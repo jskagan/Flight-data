@@ -1,0 +1,2333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flight Log — Fractional Invoice Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<!-- pdf.js 5.6.205, loaded via dynamic import (see loadPdfJs() below) --
+     this is the version validated end-to-end against real sample
+     invoices (header fields, flight legs, checksums all confirmed
+     correct). Newer pdf.js versions rely on very recent JS features that
+     older Safari/iOS (which the Claude iPad app's WebView uses) lacks --
+     rather than downgrading pdf.js (tried; an old 2.x build corrupted
+     text reconstruction), the specific missing features are polyfilled
+     below. Each polyfill targets a crash actually observed on iPad:
+       1. Promise.withResolvers (ES2024) -- crashed getTextContent()
+       2. ReadableStream async iteration -- crashed getTextContent() with
+          "undefined is not a function (near '...value of readableStream...')" -->
+<script>
+  if (!Promise.withResolvers) {
+    Promise.withResolvers = function () {
+      let resolve, reject;
+      const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+      return { promise, resolve, reject };
+    };
+  }
+
+  // ReadableStream async-iteration polyfill (for-await over a stream).
+  // Verified against the spec'd behavior including the early-exit
+  // (break -> iterator.return -> reader.cancel) path.
+  (function () {
+    if (typeof ReadableStream === 'undefined') return;
+    const proto = ReadableStream.prototype;
+    if (!proto.values) {
+      proto.values = function ({ preventCancel = false } = {}) {
+        const reader = this.getReader();
+        return {
+          async next() {
+            try {
+              const result = await reader.read();
+              if (result.done) reader.releaseLock();
+              return result;
+            } catch (e) {
+              reader.releaseLock();
+              throw e;
+            }
+          },
+          async return(value) {
+            if (!preventCancel) {
+              const cancelPromise = reader.cancel(value);
+              reader.releaseLock();
+              await cancelPromise;
+            } else {
+              reader.releaseLock();
+            }
+            return { done: true, value };
+          },
+          [Symbol.asyncIterator]() { return this; },
+        };
+      };
+    }
+    if (!proto[Symbol.asyncIterator]) {
+      proto[Symbol.asyncIterator] = proto.values;
+    }
+  })();
+
+  // Array.fromAsync (ES2024) -- Safari only gained this in 16.4; pdf.js
+  // 5.x uses it internally. Minimal spec-adequate version for the
+  // async-iterable case pdf.js needs.
+  if (!Array.fromAsync) {
+    Array.fromAsync = async function (source, mapFn, thisArg) {
+      const out = [];
+      if (source != null && typeof source[Symbol.asyncIterator] === "function") {
+        let i = 0;
+        for await (const item of source) {
+          out.push(mapFn ? await mapFn.call(thisArg, item, i++) : item);
+        }
+      } else {
+        const arr = Array.from(source);
+        let i = 0;
+        for (const item of arr) {
+          const v = await item;
+          out.push(mapFn ? await mapFn.call(thisArg, v, i++) : v);
+        }
+      }
+      return out;
+    };
+  }
+
+  // DecompressionStream (used internally by recent pdf.js releases, per
+  // its own changelog: "Use DecompressionStream in async code") -- this
+  // is a newer web-platform API (Safari added it in 16.4) that was
+  // missing entirely on this iPad's Safari version, causing pdf.js's
+  // getTextContent() to silently return zero items with no thrown error
+  // (the actual root cause behind several earlier debugging attempts that
+  // didn't pan out). Implements RFC 1951 DEFLATE decompression from the
+  // public specification, tested byte-for-byte against Node's zlib across
+  // fixed and dynamic Huffman blocks, multi-block streams, and all three
+  // formats (deflate, deflate-raw, gzip) before being added here.
+  if (typeof DecompressionStream === 'undefined') {
+    (function () {
+      function buildHuffman(lengths) {
+        const maxBits = Math.max(...lengths);
+        const blCount = new Array(maxBits + 1).fill(0);
+        for (const l of lengths) if (l > 0) blCount[l]++;
+        const nextCode = new Array(maxBits + 1).fill(0);
+        let code = 0;
+        for (let bits = 1; bits <= maxBits; bits++) {
+          code = (code + blCount[bits - 1]) << 1;
+          nextCode[bits] = code;
+        }
+        const table = new Map();
+        for (let i = 0; i < lengths.length; i++) {
+          if (lengths[i] > 0) { table.set(lengths[i] * 1000000 + nextCode[lengths[i]], i); nextCode[lengths[i]]++; }
+        }
+        return { table, maxBits };
+      }
+
+      class BitReader {
+        constructor(bytes) { this.bytes = bytes; this.bytePos = 0; this.bitPos = 0; }
+        readBit() {
+          const bit = (this.bytes[this.bytePos] >> this.bitPos) & 1;
+          this.bitPos++;
+          if (this.bitPos === 8) { this.bitPos = 0; this.bytePos++; }
+          return bit;
+        }
+        readBits(n) { let v = 0; for (let i = 0; i < n; i++) v |= this.readBit() << i; return v; }
+        readHuffmanSymbol(huff) {
+          let code = 0;
+          for (let len = 1; len <= huff.maxBits; len++) {
+            code = (code << 1) | this.readBit();
+            const key = len * 1000000 + code;
+            if (huff.table.has(key)) return huff.table.get(key);
+          }
+          throw new Error('Invalid Huffman code');
+        }
+        align() { if (this.bitPos !== 0) { this.bitPos = 0; this.bytePos++; } }
+      }
+
+      const LENGTH_BASE = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+      const LENGTH_EXTRA = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+      const DIST_BASE = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+      const DIST_EXTRA = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+      const CL_ORDER = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+
+      function fixedLitLengths() {
+        const l = new Array(288);
+        for (let i = 0; i <= 143; i++) l[i] = 8;
+        for (let i = 144; i <= 255; i++) l[i] = 9;
+        for (let i = 256; i <= 279; i++) l[i] = 7;
+        for (let i = 280; i <= 287; i++) l[i] = 8;
+        return l;
+      }
+      function fixedDistLengths() { return new Array(30).fill(5); }
+
+      function inflateRaw(input) {
+        const reader = new BitReader(input);
+        const out = [];
+        let finalBlock = false;
+        while (!finalBlock) {
+          finalBlock = reader.readBit() === 1;
+          const type = reader.readBits(2);
+          if (type === 0) {
+            reader.align();
+            const len = input[reader.bytePos] | (input[reader.bytePos + 1] << 8);
+            reader.bytePos += 4;
+            for (let i = 0; i < len; i++) out.push(input[reader.bytePos++]);
+            continue;
+          }
+          let litHuff, distHuff;
+          if (type === 1) {
+            litHuff = buildHuffman(fixedLitLengths());
+            distHuff = buildHuffman(fixedDistLengths());
+          } else if (type === 2) {
+            const hlit = reader.readBits(5) + 257;
+            const hdist = reader.readBits(5) + 1;
+            const hclen = reader.readBits(4) + 4;
+            const clLengths = new Array(19).fill(0);
+            for (let i = 0; i < hclen; i++) clLengths[CL_ORDER[i]] = reader.readBits(3);
+            const clHuff = buildHuffman(clLengths);
+            const allLengths = [];
+            while (allLengths.length < hlit + hdist) {
+              const sym = reader.readHuffmanSymbol(clHuff);
+              if (sym <= 15) { allLengths.push(sym); }
+              else if (sym === 16) { const r = reader.readBits(2) + 3; const p = allLengths[allLengths.length - 1]; for (let i = 0; i < r; i++) allLengths.push(p); }
+              else if (sym === 17) { const r = reader.readBits(3) + 3; for (let i = 0; i < r; i++) allLengths.push(0); }
+              else if (sym === 18) { const r = reader.readBits(7) + 11; for (let i = 0; i < r; i++) allLengths.push(0); }
+            }
+            litHuff = buildHuffman(allLengths.slice(0, hlit));
+            distHuff = buildHuffman(allLengths.slice(hlit, hlit + hdist));
+          } else {
+            throw new Error('Invalid block type');
+          }
+          while (true) {
+            const sym = reader.readHuffmanSymbol(litHuff);
+            if (sym < 256) { out.push(sym); }
+            else if (sym === 256) { break; }
+            else {
+              const idx = sym - 257;
+              const length = LENGTH_BASE[idx] + reader.readBits(LENGTH_EXTRA[idx]);
+              const distSym = reader.readHuffmanSymbol(distHuff);
+              const distance = DIST_BASE[distSym] + reader.readBits(DIST_EXTRA[distSym]);
+              const start = out.length - distance;
+              for (let i = 0; i < length; i++) out.push(out[start + i]);
+            }
+          }
+        }
+        return new Uint8Array(out);
+      }
+
+      function stripGzipHeader(bytes) {
+        let pos = 10;
+        const flg = bytes[3];
+        if (flg & 0x04) { const xlen = bytes[pos] | (bytes[pos + 1] << 8); pos += 2 + xlen; }
+        if (flg & 0x08) { while (bytes[pos] !== 0) pos++; pos++; }
+        if (flg & 0x10) { while (bytes[pos] !== 0) pos++; pos++; }
+        if (flg & 0x02) pos += 2;
+        return bytes.slice(pos, bytes.length - 8);
+      }
+
+      window.DecompressionStream = class DecompressionStream {
+        constructor(format) {
+          if (!['deflate', 'deflate-raw', 'gzip'].includes(format)) {
+            throw new TypeError('Unsupported compression format: ' + format);
+          }
+          const chunks = [];
+          let controllerRef;
+          this.readable = new ReadableStream({ start(controller) { controllerRef = controller; } });
+          this.writable = new WritableStream({
+            write(chunk) { chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)); },
+            close() {
+              const total = chunks.reduce((n, c) => n + c.length, 0);
+              const merged = new Uint8Array(total);
+              let offset = 0;
+              for (const c of chunks) { merged.set(c, offset); offset += c.length; }
+              let raw;
+              if (format === 'deflate-raw') raw = merged;
+              else if (format === 'deflate') raw = merged.slice(2, merged.length - 4);
+              else raw = stripGzipHeader(merged);
+              try {
+                controllerRef.enqueue(inflateRaw(raw));
+                controllerRef.close();
+              } catch (e) {
+                controllerRef.error(e);
+              }
+            },
+            abort(reason) { controllerRef.error(reason); },
+          });
+        }
+      };
+    })();
+  }
+</script>
+<style>
+  :root {
+    --bg: #10151B;
+    --panel: #1A222C;
+    --panel-2: #212B37;
+    --line: #2A3644;
+    --text: #E9EDF1;
+    --muted: #8B98A8;
+    --amber: #E3A438;
+    --amber-dim: #7A5C26;
+    --teal: #4FB8AE;
+    --red: #E2554B;
+    --mono: 'IBM Plex Mono', monospace;
+    --sans: 'Inter', sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--amber-dim); }
+
+  a, button { font-family: inherit; }
+
+  .app { display: flex; min-height: 100vh; }
+
+  /* ---- Nav rail ---- */
+  .rail {
+    width: 200px; flex-shrink: 0; background: var(--panel);
+    border-right: 1px solid var(--line); padding: 24px 0;
+    display: flex; flex-direction: column;
+  }
+  .rail-brand {
+    font-family: var(--mono); font-weight: 600; font-size: 13px;
+    letter-spacing: 0.08em; color: var(--amber); padding: 0 20px 20px;
+    text-transform: uppercase; border-bottom: 1px solid var(--line); margin-bottom: 12px;
+  }
+  .rail-brand small { display: block; color: var(--muted); font-weight: 400; letter-spacing: 0.04em; margin-top: 2px; }
+  .rail-item {
+    display: flex; align-items: center; gap: 10px; padding: 11px 20px;
+    color: var(--muted); text-decoration: none; cursor: pointer;
+    font-size: 13.5px; font-weight: 500; border-left: 2px solid transparent;
+    background: none; border-top: none; border-right: none; border-bottom: none; width: 100%; text-align: left;
+  }
+  .rail-item:hover { color: var(--text); background: var(--panel-2); }
+  .rail-item.active { color: var(--amber); border-left-color: var(--amber); background: var(--panel-2); }
+  .rail-item .count {
+    margin-left: auto; font-family: var(--mono); font-size: 11px;
+    background: var(--panel-2); color: var(--muted); padding: 1px 6px; border-radius: 8px;
+  }
+  .rail-item.active .count { background: var(--amber-dim); color: var(--amber); }
+  .rail-item .count.alert { background: rgba(226,85,75,0.2); color: var(--red); }
+
+  /* ---- Main ---- */
+  .main { flex: 1; padding: 32px 40px; max-width: 1100px; }
+
+  /* Narrower / touch screens (tablets, phones, or a narrow Claude app
+     pane): collapse the sidebar into a horizontal, scrollable top bar
+     instead of a fixed-width left column, so nav items (and the storage
+     health banner) are always reachable without needing to scroll a
+     hidden horizontal region. */
+  .page-title { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
+  .page-sub { color: var(--muted); font-size: 13.5px; margin: 0 0 28px; }
+
+  /* ---- Cards / panels ---- */
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 20px 22px; margin-bottom: 16px;
+  }
+  .card-title {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 14px;
+  }
+
+  /* ---- Upload dropzone ---- */
+  .dropzone {
+    border: 2px dashed var(--line); border-radius: 12px; padding: 48px 24px;
+    text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .dropzone:hover, .dropzone.drag { border-color: var(--amber); background: rgba(227,164,56,0.04); }
+  .dropzone-icon { font-size: 32px; margin-bottom: 12px; opacity: 0.6; }
+  .dropzone-title { font-weight: 600; margin-bottom: 4px; }
+  .dropzone-sub { color: var(--muted); font-size: 13px; }
+  input[type=file] { display: none; }
+
+  .btn {
+    font-family: var(--sans); font-weight: 600; font-size: 13.5px; padding: 9px 16px;
+    border-radius: 7px; border: 1px solid var(--line); background: var(--panel-2);
+    color: var(--text); cursor: pointer;
+  }
+  .btn:hover { border-color: var(--muted); }
+  .btn.primary { background: var(--amber); border-color: var(--amber); color: #1A1200; }
+  .btn.primary:hover { background: #f0b04e; }
+  .btn.danger { background: transparent; border-color: var(--red); color: var(--red); }
+
+  /* ---- Badges ---- */
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono);
+    font-size: 11px; padding: 3px 8px; border-radius: 5px; font-weight: 500;
+  }
+  .badge.ok { background: rgba(79,184,174,0.15); color: var(--teal); }
+  .badge.warn { background: rgba(226,85,75,0.15); color: var(--red); }
+  .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  /* ---- Invoice list ---- */
+  .invoice-row {
+    display: flex; align-items: center; gap: 18px; padding: 14px 0;
+    border-bottom: 1px solid var(--line); cursor: pointer;
+  }
+  .invoice-row:last-child { border-bottom: none; }
+  .invoice-row:hover .invoice-no { color: var(--amber); }
+  .invoice-no { font-family: var(--mono); font-weight: 600; font-size: 14px; }
+  .invoice-meta { color: var(--muted); font-size: 12.5px; }
+  .invoice-amount { font-family: var(--mono); font-size: 15px; margin-left: auto; }
+  .empty-state { color: var(--muted); font-size: 13.5px; padding: 20px 0; text-align: center; }
+
+  /* ---- Tables ---- */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--line);
+  }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 12.5px; }
+  tr:last-child td { border-bottom: none; }
+  tr.needs-review { background: rgba(226,85,75,0.06); }
+  .warn-icon { color: var(--red); cursor: help; }
+
+  /* ---- Gauge (signature element) ---- */
+  .gauge-wrap { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
+  .gauge-label { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: center; margin-top: 6px; }
+  .gauge-value { font-family: var(--mono); font-size: 26px; font-weight: 600; }
+  .gauge-stats { display: flex; flex-direction: column; gap: 10px; }
+  .stat-line { display: flex; justify-content: space-between; gap: 20px; font-size: 13px; }
+  .stat-line .k { color: var(--muted); }
+  .stat-line .v { font-family: var(--mono); }
+
+  .field-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 24px; }
+  .field { }
+  .field .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 3px; }
+  .field .v { font-family: var(--mono); font-size: 14px; }
+
+  .back-link { color: var(--muted); font-size: 13px; cursor: pointer; margin-bottom: 16px; display: inline-block; }
+  .back-link:hover { color: var(--text); }
+
+  .parse-summary { display: flex; gap: 20px; align-items: center; margin: 16px 0; }
+  .toast {
+    position: fixed; bottom: 24px; right: 24px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 12px 18px; font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    max-width: 340px;
+  }
+  .toast.error { border-color: var(--red); color: var(--red); }
+  .toast.success { border-color: var(--teal); color: var(--teal); }
+
+  .invoice-group-title {
+    font-family: var(--mono); font-size: 12px; color: var(--amber); margin: 20px 0 8px;
+    padding-bottom: 6px; border-bottom: 1px solid var(--line);
+  }
+  .invoice-group-title:first-child { margin-top: 0; }
+
+  canvas { max-width: 100%; }
+</style>
+</head>
+<body>
+<div id="signin-gate" style="min-height:100vh; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:16px; padding:20px; text-align:center;">
+  <div style="font-family:var(--mono); font-weight:700; font-size:20px; color:var(--amber);">Flight Log — Fractional Invoice Tracker</div>
+  <div style="color:var(--muted); font-size:14px; max-width:420px;">
+    Your data is stored in a single JSON file in your own Google Drive, so signing in
+    with the same account on any device shows the same data.
+  </div>
+  <button id="signin-btn" class="btn primary" style="padding:12px 24px; font-size:14px;">Sign in with Google</button>
+  <div id="signin-status" style="color:var(--muted); font-size:13px; min-height:20px;"></div>
+</div>
+<div class="app" id="app-root" style="display:none;">
+  <div class="rail">
+    <div class="rail-brand">Flight Log<small>Fractional Invoice Tracker</small></div>
+    <button class="rail-item" data-view="upload">📥 Upload</button>
+    <button class="rail-item" data-view="invoices">📋 Log Book<span class="count" id="nav-invoice-count"></span></button>
+    <button class="rail-item" data-view="review">⚠️ Review Queue<span class="count alert" id="nav-review-count"></span></button>
+    <button class="rail-item" data-view="trends">📈 Trends</button>
+    <button class="rail-item" data-view="passengers">🧑‍✈️ Passenger Report</button>
+    <div id="storage-health-banner"></div>
+  </div>
+  <div class="main" id="main"></div>
+</div>
+<div id="toast-root"></div>
+
+<script>
+
+// =============================================================
+// STORAGE
+// =============================================================
+// ---- Google Drive-backed storage ----
+// Everything lives in ONE JSON file in the signed-in user's own Drive
+// (created via this app, using the drive.file scope -- meaning this app
+// can only see files it itself created, not the rest of the user's
+// Drive). This is what makes desktop and iPad see the same data: both
+// sign in to the SAME Google account and read/write the SAME file,
+// unlike Claude's artifact storage which didn't share between sessions.
+const DRIVE_DATA_FILENAME = 'flight-log-data.json';
+let driveAccessToken = null;
+let driveFileId = null;
+let driveData = null; // in-memory: { invoices: [...], report: {...}|null }
+
+async function driveApiFetch(url, options = {}) {
+  const headers = Object.assign({}, options.headers, { Authorization: `Bearer ${driveAccessToken}` });
+  const res = await fetch(url, Object.assign({}, options, { headers }));
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Drive API error ${res.status}: ${text.slice(0, 300)}`);
+  }
+  return res;
+}
+
+async function findDriveDataFile() {
+  const q = encodeURIComponent(`name='${DRIVE_DATA_FILENAME}' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&spaces=drive`);
+  const json = await res.json();
+  return (json.files && json.files.length) ? json.files[0].id : null;
+}
+
+async function loadDriveDataFile(fileId) {
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  const text = await res.text();
+  if (!text.trim()) return { invoices: [], report: null };
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error('Drive data file exists but is not valid JSON -- it may be corrupted.');
+  }
+}
+
+async function createDriveDataFile(data) {
+  const boundary = 'flightlogboundary';
+  const metadata = { name: DRIVE_DATA_FILENAME, mimeType: 'application/json' };
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(data)}\r\n` +
+    `--${boundary}--`;
+  const res = await driveApiFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  const json = await res.json();
+  return json.id;
+}
+
+async function updateDriveDataFile(fileId, data) {
+  await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+}
+
+async function persistDriveData() {
+  if (driveFileId) {
+    await updateDriveDataFile(driveFileId, driveData);
+  } else {
+    driveFileId = await createDriveDataFile(driveData);
+  }
+}
+
+const Store = {
+  async saveInvoice(invoiceNo, data) {
+    try {
+      const idx = driveData.invoices.findIndex(inv => inv.invoice && inv.invoice.invoice_id === invoiceNo);
+      if (idx >= 0) driveData.invoices[idx] = data;
+      else driveData.invoices.push(data);
+      await persistDriveData();
+      return { ok: true };
+    } catch (e) {
+      console.error('Store.saveInvoice failed:', e);
+      return { ok: false, error: e.message || String(e) };
+    }
+  },
+  async getInvoice(invoiceNo) {
+    const inv = driveData.invoices.find(inv => inv.invoice && inv.invoice.invoice_id === invoiceNo);
+    return inv || null;
+  },
+  async listInvoices() {
+    return [...driveData.invoices].sort((a, b) => (b.invoice.period_start || '').localeCompare(a.invoice.period_start || ''));
+  },
+  async deleteInvoice(invoiceNo) {
+    try {
+      driveData.invoices = driveData.invoices.filter(inv => !(inv.invoice && inv.invoice.invoice_id === invoiceNo));
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.deleteInvoice failed:', e);
+      return false;
+    }
+  },
+  async saveReport(report) {
+    try {
+      driveData.report = report;
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.saveReport failed:', e);
+      return false;
+    }
+  },
+  async getReport() {
+    return driveData.report || null;
+  },
+};
+
+// =============================================================
+// PARSER (validated against a real sample invoice in Node before
+// being ported here -- see project notes. Column boundaries and
+// regexes are tuned to this one document template; expect to refine
+// them as more invoices are seen, same as the original Python version.)
+// =============================================================
+
+// Some pages in this document family draw text with a rotated matrix
+// (advance direction along the page's Y axis instead of X) rather than
+// the standard unrotated pattern -- confirmed on this invoice template's
+// page 2 (flight-leg detail), while page 1 (summary) is always normal.
+// itemToPosition() handles both without needing to know in advance which
+// a given page/item uses.
+function itemToPosition(item, pageWidth, pageHeight) {
+  const [a, b, c, d, e, f] = item.transform;
+  // Relative comparison, not an absolute epsilon -- some rotated items
+  // still carry a small nonzero "a"/"d" (e.g. slight per-glyph shear), so
+  // what matters is whether the off-diagonal (rotation) terms dominate
+  // the diagonal (scale) terms, not whether they're exactly zero.
+  const isRotated = Math.abs(a) < Math.abs(b) && Math.abs(d) < Math.abs(c);
+  if (isRotated) {
+    // (a,b) is the page-space direction of the glyph run's local +x axis,
+    // but its MAGNITUDE is the font-size scale (~7-12), not 1 -- it must
+    // be normalized before multiplying by width, or the computed endpoint
+    // ends up scaled by that factor too (this was a real bug: produced
+    // wildly wrong x1 values, e.g. widths of 200+ units for short words).
+    const mag = Math.hypot(a, b) || 1;
+    const dirY = b / mag;
+    const top = pageWidth - e;
+    const x0 = -f;
+    const x1 = -(f + dirY * item.width);
+    return { top, x0: Math.min(x0, x1), x1: Math.max(x0, x1) };
+  }
+  const top = pageHeight - f;
+  const x0 = e;
+  const x1 = e + item.width;
+  return { top, x0, x1 };
+}
+
+function buildRows(items, pageWidth, pageHeight, yTol = 3) {
+  const raw = items
+    .filter(it => it.str !== "" || it.width !== 0)
+    .map(it => {
+      const pos = itemToPosition(it, pageWidth, pageHeight);
+      return { text: it.str, x0: pos.x0, x1: pos.x1, top: pos.top, isSpace: it.str.trim() === "" };
+    });
+
+  const rows = [];
+  for (const w of raw.sort((a, b) => a.top - b.top || a.x0 - b.x0)) {
+    let row = rows.find(r => Math.abs(r.top - w.top) <= yTol);
+    if (!row) { row = { top: w.top, items: [] }; rows.push(row); }
+    row.items.push(w);
+  }
+
+  const GAP_THRESHOLD = 1.0;
+  for (const row of rows) {
+    row.items.sort((a, b) => a.x0 - b.x0);
+    const words = [];
+    let cur = null;
+    for (const it of row.items) {
+      const gap = cur ? it.x0 - cur.x1 : 0;
+      const isBoundary = it.isSpace || gap > GAP_THRESHOLD;
+      if (isBoundary) {
+        if (cur) { words.push(cur); cur = null; }
+        if (it.isSpace) continue;
+      }
+      if (!cur) cur = { text: it.text, x0: it.x0, x1: it.x1 };
+      else { cur.text += it.text; cur.x1 = it.x1; }
+    }
+    if (cur) words.push(cur);
+    row.words = words;
+    row.text = words.map(w => w.text).join(" ");
+  }
+  rows.sort((a, b) => a.top - b.top);
+  return rows;
+}
+
+function money(s) { return parseFloat(s.replace(/,/g, "").replace("$", "")); }
+
+function parsePage1(fullText) {
+  const find = (re, cast = (x) => x) => {
+    const m = fullText.match(re);
+    return m ? cast(m[1]) : null;
+  };
+  const periodM = fullText.match(/FLIGHT ACTIVITY INVOICE\s+(\d{2}\/\d{2}\/\d{4})\s+to\s+(\d{2}\/\d{2}\/\d{4})/);
+
+  const invoice = {
+    invoice_id: find(/Invoice No\.\s*(\S+)/),
+    invoice_date: find(/Invoice Date\s*(\d{2}\/\d{2}\/\d{4})/),
+    period_start: periodM ? periodM[1] : null,
+    period_end: periodM ? periodM[2] : null,
+    tail_no: find(/Tail No\.\s*(\S+)/),
+    aircraft_type: find(/Aircraft Type(.+?)(?:\n|Contract No\.)/, (s) => s.trim()),
+    contract_no: find(/Contract No\.\s*(\S+)/),
+    share_size_pct: find(/Share Size\s*([\d.]+)%/, parseFloat),
+    account_no: find(/Account No\.\s*(\S+)/),
+  };
+
+  const reg = fullText.match(/Regular Hourly Charge\s*([\d.]+)\s*\$([\d,.]+)\s*\$([\d,.]+)/);
+  const fuel = fullText.match(/Fuel Variable Charge\s*([\d.]+)\s*\$([\d,.]+)\s*\$([\d,.]+)/);
+  const total = fullText.match(/Total Invoice Amount:\s*\$([\d,.]+)/);
+
+  if (reg) {
+    invoice.regular_hourly_charge_hours = parseFloat(reg[1]);
+    invoice.regular_hourly_rate = money(reg[2]);
+    invoice.regular_hourly_total = money(reg[3]);
+  }
+  if (fuel) {
+    invoice.fuel_variable_hours = parseFloat(fuel[1]);
+    invoice.fuel_variable_rate = money(fuel[2]);
+    invoice.fuel_variable_total = money(fuel[3]);
+  }
+  if (total) invoice.total_invoice_amount = money(total[1]);
+
+  invoice.avg_hours_allotted_per_month = find(/Avg Allotted\s*([\d.]+)/, parseFloat);
+  invoice.avg_actual_usage_per_month = find(/Avg Actual Usage\s*([\d.]+)/, parseFloat);
+  invoice.actual_usage_trend_pct = find(/Actual Usage Trend\s*([\d.]+)\s*%/, parseFloat);
+  invoice.trends_period_months = find(/Trends\s*([\d.]+)\s*Months/, parseFloat);
+
+  if (reg && fuel && total) {
+    const expected = invoice.regular_hourly_total + invoice.fuel_variable_total;
+    invoice._check_charges_sum_ok = Math.abs(expected - invoice.total_invoice_amount) < 0.01;
+  }
+  return invoice;
+}
+
+function parseContractYears(fullText, invoiceId) {
+  const rows = [];
+  const contractRow = fullText.match(/\bContract\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  if (contractRow) {
+    rows.push({
+      invoice_id: invoiceId, period_label: "Contract", period_start: null, period_end: null,
+      hours_allotted: parseFloat(contractRow[1]), prev_hours_used: parseFloat(contractRow[2]),
+      current_hours_used: parseFloat(contractRow[3]), total_hours_used: parseFloat(contractRow[4]),
+      remaining_allotted_hours: parseFloat(contractRow[5]),
+    });
+  }
+
+  const dateRangeRe = /(\d{2}\/\d{2}\/\d{2})-(\d{2}\/\d{2}\/\d{2})/g;
+  const dateMatches = [...fullText.matchAll(dateRangeRe)];
+  const trendsPos = fullText.indexOf("Trends");
+
+  dateMatches.forEach((dm, i) => {
+    const startPos = dm.index + dm[0].length;
+    const endPos = i < dateMatches.length - 1 ? dateMatches[i + 1].index
+      : (trendsPos !== -1 ? trendsPos : fullText.length);
+    let segment = fullText.slice(startPos, endPos);
+    const nextYearLabel = segment.search(/Year/);
+    if (nextYearLabel !== -1) segment = segment.slice(0, nextYearLabel);
+    const nums = (segment.match(/[\d.]+/g) || []).map(parseFloat);
+
+    const row = { invoice_id: invoiceId, period_label: `Year ${i + 1}`, period_start: dm[1], period_end: dm[2] };
+
+    if (nums.length >= 12) {
+      const v = nums.slice(0, 12);
+      Object.assign(row, {
+        hours_allotted: v[0], hours_borrowed: v[1], hours_carried_forward: v[2],
+        total_allotted: v[3], borrowing_available: v[4], total_available: v[5],
+        prev_hours_used: v[6], current_hours_used: v[7], total_hours_used: v[8],
+        remaining_allotted_hours: v[9], remaining_available_hours: v[10], excess_hours_billed: v[11],
+      });
+    } else if (nums.length === 11) {
+      const v = nums;
+      Object.assign(row, {
+        hours_allotted: v[0], hours_borrowed: v[1], hours_carried_forward: v[2],
+        total_allotted: v[3], borrowing_available: v[4], total_available: v[5],
+        prev_hours_used: v[6], current_hours_used: 0.0, total_hours_used: v[7],
+        remaining_allotted_hours: v[8], remaining_available_hours: v[9], excess_hours_billed: v[10],
+        _note: "current_hours_used inferred as 0.0 (column was blank in source)",
+      });
+    } else {
+      row._parse_warning = `expected 11 or 12 numbers, found ${nums.length}: ${nums}`;
+    }
+    rows.push(row);
+  });
+  return rows;
+}
+
+// Column boundaries for page 2's leg table, derived from the actual
+// item positions produced by itemToPosition() for this template's
+// rotated-text page 2 (values run negative-to-less-negative, not
+// 0-to-positive, because of how the rotated coordinate remap works --
+// see itemToPosition() above). Tuned against real leg-row data, not the
+// header row, since a couple of header labels sit closer together than
+// their corresponding data columns do.
+const LEG_COLUMNS = [
+  ["resv_no", -750], ["date", -698], ["leg_no", -668], ["from", -636], ["to", -562],
+  ["aircraft_request_type", -480], ["aircraft_actual_type", -445], ["aircraft_tail_no", -401],
+  ["dist_sm", -362], ["hours", -332], ["interchange_ratio", -308], ["diff", -290],
+  ["billed_hours", -268], ["num_passengers", -213], ["lead_passenger", -169], ["flight_rule", -134],
+];
+function bucketColumn(x0) {
+  let col = LEG_COLUMNS[0][0];
+  for (const [name, lower] of LEG_COLUMNS) if (x0 >= lower) col = name;
+  return col;
+}
+
+// Builds the warnings list for a leg from its CURRENT field values --
+// reusable both at initial parse time and when an auto-applied change
+// gets undone (so the leg goes back to looking exactly as flagged as it
+// would have if the auto-resolve had never run).
+function buildLegWarnings(leg) {
+  const warnings = [];
+  for (const field of ["origin", "destination"]) {
+    const val = leg[field];
+    if (!val) warnings.push(`${field} is empty`);
+    else if (/\d/.test(val)) warnings.push(`${field} contains a digit, which is unexpected: ${JSON.stringify(val)}`);
+  }
+  for (const field of ["hours", "billed_hours", "distance_sm"]) {
+    if (leg[field] === null) warnings.push(`${field} failed to parse`);
+  }
+  if (!leg.origin_code) warnings.push("origin_code could not be identified (expected a 3-4 letter airport code)");
+  if (!leg.destination_code) warnings.push("destination_code could not be identified (expected a 3-4 letter airport code)");
+  warnings.push("Verify origin/destination airport codes visually — this template has shown 'V' rendering as 'Y' in bold city/airport text.");
+  return warnings;
+}
+
+function parsePage2(rows, invoiceId) {
+  const dataRows = rows.filter(r => r.top > 130 && r.top < 300);
+  const legRows = [], continuationRows = [];
+
+  for (const row of dataRows) {
+    if (row.text.startsWith("Hourly Total") || row.text.startsWith("Total Charges")
+      || row.text.startsWith("Total Billed") || row.text.startsWith("Total Hours")) continue;
+    const cols = {};
+    for (const w of row.words) {
+      const col = bucketColumn(w.x0);
+      (cols[col] = cols[col] || []).push(w);
+    }
+    const dateText = (cols.date || []).map(w => w.text).join(" ");
+    if (/^\d{2}\/\d{2}$/.test(dateText)) legRows.push({ top: row.top, cols, rowText: row.text });
+    else continuationRows.push({ top: row.top, cols, rowText: row.text });
+  }
+
+  for (const cont of continuationRows) {
+    const candidates = legRows.filter(lr => lr.top < cont.top && cont.top < lr.top + 10);
+    if (!candidates.length) continue;
+    const target = candidates.reduce((a, b) => (a.top > b.top ? a : b));
+    target.continuationText = target.continuationText || {};
+    for (const [colName, wordList] of Object.entries(cont.cols)) {
+      const frag = wordList.map(w => w.text).join(" ");
+      (target.continuationText[colName] = target.continuationText[colName] || []).push(frag);
+    }
+    target.rowText += " | continuation: " + cont.rowText;
+  }
+
+  const legs = [];
+  const autoResolveChanges = [];
+  let currentResvNo = null;
+  // The From/To cell actually contains TWO distinct pieces: "City, State"
+  // text (which wraps to a second line when the city name is long) and a
+  // separate bold 3-4 letter airport code sitting to the right of it.
+  // Text extraction sometimes glues the code directly onto the city text
+  // with no real word-gap (e.g. "STATECOLLEGE, UNV" as one run), so the
+  // code has to be pulled out by pattern (a trailing all-caps 3-4 letter
+  // token), not by column position alone -- and it must happen BEFORE the
+  // wrapped state line is appended, or the code ends up sandwiched in the
+  // middle of the reconstructed "City, State" text instead of removed.
+  function splitCityStateAndCode(text) {
+    if (!text) return { cityState: text || null, code: null };
+    const words = text.trim().split(/\s+/);
+    const last = words[words.length - 1];
+    if (words.length > 1 && /^[A-Z]{3,4}$/.test(last)) {
+      return { cityState: words.slice(0, -1).join(" "), code: last };
+    }
+    return { cityState: text, code: null };
+  }
+
+  legRows.forEach((lr, legIndex) => {
+    const cols = {};
+    for (const [k, v] of Object.entries(lr.cols)) cols[k] = v.map(w => w.text).join(" ");
+    if (cols.resv_no) currentResvNo = cols.resv_no;
+
+    const fromSplit = splitCityStateAndCode(cols.from);
+    const toSplit = splitCityStateAndCode(cols.to);
+
+    // Now apply any wrapped continuation (e.g. a state abbreviation that
+    // spilled to its own line) to the CODE-STRIPPED city/state text, not
+    // the original field -- otherwise the code ends up stuck between the
+    // city and the wrapped state instead of being cleanly separated.
+    let originCityState = fromSplit.cityState;
+    let destCityState = toSplit.cityState;
+    for (const [colName, frags] of Object.entries(lr.continuationText || {})) {
+      const suffix = frags.join(" ");
+      if (colName === "from") {
+        originCityState = ((originCityState || "").replace(/,\s*$/, "") + ", " + suffix).replace(/^,\s*/, "");
+      } else if (colName === "to") {
+        destCityState = ((destCityState || "").replace(/,\s*$/, "") + ", " + suffix).replace(/^,\s*/, "");
+      } else {
+        cols[colName] = ((cols[colName] || "") + ", " + suffix).replace(/^,\s*/, "").replace(/,\s*$/, "");
+      }
+    }
+
+    const leg = {
+      id: `${invoiceId}-leg-${legIndex}`,
+      invoice_id: invoiceId, reservation_no: currentResvNo, leg_date: cols.date || null,
+      request_leg_no: cols.leg_no || null,
+      origin: originCityState || null, origin_code: fromSplit.code || null,
+      destination: destCityState || null, destination_code: toSplit.code || null,
+      aircraft_request_type: cols.aircraft_request_type || null, aircraft_actual_type: cols.aircraft_actual_type || null,
+      aircraft_tail_no: cols.aircraft_tail_no || null,
+      distance_sm: cols.dist_sm ? parseFloat(cols.dist_sm) : null,
+      hours: cols.hours ? parseFloat(cols.hours) : null,
+      interchange_ratio: cols.interchange_ratio ? parseFloat(cols.interchange_ratio) : null,
+      diff: cols.diff ? parseFloat(cols.diff) : null,
+      billed_hours: cols.billed_hours ? parseFloat(cols.billed_hours) : null,
+      num_passengers: cols.num_passengers ? parseInt(cols.num_passengers) : null,
+      lead_passenger: cols.lead_passenger || null, flight_rule: cols.flight_rule || null,
+      _raw_row_text: lr.rowText,
+    };
+
+    const warnings = buildLegWarnings(leg);
+    leg._warnings = warnings;
+    legs.push(leg);
+    autoResolveChanges.push(...attemptAutoResolveLeg(leg));
+  });
+
+  const joined = rows.map(r => r.text).join("\n");
+  const subtotalRe = /Hourly Total:\s*\$([\d,.]+)\s*Fuel:\s*\$([\d,.]+)/g;
+  const totalChargesRe = /Total Charges:\s*\$([\d,.]+)/g;
+  const hourlyMatches = [...joined.matchAll(subtotalRe)];
+  const chargesMatches = [...joined.matchAll(totalChargesRe)];
+  const legResvInOrder = legs.map(l => l.reservation_no);
+  const subtotals = hourlyMatches.map((m, i) => ({
+    invoice_id: invoiceId, reservation_no: legResvInOrder[i] || null,
+    hourly_total: money(m[1]), fuel_total: money(m[2]),
+    total_charges: chargesMatches[i] ? money(chargesMatches[i][1]) : null,
+  }));
+
+  return { legs, subtotals, autoResolveChanges };
+}
+
+let _pdfjsLibPromise = null;
+function loadPdfJs() {
+  if (!_pdfjsLibPromise) {
+    // Load BOTH the main library and the worker module, then register the
+    // worker's message handler on the main thread. pdf.js checks for a
+    // main-thread handler (its internal #mainThreadWorkerMessageHandler)
+    // and, when present, runs entirely in-process WITHOUT spawning a real
+    // Web Worker -- and without needing a fetchable workerSrc.
+    //
+    // Why: on iPad/older Safari the real Worker ran pdf.js internals in a
+    // context our polyfills couldn't reach and silently swallowed its own
+    // errors, yielding "runs but returns 0 text items". Running in-process
+    // means the polyfills apply and any real error surfaces. (This version
+    // of pdf.js has no `disableWorker` option -- that was removed -- so
+    // this handler-registration approach is the supported way to do it.)
+    _pdfjsLibPromise = Promise.all([
+      import('https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/legacy/build/pdf.mjs'),
+      import('https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/legacy/build/pdf.worker.mjs'),
+    ]).then(([lib, worker]) => {
+      // Setting a non-empty workerSrc satisfies pdf.js's internal check;
+      // it won't actually be fetched because the main-thread handler below
+      // takes precedence.
+      lib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/legacy/build/pdf.worker.mjs';
+      // Expose the worker module as globalThis.pdfjsWorker. pdf.js's
+      // internal #mainThreadWorkerMessageHandler getter reads exactly
+      // `globalThis.pdfjsWorker?.WorkerMessageHandler`; when present, its
+      // #initialize() takes the fake-worker (main-thread) path instead of
+      // constructing a real `new Worker(...)`. Confirmed against pdf.js
+      // 5.x source. (workerSrc set above still satisfies the internal
+      // check but is never actually loaded, since the handler is found.)
+      globalThis.pdfjsWorker = worker;
+      return lib;
+    });
+  }
+  return _pdfjsLibPromise;
+}
+
+async function parseInvoicePdf(arrayBuffer, expectedByteLength) {
+  const pdfjsLib = await loadPdfJs();
+
+  // Temporarily detect whether pdf.js actually constructs a real Worker
+  // despite the main-thread handler registration -- if it does, the
+  // globalThis.pdfjsWorker approach isn't taking effect on this browser
+  // and the earlier "worker" theory needs to be reconsidered either way.
+  let realWorkerWasConstructed = false;
+  const OriginalWorker = window.Worker;
+  window.Worker = function (...args) {
+    realWorkerWasConstructed = true;
+    return new OriginalWorker(...args);
+  };
+
+  let doc;
+  try {
+    doc = await pdfjsLib.getDocument({
+      data: arrayBuffer,
+      isEvalSupported: false,   // some Safari/CSP contexts disallow eval
+      useSystemFonts: false,
+    }).promise;
+  } finally {
+    window.Worker = OriginalWorker;
+  }
+
+  const diagnostics = { numPages: doc.numPages, realWorkerWasConstructed, page2RowsFound: null, page2LegRowsMatched: null, page2Error: null, page2SampleRows: null, page2ViewportHeight: null, page2RawItemSample: null };
+
+  const page1 = await doc.getPage(1);
+  const vp1 = page1.getViewport({ scale: 1 });
+  const page1Content = await page1.getTextContent();
+  const rows1 = buildRows(page1Content.items, vp1.width, vp1.height);
+  const page1Text = rows1.map(r => r.text).join("\n");
+
+  const invoice = parsePage1(page1Text);
+  const contractYears = parseContractYears(page1Text, invoice.invoice_id);
+
+  let legs = [], subtotals = [], autoResolveChanges = [];
+  if (doc.numPages > 1) {
+    try {
+      const page2 = await doc.getPage(2);
+      const vp2 = page2.getViewport({ scale: 1 });
+      const page2Content = await page2.getTextContent();
+      diagnostics.page2ViewportHeight = vp2.height;
+      // Raw, UNPROCESSED pdf.js output -- captured before buildRows() touches
+      // it, so we can tell whether garbled output originates in pdf.js's own
+      // extraction or in this app's row-clustering logic.
+      diagnostics.page2RawItemSample = page2Content.items.slice(0, 15).map(it => ({
+        str: it.str, transform: it.transform, width: it.width, height: it.height,
+      }));
+      const rows2 = buildRows(page2Content.items, vp2.width, vp2.height);
+      diagnostics.page2RowsFound = rows2.length;
+      // Sample a few rows regardless of outcome -- cheap, and invaluable
+      // for diagnosing a column-boundary or text-extraction mismatch if
+      // leg parsing comes back empty.
+      diagnostics.page2SampleRows = rows2.slice(0, 8).map(r => ({ top: Math.round(r.top), text: r.text }));
+      ({ legs, subtotals, autoResolveChanges } = parsePage2(rows2, invoice.invoice_id));
+      diagnostics.page2LegRowsMatched = legs.length;
+    } catch (e) {
+      diagnostics.page2Error = e.message || String(e);
+      console.error('parseInvoicePdf: page 2 extraction failed:', e);
+    }
+  }
+
+  if (subtotals.length && invoice.total_invoice_amount != null) {
+    const sum = subtotals.reduce((a, s) => a + (s.total_charges || 0), 0);
+    invoice._check_reservations_sum_to_invoice_total = Math.abs(sum - invoice.total_invoice_amount) < 0.01;
+  }
+  if (!invoice.invoice_id) {
+    // Put full diagnostics directly IN the message (not on a custom Error
+    // property, not behind a conditional UI element) so there's no
+    // possible path where it fails to show up. Includes the RAW pdf.js
+    // item data (pre-buildRows) so an empty result can be traced to
+    // either pdf.js returning nothing or this app's row logic dropping it.
+    const sample = page1Text ? page1Text.slice(0, 400) : "(page1Text is empty)";
+    const rawSample = JSON.stringify(
+      (page1Content.items || []).slice(0, 6).map(it => ({ str: it.str, transform: it.transform, width: it.width }))
+    );
+    throw new Error(
+      "Could not find an invoice number on this PDF. " +
+      "DIAG: numPages=" + doc.numPages +
+      " arrayBufferBytes=" + arrayBuffer.byteLength +
+      " expectedFileBytes=" + (expectedByteLength ?? "unknown") +
+      " realWorkerWasConstructed=" + realWorkerWasConstructed +
+      " page1ItemCount=" + ((page1Content.items || []).length) +
+      " rowsBuilt=" + rows1.length +
+      " TEXT_SAMPLE>>>" + sample + "<<< " +
+      "RAW_ITEMS>>>" + rawSample + "<<<"
+    );
+  }
+
+  return {
+    parser_version: "js-0.1.0", schema_version: "0.1.0", extracted_at: new Date().toISOString(),
+    invoice, contract_year_snapshots: contractYears, flight_legs: legs, reservation_subtotals: subtotals,
+    _diagnostics: diagnostics, _autoResolveChanges: autoResolveChanges,
+  };
+}
+
+// =============================================================
+// UI HELPERS
+// =============================================================
+function esc(s) { return (s ?? "").toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtMoney(n) { return n == null ? "—" : "$" + Number(n).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}); }
+function fmtNum(n, d=1) { return n == null ? "—" : Number(n).toFixed(d); }
+
+function toast(msg, type = "success") {
+  const root = document.getElementById("toast-root");
+  const el = document.createElement("div");
+  el.className = "toast " + type;
+  el.textContent = msg;
+  root.appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+
+function legsNeedingReviewCount(inv) {
+  return (inv.flight_legs || []).filter(l => l._warnings && l._warnings.length).length;
+}
+
+// ---- Signature element: hour-meter gauge ----
+function renderGauge(used, total) {
+  const pct = total ? Math.min(used / total, 1) : 0;
+  const r = 54, cx = 64, cy = 64;
+  const startAngle = Math.PI, endAngle = 0; // semicircle, left to right
+  const angle = startAngle + (endAngle - startAngle) * pct;
+  const needleX = cx + r * 0.85 * Math.cos(angle);
+  const needleY = cy + r * 0.85 * Math.sin(angle) * -1 + cy - cy; // computed below properly
+  // Build arc path (semicircle top half, y decreasing upward in SVG so we flip)
+  const polarToXY = (a, radius) => [cx + radius * Math.cos(a), cy - radius * Math.sin(a)];
+  const [sx, sy] = polarToXY(Math.PI, r);
+  const [ex, ey] = polarToXY(0, r);
+  const [nx, ny] = polarToXY(angle, r * 0.8);
+  const color = pct > 0.9 ? 'var(--red)' : pct > 0.7 ? 'var(--amber)' : 'var(--teal)';
+  return `
+    <svg width="128" height="76" viewBox="0 0 128 76">
+      <path d="M ${sx} ${sy} A ${r} ${r} 0 0 1 ${ex} ${ey}" fill="none" stroke="var(--line)" stroke-width="8" stroke-linecap="round"/>
+      <path d="M ${sx} ${sy} A ${r} ${r} 0 0 1 ${polarToXY(Math.PI - Math.PI*pct,r)[0]} ${polarToXY(Math.PI - Math.PI*pct,r)[1]}"
+            fill="none" stroke="${color}" stroke-width="8" stroke-linecap="round"/>
+      <line x1="${cx}" y1="${cy}" x2="${nx}" y2="${ny}" stroke="var(--text)" stroke-width="2"/>
+      <circle cx="${cx}" cy="${cy}" r="4" fill="var(--text)"/>
+    </svg>`;
+}
+
+// =============================================================
+// VIEWS
+// =============================================================
+const main = document.getElementById("main");
+let currentView = "upload";
+let cachedInvoices = null;
+
+function showStorageHealthBanner(message) {
+  const el = document.getElementById("storage-health-banner");
+  if (!el) return;
+  el.innerHTML = `
+    <div style="margin:12px 16px 0; padding:10px 12px; background:rgba(226,85,75,0.12); border:1px solid var(--red); border-radius:8px; font-size:11px; color:var(--red);">
+      Storage issue: ${esc(message)}
+      <button class="btn danger" id="banner-reset" style="display:block; margin-top:8px; width:100%; font-size:11px; padding:5px 8px;">Reset stored data</button>
+    </div>`;
+  document.getElementById("banner-reset").addEventListener("click", async () => {
+    const btn = document.getElementById("banner-reset");
+    btn.disabled = true; btn.textContent = "Resetting…";
+    await emergencyResetStorage();
+    cachedInvoices = null;
+    cachedReport = null;
+    clearStorageHealthBanner();
+    toast("Attempted storage reset.", "success");
+    navigate(currentView);
+  });
+}
+function clearStorageHealthBanner() {
+  const el = document.getElementById("storage-health-banner");
+  if (el) el.innerHTML = "";
+}
+
+async function refreshNavCounts() {
+  const invoices = await getInvoicesCached();
+  document.getElementById("nav-invoice-count").textContent = invoices.length || "";
+  const reviewCount = invoices.reduce((sum, inv) => sum + legsNeedingReviewCount(inv), 0);
+  const rc = document.getElementById("nav-review-count");
+  rc.textContent = reviewCount || "";
+  rc.style.display = reviewCount ? "" : "none";
+  clearStorageHealthBanner();
+}
+
+async function getInvoicesCached(force = false) {
+  if (cachedInvoices && !force) return cachedInvoices;
+  cachedInvoices = await Store.listInvoices();
+  return cachedInvoices;
+}
+
+// Report is fully recomputed from all saved invoices every time --
+// simpler and safer than trying to incrementally patch it, and cheap
+// at the data volumes a fractional-invoice log actually has.
+let cachedReport = null;
+
+// Month is derived from the invoice's billing period (period_start),
+// not the leg date -- leg dates on this template are "MM/DD" with no
+// year, so the invoice period is the only reliable source of year+month.
+function monthKeyFromPeriodStart(periodStart) {
+  if (!periodStart) return '0000-00';
+  const parts = periodStart.split('/'); // MM/DD/YYYY
+  if (parts.length !== 3) return '0000-00';
+  const [mm, , yyyy] = parts;
+  return `${yyyy}-${mm.padStart(2, '0')}`;
+}
+function monthLabelFromKey(key) {
+  const [yyyy, mm] = key.split('-');
+  if (yyyy === '0000') return 'Unknown month';
+  const d = new Date(Number(yyyy), Number(mm) - 1, 1);
+  return d.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+}
+function round2(n) { return Math.round(n * 100) / 100; }
+
+async function recomputeReport() {
+  const invoices = await getInvoicesCached(true);
+  const byPassenger = {};
+
+  for (const inv of invoices) {
+    const invoiceNo = inv.invoice.invoice_id;
+    const periodStart = inv.invoice.period_start;
+    const monthKey = monthKeyFromPeriodStart(periodStart);
+
+    for (const leg of (inv.flight_legs || [])) {
+      const name = (leg.lead_passenger || '').trim() || 'Unassigned';
+      if (!byPassenger[name]) {
+        byPassenger[name] = { name, totalBilledHours: 0, tripCount: 0, monthsByKey: {} };
+      }
+      const p = byPassenger[name];
+      if (!p.monthsByKey[monthKey]) {
+        p.monthsByKey[monthKey] = {
+          monthKey, monthLabel: monthLabelFromKey(monthKey),
+          subtotalBilledHours: 0, trips: [],
+        };
+      }
+      const billed = leg.billed_hours != null ? leg.billed_hours : 0;
+      p.monthsByKey[monthKey].subtotalBilledHours += billed;
+      p.monthsByKey[monthKey].trips.push({
+        invoiceNo, periodStart, date: leg.leg_date,
+        from: leg.origin, to: leg.destination,
+        fromCode: leg.origin_code, toCode: leg.destination_code,
+        billedHours: leg.billed_hours,
+      });
+      p.totalBilledHours += billed;
+      p.tripCount += 1;
+    }
+  }
+
+  const passengers = Object.values(byPassenger).sort((a, b) => a.name.localeCompare(b.name));
+  for (const p of passengers) {
+    const months = Object.values(p.monthsByKey).sort((a, b) => a.monthKey.localeCompare(b.monthKey));
+    for (const m of months) {
+      m.trips.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      m.subtotalBilledHours = round2(m.subtotalBilledHours);
+    }
+    delete p.monthsByKey;
+    p.months = months;
+    p.totalBilledHours = round2(p.totalBilledHours);
+  }
+
+  const report = { generated_at: new Date().toISOString(), passengers };
+  const persisted = await Store.saveReport(report);
+  if (!persisted) console.error('recomputeReport: failed to persist report (display is still correct -- this only affects offline/next-session caching)');
+  cachedReport = report;
+  return report;
+}
+
+async function getReportCached(force = false) {
+  if (cachedReport && !force) return cachedReport;
+  cachedReport = await Store.getReport();
+  return cachedReport;
+}
+
+// ---- Review resolution ----
+// Applies a person's chosen corrections to one flagged leg: updates the
+// stored invoice, clears that leg's warnings (removing it from the
+// Review Queue), and recomputes the Passenger Report since edited
+// fields (billed hours, names) can change totals.
+async function resolveLeg(invoiceNo, legId, edits) {
+  const inv = await Store.getInvoice(invoiceNo);
+  if (!inv) return { ok: false, error: `Invoice ${invoiceNo} not found` };
+  const leg = (inv.flight_legs || []).find(l => l.id === legId);
+  if (!leg) return { ok: false, error: `Leg ${legId} not found on invoice ${invoiceNo}` };
+
+  Object.assign(leg, edits);
+  leg._warnings = null;
+  leg._resolvedAt = new Date().toISOString();
+
+  const saveResult = await Store.saveInvoice(invoiceNo, inv);
+  if (!saveResult.ok) return { ok: false, error: saveResult.error || 'storage write failed' };
+
+  cachedInvoices = null;
+  await recomputeReport();
+  return { ok: true };
+}
+
+// Deletes known/likely storage keys directly, WITHOUT relying on
+// window.storage.list() -- used as a recovery path specifically for
+// when list() itself is the thing failing (so we can't enumerate real
+// keys to delete). Only removes keys used during this app's own testing;
+// if other invoice numbers were saved beyond what's listed here, they'd
+// need to be identified and cleared separately.
+async function emergencyResetStorage() {
+  const candidateKeys = [
+    'report:passenger_hours',
+    'invoice:123456789',
+  ];
+  for (const key of candidateKeys) {
+    try { await window.storage.delete(key, false); } catch (e) { /* best-effort */ }
+  }
+}
+
+function setActiveNav(view) {
+  document.querySelectorAll(".rail-item").forEach(el => {
+    el.classList.toggle("active", el.dataset.view === view);
+  });
+}
+
+async function navigate(view, param) {
+  currentView = view;
+  setActiveNav(view);
+  try {
+    if (view === "upload") await renderUpload();
+    else if (view === "invoices") await renderInvoiceList();
+    else if (view === "detail") await renderInvoiceDetail(param);
+    else if (view === "review") await renderReviewQueue();
+    else if (view === "trends") await renderTrends();
+    else if (view === "passengers") await renderPassengerReport();
+  } catch (e) {
+    // Catch-all so a bug in one view shows a visible error instead of an
+    // infinite "Loading…" -- individual views may also handle their own
+    // errors more specifically (see renderPassengerReport).
+    console.error(`navigate(${view}) failed:`, e);
+    const isStorageError = /storage|list failed|invalid response/i.test(e.message || "");
+    main.innerHTML = `
+      <div class="card">
+        <span style="color:var(--red)">Something went wrong loading this page: ${esc(e.message)}</span>
+        <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn" id="nav-retry">Retry</button>
+          ${isStorageError ? '<button class="btn danger" id="nav-reset">Reset stored data &amp; retry</button>' : ''}
+        </div>
+        ${isStorageError ? `<div style="margin-top:10px; font-size:12px; color:var(--muted);">
+          This clears locally saved invoices/reports (best-effort, targets known test data from
+          this session) in case accumulated data is what's breaking storage reads -- it won't help
+          if this is a platform-side issue instead.
+        </div>` : ''}
+      </div>`;
+    document.getElementById("nav-retry").addEventListener("click", () => navigate(view, param));
+    const resetBtn = document.getElementById("nav-reset");
+    if (resetBtn) {
+      resetBtn.addEventListener("click", async () => {
+        resetBtn.disabled = true;
+        resetBtn.textContent = "Resetting…";
+        await emergencyResetStorage();
+        cachedInvoices = null;
+        cachedReport = null;
+        toast("Attempted storage reset. Retrying…", "success");
+        navigate(view, param);
+      });
+    }
+  }
+  try {
+    await refreshNavCounts();
+  } catch (e) {
+    console.error('refreshNavCounts failed:', e);
+    showStorageHealthBanner(e.message || String(e));
+  }
+}
+
+// ---- Upload ----
+function renderUpload() {
+  main.innerHTML = `
+    <div class="page-title">Upload invoice</div>
+    <div class="page-sub">Drop a flight activity invoice PDF to parse it into your flight log.</div>
+    <div class="card">
+      <div class="dropzone" id="dropzone">
+        <div class="dropzone-icon">✈️</div>
+        <div class="dropzone-title">Drop PDF here, or click to choose a file</div>
+        <div class="dropzone-sub">Parsed entirely in your browser — nothing is uploaded anywhere.</div>
+        <input type="file" id="file-input" accept="application/pdf">
+      </div>
+    </div>
+    <div id="upload-result"></div>
+  `;
+  const dz = document.getElementById("dropzone");
+  const input = document.getElementById("file-input");
+  dz.addEventListener("click", () => input.click());
+  dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("drag"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
+  dz.addEventListener("drop", e => {
+    e.preventDefault(); dz.classList.remove("drag");
+    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+  });
+  input.addEventListener("change", () => { if (input.files.length) handleFile(input.files[0]); });
+}
+
+// Reverts one auto-applied change on an in-memory (not-yet-saved) parse
+// result, and re-flags that leg for manual review by regenerating its
+// warnings from current field values.
+function undoAutoResolveChange(result, change) {
+  const leg = (result.flight_legs || []).find(l => l.id === change.legId);
+  if (!leg) return;
+  leg[change.field] = change.oldValue;
+  leg._warnings = buildLegWarnings(leg);
+  leg._autoResolved = false;
+  delete leg._resolvedAt;
+}
+
+async function handleFile(file) {
+  const resultEl = document.getElementById("upload-result");
+  resultEl.innerHTML = `<div class="card"><span style="color:var(--muted)">Parsing ${esc(file.name)}…</span></div>`;
+  try {
+    const buf = await file.arrayBuffer();
+    if (buf.byteLength !== file.size) {
+      console.error(`File read size mismatch: file.size=${file.size} but arrayBuffer byteLength=${buf.byteLength}`);
+    }
+    const result = await parseInvoicePdf(buf, file.size);
+    const invoiceNo = result.invoice.invoice_id;
+    const existing = await Store.getInvoice(invoiceNo);
+
+    function renderResultUI() {
+      const reviewCount = legsNeedingReviewCount(result);
+      const checksOk = result.invoice._check_charges_sum_ok !== false
+        && result.invoice._check_reservations_sum_to_invoice_total !== false;
+
+      resultEl.innerHTML = `
+      <div class="card">
+        <div class="card-title">Parse result</div>
+        <div class="field-grid">
+          <div class="field"><div class="k">Invoice No.</div><div class="v">${esc(invoiceNo)}</div></div>
+          <div class="field"><div class="k">Period</div><div class="v">${esc(result.invoice.period_start)} – ${esc(result.invoice.period_end)}</div></div>
+          <div class="field"><div class="k">Total</div><div class="v">${fmtMoney(result.invoice.total_invoice_amount)}</div></div>
+        </div>
+        <div class="parse-summary">
+          <span class="badge ${checksOk ? 'ok' : 'warn'}"><span class="dot"></span>${checksOk ? 'Checksums OK' : 'Checksum mismatch'}</span>
+          ${reviewCount ? `<span class="badge warn"><span class="dot"></span>${reviewCount} leg(s) need review</span>` : `<span class="badge ok"><span class="dot"></span>No leg warnings</span>`}
+          ${existing ? `<span class="badge warn"><span class="dot"></span>Already imported — saving will overwrite</span>` : ''}
+        </div>
+        ${result._autoResolveChanges && result._autoResolveChanges.length ? `
+          <div id="auto-resolve-panel" style="margin-bottom:16px; padding:12px; background:var(--panel-2); border-radius:8px; border:1px solid var(--line);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <div style="font-size:12px; color:var(--teal); text-transform:uppercase; letter-spacing:0.05em;">
+                ✓ Automatically resolved ${result._autoResolveChanges.length} ambiguit${result._autoResolveChanges.length === 1 ? 'y' : 'ies'}
+              </div>
+              <button class="btn" id="undo-all-btn" style="font-size:11px; padding:4px 10px;">Undo all</button>
+            </div>
+            <div id="auto-resolve-list" style="display:flex; flex-direction:column; gap:8px; font-size:12px;">
+              ${result._autoResolveChanges.map((c, i) => `
+                <div data-change-index="${i}" style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+                  <div style="color:var(--muted);">
+                    Leg ${esc(c.legId.split('-leg-')[1])}: <span style="color:var(--text);">${esc(c.field)}</span>
+                    "${esc(c.oldValue)}" → "${esc(c.newValue)}"
+                    <div style="font-size:10px; color:var(--muted);">${esc(c.reason)}</div>
+                  </div>
+                  <button class="btn" data-undo-index="${i}" style="font-size:10px; padding:3px 8px; flex-shrink:0;">Undo</button>
+                </div>
+              `).join("")}
+            </div>
+          </div>
+        ` : ''}
+        <button class="btn primary" id="save-btn">${existing ? 'Overwrite saved invoice' : 'Save to Log Book'}</button>
+        ${result._diagnostics && result._diagnostics.page2LegRowsMatched === 0 ? `
+          <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--line);">
+            <div style="color:var(--red); font-size:13px; margin-bottom:8px;">
+              ⚠ Found ${result._diagnostics.numPages} page(s) but matched 0 flight legs on page 2.
+              This usually means the column layout on this PDF doesn't match what the parser expects.
+            </div>
+            <details style="font-size:12px; color:var(--muted);">
+              <summary style="cursor:pointer;">Show diagnostic detail</summary>
+              <pre style="white-space:pre-wrap; font-family:var(--mono); font-size:11px; background:var(--panel-2); padding:10px; border-radius:6px; margin-top:8px;">${esc(JSON.stringify(result._diagnostics, null, 2))}</pre>
+            </details>
+          </div>
+        ` : result._diagnostics && result._diagnostics.page2Error ? `
+          <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--line); color:var(--red); font-size:13px;">
+            ⚠ Page 2 (flight legs) failed to parse: ${esc(result._diagnostics.page2Error)}
+          </div>
+        ` : ''}
+      </div>
+    `;
+      document.getElementById("save-btn").addEventListener("click", async () => {
+        const btn = document.getElementById("save-btn");
+        btn.disabled = true;
+        btn.textContent = "Saving…";
+        const saveResult = await Store.saveInvoice(invoiceNo, result);
+        if (!saveResult.ok) {
+          btn.disabled = false;
+          btn.textContent = existing ? "Overwrite saved invoice" : "Save to Log Book";
+          toast(`Could not save invoice ${invoiceNo}: ${saveResult.error || 'unknown storage error'}`, "error");
+          return;
+        }
+        cachedInvoices = null;
+        // The save itself already succeeded at this point -- don't let a
+        // failure in the (separate) report-refresh step make it look like
+        // the whole upload failed. Report just won't be up to date until
+        // storage.list() works again; the invoice itself is safely saved.
+        let reportNote = "Passenger report updated.";
+        try {
+          await recomputeReport();
+        } catch (e) {
+          console.error("recomputeReport after save failed (invoice was still saved):", e);
+          reportNote = "Passenger report could not be refreshed right now (storage issue) -- your invoice was still saved.";
+        }
+        toast(`Saved invoice ${invoiceNo} to your log book. ${reportNote}`, "success");
+        navigate("detail", invoiceNo);
+      });
+
+      // Undo wiring for auto-applied changes -- reverts the specific
+      // field(s) on the in-memory result (nothing has been saved to Drive
+      // yet at this point) and re-flags that leg for manual review.
+      const undoAllBtn = document.getElementById("undo-all-btn");
+      if (undoAllBtn) {
+        undoAllBtn.addEventListener("click", () => {
+          for (const change of result._autoResolveChanges) undoAutoResolveChange(result, change);
+          result._autoResolveChanges = [];
+          renderResultUI();
+        });
+      }
+      document.querySelectorAll("[data-undo-index]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const idx = parseInt(btn.dataset.undoIndex, 10);
+          undoAutoResolveChange(result, result._autoResolveChanges[idx]);
+          result._autoResolveChanges.splice(idx, 1);
+          renderResultUI();
+        });
+      });
+    }
+
+    renderResultUI();
+  } catch (e) {
+    resultEl.innerHTML = `
+      <div class="card">
+        <div style="color:var(--red); white-space:pre-wrap; word-break:break-word; font-size:13px;">Could not parse this PDF: ${esc(e.message)}</div>
+        <details style="margin-top:10px; font-size:11px; color:var(--muted);">
+          <summary style="cursor:pointer;">Show technical detail</summary>
+          <pre style="white-space:pre-wrap; font-family:var(--mono); font-size:10px; background:var(--panel-2); padding:10px; border-radius:6px; margin-top:8px;">${esc(e.stack || "(no stack trace available)")}</pre>
+        </details>
+      </div>`;
+  }
+}
+
+// ---- Invoice list ----
+async function renderInvoiceList() {
+  main.innerHTML = `<div class="page-title">Log Book</div><div class="page-sub">All uploaded invoices, most recent first.</div><div class="card" id="list-card"><div class="empty-state">Loading…</div></div>`;
+  const invoices = await getInvoicesCached();
+  const card = document.getElementById("list-card");
+  if (!invoices.length) {
+    card.innerHTML = `<div class="empty-state">No invoices yet. Upload one to get started.</div>`;
+    return;
+  }
+  card.innerHTML = invoices.map(inv => {
+    const i = inv.invoice;
+    const reviewCount = legsNeedingReviewCount(inv);
+    return `
+      <div class="invoice-row" data-invoice="${esc(i.invoice_id)}">
+        <div>
+          <div class="invoice-no">${esc(i.invoice_id)}</div>
+          <div class="invoice-meta">${esc(i.tail_no)} · ${esc(i.period_start)} – ${esc(i.period_end)}</div>
+        </div>
+        ${reviewCount ? `<span class="badge warn"><span class="dot"></span>${reviewCount} to review</span>` : `<span class="badge ok"><span class="dot"></span>Clean</span>`}
+        <div class="invoice-amount">${fmtMoney(i.total_invoice_amount)}</div>
+      </div>
+    `;
+  }).join("");
+  card.querySelectorAll(".invoice-row").forEach(row => {
+    row.addEventListener("click", () => navigate("detail", row.dataset.invoice));
+  });
+}
+
+// ---- Invoice detail ----
+async function renderInvoiceDetail(invoiceNo) {
+  main.innerHTML = `<div class="empty-state">Loading…</div>`;
+  const inv = await Store.getInvoice(invoiceNo);
+  if (!inv) { main.innerHTML = `<div class="empty-state">Invoice not found.</div>`; return; }
+  const i = inv.invoice;
+  const currentYear = inv.contract_year_snapshots.find(y => y.period_label === "Year 1") || inv.contract_year_snapshots[1];
+  const gaugeUsed = currentYear ? currentYear.total_hours_used : 0;
+  const gaugeTotal = currentYear ? currentYear.total_available : 1;
+
+  main.innerHTML = `
+    <div class="back-link" id="back">← Back to Log Book</div>
+    <div class="page-title">Invoice ${esc(i.invoice_id)}</div>
+    <div class="page-sub">${esc(i.tail_no)} · ${esc(i.aircraft_type)} · ${esc(i.period_start)} – ${esc(i.period_end)}</div>
+
+    <div class="card">
+      <div class="card-title">Summary</div>
+      <div class="field-grid">
+        <div class="field"><div class="k">Contract No.</div><div class="v">${esc(i.contract_no)}</div></div>
+        <div class="field"><div class="k">Share Size</div><div class="v">${esc(i.share_size_pct)}%</div></div>
+        <div class="field"><div class="k">Account No.</div><div class="v">${esc(i.account_no)}</div></div>
+        <div class="field"><div class="k">Total Invoice</div><div class="v">${fmtMoney(i.total_invoice_amount)}</div></div>
+        <div class="field"><div class="k">Avg Usage/Month</div><div class="v">${fmtNum(i.avg_actual_usage_per_month)} hrs</div></div>
+        <div class="field"><div class="k">Usage Trend</div><div class="v">${fmtNum(i.actual_usage_trend_pct)}%</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Year 1 hours used</div>
+      <div class="gauge-wrap">
+        ${renderGauge(gaugeUsed, gaugeTotal)}
+        <div class="gauge-stats">
+          <div class="stat-line"><span class="k">Used</span><span class="v">${fmtNum(gaugeUsed)} hrs</span></div>
+          <div class="stat-line"><span class="k">Available</span><span class="v">${fmtNum(gaugeTotal)} hrs</span></div>
+          <div class="stat-line"><span class="k">Remaining</span><span class="v">${fmtNum(gaugeTotal - gaugeUsed)} hrs</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Charges</div>
+      <table>
+        <thead><tr><th>Description</th><th>Hours</th><th>Rate</th><th>Total</th></tr></thead>
+        <tbody>
+          <tr><td>Regular Hourly Charge</td><td>${fmtNum(i.regular_hourly_charge_hours)}</td><td>${fmtMoney(i.regular_hourly_rate)}</td><td>${fmtMoney(i.regular_hourly_total)}</td></tr>
+          <tr><td>Fuel Variable Charge</td><td>${fmtNum(i.fuel_variable_hours)}</td><td>${fmtMoney(i.fuel_variable_rate)}</td><td>${fmtMoney(i.fuel_variable_total)}</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Contract years</div>
+      <table>
+        <thead><tr><th>Period</th><th>Allotted</th><th>Available</th><th>Used</th><th>Remaining</th><th>Excess</th></tr></thead>
+        <tbody>
+          ${inv.contract_year_snapshots.map(y => `
+            <tr>
+              <td>${esc(y.period_label)}</td>
+              <td>${fmtNum(y.hours_allotted)}</td>
+              <td>${fmtNum(y.total_available)}</td>
+              <td>${fmtNum(y.total_hours_used)}</td>
+              <td>${fmtNum(y.remaining_available_hours)}</td>
+              <td>${fmtNum(y.excess_hours_billed)}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Flight legs</div>
+      ${inv.flight_legs.length ? `
+      <table>
+        <thead><tr><th></th><th>Date</th><th>From</th><th>To</th><th>Code</th><th>Aircraft</th><th>Hours</th><th>Billed</th><th>Pax</th><th>Passenger</th></tr></thead>
+        <tbody>
+          ${inv.flight_legs.map((leg, idx) => `
+            <tr class="${leg._warnings && leg._warnings.length ? 'needs-review' : ''}">
+              <td>${leg._warnings && leg._warnings.length ? `<span class="warn-icon" title="${esc(leg._warnings.join(' | '))}">⚠</span>` : ''}</td>
+              <td>${esc(leg.leg_date)}</td>
+              <td>${esc(leg.origin)}</td>
+              <td>${esc(leg.destination)}</td>
+              <td>${esc(leg.origin_code)} → ${esc(leg.destination_code)}</td>
+              <td>${esc(leg.aircraft_actual_type)}</td>
+              <td>${fmtNum(leg.hours)}</td>
+              <td>${fmtNum(leg.billed_hours)}</td>
+              <td>${leg.num_passengers ?? '—'}</td>
+              <td>${esc(leg.lead_passenger)}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>` : `<div class="empty-state">
+          No leg-level detail on this invoice.
+          ${inv._diagnostics ? `<details style="text-align:left; margin-top:10px; font-size:12px;">
+            <summary style="cursor:pointer; color:var(--muted);">Why? (diagnostic detail)</summary>
+            <pre style="white-space:pre-wrap; font-family:var(--mono); font-size:11px; background:var(--panel-2); padding:10px; border-radius:6px; margin-top:8px; text-align:left;">${esc(JSON.stringify(inv._diagnostics, null, 2))}</pre>
+          </details>` : ''}
+        </div>`}
+    </div>
+
+    <div class="card" id="delete-card">
+      <button class="btn danger" id="delete-btn">Delete this invoice</button>
+    </div>
+  `;
+  document.getElementById("back").addEventListener("click", () => navigate("invoices"));
+
+  function wireDeleteButton() {
+    const deleteCard = document.getElementById("delete-card");
+    document.getElementById("delete-btn").addEventListener("click", () => {
+      // In-app confirmation instead of window.confirm(), which is
+      // unreliable inside a sandboxed iframe (can silently no-op).
+      deleteCard.innerHTML = `
+        <div style="margin-bottom:10px; color: var(--red);">Delete invoice ${esc(i.invoice_id)}? This can't be undone.</div>
+        <button class="btn danger" id="confirm-delete-btn">Yes, delete it</button>
+        <button class="btn" id="cancel-delete-btn">Cancel</button>
+      `;
+      document.getElementById("cancel-delete-btn").addEventListener("click", () => {
+        deleteCard.innerHTML = `<button class="btn danger" id="delete-btn">Delete this invoice</button>`;
+        wireDeleteButton();
+      });
+      document.getElementById("confirm-delete-btn").addEventListener("click", async () => {
+        const btn = document.getElementById("confirm-delete-btn");
+        btn.disabled = true;
+        btn.textContent = "Deleting…";
+        const ok = await Store.deleteInvoice(i.invoice_id);
+        if (!ok) {
+          toast(`Could not delete invoice ${i.invoice_id} — storage delete failed. Please try again.`, "error");
+          deleteCard.innerHTML = `<button class="btn danger" id="delete-btn">Delete this invoice</button>`;
+          wireDeleteButton();
+          return;
+        }
+        cachedInvoices = null;
+        let reportNote = "Passenger report updated.";
+        try {
+          await recomputeReport();
+        } catch (e) {
+          console.error("recomputeReport after delete failed (invoice was still deleted):", e);
+          reportNote = "Passenger report could not be refreshed right now (storage issue) -- your invoice was still deleted.";
+        }
+        toast(`Invoice deleted. ${reportNote}`, "success");
+        navigate("invoices");
+      });
+    });
+  }
+  wireDeleteButton();
+}
+
+// ---- Review queue ----
+function reviewInputStyle() {
+  return "width:100%; background:var(--panel-2); border:1px solid var(--line); color:var(--text); " +
+         "padding:7px 9px; border-radius:6px; font-family:var(--mono); font-size:13px;";
+}
+
+function renderLegSummaryHTML(leg) {
+  return `
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap;">
+      <div>
+        <div style="font-family:var(--mono); font-size:13px;">${esc(leg.leg_date)} · ${esc(leg.origin)} → ${esc(leg.destination)}</div>
+        <div style="font-family:var(--sans); font-size:12px; color:var(--red); margin-top:6px;">${leg._warnings.map(esc).join("<br>")}</div>
+      </div>
+      <button class="btn" data-resolve-btn>Resolve</button>
+    </div>`;
+}
+
+// Splits text into alternating word/whitespace tokens (so the original
+// exact spacing can always be reconstructed), used to find and replace
+// individual ambiguous words without disturbing the rest of the field.
+function tokenizePreservingSpaces(text) {
+  return (text || "").split(/(\s+)/);
+}
+
+// Words containing 'Y' are candidates for the known V->Y rendering issue.
+// Returns each such word WITH its surrounding context (the full field
+// text) so the picker can show "the word AND where it sits", not just
+// the bare character.
+// ---- Airport code lookup (for resolving V/Y and other code ambiguities) ----
+// Fetched lazily (only once actually needed, not on every page load) from
+// A LIVE, comprehensive fetch of the full airport database turned out
+// not to be possible from inside this app: Claude's chat artifacts run
+// under a strict CSP that blocks fetch() to arbitrary external domains
+// (confirmed by testing -- it failed inside the real app even though an
+// identical fetch worked fine in a normal unrestricted browser tab). The
+// full public dataset is also too large (~78,000 airports) to embed
+// directly without bloating this file substantially.
+//
+// So: this is a SMALL, curated, embedded list -- not comprehensive. It
+// currently covers only the airports actually confirmed relevant to
+// invoices seen so far. Add more {ident, municipality, region, name}
+// entries here as new codes come up. For a full/unlimited lookup, use
+// the standalone airport_lookup_test.html page instead, which runs
+// outside Claude's CSP and can fetch the complete public database.
+const EMBEDDED_AIRPORTS = [
+  { ident: 'UNV', municipality: 'State College', region: 'PA', name: 'State College Regional Airport' },
+  { ident: 'VES', municipality: 'Versailles', region: 'OH', name: 'Darke County Airport' },
+];
+
+const airportIndex = new Map();
+for (const a of EMBEDDED_AIRPORTS) {
+  airportIndex.set(a.ident.toUpperCase(), a);
+}
+
+function normalizeForMatch(s) {
+  return (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+// Looks up a code in the small embedded list and checks whether its
+// real-world city/state plausibly matches the city/state text already on
+// the leg. Synchronous (no network involved) -- see notes above on why.
+function verifyAirportCode(code, cityStateText) {
+  if (!code) return { found: false, offlineList: true };
+  const record = airportIndex.get(code.trim().toUpperCase());
+  if (!record) return { found: false, offlineList: true };
+  const normCityState = normalizeForMatch(cityStateText);
+  const normMunicipality = normalizeForMatch(record.municipality);
+  const cityMatch = !!(normCityState && normMunicipality &&
+    (normCityState.includes(normMunicipality) || normMunicipality.includes(normCityState)));
+  return { found: true, name: record.name, municipality: record.municipality, region: record.region, cityMatch };
+}
+
+function findAmbiguousWords(fieldName, text) {
+  const tokens = tokenizePreservingSpaces(text);
+  const found = [];
+  tokens.forEach((tok, i) => {
+    if (tok.trim() !== "" && /Y/.test(tok)) {
+      found.push({ fieldName, tokenIndex: i, original: tok, corrected: tok.replace(/Y/g, "V") });
+    }
+  });
+  return found;
+}
+
+// Rewrites a "City, State" string's city portion using an officially
+// spelled municipality name, preserving whatever state/suffix already
+// follows the last comma. Shared by the manual "Fix city spelling"
+// button and the automatic resolver below, so both behave identically.
+function applyCityFix(currentVal, officialMunicipality) {
+  const lastComma = (currentVal || "").lastIndexOf(",");
+  const statePart = lastComma !== -1 ? currentVal.slice(lastComma + 1).trim() : "";
+  return statePart ? `${officialMunicipality}, ${statePart}` : officialMunicipality;
+}
+
+// Automatically resolves a leg's airport-code ambiguities WITHOUT asking
+// the person first, but only when confidence is high: exactly one of the
+// two candidate readings (original vs Y->V corrected) is both a real
+// airport in the embedded database AND its city plausibly matches what's
+// already on the leg. Every change made is recorded (with enough detail
+// to undo it) rather than applied silently. If a leg has ambiguity that
+// can't be confidently resolved this way, it's left alone for manual
+// review exactly as before.
+function attemptAutoResolveLeg(leg) {
+  const changes = [];
+  let anyRemainingAmbiguity = false;
+  const codeCityPairs = [
+    { codeField: "origin_code", cityField: "origin" },
+    { codeField: "destination_code", cityField: "destination" },
+  ];
+
+  for (const { codeField, cityField } of codeCityPairs) {
+    const ambiguous = findAmbiguousWords(codeField, leg[codeField] || "");
+    if (!ambiguous.length) continue; // nothing ambiguous about this code -- leave it alone
+
+    const { original, corrected } = ambiguous[0]; // a code field is always a single token
+    const cityText = leg[cityField] || "";
+    const resOriginal = verifyAirportCode(original, cityText);
+    const resCorrected = verifyAirportCode(corrected, cityText);
+    const originalMatches = resOriginal.found && resOriginal.cityMatch;
+    const correctedMatches = resCorrected.found && resCorrected.cityMatch;
+
+    let winner = null; // { value, res } for whichever reading is confirmed, if any
+    if (correctedMatches && !originalMatches) winner = { value: corrected, res: resCorrected };
+    else if (originalMatches && !correctedMatches) winner = { value: original, res: resOriginal };
+    else { anyRemainingAmbiguity = true; continue; } // neither or both matched -- stay flagged
+
+    if (leg[codeField] !== winner.value) {
+      const oldCode = leg[codeField];
+      leg[codeField] = winner.value;
+      changes.push({
+        legId: leg.id, field: codeField, oldValue: oldCode, newValue: winner.value,
+        reason: `Matched "${winner.value}" in airport database (${winner.res.name}, ${winner.res.municipality}, ${winner.res.region})`,
+      });
+    }
+
+    if (normalizeForMatch(cityText) !== normalizeForMatch(winner.res.municipality)) {
+      const oldCity = leg[cityField];
+      const newCity = applyCityFix(oldCity, winner.res.municipality);
+      if (newCity !== oldCity) {
+        leg[cityField] = newCity;
+        changes.push({
+          legId: leg.id, field: cityField, oldValue: oldCity, newValue: newCity,
+          reason: `City spelling corrected using verified airport ${winner.value}`,
+        });
+      }
+    }
+  }
+
+  if (changes.length && !anyRemainingAmbiguity) {
+    // Fully resolved with high confidence -- treat like a completed
+    // manual review, same as clicking "Save changes & resolve" would.
+    leg._warnings = null;
+    leg._resolvedAt = new Date().toISOString();
+    leg._autoResolved = true;
+  } else if (changes.length) {
+    // Partially resolved -- regenerate warnings so whatever's still
+    // uncertain (or the standing "verify visually" note) still surfaces.
+    leg._warnings = buildLegWarnings(leg);
+  }
+
+  return changes;
+}
+
+function renderLegEditFormHTML(invoiceNo, leg) {
+  const style = reviewInputStyle();
+  const ambiguousWords = [
+    ...findAmbiguousWords("origin", leg.origin || ""),
+    ...findAmbiguousWords("destination", leg.destination || ""),
+    ...findAmbiguousWords("origin_code", leg.origin_code || ""),
+    ...findAmbiguousWords("destination_code", leg.destination_code || ""),
+  ];
+  const fieldLabel = { origin: "From", destination: "To", origin_code: "From Code", destination_code: "To Code" };
+
+  return `
+    <div style="font-family:var(--mono); font-size:11px; color:var(--muted); margin-bottom:10px; text-transform:uppercase; letter-spacing:0.05em;">
+      Resolving leg · ${esc(leg.leg_date)} · Invoice ${esc(invoiceNo)}
+    </div>
+    <div class="field-grid" style="margin-bottom:14px;">
+      <div class="field"><div class="k">From</div><input style="${style}" data-field="origin" value="${esc(leg.origin || "")}"></div>
+      <div class="field"><div class="k">From Code</div><input style="${style}" data-field="origin_code" value="${esc(leg.origin_code || "")}"></div>
+      <div class="field"><div class="k">To</div><input style="${style}" data-field="destination" value="${esc(leg.destination || "")}"></div>
+      <div class="field"><div class="k">To Code</div><input style="${style}" data-field="destination_code" value="${esc(leg.destination_code || "")}"></div>
+      <div class="field"><div class="k">Lead Passenger</div><input style="${style}" data-field="lead_passenger" value="${esc(leg.lead_passenger || "")}"></div>
+      <div class="field"><div class="k">Hours</div><input style="${style}" data-field="hours" value="${leg.hours ?? ""}"></div>
+      <div class="field"><div class="k">Billed Hours</div><input style="${style}" data-field="billed_hours" value="${leg.billed_hours ?? ""}"></div>
+      <div class="field"><div class="k">Distance (SM)</div><input style="${style}" data-field="distance_sm" value="${leg.distance_sm ?? ""}"></div>
+    </div>
+    ${ambiguousWords.length ? `
+      <div style="margin-bottom:14px; padding:12px; background:var(--panel-2); border-radius:8px; border:1px solid var(--line);">
+        <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:10px;">
+          Possible character issue — this template has shown 'V' rendering as 'Y'. Pick the correct word for each:
+        </div>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          ${ambiguousWords.map((w, i) => `
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;" data-ambig-row data-field-name="${w.fieldName}" data-token-index="${w.tokenIndex}">
+              <span style="font-size:12px; color:var(--muted); min-width:36px;">${esc(fieldLabel[w.fieldName])}:</span>
+              <button class="btn" data-ambig-choice="original" data-value="${esc(w.original)}" style="font-family:var(--mono); background:var(--amber); border-color:var(--amber); color:#1A1200;">${esc(w.original)}</button>
+              <span style="color:var(--muted); font-size:11px;">or</span>
+              <button class="btn" data-ambig-choice="corrected" data-value="${esc(w.corrected)}" style="font-family:var(--mono);">${esc(w.corrected)}</button>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    ` : ""}
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <button class="btn primary" data-action="save">Save changes &amp; resolve</button>
+      <button class="btn" data-action="dismiss">Looks correct — resolve as-is</button>
+      <button class="btn" data-action="cancel">Cancel</button>
+    </div>
+    <div data-error style="color:var(--red); font-size:12px; margin-top:10px; display:none;"></div>`;
+}
+
+function wireLegReviewBlock(container, invoiceNo, leg) {
+  function showSummary() {
+    container.innerHTML = renderLegSummaryHTML(leg);
+    container.querySelector("[data-resolve-btn]").addEventListener("click", showEditForm);
+  }
+
+  function showEditForm() {
+    container.innerHTML = renderLegEditFormHTML(invoiceNo, leg);
+
+    const field = (name) => container.querySelector(`[data-field="${name}"]`);
+
+    // Each ambiguous-word row has two buttons (original / corrected).
+    // Clicking one replaces JUST that word (by token position) in the
+    // live input value -- re-tokenizing fresh each time so this stays
+    // correct even if the person has already hand-edited the field.
+    container.querySelectorAll("[data-ambig-row]").forEach(row => {
+      const fieldName = row.dataset.fieldName;
+      const tokenIndex = parseInt(row.dataset.tokenIndex, 10);
+      row.querySelectorAll("[data-ambig-choice]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const input = field(fieldName);
+          const tokens = tokenizePreservingSpaces(input.value);
+          if (tokens[tokenIndex] !== undefined) {
+            tokens[tokenIndex] = btn.dataset.value;
+            input.value = tokens.join("");
+          }
+          // Visually mark this row's chosen option -- amber = selected.
+          row.querySelectorAll("[data-ambig-choice]").forEach(b => {
+            const isChosen = b === btn;
+            b.style.background = isChosen ? "var(--amber)" : "";
+            b.style.borderColor = isChosen ? "var(--amber)" : "";
+            b.style.color = isChosen ? "#1A1200" : "";
+          });
+        });
+      });
+    });
+
+    // For code-field ambiguities specifically (From Code / To Code), try
+    // to resolve them automatically against a real airport database
+    // instead of leaving it as a pure guess: look up both candidates,
+    // check which one's real city/state matches what's on this leg, and
+    // if exactly one matches, pre-select it and label it as verified.
+    container.querySelectorAll('[data-ambig-row][data-field-name="origin_code"], [data-ambig-row][data-field-name="destination_code"]').forEach(async (row) => {
+      const fieldName = row.dataset.fieldName;
+      const cityStateText = fieldName === "origin_code" ? field("origin").value : field("destination").value;
+      const buttons = row.querySelectorAll("[data-ambig-choice]");
+      const statusEl = document.createElement("span");
+      statusEl.style.cssText = "font-size:11px; color:var(--muted);";
+      statusEl.textContent = "Checking airport database…";
+      row.appendChild(statusEl);
+
+      const results = Array.from(buttons).map(btn => verifyAirportCode(btn.dataset.value, cityStateText));
+
+      buttons.forEach((btn, i) => {
+        const r = results[i];
+        if (r.found) {
+          const note = document.createElement("div");
+          note.style.cssText = `font-size:10px; margin-top:3px; color:${r.cityMatch ? 'var(--teal)' : 'var(--muted)'};`;
+          note.textContent = r.cityMatch
+            ? `✓ ${r.name} (${r.municipality}, ${r.region})`
+            : `${r.name} (${r.municipality}, ${r.region}) — different city`;
+          btn.parentElement && btn.insertAdjacentElement("afterend", note);
+        }
+      });
+
+      const matchIndex = results.findIndex(r => r.found && r.cityMatch);
+      const otherMatchExists = results.filter(r => r.found && r.cityMatch).length > 1;
+      if (matchIndex !== -1 && !otherMatchExists) {
+        statusEl.textContent = "Matched against a small built-in airport list — recommended choice highlighted below.";
+        buttons[matchIndex].click(); // auto-select the verified match
+
+        // The database's municipality name is properly spaced/spelled --
+        // offer to use it to fix the city text too, since this template's
+        // text extraction sometimes drops spaces between words (e.g.
+        // "STATECOLLEGE" for "State College") with no positional signal
+        // this app can otherwise detect.
+        const matchedRecord = results[matchIndex];
+        const cityFieldName = fieldName === "origin_code" ? "origin" : "destination";
+        const cityInput = field(cityFieldName);
+        const currentVal = cityInput.value;
+        const normCurrent = normalizeForMatch(currentVal);
+        const normOfficial = normalizeForMatch(matchedRecord.municipality);
+        if (normCurrent !== normOfficial) {
+          const fixBtn = document.createElement("button");
+          fixBtn.className = "btn";
+          fixBtn.style.cssText = "margin-top:6px; font-size:11px;";
+          fixBtn.textContent = `Fix city spelling → "${matchedRecord.municipality}"`;
+          fixBtn.addEventListener("click", () => {
+            const lastComma = currentVal.lastIndexOf(",");
+            const statePart = lastComma !== -1 ? currentVal.slice(lastComma + 1).trim() : "";
+            cityInput.value = statePart ? `${matchedRecord.municipality}, ${statePart}` : matchedRecord.municipality;
+            fixBtn.disabled = true;
+            fixBtn.textContent = "✓ City spelling fixed";
+          });
+          row.appendChild(fixBtn);
+        }
+      } else {
+        statusEl.textContent = "Not in this app's small built-in airport list — pick manually, or check the separate airport_lookup_test.html tool for a full 78,000-airport search.";
+      }
+    });
+
+    container.querySelector('[data-action="cancel"]').addEventListener("click", showSummary);
+
+    async function doResolve(edits) {
+      const errorEl = container.querySelector("[data-error]");
+      const saveBtn = container.querySelector('[data-action="save"]');
+      const dismissBtn = container.querySelector('[data-action="dismiss"]');
+      saveBtn.disabled = true; dismissBtn.disabled = true;
+      const result = await resolveLeg(invoiceNo, leg.id, edits);
+      if (!result.ok) {
+        errorEl.textContent = "Could not save: " + (result.error || "unknown error");
+        errorEl.style.display = "block";
+        saveBtn.disabled = false; dismissBtn.disabled = false;
+        return;
+      }
+      toast("Leg resolved and removed from the review queue.", "success");
+      renderReviewQueue(); // full refresh -- this leg no longer matches the filter
+    }
+
+    container.querySelector('[data-action="save"]').addEventListener("click", () => {
+      const num = (v) => (v.trim() === "" ? null : parseFloat(v));
+      doResolve({
+        origin: field("origin").value.trim() || null,
+        origin_code: field("origin_code").value.trim() || null,
+        destination: field("destination").value.trim() || null,
+        destination_code: field("destination_code").value.trim() || null,
+        lead_passenger: field("lead_passenger").value.trim() || null,
+        hours: num(field("hours").value),
+        billed_hours: num(field("billed_hours").value),
+        distance_sm: num(field("distance_sm").value),
+      });
+    });
+
+    container.querySelector('[data-action="dismiss"]').addEventListener("click", () => doResolve({}));
+  }
+
+  showSummary();
+}
+
+async function renderReviewQueue() {
+  main.innerHTML = `<div class="page-title">Review Queue</div><div class="page-sub">Legs the parser flagged as needing a human check. Resolve each one to remove it from this list.</div><div id="rq-container"><div class="card"><div class="empty-state">Loading…</div></div></div>`;
+  const invoices = await getInvoicesCached();
+  const container = document.getElementById("rq-container");
+
+  // Auto-resolve pass: this covers legs from invoices saved BEFORE this
+  // feature existed (or before the airport database had the right entry
+  // yet) -- newly parsed invoices already went through this at parse
+  // time, so this mostly catches older/pre-existing data.
+  const allAutoChanges = []; // { invoiceNo, ...change }
+  const invoicesToPersist = new Map(); // invoiceNo -> invoice object
+  for (const inv of invoices) {
+    for (const leg of (inv.flight_legs || [])) {
+      if (!leg._warnings || !leg._warnings.length) continue;
+      const changes = attemptAutoResolveLeg(leg);
+      if (changes.length) {
+        for (const c of changes) allAutoChanges.push({ invoiceNo: inv.invoice.invoice_id, ...c });
+        invoicesToPersist.set(inv.invoice.invoice_id, inv);
+      }
+    }
+  }
+  for (const [invoiceNo, inv] of invoicesToPersist) {
+    await Store.saveInvoice(invoiceNo, inv);
+  }
+  if (invoicesToPersist.size) {
+    cachedInvoices = null;
+    await recomputeReport().catch(e => console.error("recomputeReport after auto-resolve failed:", e));
+  }
+
+  const groups = invoices.map(inv => ({
+    invoice: inv.invoice,
+    legs: (inv.flight_legs || []).filter(l => l._warnings && l._warnings.length),
+  })).filter(g => g.legs.length);
+
+  const autoResolveBannerHTML = allAutoChanges.length ? `
+    <div class="card" style="margin-bottom:20px; border-color:var(--teal);">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <div style="font-size:12px; color:var(--teal); text-transform:uppercase; letter-spacing:0.05em;">
+          ✓ Automatically resolved ${allAutoChanges.length} ambiguit${allAutoChanges.length === 1 ? 'y' : 'ies'} just now
+        </div>
+        <button class="btn" id="rq-undo-all-btn" style="font-size:11px; padding:4px 10px;">Undo all</button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:8px; font-size:12px;">
+        ${allAutoChanges.map((c, i) => `
+          <div data-rq-change-index="${i}" style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+            <div style="color:var(--muted);">
+              Invoice ${esc(c.invoiceNo)}, leg ${esc(c.legId.split('-leg-')[1])}: <span style="color:var(--text);">${esc(c.field)}</span>
+              "${esc(c.oldValue)}" → "${esc(c.newValue)}"
+              <div style="font-size:10px; color:var(--muted);">${esc(c.reason)}</div>
+            </div>
+            <button class="btn" data-rq-undo-index="${i}" style="font-size:10px; padding:3px 8px; flex-shrink:0;">Undo</button>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  ` : '';
+
+  if (!groups.length) {
+    container.innerHTML = autoResolveBannerHTML + `<div class="card"><div class="empty-state">Nothing needs review. 🎉</div></div>`;
+    wireReviewQueueUndoButtons(allAutoChanges);
+    return;
+  }
+
+  container.innerHTML = autoResolveBannerHTML + groups.map(g => `
+    <div class="invoice-group-title">Invoice ${esc(g.invoice.invoice_id)} — ${esc(g.invoice.period_start)}</div>
+    ${g.legs.map(leg => `<div class="card" id="review-block-${esc(leg.id)}"></div>`).join("")}
+  `).join("");
+
+  wireReviewQueueUndoButtons(allAutoChanges);
+  for (const g of groups) {
+    for (const leg of g.legs) {
+      const block = document.getElementById(`review-block-${leg.id}`);
+      if (block) wireLegReviewBlock(block, g.invoice.invoice_id, leg);
+    }
+  }
+}
+
+// Undo for changes the Review Queue's own auto-resolve pass just made --
+// these WERE already persisted to Drive (unlike the parse-time version,
+// which undoes purely in-memory data before the first save), so undoing
+// here means reverting the field, re-flagging the leg, and re-saving.
+function wireReviewQueueUndoButtons(allAutoChanges) {
+  async function undoOne(index) {
+    const c = allAutoChanges[index];
+    const inv = await Store.getInvoice(c.invoiceNo);
+    if (!inv) return;
+    const leg = (inv.flight_legs || []).find(l => l.id === c.legId);
+    if (!leg) return;
+    leg[c.field] = c.oldValue;
+    leg._warnings = buildLegWarnings(leg);
+    leg._autoResolved = false;
+    delete leg._resolvedAt;
+    await Store.saveInvoice(c.invoiceNo, inv);
+    cachedInvoices = null;
+    await recomputeReport().catch(e => console.error("recomputeReport after undo failed:", e));
+  }
+
+  const undoAllBtn = document.getElementById("rq-undo-all-btn");
+  if (undoAllBtn) {
+    undoAllBtn.addEventListener("click", async () => {
+      undoAllBtn.disabled = true;
+      undoAllBtn.textContent = "Undoing…";
+      for (let i = 0; i < allAutoChanges.length; i++) await undoOne(i);
+      renderReviewQueue();
+    });
+  }
+  document.querySelectorAll("[data-rq-undo-index]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      await undoOne(parseInt(btn.dataset.rqUndoIndex, 10));
+      renderReviewQueue();
+    });
+  });
+}
+
+// ---- Passenger report ----
+let passengerReportMode = "detailed"; // "detailed" | "summary"
+
+async function renderPassengerReport() {
+  main.innerHTML = `
+    <div class="page-title">Passenger Report</div>
+    <div class="page-sub">Billed hours by lead passenger, across every saved invoice.</div>
+    <div style="display:flex; gap:0; margin-bottom:20px; border:1px solid var(--line); border-radius:8px; width:fit-content; overflow:hidden;">
+      <button class="btn" data-mode="detailed" style="border:none; border-radius:0; ${passengerReportMode === 'detailed' ? 'background:var(--amber); color:#1A1200;' : ''}">Detailed</button>
+      <button class="btn" data-mode="summary" style="border:none; border-radius:0; border-left:1px solid var(--line); ${passengerReportMode === 'summary' ? 'background:var(--amber); color:#1A1200;' : ''}">Summary</button>
+    </div>
+    <div id="pr-card"><div class="card"><div class="empty-state">Loading…</div></div></div>
+  `;
+  document.querySelectorAll("[data-mode]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      passengerReportMode = btn.dataset.mode;
+      renderPassengerReport();
+    });
+  });
+  const container = document.getElementById("pr-card");
+
+  let report;
+  try {
+    // Always recompute live from the actual saved invoices rather than
+    // trusting a previously persisted report -- a stale (e.g. empty)
+    // persisted report would otherwise be shown forever, since it reads
+    // as "a report exists" even when it no longer reflects reality.
+    // Cheap at this data scale; correctness > the minor savings of caching.
+    report = await recomputeReport();
+  } catch (e) {
+    console.error('renderPassengerReport failed:', e);
+    container.innerHTML = `
+      <div class="card">
+        <span style="color:var(--red)">Could not load the passenger report: ${esc(e.message)}</span>
+        <div style="margin-top:12px;"><button class="btn" id="pr-retry">Retry</button></div>
+      </div>`;
+    document.getElementById("pr-retry").addEventListener("click", () => renderPassengerReport());
+    return;
+  }
+
+  if (!report.passengers.length) {
+    container.innerHTML = `<div class="card"><div class="empty-state">No flight legs with passenger data yet.</div></div>`;
+    return;
+  }
+
+  const generated = new Date(report.generated_at).toLocaleString();
+  container.innerHTML = `
+    <div class="page-sub" style="margin-bottom:16px;">Last updated ${esc(generated)}</div>
+    ${report.passengers.map(p => `
+      <div class="card">
+        <div style="font-family:var(--mono); font-size:24px; font-weight:700; color:var(--amber); letter-spacing:0.01em; margin-bottom:16px;">${esc(p.name)}</div>
+
+        ${p.months.map(m => passengerReportMode === "summary" ? `
+          <div style="margin-bottom:18px;">
+            <div style="font-family:var(--mono); font-size:12px; color:var(--amber); margin-bottom:6px;">${esc(m.monthLabel)}</div>
+            <table>
+              <thead><tr><th>Date</th><th>Billed Hours</th><th>Invoice</th></tr></thead>
+              <tbody>
+                ${m.trips.map(t => `
+                  <tr>
+                    <td>${esc(t.date)}</td>
+                    <td>${fmtNum(t.billedHours)}</td>
+                    <td style="color:var(--muted)">${esc(t.invoiceNo)}</td>
+                  </tr>`).join("")}
+                <tr style="background:var(--panel-2);">
+                  <td style="text-align:right; color:var(--muted); font-family:var(--sans); font-size:12px;">Subtotal for ${esc(m.monthLabel)}</td>
+                  <td style="font-weight:600;">${fmtNum(m.subtotalBilledHours, 2)}</td>
+                  <td></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        ` : `
+          <div style="margin-bottom:18px;">
+            <div style="font-family:var(--mono); font-size:12px; color:var(--amber); margin-bottom:6px;">${esc(m.monthLabel)}</div>
+            <table>
+              <thead><tr><th>Date</th><th>From</th><th>To</th><th>Code</th><th>Billed Hours</th><th>Invoice</th></tr></thead>
+              <tbody>
+                ${m.trips.map(t => `
+                  <tr>
+                    <td>${esc(t.date)}</td>
+                    <td>${esc(t.from)}</td>
+                    <td>${esc(t.to)}</td>
+                    <td>${esc(t.fromCode)} → ${esc(t.toCode)}</td>
+                    <td>${fmtNum(t.billedHours)}</td>
+                    <td style="color:var(--muted)">${esc(t.invoiceNo)}</td>
+                  </tr>`).join("")}
+                <tr style="background:var(--panel-2);">
+                  <td colspan="4" style="text-align:right; color:var(--muted); font-family:var(--sans); font-size:12px;">Subtotal for ${esc(m.monthLabel)}</td>
+                  <td style="font-weight:600;">${fmtNum(m.subtotalBilledHours, 2)}</td>
+                  <td></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        `).join("")}
+
+        <div style="display:flex; justify-content:space-between; align-items:baseline; padding-top:12px; border-top:1px solid var(--line);">
+          <span style="color:var(--muted); font-size:13px;">Total billed hours — ${esc(p.name)} (${p.tripCount} trip${p.tripCount === 1 ? '' : 's'})</span>
+          <span class="gauge-value">${fmtNum(p.totalBilledHours, 2)}</span>
+        </div>
+      </div>
+    `).join("")}
+  `;
+}
+
+// ---- Trends ----
+let trendChart = null;
+async function renderTrends() {
+  main.innerHTML = `
+    <div class="page-title">Trends</div>
+    <div class="page-sub">Monthly spend and hours usage across all saved invoices.</div>
+    <div class="card"><canvas id="trend-canvas" height="90"></canvas></div>
+  `;
+  const invoices = await getInvoicesCached();
+  if (!invoices.length) {
+    document.querySelector(".card").innerHTML = `<div class="empty-state">No invoices yet.</div>`;
+    return;
+  }
+  const sorted = [...invoices].sort((a, b) => (a.invoice.period_start || '').localeCompare(b.invoice.period_start || ''));
+  const labels = sorted.map(inv => inv.invoice.period_start);
+  const spend = sorted.map(inv => inv.invoice.total_invoice_amount);
+  const usage = sorted.map(inv => inv.invoice.avg_actual_usage_per_month);
+
+  const ctx = document.getElementById("trend-canvas");
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Total invoice ($)', data: spend, backgroundColor: '#E3A438', yAxisID: 'y' },
+        { label: 'Avg usage (hrs/mo)', data: usage, type: 'line', borderColor: '#4FB8AE', backgroundColor: '#4FB8AE', yAxisID: 'y1' },
+      ]
+    },
+    options: {
+      responsive: true,
+      scales: {
+        y: { position: 'left', ticks: { color: '#8B98A8' }, grid: { color: '#2A3644' } },
+        y1: { position: 'right', ticks: { color: '#8B98A8' }, grid: { display: false } },
+        x: { ticks: { color: '#8B98A8' }, grid: { color: '#2A3644' } },
+      },
+      plugins: { legend: { labels: { color: '#E9EDF1' } } }
+    }
+  });
+}
+
+// =============================================================
+// INIT
+// =============================================================
+document.querySelectorAll(".rail-item").forEach(el => {
+  el.addEventListener("click", () => navigate(el.dataset.view));
+});
+
+// window.storage is an API Claude injects only when this artifact is
+// rendered inside Claude's own interface -- it will NOT exist if this
+// HTML file is downloaded and opened directly in a regular browser
+// (file:// or otherwise outside Claude). Check up front and show a clear
+// explanation instead of letting every Save/Delete/etc. fail with a
+// cryptic "Cannot read properties of undefined" error.
+const DRIVE_CLIENT_ID = '199114602407-31geakspltrct7pu85vm9kofu3c9rfaq.apps.googleusercontent.com';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+let tokenClient = null;
+
+function showSignInStatus(message, isError) {
+  const el = document.getElementById('signin-status');
+  if (el) {
+    el.textContent = message;
+    el.style.color = isError ? 'var(--red)' : 'var(--muted)';
+  }
+}
+
+async function completeSignIn() {
+  try {
+    showSignInStatus('Loading your data from Drive…', false);
+    driveFileId = await findDriveDataFile();
+    if (driveFileId) {
+      driveData = await loadDriveDataFile(driveFileId);
+    } else {
+      driveData = { invoices: [], report: null };
+      driveFileId = await createDriveDataFile(driveData);
+    }
+    document.getElementById('signin-gate').style.display = 'none';
+    document.getElementById('app-root').style.display = '';
+    navigate('upload');
+  } catch (e) {
+    console.error('completeSignIn failed:', e);
+    showSignInStatus('Something went wrong loading your data: ' + (e.message || e), true);
+  }
+}
+
+function initGoogleAuth() {
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: DRIVE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: (response) => {
+      if (response.error) {
+        showSignInStatus('Sign-in failed: ' + response.error, true);
+        return;
+      }
+      driveAccessToken = response.access_token;
+      completeSignIn();
+    },
+  });
+  document.getElementById('signin-btn').addEventListener('click', () => {
+    showSignInStatus('Opening Google sign-in…', false);
+    tokenClient.requestAccessToken();
+  });
+}
+
+// Google Identity Services loads asynchronously (the <script> tag has
+// `defer`); poll briefly for it to be ready rather than assuming it's
+// already there by the time this script runs.
+(function waitForGoogleIdentity(triesLeft = 50) {
+  if (window.google && window.google.accounts && window.google.accounts.oauth2) {
+    initGoogleAuth();
+  } else if (triesLeft > 0) {
+    setTimeout(() => waitForGoogleIdentity(triesLeft - 1), 100);
+  } else {
+    showSignInStatus('Could not load Google Sign-In. Check your connection and reload the page.', true);
+  }
+})();
+
+</script>
+</body>
+</html>
