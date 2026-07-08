@@ -4377,6 +4377,45 @@ function formatTripitDateRange(start, end) {
   return `${startLabel} – ${endD.toLocaleDateString("en-US", opts)}`;
 }
 
+// Reconstructs "trips" from the flat synced event list at render time --
+// Google Calendar events carry no tripId, but TripIt's feed emits one
+// all-day "trip header" event per trip (classified as tripHeader above)
+// whose date range spans the whole trip. Every other event is assigned to
+// whichever header's range contains its start; events matching no header
+// (e.g. headers turned off in TripIt's feed settings) land in a single
+// fallback bucket rather than being silently dropped.
+function groupTripitEventsIntoTrips(events) {
+  const headers = events.filter(ev => ev.type === 'tripHeader');
+  const rest = events.filter(ev => ev.type !== 'tripHeader');
+
+  const trips = headers.map(h => ({ name: h.summary, start: h.start, end: h.end, location: h.location, events: [] }));
+  const fallback = { name: 'Other Plans', start: null, end: null, location: null, events: [] };
+
+  for (const ev of rest) {
+    const evStart = ev.start ? new Date(ev.start).getTime() : null;
+    const trip = evStart != null && trips.find(t => {
+      const tStart = new Date(t.start).getTime();
+      const tEnd = new Date(t.end || t.start).getTime();
+      return evStart >= tStart && evStart <= tEnd;
+    });
+    (trip || fallback).events.push(ev);
+  }
+
+  // Flights/hotels first (prioritized, per user request), unclassified
+  // "other" events after -- both sorted chronologically within their group.
+  const TYPE_PRIORITY = { flight: 0, hotel: 0, other: 1 };
+  const byPriorityThenStart = (a, b) => {
+    const pDiff = (TYPE_PRIORITY[a.type] ?? 1) - (TYPE_PRIORITY[b.type] ?? 1);
+    return pDiff !== 0 ? pDiff : new Date(a.start || 0) - new Date(b.start || 0);
+  };
+  for (const t of trips) t.events.sort(byPriorityThenStart);
+  fallback.events.sort(byPriorityThenStart);
+
+  trips.sort((a, b) => new Date(a.start || 0) - new Date(b.start || 0));
+  if (fallback.events.length) trips.push(fallback);
+  return trips;
+}
+
 async function renderTripitEventsList() {
   const container = document.getElementById("tripit-card");
   const events = await Store.listTripitEvents();
@@ -4386,22 +4425,37 @@ async function renderTripitEventsList() {
     return;
   }
 
-  const sorted = [...events].sort((a, b) => new Date(a.start || 0) - new Date(b.start || 0));
+  const trips = groupTripitEventsIntoTrips(events);
 
-  container.innerHTML = sorted.map(ev => `
-    <div class="card" style="margin-bottom:14px; ${ev.type === 'other' ? 'opacity:0.6;' : ''}">
-      <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700;">
-        ${esc(TRIPIT_TYPE_LABEL[ev.type] || ev.type)} • ${esc(formatTripitDateRange(ev.start, ev.end))}
-      </div>
-      <div style="margin-top:6px; font-size:13px; color:var(--text);">${esc(ev.summary)}</div>
-      ${ev.location ? `<div style="margin-top:4px; font-size:13px; color:var(--muted);">${esc(ev.location)}</div>` : ''}
-      ${isOwner ? `
-        <div data-tripit-delete-slot="${esc(ev.id)}" style="margin-top:8px;">
-          <button class="btn danger" data-tripit-delete-btn data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px;">Delete</button>
+  if (!trips.length) {
+    container.innerHTML = `<div class="card"><div class="empty-state">No trips yet.</div></div>`;
+    return;
+  }
+
+  container.innerHTML = trips.map(trip => {
+    const subtitle = [formatTripitDateRange(trip.start, trip.end), trip.location].filter(Boolean).join(" • ");
+    const eventRows = trip.events.map(ev => `
+      <div style="padding:10px 0; border-top:1px solid var(--line); margin-top:10px; ${ev.type === 'other' ? 'opacity:0.6;' : ''}">
+        <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">
+          ${esc(TRIPIT_TYPE_LABEL[ev.type] || ev.type)}${ev.start ? ` • ${esc(formatTripitDateRange(ev.start, ev.end))}` : ''}
         </div>
-      ` : ''}
-    </div>
-  `).join("");
+        <div style="margin-top:6px; font-size:13px; color:var(--text);">${esc(ev.summary)}</div>
+        ${ev.location ? `<div style="margin-top:4px; font-size:13px; color:var(--muted);">${esc(ev.location)}</div>` : ''}
+        ${isOwner ? `
+          <div data-tripit-delete-slot="${esc(ev.id)}" style="margin-top:8px;">
+            <button class="btn danger" data-tripit-delete-btn data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px;">Delete</button>
+          </div>
+        ` : ''}
+      </div>
+    `).join("");
+    return `
+      <div class="card" style="margin-bottom:14px;">
+        <div style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">${esc(trip.name)}</div>
+        ${subtitle ? `<div style="margin-top:2px; font-size:13px; color:var(--muted);">${esc(subtitle)}</div>` : ''}
+        ${eventRows}
+      </div>
+    `;
+  }).join("");
 
   if (!isOwner) return;
 
