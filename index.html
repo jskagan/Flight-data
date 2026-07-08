@@ -826,6 +826,26 @@ const Store = {
       return { ok: false, error: e.message || String(e) };
     }
   },
+  async deleteTripitEvent(id) {
+    try {
+      driveData.tripitEvents = (driveData.tripitEvents || []).filter(ev => ev.id !== id);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.deleteTripitEvent failed:', e);
+      return false;
+    }
+  },
+  async clearAllTripitEvents() {
+    try {
+      driveData.tripitEvents = [];
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.clearAllTripitEvents failed:', e);
+      return false;
+    }
+  },
   async deleteInvoice(invoiceNo) {
     try {
       driveData.invoices = driveData.invoices.filter(inv => !(inv.invoice && inv.invoice.invoice_id === invoiceNo));
@@ -1310,12 +1330,15 @@ async function findTripitCalendarId() {
   return candidates[0].id;
 }
 
-// Classifies a TripIt calendar event's plain-text title into flight vs
-// hotel vs other. TripIt's own feed generator decides this wording, not
-// this app -- these patterns are a first-pass guess, tuned against a
-// public sample feed, and may need adjustment once checked against a
-// real subscribed calendar.
-function classifyTripitEvent(summary) {
+// Classifies a TripIt calendar event's plain-text title (and, for trip
+// headers, description) into tripHeader vs flight vs hotel vs other.
+// TripIt's own feed generator decides this wording, not this app -- these
+// patterns are a first-pass guess, tuned against a public sample feed and
+// a third-party TripIt-feed parser's documented behavior, and may need
+// adjustment once checked against a real subscribed calendar.
+const TRIPIT_HEADER_DESCRIPTION_MATCH = /^.+ is in .+/i;
+function classifyTripitEvent(summary, description) {
+  if (TRIPIT_HEADER_DESCRIPTION_MATCH.test(description || '')) return 'tripHeader';
   const s = summary || '';
   if (/\b[A-Z]{2}\s?\d{2,4}\b/.test(s) || /\bflight\b/i.test(s)) return 'flight';
   if (/\bhotel\b/i.test(s) || /\bcheck-?in\b/i.test(s) || /\blodging\b/i.test(s)) return 'hotel';
@@ -1333,7 +1356,7 @@ async function syncTripitFromCalendar() {
   const result = await calendarApiFetch(url);
   const events = (result.items || []).map(ev => ({
     id: ev.id,
-    type: classifyTripitEvent(ev.summary),
+    type: classifyTripitEvent(ev.summary, ev.description),
     summary: ev.summary || '(no title)',
     start: (ev.start && (ev.start.dateTime || ev.start.date)) || null,
     end: (ev.end && (ev.end.dateTime || ev.end.date)) || null,
@@ -4372,8 +4395,38 @@ async function renderTripitEventsList() {
       </div>
       <div style="margin-top:6px; font-size:13px; color:var(--text);">${esc(ev.summary)}</div>
       ${ev.location ? `<div style="margin-top:4px; font-size:13px; color:var(--muted);">${esc(ev.location)}</div>` : ''}
+      ${isOwner ? `
+        <div data-tripit-delete-slot="${esc(ev.id)}" style="margin-top:8px;">
+          <button class="btn danger" data-tripit-delete-btn data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px;">Delete</button>
+        </div>
+      ` : ''}
     </div>
   `).join("");
+
+  if (!isOwner) return;
+
+  // Per-item delete uses the same inline confirm/cancel pattern as the
+  // invoice list (index.html renderInvoiceList) -- no window.confirm().
+  container.querySelectorAll("[data-tripit-delete-btn]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.id;
+      const slot = container.querySelector(`[data-tripit-delete-slot="${id}"]`);
+      slot.innerHTML = `
+        <div style="color:var(--red); font-size:11px; margin-bottom:6px;">Delete this item? This can't be undone.</div>
+        <button class="btn danger" data-tripit-confirm-delete style="font-size:11px; padding:3px 8px;">Yes, delete it</button>
+        <button class="btn" data-tripit-cancel-delete style="font-size:11px; padding:3px 8px;">Cancel</button>
+      `;
+      slot.querySelector("[data-tripit-cancel-delete]").addEventListener("click", () => renderTripitEventsList());
+      slot.querySelector("[data-tripit-confirm-delete]").addEventListener("click", async () => {
+        const confirmBtn = slot.querySelector("[data-tripit-confirm-delete]");
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = "Deleting…";
+        const ok = await Store.deleteTripitEvent(id);
+        if (!ok) toast("Could not delete this item — storage error. Please try again.", "error");
+        renderTripitEventsList();
+      });
+    });
+  });
 }
 
 async function renderTripitTrips() {
@@ -4382,14 +4435,33 @@ async function renderTripitTrips() {
     <div class="page-sub">Recent and upcoming flights and hotels, synced from TripIt via Google Calendar.</div>
     <div id="tripit-card"><div class="card"><div class="empty-state">Loading…</div></div></div>
     ${isOwner ? `
-      <div style="margin-top:16px; text-align:left;">
+      <div style="margin-top:16px; text-align:left;" id="tripit-actions">
         <button class="btn primary" id="sync-tripit-btn">Sync from Google Calendar</button>
+        <button class="btn danger" id="clear-tripit-btn">Delete All</button>
         <span id="sync-tripit-status" style="margin-left:10px; color:var(--muted); font-size:13px;"></span>
       </div>
     ` : ''}
   `;
 
   if (isOwner) {
+    document.getElementById("clear-tripit-btn").addEventListener("click", () => {
+      const actions = document.getElementById("tripit-actions");
+      actions.innerHTML = `
+        <span style="color:var(--red); font-size:13px; margin-right:10px;">Delete ALL synced trips? This can't be undone -- click "Sync from Google Calendar" afterward to rebuild it.</span>
+        <button class="btn danger" id="confirm-clear-tripit">Yes, delete all</button>
+        <button class="btn" id="cancel-clear-tripit">Cancel</button>
+      `;
+      document.getElementById("cancel-clear-tripit").addEventListener("click", () => renderTripitTrips());
+      document.getElementById("confirm-clear-tripit").addEventListener("click", async () => {
+        const confirmBtn = document.getElementById("confirm-clear-tripit");
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = "Deleting…";
+        const ok = await Store.clearAllTripitEvents();
+        if (!ok) toast("Could not clear data — storage error. Please try again.", "error");
+        renderTripitTrips();
+      });
+    });
+
     document.getElementById("sync-tripit-btn").addEventListener("click", async () => {
       const btn = document.getElementById("sync-tripit-btn");
       const status = document.getElementById("sync-tripit-status");
