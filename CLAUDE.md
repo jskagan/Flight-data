@@ -47,6 +47,8 @@ driveData = {
   tripitEvents: [...],             // flat list of synced TripIt/Calendar events (see below)
   tripitTripOverrides: {...},      // per-trip hidden/shown overrides, keyed by trip key
   syncTimestamps: {...},           // { reservations, psBalance, tripit } ISO strings, last successful sync
+  gmailCalendarAccessEmails: [...],// lowercased emails (besides OWNER_EMAIL) opted into requesting
+                                    // Gmail/Calendar scope at sign-in, set from the Users utility page
 }
 ```
 
@@ -58,10 +60,29 @@ There is no server — auth and API calls happen entirely client-side via Google
 **Auth model** (`index.html:5626` area to end): a single hardcoded `OWNER_EMAIL` gets
 read/write access (upload, edit, delete, sync); anyone else who signs in with a Google account the
 owner has shared the Drive file with gets read-only access. This is enforced both at the UI level
-(hiding buttons) and at the real Google Drive sharing-permission level. `DRIVE_SCOPE`
-(`index.html:5626`) requests `drive` + `userinfo.email` + `gmail.readonly` + `calendar.readonly` —
-the last one is for the TripIt pipeline below and was added after the other three, so a
-previously-signed-in owner will see a one-time re-consent prompt.
+(hiding buttons) and at the real Google Drive sharing-permission level.
+
+OAuth scope is split into two tiers rather than one flat `DRIVE_SCOPE` string. `DRIVE_SCOPE_BASE`
+(`drive` + `userinfo.email`) is what everyone needs, since that's the only way anyone — owner or
+viewer — actually reads the shared Drive file. `DRIVE_SCOPE_EXTRA` (`gmail.readonly` +
+`calendar.readonly`) is only needed by accounts that run the Gmail/Calendar sync pipelines below —
+today that's `OWNER_EMAIL`, plus whoever the owner has opted in from the Users utility page
+(`driveData.gmailCalendarAccessEmails`, toggled via `renderUsersListBody()`,
+`index.html:4499` area). Because Google requires picking OAuth scope *before* knowing who's
+signing in, `initGoogleAuth()` can't look up a given browser's real access level ahead of the
+consent screen — instead it caches which tier this device needed last time in `localStorage`
+(`SCOPE_TIER_KEY`) and requests that same tier again, defaulting to the full tier when unset so an
+unrecognized device behaves like before this split existed. `completeSignIn()` corrects that cached
+hint after every sign-in once the real identity is known, so it's only ever wrong for one sign-in
+per device. This is why toggling a user's access on the Users page takes effect on their *next*
+sign-in, not immediately — and note the toggle only changes which scopes get *requested*; the
+sync pipelines themselves stay hardcoded to `OWNER_EMAIL` regardless of who else has the extra
+scope granted.
+
+The "Authorized Users" list on the Users utility page isn't a separate registry — it's read live
+from the Drive file's real sharing permissions (`listDriveFilePermissions()`, `index.html:658`
+area) via `permissions.list`, which is the same source of truth Step 3 on that page tells the owner
+to edit directly in Drive's own Share dialog.
 
 ### The four data pipelines
 
