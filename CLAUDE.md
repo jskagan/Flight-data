@@ -118,7 +118,7 @@ Calendar to TripIt's feed** (one-time manual step in Google Calendar's UI, outsi
 `syncTripitFromCalendar()` (`index.html:1482`) reads that calendar via the Google Calendar API —
 found by name match (any calendar with "tripit" in its title, `findTripitCalendarId`,
 `index.html:1430`) — over a rolling window (`TRIPIT_SYNC_DAYS_BACK`/`FORWARD`, currently 60 days
-back / 365 forward).
+back / 1095 forward, i.e. 3 years).
 
 - **Trip grouping**: Calendar API events are flat (no `tripId`), but TripIt's feed emits one
   all-day "trip header" event per trip whose `description` starts with `"<name> is in <location>"`
