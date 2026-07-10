@@ -543,7 +543,7 @@
     <button class="rail-item" data-view="triptrips"><span class="nav-icon">🧳</span>Trips</button>
     <button class="rail-item" data-submenu-toggle="passengers" id="passengers-toggle">
       <span class="nav-icon">✈️</span>NetJets
-      <span id="passengers-caret" style="margin-left:auto; font-size:22px;">▸</span>
+      <span id="passengers-caret" style="margin-left:auto; font-size:22px; padding:2px 6px; cursor:pointer;">▸</span>
     </button>
     <div id="passengers-submenu" class="collapsed">
       <button class="rail-item rail-subitem" data-mode="hours_summary">Hours</button>
@@ -2428,8 +2428,11 @@ function setActiveNav(view, param) {
   document.getElementById("ambiguities-submenu").classList.toggle("collapsed", !isAmbiguitiesView);
   document.getElementById("ambiguities-caret").textContent = isAmbiguitiesView ? "▾" : "▸";
 
+  // NetJets Overview highlights the top-level button but -- unlike the
+  // Hours/Legs/Flight Log sub-views -- deliberately does not auto-expand
+  // the submenu; only the caret does that (see its own click handler).
   const isPassengersView = view === "passengers";
-  document.getElementById("passengers-toggle").classList.toggle("active", isPassengersView);
+  document.getElementById("passengers-toggle").classList.toggle("active", isPassengersView || view === "netjetsoverview");
   document.getElementById("passengers-submenu").classList.toggle("collapsed", !isPassengersView);
   document.getElementById("passengers-caret").textContent = isPassengersView ? "▾" : "▸";
 
@@ -2453,12 +2456,13 @@ async function navigate(view, param) {
   // fresh recompute -- important now that data is shared across multiple
   // signed-in users/sessions, so changes someone else made elsewhere
   // aren't missed by an overly long-lived cache.
-  if (view === "passengers" && previousView !== "passengers") {
+  if ((view === "passengers" || view === "netjetsoverview") && previousView !== "passengers" && previousView !== "netjetsoverview") {
     cachedReport = null;
   }
   try {
     if (view === "upload") await renderUpload();
     else if (view === "home") await renderHome();
+    else if (view === "netjetsoverview") await renderNetJetsOverview();
     else if (view === "invoices") await renderInvoiceList();
     else if (view === "detail") await renderInvoiceDetail(param);
     else if (view === "review") await renderReviewQueue();
@@ -3820,6 +3824,194 @@ async function buildHoursSummaryHTML(report, filterKey = "totals") {
       </table>
     </div>
   `;
+}
+
+// NetJets Overview -- the landing page for the NetJets rail button itself
+// (as opposed to its Hours/Legs/Flight Log submenu, reached via the caret).
+// Shows the same Remaining Hours figures as Home, plus a monthly (not
+// per-leg) summary of billed hours/charges for each of Kagan and Lopata.
+async function renderNetJetsOverview() {
+  main.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <img src="data:image/png;base64,${LONG_FOPBP_LOGO_B64}" id="fopbp-logo-netjetsoverview" style="width:100%; height:auto; display:block; cursor:pointer;" alt="Long FOP-BP logo">
+    </div>
+    <div style="display:flex; flex-direction:column; align-items:center; margin-bottom:24px;">
+      <a href="https://fly.netjets.com/home" target="_blank" rel="noopener" style="background:#fff; border-radius:6px; padding:6px 10px; display:inline-flex; cursor:pointer;">
+        <img src="data:image/png;base64,${NETJETS_LOGO_B64}" style="width:210px; height:auto; display:block;" alt="NetJets">
+      </a>
+      <div style="font-family:var(--mono); font-size:32px; font-weight:700; color:var(--amber); margin-top:14px;">Overview</div>
+    </div>
+    <div id="netjetsoverview-hours-card"><div class="card"><div class="empty-state">Loading…</div></div></div>
+    <div id="netjetsoverview-legs-card"><div class="card"><div class="empty-state">Loading…</div></div></div>
+    <div id="netjetsoverview-flightlog-card"><div class="card"><div class="empty-state">Loading…</div></div></div>
+    <div style="display:flex; justify-content:flex-end; gap:16px; margin-top:16px;">
+      <div style="display:flex; gap:16px;">
+        <button id="njov-nav-trips" style="background:none; border:none; cursor:pointer; padding:0; width:80px; height:56px; display:flex; align-items:center; justify-content:center;"><img src="data:image/png;base64,${TRIPS_NAV_ICON_B64}" style="max-width:80px; max-height:56px; width:auto; height:auto; display:block;" alt="Trips"></button>
+        <button id="njov-nav-ps" style="background:none; border:none; cursor:pointer; padding:0; width:80px; height:56px; display:flex; align-items:center; justify-content:center;">
+          <img src="data:image/png;base64,${LAX_NAV_ICON_B64}" style="max-width:80px; max-height:56px; width:auto; height:auto; display:block;" alt="P/S">
+        </button>
+        <button id="njov-nav-home" style="background:none; border:none; cursor:pointer; padding:0; width:80px; height:56px; display:flex; align-items:center; justify-content:center;">
+          <img src="data:image/png;base64,${TRIPIT_HOME_ICON_B64}" style="max-width:80px; max-height:56px; width:auto; height:auto; display:block;" alt="Home">
+        </button>
+      </div>
+    </div>
+  `;
+  document.getElementById("fopbp-logo-netjetsoverview").addEventListener("click", showFopBpPhoto);
+  document.getElementById("njov-nav-trips").addEventListener("click", () => navigate("triptrips"));
+  document.getElementById("njov-nav-ps").addEventListener("click", () => navigate("reservations"));
+  document.getElementById("njov-nav-home").addEventListener("click", () => navigate("home"));
+
+  const report = cachedReport || await recomputeReport();
+
+  try {
+    const totals = await getRemainingHoursTotals(report);
+    const hoursHost = document.getElementById("netjetsoverview-hours-card");
+    if (!totals) {
+      hoursHost.innerHTML = `<div class="card"><div class="card-title">Hours</div><div class="empty-state">No invoices yet.</div></div>`;
+    } else {
+      hoursHost.innerHTML = `
+        <div class="card">
+          <div class="card-title">Hours</div>
+          <table class="report-table">
+            <colgroup><col style="width:180px;"><col style="width:120px;"><col style="width:120px;"><col style="width:120px;"></colgroup>
+            <thead><tr><th></th><th>Kagan</th><th>Lopata</th><th>Total</th></tr></thead>
+            <tbody>
+              <tr style="background:var(--panel-2);">
+                <td style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">Remaining Hours</td>
+                <td data-njov-hours-cell="kagan" style="font-weight:600; cursor:pointer;">${fmtNum(totals.jon, 2)}</td>
+                <td data-njov-hours-cell="lopata" style="font-weight:600; cursor:pointer;">${fmtNum(totals.rob, 2)}</td>
+                <td data-njov-hours-cell="totals" style="font-weight:600; cursor:pointer;">${fmtNum(totals.total, 2)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>`;
+      hoursHost.querySelectorAll("[data-njov-hours-cell]").forEach(cell => {
+        cell.addEventListener("click", () => {
+          passengerReportMode = "hours_summary";
+          navigate("passengers", cell.dataset.njovHoursCell);
+        });
+      });
+    }
+  } catch (e) {
+    console.error("renderNetJetsOverview hours failed:", e);
+    document.getElementById("netjetsoverview-hours-card").innerHTML = `<div class="card"><span style="color:var(--red)">Could not load hours.</span></div>`;
+  }
+
+  // One monthly-summary table per person -- deliberately a subtotal per
+  // month (reusing the same subtotal fields recomputeReport already
+  // computes), not the individual-leg rows the Legs/detailed report shows.
+  function monthlySummaryTable(personName, filterKey) {
+    const p = report.passengers.find(pp => pp.name === personName);
+    const months = p ? p.months : [];
+    if (!months.length) return `<div class="empty-state">No legs yet.</div>`;
+    return `
+      <table class="report-table" style="margin-bottom:20px;">
+        <colgroup><col><col style="width:90px;"><col style="width:100px;"><col style="width:110px;"><col style="width:90px;"><col style="width:110px;"></colgroup>
+        <thead><tr>
+          <th>Month</th><th>Hours</th><th>Billed Hours</th><th>Hourly Total</th><th>Fuel</th><th>Total Charges</th>
+        </tr></thead>
+        <tbody>
+          ${months.map(m => `
+            <tr data-njov-legs-row="${esc(filterKey)}" style="cursor:pointer;">
+              <td>${esc(m.monthLabel)}</td>
+              <td>${fmtNum(m.subtotalHours, 2)}</td>
+              <td>${fmtNum(m.subtotalBilledHours, 2)}</td>
+              <td>${fmtMoney(m.subtotalHourlyTotal)}</td>
+              <td>${fmtMoney(m.subtotalFuelTotal)}</td>
+              <td>${fmtMoney(m.subtotalTotalCharges)}</td>
+            </tr>`).join("")}
+          <tr style="background:var(--panel-2);">
+            <td style="font-family:var(--sans); font-size:15px; color:#fff;">Total</td>
+            <td style="font-weight:600;">${fmtNum(p.totalHours, 2)}</td>
+            <td style="font-weight:600;">${fmtNum(p.totalBilledHours, 2)}</td>
+            <td style="font-weight:600;">${fmtMoney(p.totalHourlyTotal)}</td>
+            <td style="font-weight:600;">${fmtMoney(p.totalFuelTotal)}</td>
+            <td style="font-weight:600;">${fmtMoney(p.totalTotalCharges)}</td>
+          </tr>
+        </tbody>
+      </table>`;
+  }
+
+  try {
+    const legsHost = document.getElementById("netjetsoverview-legs-card");
+    legsHost.innerHTML = `
+      <div class="card">
+        <div class="card-title">Legs</div>
+        <div style="font-family:var(--mono); font-size:16px; font-weight:700; color:var(--amber); margin-bottom:8px;">Kagan</div>
+        ${monthlySummaryTable(HOURS_SUMMARY_PEOPLE[0], "kagan")}
+        <div style="font-family:var(--mono); font-size:16px; font-weight:700; color:var(--amber); margin-bottom:8px;">Lopata</div>
+        ${monthlySummaryTable(HOURS_SUMMARY_PEOPLE[1], "lopata")}
+      </div>`;
+    legsHost.querySelectorAll("[data-njov-legs-row]").forEach(row => {
+      row.addEventListener("click", () => {
+        passengerReportMode = "detailed";
+        navigate("passengers", row.dataset.njovLegsRow);
+      });
+    });
+  } catch (e) {
+    console.error("renderNetJetsOverview legs failed:", e);
+    document.getElementById("netjetsoverview-legs-card").innerHTML = `<div class="card"><span style="color:var(--red)">Could not load legs.</span></div>`;
+  }
+
+  // Flight Log card -- counts, per month, how many legs are missing Notes
+  // (the same per-leg Notes field the Flight Log/"summary" report shows
+  // and lets you fill in) -- i.e. legs still needing that field completed.
+  try {
+    const kagan = report.passengers.find(pp => pp.name === HOURS_SUMMARY_PEOPLE[0]);
+    const lopata = report.passengers.find(pp => pp.name === HOURS_SUMMARY_PEOPLE[1]);
+
+    const monthsByKey = new Map(); // monthKey -> { monthLabel, kagan, lopata }
+    function tallyMissingNotes(person, column) {
+      if (!person) return;
+      for (const m of person.months) {
+        const missing = m.trips.filter(t => !(t.notes || "").trim()).length;
+        if (!monthsByKey.has(m.monthKey)) monthsByKey.set(m.monthKey, { monthLabel: m.monthLabel, kagan: 0, lopata: 0 });
+        monthsByKey.get(m.monthKey)[column] += missing;
+      }
+    }
+    tallyMissingNotes(kagan, "kagan");
+    tallyMissingNotes(lopata, "lopata");
+
+    const months = [...monthsByKey.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([, v]) => v);
+    const flightLogHost = document.getElementById("netjetsoverview-flightlog-card");
+
+    if (!months.length) {
+      flightLogHost.innerHTML = `<div class="card"><div class="card-title">Flight Log</div><div class="empty-state">No legs yet.</div></div>`;
+    } else {
+      const totalKagan = months.reduce((sum, m) => sum + m.kagan, 0);
+      const totalLopata = months.reduce((sum, m) => sum + m.lopata, 0);
+      flightLogHost.innerHTML = `
+        <div class="card">
+          <div class="card-title">Flight Log</div>
+          <table class="report-table">
+            <colgroup><col><col style="width:120px;"><col style="width:120px;"></colgroup>
+            <thead><tr><th>Month</th><th>Kagan</th><th>Lopata</th></tr></thead>
+            <tbody>
+              ${months.map(m => `
+                <tr>
+                  <td>${esc(m.monthLabel)}</td>
+                  <td data-njov-flightlog-cell="kagan" style="cursor:pointer;">${m.kagan}</td>
+                  <td data-njov-flightlog-cell="lopata" style="cursor:pointer;">${m.lopata}</td>
+                </tr>`).join("")}
+              <tr style="background:var(--panel-2);">
+                <td style="font-family:var(--sans); font-size:15px; color:#fff;">Total</td>
+                <td data-njov-flightlog-cell="kagan" style="font-weight:600; cursor:pointer;">${totalKagan}</td>
+                <td data-njov-flightlog-cell="lopata" style="font-weight:600; cursor:pointer;">${totalLopata}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>`;
+      flightLogHost.querySelectorAll("[data-njov-flightlog-cell]").forEach(cell => {
+        cell.addEventListener("click", () => {
+          passengerReportMode = "summary";
+          navigate("passengers", cell.dataset.njovFlightlogCell);
+        });
+      });
+    }
+  } catch (e) {
+    console.error("renderNetJetsOverview flight log failed:", e);
+    document.getElementById("netjetsoverview-flightlog-card").innerHTML = `<div class="card"><span style="color:var(--red)">Could not load flight log.</span></div>`;
+  }
 }
 
 async function renderPassengerReport(filterKey = "totals") {
@@ -5768,21 +5960,19 @@ document.getElementById("utilities-refresh-all-btn").addEventListener("click", a
     btn.textContent = originalText;
   }
 });
-document.getElementById("passengers-toggle").addEventListener("click", () => {
+// The NetJets button itself is a split control: clicking the label/icon
+// always goes to the NetJets Overview page (and, via setActiveNav, leaves
+// the Hours/Legs/Flight Log submenu collapsed rather than expanding it);
+// only the caret expands/collapses that submenu, independent of navigation.
+document.getElementById("passengers-caret").addEventListener("click", (e) => {
+  e.stopPropagation();
   const submenu = document.getElementById("passengers-submenu");
-  const isCollapsed = submenu.classList.contains("collapsed") || currentView !== "passengers";
-  if (isCollapsed) {
-    // First open (or reopening after navigating elsewhere) -- expand and
-    // show a sensible default rather than an empty-looking menu.
-    passengerReportMode = "hours_summary";
-    navigate("passengers", "totals");
-  } else {
-    // Already open and showing something -- just collapse it rather than
-    // resetting back to Totals/Hours, which was the actual bug (every
-    // click force-navigated, with no way to simply close the menu).
-    submenu.classList.add("collapsed");
-    document.getElementById("passengers-caret").textContent = "▸";
-  }
+  const willOpen = submenu.classList.contains("collapsed");
+  submenu.classList.toggle("collapsed", !willOpen);
+  document.getElementById("passengers-caret").textContent = willOpen ? "▾" : "▸";
+});
+document.getElementById("passengers-toggle").addEventListener("click", () => {
+  navigate("netjetsoverview");
 });
 document.querySelectorAll(".rail-item[data-mode]").forEach(el => {
   el.addEventListener("click", () => {
