@@ -5201,6 +5201,45 @@ function getEffectiveTripitEvent(ev) {
   };
 }
 
+// Same-day tie-break used by groupTripitEventsIntoTrips's sort: given two
+// events, returns -1/1 if a flight/other-event pair should be reordered
+// ahead of plain chronological order, or null if neither event is a
+// flight paired with some other non-flight event (the common case, left
+// to the normal sort). Applies to any event type occurring "in a city" --
+// lodging, transportation, dining, concert, tour, other -- not just hotel
+// stays: a flight landing the same day something else starts should read
+// as "arrive, then do the thing" (flight first), and a flight leaving the
+// same day something else ends should read as "finish the thing, then
+// depart" (other event first).
+function tripitFlightEventOrder(a, b) {
+  const flight = a.type === 'flight' ? a : (b.type === 'flight' ? b : null);
+  const other = flight === a ? b : (flight === b ? a : null);
+  if (!flight || !other || other.type === 'flight') return null;
+
+  const dayKey = iso => {
+    const p = parseTripitLocalParts(iso);
+    return p ? `${p.year}-${p.month}-${p.day}` : null;
+  };
+  const arriveDay = dayKey(flight.end);
+  const departDay = dayKey(flight.start);
+  const otherStartDay = dayKey(other.start);
+  const otherEndDay = dayKey(other.end || other.start);
+
+  const arrivalMatch = arriveDay && otherStartDay && arriveDay === otherStartDay;
+  const departureMatch = departDay && otherEndDay && departDay === otherEndDay;
+  // An ordinary (non-overnight) flight's own arrival day and departure day
+  // are the same calendar day, so a same-day "other" event (e.g. a single
+  // dining reservation, not a multi-day stay) can trip both checks at
+  // once -- that's not a real signal either way, so defer to the plain
+  // chronological sort rather than guessing.
+  if (arrivalMatch && departureMatch) return null;
+  // Flight arrives the same day the other event begins -- list the arrival first.
+  if (arrivalMatch) return flight === a ? -1 : 1;
+  // Flight departs the same day the other event ends -- list the other event first.
+  if (departureMatch) return flight === a ? 1 : -1;
+  return null;
+}
+
 // Reconstructs "trips" from the flat synced event list at render time --
 // Google Calendar events carry no tripId, but TripIt's feed emits one
 // all-day "trip header" event per trip (classified as tripHeader above)
@@ -5233,7 +5272,18 @@ function groupTripitEventsIntoTrips(events) {
   // reservation showing up after the return flight). Flights/hotels stay
   // visually prioritized via de-emphasized styling on "other" rows
   // instead of by reordering them out of sequence.
-  const byStart = (a, b) => new Date(a.start || 0) - new Date(b.start || 0);
+  //
+  // One same-day tie-break on top of that: a flight landing the same day
+  // another event begins should read as "arrive, then do the thing"
+  // (flight first), while a flight leaving the same day another event
+  // ends should read as "finish, then depart" (other event first) --
+  // both cases are more intuitive than whatever order their raw
+  // timestamps happen to fall in.
+  const byStart = (a, b) => {
+    const special = tripitFlightEventOrder(a, b);
+    if (special != null) return special;
+    return new Date(a.start || 0) - new Date(b.start || 0);
+  };
   for (const t of trips) t.events.sort(byStart);
   fallback.events.sort(byStart);
 
@@ -5827,11 +5877,20 @@ function renderTripsyEventsList() {
   container.innerHTML = trips.map(trip => {
     const subtitle = [formatTripitDateRange(trip.start, trip.end), trip.location].filter(Boolean).join(" • ");
     const collapsed = isTripsyTripCollapsed(trip.key);
+    // Snapshot events come pre-sorted chronologically from generation time,
+    // but re-sort here (same flight/other-event same-day tie-break as the
+    // TripIt Trips page) so manual edits to the generator, or future
+    // snapshots, can't silently drift from that ordering.
+    const sortedEvents = trip.events.slice().sort((a, b) => {
+      const special = tripitFlightEventOrder(a, b);
+      if (special != null) return special;
+      return new Date(a.start || 0) - new Date(b.start || 0);
+    });
     // Once any event in this trip has a matching P/S Reservation card
     // inserted, every OTHER event shifts one indent level to the right so
     // the P/S card reads as the leftmost/outermost item in the list.
-    const hasPsMatchInTrip = trip.events.some(ev => findMatchingTripsyPsReservation(ev));
-    const eventRows = collapsed ? "" : trip.events.map(ev => {
+    const hasPsMatchInTrip = sortedEvents.some(ev => findMatchingTripsyPsReservation(ev));
+    const eventRows = collapsed ? "" : sortedEvents.map(ev => {
       const departTime = formatTripitTime(ev.start);
       const arriveTime = formatTripitTime(ev.end);
       const showTimes = (ev.type === 'flight' || ev.type === 'transportation') && (departTime || arriveTime);
