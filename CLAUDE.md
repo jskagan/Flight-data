@@ -32,6 +32,13 @@ language and getting the user's explicit go-ahead.** This applies every session,
 the user asks for it in the moment — don't treat silence or an unrelated request as consent to
 commit pending changes.
 
+The user runs multiple sessions against this repo (different devices, sometimes in parallel), so
+`main` can move without this session knowing. **Every session should start with `git fetch origin`
+and a look at `git log main..origin/main`**, before making any local edits — catching divergence
+early (as an FYI at the start of a session) is much cheaper than discovering it as a rejected push
+after a chunk of work is already done. If `origin/main` has commits this session doesn't, merge
+them in (don't discard or force-push over them) and verify the result before continuing.
+
 ## Data flow / architecture
 
 All app state lives in **one JSON file in Google Drive** (`flight-log-data.json`), shared between
