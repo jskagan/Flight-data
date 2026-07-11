@@ -5730,6 +5730,84 @@ async function decryptTripsyData(passphrase) {
 // slow, so redoing it on every click would be a noticeable stutter).
 let tripsyDecryptedTrips = null;
 
+// PS Reservations (driveData.reservations, Gmail-sourced) fetched once so
+// they can be cross-referenced against Tripsy flight events by date +
+// flight number -- see matchPsReservationToTripsyFlight below.
+let tripsyPsReservations = null;
+
+function tripsyFlightNumberDigits(str) {
+  if (!str) return '';
+  const matches = String(str).match(/\d+/g);
+  if (!matches || !matches.length) return '';
+  return String(Number(matches[matches.length - 1]));
+}
+
+// PS is always the LAX private terminal, so whichever airport field on the
+// reservation says "LAX" tells us whether it's for the departing leg
+// (insert the PS card before the flight) or the arriving leg (insert
+// after) -- reservations don't self-describe a direction otherwise.
+function matchPsReservationToTripsyFlight(res, ev) {
+  if (ev.type !== 'flight' || !res.flightNumber) return null;
+  const resDigits = tripsyFlightNumberDigits(res.flightNumber);
+  const evDigits = tripsyFlightNumberDigits(ev.summary);
+  if (!resDigits || resDigits !== evDigits) return null;
+
+  const inferredYear = inferReservationYear(res.date, res.emailInternalDate);
+  const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const [monthName, dayStr] = (res.date || '').split(' ');
+  const resMonth = monthNames.indexOf(monthName) + 1;
+  const resDay = Number(dayStr);
+  if (!inferredYear || !resMonth || !resDay) return null;
+
+  const startParts = parseTripitLocalParts(ev.start);
+  const endParts = parseTripitLocalParts(ev.end);
+  const sameDate = parts => parts && parts.year === inferredYear && parts.month === resMonth && parts.day === resDay;
+
+  const isDeparture = res.origin === 'LAX' || res.departureAirport === 'LAX';
+  const isArrival = res.destination === 'LAX' || res.arrivalAirport === 'LAX';
+
+  if (isDeparture && sameDate(startParts)) return 'before';
+  if (isArrival && sameDate(endParts)) return 'after';
+  if (!isDeparture && !isArrival) {
+    if (sameDate(startParts)) return 'before';
+    if (sameDate(endParts)) return 'after';
+  }
+  return null;
+}
+
+function findMatchingTripsyPsReservation(ev) {
+  if (!tripsyPsReservations || ev.type !== 'flight') return null;
+  for (const res of tripsyPsReservations) {
+    const direction = matchPsReservationToTripsyFlight(res, ev);
+    if (direction) return { reservation: res, direction };
+  }
+  return null;
+}
+
+function renderPsReservationTripsyEntryHtml(res) {
+  const flightLine = `${esc(res.airline || '')}${res.flightNumber ? ' #' + esc(res.flightNumber) : ''}`.trim();
+  const legs = [
+    res.departureAirport && res.departureTime ? `Departs: ${esc(res.departureAirport)} ${esc(res.departureTime)}` : '',
+    res.arrivalAirport && res.arrivalTime ? `Arrives: ${esc(res.arrivalAirport)} ${esc(res.arrivalTime)}` : '',
+  ].filter(Boolean).join(' · ');
+  const travelers = (res.travelers || []).map(t => esc(t.name)).join(', ');
+  return `
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); margin-top:10px;">
+      <div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <img src="data:image/png;base64,${LAX_NAV_ICON_B64}" style="width:26px; height:auto; display:block;" alt="P/S">
+          <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">P/S Reservation</div>
+        </div>
+        ${flightLine ? `<div style="margin-top:6px; font-size:13px; color:var(--text);">${flightLine}</div>` : ''}
+        ${legs ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">${legs}</div>` : ''}
+        ${res.arriveByTime ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">Arrive by ${esc(res.arriveByTime)}</div>` : ''}
+        ${travelers ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">Travelers: ${travelers}</div>` : ''}
+        ${res.reservationNumber ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">Reservation #${esc(res.reservationNumber)}${res.status ? ' — ' + esc(res.status) : ''}</div>` : ''}
+      </div>
+    </div>
+  `;
+}
+
 function renderTripsyEventsList() {
   const container = document.getElementById("tripsy-card");
   const allTrips = tripsyDecryptedTrips || [];
@@ -5753,7 +5831,8 @@ function renderTripsyEventsList() {
       const departTime = formatTripitTime(ev.start);
       const arriveTime = formatTripitTime(ev.end);
       const showTimes = (ev.type === 'flight' || ev.type === 'transportation') && (departTime || arriveTime);
-      return `
+      const psMatch = findMatchingTripsyPsReservation(ev);
+      const flightHtml = `
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); margin-top:10px; margin-left:${(TRIPIT_TYPE_INDENT[ev.type] ?? 3) * TRIPIT_INDENT_PX}px; ${ev.type === 'other' ? 'opacity:0.6;' : ''}">
         <div>
           <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">
@@ -5767,6 +5846,9 @@ function renderTripsyEventsList() {
         </div>
       </div>
       `;
+      if (!psMatch) return flightHtml;
+      const psHtml = renderPsReservationTripsyEntryHtml(psMatch.reservation);
+      return psMatch.direction === 'before' ? psHtml + flightHtml : flightHtml + psHtml;
     }).join("");
     return `
       <div class="card" style="margin-bottom:14px;">
@@ -5901,6 +5983,10 @@ async function renderTripsyTrips() {
   });
   document.getElementById("tripsy-nav-ps").addEventListener("click", () => navigate("reservations"));
   document.getElementById("tripsy-nav-home").addEventListener("click", () => navigate("home"));
+
+  if (!tripsyPsReservations) {
+    try { tripsyPsReservations = await Store.listReservations(); } catch (e) { tripsyPsReservations = []; }
+  }
 
   await unlockTripsyTrips();
 }
