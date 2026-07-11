@@ -5643,6 +5643,66 @@ function setTripsyTripCollapsed(tripKey, collapsed) {
   }
 }
 
+// Hide/show overrides, same 'hidden'/'shown' semantics as the TripIt Trips
+// page's Store.setTripitTripOverride -- but there's no shared write channel
+// for Tripsy data (it's a public encrypted snapshot, not driveData), so
+// this is localStorage-backed and therefore per-device, not synced across
+// users the way the real Trips page's hide/show is.
+const TRIPSY_OVERRIDE_STORAGE_PREFIX = 'tripsy-trip-override:';
+function getTripsyTripOverride(tripKey) {
+  try {
+    return localStorage.getItem(TRIPSY_OVERRIDE_STORAGE_PREFIX + tripKey) || null;
+  } catch (e) {
+    return null;
+  }
+}
+function setTripsyTripOverride(tripKey, value) {
+  try {
+    if (value) localStorage.setItem(TRIPSY_OVERRIDE_STORAGE_PREFIX + tripKey, value);
+    else localStorage.removeItem(TRIPSY_OVERRIDE_STORAGE_PREFIX + tripKey);
+  } catch (e) {
+    console.error('setTripsyTripOverride failed:', e);
+  }
+}
+
+// Same auto-hide rule as the TripIt Trips page's isTripEffectivelyHidden
+// (reuses the exact same TRIPIT_AUTO_HIDE_DAYS constant so the two pages
+// can never drift apart): a trip more than that many days past its last
+// activity auto-hides, unless a manual override says otherwise.
+function isTripsyTripEffectivelyHidden(trip) {
+  const override = getTripsyTripOverride(trip.key);
+  if (override === 'shown') return false;
+  if (override === 'hidden') return true;
+
+  const lastActivity = getTripLastActivityTime(trip);
+  if (lastActivity == null) return false;
+  const cutoff = Date.now() - TRIPIT_AUTO_HIDE_DAYS * 24 * 60 * 60 * 1000;
+  return lastActivity < cutoff;
+}
+
+const TRIPSY_PASSPHRASE_DRIVE_FILENAME = 'Tripsy Trips Passphrase';
+
+// Primary passphrase source: the same private Drive file the scheduled
+// refresh task reads from. Whether this succeeds is gated entirely by real
+// Drive sharing permissions (the same mechanism the rest of this app uses
+// for "who's authorized") -- share the file with someone and they unlock
+// automatically on next load; unshare it and they lose access immediately,
+// no separate revocation step needed. Throws if the file doesn't exist, the
+// signed-in user hasn't been shared it, or it's empty -- callers should
+// fall back to the manual entry form in that case.
+async function fetchTripsyPassphraseFromDrive() {
+  const q = encodeURIComponent(`name='${TRIPSY_PASSPHRASE_DRIVE_FILENAME}' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&spaces=drive`);
+  const json = await res.json();
+  const fileId = (json.files && json.files.length) ? json.files[0].id : null;
+  if (!fileId) throw new Error('Tripsy passphrase file not found (or not shared with this account).');
+  const contentRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  const text = await contentRes.text();
+  const firstLine = (text.split('\n')[0] || '').trim();
+  if (!firstLine) throw new Error('Tripsy passphrase file is empty.');
+  return firstLine;
+}
+
 // Decrypts TRIPSY_ENCRYPTED with the given passphrase and returns the
 // parsed trip array. AES-GCM's built-in auth tag makes a wrong passphrase
 // fail loudly here (decrypt throws) rather than silently returning garbage,
@@ -5672,10 +5732,17 @@ let tripsyDecryptedTrips = null;
 
 function renderTripsyEventsList() {
   const container = document.getElementById("tripsy-card");
-  const trips = tripsyDecryptedTrips || [];
+  const allTrips = tripsyDecryptedTrips || [];
+
+  if (!allTrips.length) {
+    container.innerHTML = `<div class="card"><div class="empty-state">No Tripsy trips in range.</div></div>`;
+    return;
+  }
+
+  const trips = allTrips.filter(t => !isTripsyTripEffectivelyHidden(t));
 
   if (!trips.length) {
-    container.innerHTML = `<div class="card"><div class="empty-state">No Tripsy trips in range.</div></div>`;
+    container.innerHTML = `<div class="card"><div class="empty-state">All trips are hidden. Click "Hidden Trips" above to show one.</div></div>`;
     return;
   }
 
@@ -5711,6 +5778,9 @@ function renderTripsyEventsList() {
           <button data-tripsy-toggle-collapse data-key="${esc(trip.key)}" title="${collapsed ? 'Expand' : 'Collapse'}" style="background:none; border:none; cursor:pointer; color:var(--amber); font-size:26px; line-height:1; padding:0; flex-shrink:0;">${collapsed ? '▸' : '▾'}</button>
         </div>
         ${eventRows}
+        <div style="margin-top:12px; text-align:right;">
+          <button class="btn" data-tripsy-hide-trip data-key="${esc(trip.key)}" style="font-size:11px; padding:3px 8px;">Hide Trip</button>
+        </div>
       </div>
     `;
   }).join("");
@@ -5720,6 +5790,49 @@ function renderTripsyEventsList() {
       const key = btn.dataset.key;
       setTripsyTripCollapsed(key, !isTripsyTripCollapsed(key));
       renderTripsyEventsList();
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-hide-trip]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      setTripsyTripOverride(btn.dataset.key, 'hidden');
+      renderTripsyEventsList();
+      const hiddenPanel = document.getElementById("tripsy-hidden-panel");
+      if (hiddenPanel && hiddenPanel.style.display !== "none") renderTripsyHiddenTripsPanelContent();
+    });
+  });
+}
+
+function renderTripsyHiddenTripsPanelContent() {
+  const panel = document.getElementById("tripsy-hidden-panel");
+  if (!panel) return;
+  const hiddenTrips = (tripsyDecryptedTrips || []).filter(t => isTripsyTripEffectivelyHidden(t));
+
+  if (!hiddenTrips.length) {
+    panel.innerHTML = `<div class="card"><div class="empty-state">No hidden trips.</div></div>`;
+    return;
+  }
+
+  panel.innerHTML = `
+    <div class="card">
+      <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:6px;">Hidden Trips</div>
+      ${hiddenTrips.map(trip => `
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 0; border-top:1px solid var(--line);">
+          <div>
+            <div style="font-size:13px; color:var(--text); font-weight:600;">${esc(trip.name)}</div>
+            <div style="font-size:12px; color:var(--muted);">${esc(formatTripitDateRange(trip.start, trip.end))}</div>
+          </div>
+          <button class="btn" data-tripsy-show-trip data-key="${esc(trip.key)}" style="font-size:11px; padding:3px 8px; flex-shrink:0;">Show</button>
+        </div>
+      `).join("")}
+    </div>
+  `;
+
+  panel.querySelectorAll("[data-tripsy-show-trip]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      setTripsyTripOverride(btn.dataset.key, 'shown');
+      renderTripsyEventsList();
+      renderTripsyHiddenTripsPanelContent();
     });
   });
 }
@@ -5734,14 +5847,21 @@ async function renderTripsyTrips() {
     </div>
     <div class="page-title">Tripsy Trips</div>
     <div class="page-sub">Pulled from your Tripsy account -- includes confirmation codes, seat info, addresses, and other detail the calendar feed doesn't carry (shown in teal below).</div>
+    <div id="tripsy-hidden-panel" style="display:none; margin-bottom:16px;"></div>
     <div id="tripsy-card"><div class="card"><div class="empty-state">Loading…</div></div></div>
     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-top:28px; flex-wrap:wrap;">
       <div style="text-align:left;">
-        <div style="font-size:12px; color:var(--muted);">Last updated: ${esc(formatSyncTimestamp(TRIPSY_SNAPSHOT_GENERATED_AT))}</div>
-        <button id="tripsy-refresh-btn" style="background:none; border:none; cursor:pointer; padding:0; display:flex; flex-direction:column; align-items:center; gap:4px; color:var(--text); margin-top:8px;">
-          <span style="font-size:26px; line-height:1;">🔄</span>
-          <span style="font-size:12px; font-weight:600;">Refresh</span>
-        </button>
+        <div style="display:flex; gap:28px; align-items:flex-start;">
+          <button id="tripsy-refresh-btn" style="background:none; border:none; cursor:pointer; padding:0; display:flex; flex-direction:column; align-items:center; gap:4px; color:var(--text);">
+            <span style="font-size:26px; line-height:1;">🔄</span>
+            <span style="font-size:12px; font-weight:600;">Refresh</span>
+          </button>
+          <button id="tripsy-hidden-trips-btn" style="background:none; border:none; cursor:pointer; padding:0; display:flex; flex-direction:column; align-items:center; gap:4px; color:var(--text);">
+            <span style="font-size:26px; line-height:1;">👁️</span>
+            <span id="tripsy-hidden-trips-btn-label" style="font-size:12px; font-weight:600;">Show Hidden</span>
+          </button>
+        </div>
+        <div style="margin-top:8px; font-size:12px; color:var(--muted);">Last updated: ${esc(formatSyncTimestamp(TRIPSY_SNAPSHOT_GENERATED_AT))}</div>
       </div>
       <div style="display:flex; gap:16px;">
         <button id="tripsy-nav-trips" style="background:none; border:none; cursor:pointer; padding:0; width:80px; height:56px; display:flex; align-items:center; justify-content:center;"><img src="data:image/png;base64,${TRIPS_NAV_ICON_B64}" style="max-width:80px; max-height:56px; width:auto; height:auto; display:block;" alt="Trips"></button>
@@ -5758,6 +5878,22 @@ async function renderTripsyTrips() {
 
   document.getElementById("fopbp-logo-tripsytrips").addEventListener("click", showFopBpPhoto);
   document.getElementById("tripsy-refresh-btn").addEventListener("click", () => window.location.reload());
+  document.getElementById("tripsy-hidden-trips-btn").addEventListener("click", () => {
+    const panel = document.getElementById("tripsy-hidden-panel");
+    const tripsCard = document.getElementById("tripsy-card");
+    const label = document.getElementById("tripsy-hidden-trips-btn-label");
+    const isOpen = panel.style.display !== "none";
+    if (isOpen) {
+      panel.style.display = "none";
+      tripsCard.style.display = "";
+      label.textContent = "Show Hidden";
+    } else {
+      renderTripsyHiddenTripsPanelContent();
+      panel.style.display = "block";
+      tripsCard.style.display = "none";
+      label.textContent = "Show Active";
+    }
+  });
   document.getElementById("tripsy-nav-trips").addEventListener("click", () => navigate("triptrips"));
   document.getElementById("tripsy-nav-netjets").addEventListener("click", () => {
     passengerReportMode = "hours_summary";
@@ -5777,6 +5913,24 @@ async function unlockTripsyTrips() {
     renderTripsyEventsList();
     return;
   }
+
+  // Primary path: fetch the passphrase live from Drive, gated by whether
+  // the signed-in user has actually been shared that file. Deliberately
+  // not cached in localStorage -- fetching it fresh each load means access
+  // changes (sharing/unsharing the passphrase file) take effect immediately
+  // rather than needing a stale local cache to expire first.
+  try {
+    const passphrase = await fetchTripsyPassphraseFromDrive();
+    tripsyDecryptedTrips = await decryptTripsyData(passphrase);
+    renderTripsyEventsList();
+    return;
+  } catch (e) {
+    console.error('Tripsy auto-unlock via Drive failed, falling back to manual entry:', e);
+  }
+
+  // Fallback: someone who has the passphrase but wasn't Drive-shared the
+  // passphrase file itself (or a transient Drive error) can still type it
+  // in manually, cached locally so they're not re-prompted every visit.
   let cached = null;
   try { cached = localStorage.getItem(TRIPSY_PASSPHRASE_STORAGE_KEY); } catch (e) { /* ignore */ }
   if (cached) {
