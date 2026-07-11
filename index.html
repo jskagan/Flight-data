@@ -5846,11 +5846,10 @@ function renderPsReservationTripsyEntryHtml(res) {
       <div>
         <div style="display:flex; align-items:center; gap:8px;">
           <img src="data:image/png;base64,${LAX_NAV_ICON_B64}" style="width:26px; height:auto; display:block;" alt="P/S">
-          <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">P/S Reservation</div>
+          <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">P/S Reservation${res.experience ? ` • ${esc(res.experience)}` : ''}${res.arriveByTime ? ` • Arrive by ${esc(res.arriveByTime)}` : ''}</div>
         </div>
         ${flightLine ? `<div style="margin-top:6px; font-size:13px; color:var(--text);">${flightLine}</div>` : ''}
         ${legs ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">${legs}</div>` : ''}
-        ${res.arriveByTime ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">Arrive by ${esc(res.arriveByTime)}</div>` : ''}
         ${travelers ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">Travelers: ${travelers}</div>` : ''}
         ${res.reservationNumber ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">Reservation #${esc(res.reservationNumber)}${res.status ? ' — ' + esc(res.status) : ''}</div>` : ''}
       </div>
@@ -5873,6 +5872,41 @@ function expandTripsyHotelEvents(events) {
   });
 }
 
+// Generalizes the flight arrival/departure same-day tie-break
+// (tripitFlightEventOrder) to ANY multi-day Tripsy event vs. a single-day
+// event sharing one of its boundary days -- Tripsy Trips only, since here a
+// "multi-day event" isn't limited to flights (tours, cruises, and other
+// multi-day activities all carry real start/end dates too, and hotel stays
+// have already been split into single-day Check-in/Check-out rows by
+// expandTripsyHotelEvents by the time this runs). On the multi-day event's
+// first day, the single-day event is listed first; on its last day, the
+// multi-day event is listed first, then the single-day event.
+function tripsyMultiDayEventOrder(a, b) {
+  const dayKey = iso => {
+    const p = parseTripitLocalParts(iso);
+    return p ? `${p.year}-${p.month}-${p.day}` : null;
+  };
+  const isMultiDay = ev => {
+    const s = dayKey(ev.start);
+    const e = dayKey(ev.end);
+    return !!(s && e && s !== e);
+  };
+  const multi = isMultiDay(a) ? a : (isMultiDay(b) ? b : null);
+  const single = multi === a ? b : (multi === b ? a : null);
+  if (!multi || !single || isMultiDay(single)) return null;
+
+  const multiStartDay = dayKey(multi.start);
+  const multiEndDay = dayKey(multi.end);
+  const singleDay = dayKey(single.start) || dayKey(single.end);
+
+  const startMatch = multiStartDay && singleDay && multiStartDay === singleDay;
+  const endMatch = multiEndDay && singleDay && multiEndDay === singleDay;
+  if (startMatch && endMatch) return null;
+  if (startMatch) return multi === a ? 1 : -1; // single-day event listed first
+  if (endMatch) return multi === a ? -1 : 1;   // multi-day event listed first
+  return null;
+}
+
 function renderTripsyEventsList() {
   const container = document.getElementById("tripsy-card");
   const allTrips = tripsyDecryptedTrips || [];
@@ -5893,13 +5927,13 @@ function renderTripsyEventsList() {
     const subtitle = [formatTripitDateRange(trip.start, trip.end), trip.location].filter(Boolean).join(" • ");
     const collapsed = isTripsyTripCollapsed(trip.key);
     // Snapshot events come pre-sorted chronologically from generation time,
-    // but re-sort here (same flight/other-event same-day tie-break as the
-    // TripIt Trips page) so manual edits to the generator, or future
+    // but re-sort here (multi-day/single-day same-day tie-break, see
+    // tripsyMultiDayEventOrder) so manual edits to the generator, or future
     // snapshots, can't silently drift from that ordering. Lodging events
     // are expanded into separate Check-in/Check-out rows first so each
     // half sorts independently by its own date.
     const sortedEvents = expandTripsyHotelEvents(trip.events).sort((a, b) => {
-      const special = tripitFlightEventOrder(a, b);
+      const special = tripsyMultiDayEventOrder(a, b);
       if (special != null) return special;
       return new Date(a.start || 0) - new Date(b.start || 0);
     });
