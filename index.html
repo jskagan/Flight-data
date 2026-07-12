@@ -975,6 +975,10 @@ const Store = {
   async queueTripsyChange(change) {
     try {
       if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
+      // Re-saving with the same id (e.g. editing a not-yet-created pending
+      // item again before it's applied) replaces the earlier entry rather
+      // than piling up duplicates.
+      driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(c => c.id !== change.id);
       // An edit queued twice for the same event should amend the existing
       // pending edit rather than pile up duplicates that would otherwise
       // get applied in some arbitrary order later.
@@ -5773,19 +5777,40 @@ async function renderTripitTrips() {
 }
 
 // ---- Tripsy Trips (embedded-snapshot page, see TRIPSY_TRIPS_DATA above) ----
+// Collapsed by default (no stored value yet) -- explicit expand/collapse
+// choices made during a visit are still remembered (stored as '0'/'1'
+// rather than presence/absence) so toggling a trip open and then, say,
+// hiding/showing another one doesn't re-collapse it. resetAllTripsyTripsCollapsed
+// below is what actually enforces "every fresh visit starts all-collapsed",
+// by clearing those stored choices at the top of each page load.
 function isTripsyTripCollapsed(tripKey) {
   try {
-    return localStorage.getItem(TRIPSY_COLLAPSE_STORAGE_PREFIX + tripKey) === '1';
+    return localStorage.getItem(TRIPSY_COLLAPSE_STORAGE_PREFIX + tripKey) !== '0';
   } catch (e) {
-    return false;
+    return true;
   }
 }
 function setTripsyTripCollapsed(tripKey, collapsed) {
   try {
-    if (collapsed) localStorage.setItem(TRIPSY_COLLAPSE_STORAGE_PREFIX + tripKey, '1');
-    else localStorage.removeItem(TRIPSY_COLLAPSE_STORAGE_PREFIX + tripKey);
+    localStorage.setItem(TRIPSY_COLLAPSE_STORAGE_PREFIX + tripKey, collapsed ? '1' : '0');
   } catch (e) {
     console.error('setTripsyTripCollapsed failed:', e);
+  }
+}
+// Clears every remembered per-trip expand/collapse choice so the next
+// render falls back to the (collapsed) default -- called once per fresh
+// navigation to the Tripsy Trips page, not on every re-render within a
+// visit, so in-visit toggling still behaves normally.
+function resetAllTripsyTripsCollapsed() {
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(TRIPSY_COLLAPSE_STORAGE_PREFIX)) keys.push(k);
+    }
+    keys.forEach(k => localStorage.removeItem(k));
+  } catch (e) {
+    console.error('resetAllTripsyTripsCollapsed failed:', e);
   }
 }
 
@@ -5931,21 +5956,21 @@ function findMatchingTripsyPsReservation(ev) {
 }
 
 function renderPsReservationTripsyEntryHtml(res) {
-  const flightLine = `${esc(res.airline || '')}${res.flightNumber ? ' #' + esc(res.flightNumber) : ''}`.trim();
-  const legs = [
-    res.departureAirport && res.departureTime ? `Departs: ${esc(res.departureAirport)} ${esc(res.departureTime)}` : '',
-    res.arrivalAirport && res.arrivalTime ? `Arrives: ${esc(res.arrivalAirport)} ${esc(res.arrivalTime)}` : '',
-  ].filter(Boolean).join(' · ');
+  // In place of flight/airline details: the "Arrive by" time if the
+  // reservation has one, otherwise fall back to the flight's own arrival
+  // info -- either way this is the ONLY flight-related detail shown here.
+  const arrivalLine = res.arriveByTime
+    ? `Arrive by ${esc(res.arriveByTime)}`
+    : (res.arrivalAirport && res.arrivalTime ? `Arrives: ${esc(res.arrivalAirport)} ${esc(res.arrivalTime)}` : '');
   const travelers = (res.travelers || []).map(t => esc(t.name)).join(', ');
   return `
     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); margin-top:10px;">
       <div>
         <div style="display:flex; align-items:center; gap:8px;">
           <img src="data:image/png;base64,${LAX_NAV_ICON_B64}" style="width:26px; height:auto; display:block;" alt="P/S">
-          <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">P/S Reservation${res.experience ? ` • ${esc(res.experience)}` : ''}${res.arriveByTime ? ` • Arrive by ${esc(res.arriveByTime)}` : ''}</div>
+          <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">P/S Reservation${res.experience ? ` • ${esc(res.experience)}` : ''}</div>
         </div>
-        ${flightLine ? `<div style="margin-top:6px; font-size:13px; color:var(--text);">${flightLine}</div>` : ''}
-        ${legs ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">${legs}</div>` : ''}
+        ${arrivalLine ? `<div style="margin-top:6px; font-size:13px; color:var(--text);">${arrivalLine}</div>` : ''}
         ${travelers ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">Travelers: ${travelers}</div>` : ''}
         ${res.reservationNumber ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">Reservation #${esc(res.reservationNumber)}${res.status ? ' — ' + esc(res.status) : ''}</div>` : ''}
       </div>
@@ -6022,12 +6047,56 @@ const TRIPSY_ACTIVITY_TYPES = [
 ];
 const TRIPSY_TRANSPORTATION_TYPES = ['airplane', 'bike', 'bus', 'car', 'roadtrip', 'cruise', 'ferry', 'motorcycle', 'train', 'walk'];
 
+// Starting suggestions for the Company field when Type is Airplane --
+// anything the user types that isn't already here gets remembered (see
+// addTripsyCustomAirline) so it shows up as a suggestion next time too.
+const TRIPSY_BASE_AIRLINES = [
+  'American Airlines', 'Asiana Airlines', 'British Airways', 'Charter', 'Delta Air Lines',
+  'KLM', 'Korean Air', 'Lufthansa', 'NetJets', 'Singapore Airlines', 'Southwest Airlines',
+  'Thai Airways', 'Thai AsiaAir', 'Turkish Air', 'United Airlines',
+];
+const TRIPSY_CUSTOM_AIRLINES_STORAGE_KEY = 'tripsy-custom-airlines';
+function getTripsyCustomAirlines() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(TRIPSY_CUSTOM_AIRLINES_STORAGE_KEY) || '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch (e) {
+    return [];
+  }
+}
+// Only persists names not already covered (case-insensitively) by the base
+// list or a prior custom addition -- this is a per-device convenience list,
+// not something pushed to Tripsy.
+function addTripsyCustomAirline(name) {
+  if (!name) return;
+  try {
+    const custom = getTripsyCustomAirlines();
+    const known = new Set([...TRIPSY_BASE_AIRLINES, ...custom].map(a => a.toLowerCase()));
+    if (!known.has(name.toLowerCase())) {
+      custom.push(name);
+      localStorage.setItem(TRIPSY_CUSTOM_AIRLINES_STORAGE_KEY, JSON.stringify(custom));
+    }
+  } catch (e) {
+    console.error('addTripsyCustomAirline failed:', e);
+  }
+}
+function getAllTripsyAirlines() {
+  return [...TRIPSY_BASE_AIRLINES, ...getTripsyCustomAirlines()].sort((a, b) => a.localeCompare(b));
+}
+
 // Only prettifies slugs from our own known lists -- Tripsy's custom
 // per-account categories are opaque generated ids (e.g.
 // "7XGVGtMARwoON7rl52N1P4j36dI9gf4NDgw"), not real camelCase words, so
 // running those through the same word-split logic just mangles them.
+// The owner's one real custom Tripsy category (see tripsy_categories_list)
+// -- opaque generated slug, so it's given an explicit label below rather
+// than being run through the word-split logic, and used to preset the
+// "Spa" add-item menu choice since Tripsy has no built-in spa type.
+const TRIPSY_CUSTOM_CATEGORY_SPA_SLUG = '7XGVGtMARwoON7rl52N1P4j36dI9gf4NDgw';
+const TRIPSY_CUSTOM_CATEGORY_LABELS = { [TRIPSY_CUSTOM_CATEGORY_SPA_SLUG]: 'Spa' };
 function tripsySlugToLabel(slug) {
   if (!slug) return '';
+  if (TRIPSY_CUSTOM_CATEGORY_LABELS[slug]) return TRIPSY_CUSTOM_CATEGORY_LABELS[slug];
   if (!TRIPSY_ACTIVITY_TYPES.includes(slug) && !TRIPSY_TRANSPORTATION_TYPES.includes(slug)) return slug;
   return slug.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, c => c.toUpperCase());
 }
@@ -6041,17 +6110,41 @@ function tripsyActivityCategoryToType(category) {
   return TRIPSY_ACTIVITY_CATEGORY_TO_TYPE[category] || 'other';
 }
 
+// Same TRIPIT_TYPE_LABEL-driven display type a real event would get, but
+// for a pending create_event change (which has no snapshot event to derive
+// it from) -- reads straight from the queued change's own fields.
+function tripsyPendingCreateDisplayType(change) {
+  if (change.tripsyResource === 'hosting') return 'hotel';
+  if (change.tripsyResource === 'activity') return tripsyActivityCategoryToType(change.fields.category);
+  return change.fields.category === 'airplane' ? 'flight' : 'transportation';
+}
+
 // Each field's `group` drives the section it's rendered under in the edit
 // panel (see renderTripsyEditPanel) -- order here is the order groups and
-// fields appear in.
+// fields appear in. The "Details" section is a distinct group per resource
+// (eventDetails/lodgingDetails/transportDetails) since each needs its own
+// heading text, not one shared "Details" label.
 const TRIPSY_EDIT_GROUP_LABEL = {
-  basics: 'Details', timing: 'Timing', contact: 'Contact & Booking',
-  departure: 'Departure', arrival: 'Arrival', seat: 'Seat & Vehicle', notes: 'Notes',
+  eventDetails: 'Event Details', lodgingDetails: 'Lodging Details', transportDetails: 'Transportation Details',
+  timing: 'Timing', contact: 'Contact Information',
+  departure: 'Departure', arrival: 'Arrival', seat: 'Seat', notes: 'Notes', travelAgent: 'Travel Agent',
 };
+// Same five fields, appended as the last group (Travel Agent, at the
+// bottom) for every resource -- Tripsy's own API has no travel-agent
+// concept as far as anything pulled from it has ever shown, so these are
+// speculative fields with no confirmed way to push back to Tripsy; noted
+// in the refresh procedure for whoever applies a pending edit later.
+const TRIPSY_TRAVEL_AGENT_FIELDS = [
+  { key: 'agentName', label: 'Agent Name', kind: 'text', group: 'travelAgent' },
+  { key: 'agency', label: 'Agency', kind: 'text', group: 'travelAgent' },
+  { key: 'agentPhone', label: 'Phone Number', kind: 'text', group: 'travelAgent' },
+  { key: 'agencyReservationNumber', label: 'Agency Reservation Number', kind: 'text', group: 'travelAgent' },
+  { key: 'agentWebsite', label: 'Website', kind: 'text', group: 'travelAgent' },
+];
 const TRIPSY_EDIT_FIELDS = {
   activity: [
-    { key: 'name', label: 'Name', kind: 'text', group: 'basics' },
-    { key: 'category', label: 'Category', kind: 'select', options: TRIPSY_ACTIVITY_TYPES, group: 'basics' },
+    { key: 'name', label: 'Name', kind: 'text', group: 'eventDetails' },
+    { key: 'category', label: 'Category', kind: 'select', options: TRIPSY_ACTIVITY_TYPES, group: 'eventDetails', optionSort: true },
     { key: 'startsAt', label: 'Start', kind: 'datetime', group: 'timing' },
     { key: 'endsAt', label: 'End', kind: 'datetime', group: 'timing' },
     { key: 'address', label: 'Location', kind: 'text', group: 'contact' },
@@ -6059,21 +6152,25 @@ const TRIPSY_EDIT_FIELDS = {
     { key: 'phone', label: 'Phone', kind: 'text', group: 'contact' },
     { key: 'website', label: 'Website', kind: 'text', group: 'contact' },
     { key: 'notes', label: 'Notes', kind: 'textarea', group: 'notes' },
+    ...TRIPSY_TRAVEL_AGENT_FIELDS,
   ],
   hosting: [
-    { key: 'name', label: 'Name', kind: 'text', group: 'basics' },
+    { key: 'name', label: 'Name', kind: 'text', group: 'lodgingDetails' },
+    { key: 'confirmation', label: 'Confirmation #', kind: 'text', group: 'lodgingDetails' },
     { key: 'startsAt', label: 'Check-in', kind: 'datetime', group: 'timing' },
     { key: 'endsAt', label: 'Check-out', kind: 'datetime', group: 'timing' },
     { key: 'address', label: 'Address', kind: 'text', group: 'contact' },
-    { key: 'confirmation', label: 'Confirmation #', kind: 'text', group: 'contact' },
     { key: 'phone', label: 'Phone', kind: 'text', group: 'contact' },
     { key: 'website', label: 'Website', kind: 'text', group: 'contact' },
     { key: 'notes', label: 'Notes', kind: 'textarea', group: 'notes' },
+    ...TRIPSY_TRAVEL_AGENT_FIELDS,
   ],
   transportation: [
-    { key: 'category', label: 'Type', kind: 'select', options: TRIPSY_TRANSPORTATION_TYPES, group: 'basics' },
-    { key: 'company', label: 'Company', kind: 'text', group: 'basics' },
-    { key: 'transportNumber', label: 'Number', kind: 'text', group: 'basics' },
+    { key: 'category', label: 'Type', kind: 'select', options: TRIPSY_TRANSPORTATION_TYPES, group: 'transportDetails' },
+    { key: 'confirmation', label: 'Confirmation #', kind: 'text', group: 'transportDetails' },
+    { key: 'company', label: 'Company', kind: 'company', group: 'transportDetails' },
+    { key: 'transportNumber', label: 'Number', kind: 'text', group: 'transportDetails' },
+    { key: 'vehicleDescription', label: 'Vehicle', kind: 'text', group: 'transportDetails' },
     { key: 'departureDescription', label: 'Departure location', kind: 'text', group: 'departure' },
     { key: 'departureTerminal', label: 'Departure terminal', kind: 'text', group: 'departure' },
     { key: 'departureAt', label: 'Departure time', kind: 'datetime', group: 'departure' },
@@ -6082,11 +6179,40 @@ const TRIPSY_EDIT_FIELDS = {
     { key: 'arrivalAt', label: 'Arrival time', kind: 'datetime', group: 'arrival' },
     { key: 'seatClass', label: 'Seat class', kind: 'text', group: 'seat' },
     { key: 'seatNumber', label: 'Seat number', kind: 'text', group: 'seat' },
-    { key: 'vehicleDescription', label: 'Vehicle', kind: 'text', group: 'seat' },
-    { key: 'confirmation', label: 'Confirmation #', kind: 'text', group: 'seat' },
     { key: 'notes', label: 'Notes', kind: 'textarea', group: 'notes' },
+    ...TRIPSY_TRAVEL_AGENT_FIELDS,
   ],
 };
+
+// Builds an all-empty tripsyRaw for the "add new item" flow -- same field
+// set renderTripsyEditPanel already knows how to render/save for that
+// resource (via TRIPSY_EDIT_FIELDS), just with every value blank except a
+// preset category where the add-menu choice implies one (e.g. picking
+// "Flight" preselects Type = Airplane).
+function tripsyBlankRaw(resource, presetCategory) {
+  const blank = { resource, id: null };
+  for (const f of TRIPSY_EDIT_FIELDS[resource]) blank[f.key] = null;
+  if (presetCategory) blank.category = presetCategory;
+  return blank;
+}
+
+// The choices offered by the + button on an expanded trip card -- the
+// first six are deliberately the same items Tripsy itself offers when
+// adding to a trip; Spa/Concert/Museum were added on top of those by
+// owner request. Each maps onto one of the three resources
+// renderTripsyEditPanel already knows how to render, with `category`
+// preset to match.
+const TRIPSY_ADD_MENU_ITEMS = [
+  { label: 'Flight', resource: 'transportation', category: 'airplane' },
+  { label: 'Stay', resource: 'hosting', category: null },
+  { label: 'Restaurant', resource: 'activity', category: 'restaurant' },
+  { label: 'Tour', resource: 'activity', category: 'tour' },
+  { label: 'Car', resource: 'transportation', category: 'car' },
+  { label: 'Train', resource: 'transportation', category: 'train' },
+  { label: 'Spa', resource: 'activity', category: TRIPSY_CUSTOM_CATEGORY_SPA_SLUG },
+  { label: 'Concert', resource: 'activity', category: 'concert' },
+  { label: 'Museum', resource: 'activity', category: 'museum' },
+];
 
 // Stable key for a Tripsy-sourced event across renders (and across the
 // Check-in/Check-out split, which shares one underlying hosting record) --
@@ -6187,12 +6313,21 @@ function tripsyTripIdFromKey(tripKey) {
 // without saving. `raw` is the CURRENT effective raw fields (including any
 // already-pending edit), so re-opening a panel after a partial edit picks
 // up where it left off rather than reverting to the original synced data.
-function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary) {
+// `createOptions` is null for editing an existing Tripsy-sourced event, or
+// { pendingChangeId, tripsyTripId } when this panel is instead adding a new
+// item that doesn't exist in Tripsy yet -- see addTripsyItem, which opens
+// this same form pre-filled with a blank record and the chosen category.
+function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, createOptions) {
   const fields = TRIPSY_EDIT_FIELDS[raw.resource] || [];
+  // A fresh id per render (not tied to the event's own id, which doesn't
+  // exist yet in create mode) so multiple panels open at once never
+  // collide on the same datalist id.
+  const airlineDatalistId = 'tripsy-airline-datalist-' + Math.random().toString(36).slice(2, 10);
   const inputHtml = f => {
     const val = raw[f.key] || '';
     if (f.kind === 'select') {
-      const options = f.options.includes(val) || !val ? f.options : [val, ...f.options];
+      let options = f.options.includes(val) || !val ? f.options : [val, ...f.options];
+      if (f.optionSort) options = options.slice().sort((a, b) => tripsySlugToLabel(a).localeCompare(tripsySlugToLabel(b)));
       return `<select data-tripsy-edit-field="${f.key}" class="field-input">
         ${options.map(o => `<option value="${esc(o)}" ${o === val ? 'selected' : ''}>${esc(tripsySlugToLabel(o))}</option>`).join('')}
       </select>`;
@@ -6202,6 +6337,15 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary) {
     }
     if (f.kind === 'datetime') {
       return `<input type="datetime-local" data-tripsy-edit-field="${f.key}" value="${esc(val.slice(0, 16))}" class="field-input">`;
+    }
+    if (f.kind === 'company') {
+      // Free-text input backed by a <datalist> -- looks and behaves like a
+      // dropdown of suggestions, but still accepts any typed value (see
+      // the Save handler for how a new one gets remembered). The datalist
+      // itself is populated (or emptied) by the Type-change listener
+      // wired up below, so airline suggestions only appear when Type is
+      // currently Airplane.
+      return `<input type="text" data-tripsy-edit-field="${f.key}" value="${esc(val)}" class="field-input" list="${airlineDatalistId}" autocomplete="off"><datalist id="${airlineDatalistId}"></datalist>`;
     }
     return `<input type="text" data-tripsy-edit-field="${f.key}" value="${esc(val)}" class="field-input">`;
   };
@@ -6237,6 +6381,21 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary) {
     </div>
   `;
 
+  // Airline suggestions only make sense once Type is Airplane -- populate
+  // the datalist on open (matching whatever Type currently is) and again
+  // on every Type change, rather than tying it to a fixed element swap.
+  if (raw.resource === 'transportation') {
+    const categorySelect = panel.querySelector('[data-tripsy-edit-field="category"]');
+    const airlineDatalist = document.getElementById(airlineDatalistId);
+    const refreshAirlineOptions = () => {
+      airlineDatalist.innerHTML = categorySelect.value === 'airplane'
+        ? getAllTripsyAirlines().map(a => `<option value="${esc(a)}"></option>`).join('')
+        : '';
+    };
+    categorySelect.addEventListener('change', refreshAirlineOptions);
+    refreshAirlineOptions();
+  }
+
   panel.querySelector("[data-tripsy-edit-exit]").addEventListener("click", () => {
     panel.style.display = "none";
     panel.innerHTML = "";
@@ -6245,31 +6404,71 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary) {
   panel.querySelector("[data-tripsy-edit-save]").addEventListener("click", async () => {
     const saveBtn = panel.querySelector("[data-tripsy-edit-save]");
     saveBtn.disabled = true;
-    const changes = {};
-    for (const f of fields) {
-      const el = panel.querySelector(`[data-tripsy-edit-field="${f.key}"]`);
-      let newVal = el.value.trim();
-      if (f.kind === 'datetime' && newVal) newVal = newVal.length === 16 ? `${newVal}:00` : newVal;
-      const oldVal = raw[f.key] || '';
-      if (newVal !== oldVal) changes[f.key] = newVal || null;
+
+    // A newly-typed airline (Type currently Airplane, Company not already
+    // a known suggestion) gets remembered for next time, regardless of
+    // whether Company itself was the field that changed this save.
+    if (raw.resource === 'transportation') {
+      const finalCategory = panel.querySelector('[data-tripsy-edit-field="category"]').value;
+      const finalCompany = panel.querySelector('[data-tripsy-edit-field="company"]').value.trim();
+      if (finalCategory === 'airplane' && finalCompany) addTripsyCustomAirline(finalCompany);
     }
-    if (Object.keys(changes).length === 0) {
-      panel.style.display = "none";
-      panel.innerHTML = "";
-      return;
+
+    let ok;
+    if (createOptions) {
+      // Create mode: there's no baseline to diff against yet, so every
+      // non-empty field the user filled in becomes part of the new item.
+      const newFields = {};
+      for (const f of fields) {
+        const el = panel.querySelector(`[data-tripsy-edit-field="${f.key}"]`);
+        let val = el.value.trim();
+        if (f.kind === 'datetime' && val) val = val.length === 16 ? `${val}:00` : val;
+        if (val) newFields[f.key] = val;
+      }
+      if (Object.keys(newFields).length === 0) {
+        panel.style.display = "none";
+        panel.innerHTML = "";
+        return;
+      }
+      ok = await Store.queueTripsyChange({
+        id: createOptions.pendingChangeId,
+        type: 'create_event',
+        createdAt: new Date().toISOString(),
+        tripKey, tripName,
+        tripsyResource: raw.resource,
+        tripsyTripId: createOptions.tripsyTripId,
+        eventSummary: newFields.name || newFields.company || tripsySlugToLabel(newFields.category) || 'New item',
+        fields: newFields,
+      });
+    } else {
+      const changes = {};
+      for (const f of fields) {
+        const el = panel.querySelector(`[data-tripsy-edit-field="${f.key}"]`);
+        let newVal = el.value.trim();
+        if (f.kind === 'datetime' && newVal) newVal = newVal.length === 16 ? `${newVal}:00` : newVal;
+        const oldVal = raw[f.key] || '';
+        if (newVal !== oldVal) changes[f.key] = newVal || null;
+      }
+      if (Object.keys(changes).length === 0) {
+        panel.style.display = "none";
+        panel.innerHTML = "";
+        return;
+      }
+      ok = await Store.queueTripsyChange({
+        id: crypto.randomUUID(),
+        type: 'edit_event',
+        createdAt: new Date().toISOString(),
+        tripKey, tripName,
+        eventKey: tripsyEventKey(raw),
+        eventSummary,
+        tripsyResource: raw.resource,
+        tripsyId: raw.id,
+        changes,
+      });
     }
-    const ok = await Store.queueTripsyChange({
-      id: crypto.randomUUID(),
-      type: 'edit_event',
-      createdAt: new Date().toISOString(),
-      tripKey, tripName,
-      eventKey: tripsyEventKey(raw),
-      eventSummary,
-      tripsyResource: raw.resource,
-      tripsyId: raw.id,
-      changes,
-    });
     if (!ok) toast("Could not save changes — storage error. Please try again.", "error");
+    panel.style.display = "none";
+    panel.innerHTML = "";
     renderTripsyEventsList();
     const pendingPanel = document.getElementById("tripsy-pending-panel");
     if (pendingPanel && pendingPanel.style.display !== "none") renderTripsyPendingChangesPanelContent();
@@ -6297,6 +6496,7 @@ async function renderTripsyEventsList() {
 
   container.innerHTML = trips.map(trip => {
     const pendingDeleteTrip = pendingChanges.find(c => c.type === 'delete_trip' && c.tripKey === trip.key);
+    const pendingCreates = pendingChanges.filter(c => c.type === 'create_event' && c.tripKey === trip.key);
     const subtitle = [formatTripitDateRange(trip.start, trip.end), trip.location].filter(Boolean).join(" • ");
 
     if (pendingDeleteTrip) {
@@ -6378,6 +6578,30 @@ async function renderTripsyEventsList() {
       const psHtml = renderPsReservationTripsyEntryHtml(psMatch.reservation);
       return psMatch.direction === 'before' ? psHtml + flightHtml : flightHtml + psHtml;
     }).join("");
+    // Queued new items don't exist in the snapshot yet, so they're rendered
+    // from the pending change itself rather than through the normal
+    // ev/tripsyRaw path -- dashed green border and an Undo-style Remove
+    // action mark them as not-yet-real, same idea as the pending
+    // edit/delete badges above but visually distinct since there's no
+    // underlying Tripsy record to point at yet.
+    const pendingCreateRows = collapsed ? "" : pendingCreates.map(c => `
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px dashed var(--home-green); margin-top:10px;">
+        <div>
+          <div style="font-family:var(--mono); font-size:13px; color:var(--home-green); font-weight:700;">
+            ${esc(TRIPIT_TYPE_LABEL[tripsyPendingCreateDisplayType(c)] || 'New item')}
+          </div>
+          <div style="margin-top:6px; font-size:13px; color:var(--text);">${esc(c.eventSummary)}</div>
+          <div style="margin-top:4px; font-size:11px; color:var(--home-green);">➕ Not yet created in Tripsy — syncs next refresh</div>
+        </div>
+        <div style="display:flex; gap:6px; flex-shrink:0;">
+          <button class="btn" data-tripsy-edit-pending-create data-change-id="${esc(c.id)}" style="font-size:11px; padding:3px 8px;" title="Edit">✏️</button>
+          <button class="btn" data-tripsy-remove-pending-create data-change-id="${esc(c.id)}" style="font-size:11px; padding:3px 8px;" title="Remove">🗑️</button>
+        </div>
+      </div>
+    `).join("");
+    // The add-item + button only makes sense once the card is expanded --
+    // collapsed cards don't show the events list it'd be adding alongside.
+    const showAddButton = !collapsed && isOwner;
     return `
       <div class="card" style="margin-bottom:14px;">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
@@ -6385,9 +6609,21 @@ async function renderTripsyEventsList() {
             <div style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">${esc(trip.name)}</div>
             ${subtitle ? `<div style="margin-top:2px; font-size:13px; color:var(--muted);">${esc(subtitle)}</div>` : ''}
           </div>
-          <button data-tripsy-toggle-collapse data-key="${esc(trip.key)}" title="${collapsed ? 'Expand' : 'Collapse'}" style="background:none; border:none; cursor:pointer; color:var(--amber); font-size:26px; line-height:1; padding:0; flex-shrink:0;">${collapsed ? '▸' : '▾'}</button>
+          <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+            ${showAddButton ? `
+              <div style="position:relative;">
+                <button data-tripsy-add-item-toggle data-key="${esc(trip.key)}" title="Add item to trip" style="background:var(--home-green); border:none; border-radius:50%; width:28px; height:28px; cursor:pointer; color:#04210F; font-size:18px; font-weight:700; line-height:1; display:flex; align-items:center; justify-content:center; padding:0;">+</button>
+                <div data-tripsy-add-item-menu="${esc(trip.key)}" style="display:none; position:absolute; top:100%; right:0; margin-top:6px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+                  ${TRIPSY_ADD_MENU_ITEMS.map((item, idx) => `<button data-tripsy-add-item-choice data-key="${esc(trip.key)}" data-idx="${idx}" style="display:block; width:100%; text-align:left; background:none; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px;">${esc(item.label)}</button>`).join('')}
+                </div>
+              </div>
+            ` : ''}
+            <button data-tripsy-toggle-collapse data-key="${esc(trip.key)}" title="${collapsed ? 'Expand' : 'Collapse'}" style="background:none; border:none; cursor:pointer; color:var(--amber); font-size:26px; line-height:1; padding:0;">${collapsed ? '▸' : '▾'}</button>
+          </div>
         </div>
+        ${showAddButton ? `<div data-tripsy-add-item-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${eventRows}
+        ${pendingCreateRows}
         <div style="margin-top:12px; text-align:right; display:flex; gap:8px; justify-content:flex-end;">
           <button class="btn" data-tripsy-hide-trip data-key="${esc(trip.key)}" style="font-size:11px; padding:3px 8px;">Hide Trip</button>
           ${isOwner ? `<button class="btn" data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}" style="font-size:11px; padding:3px 8px;">Delete Trip</button>` : ''}
@@ -6414,6 +6650,60 @@ async function renderTripsyEventsList() {
   });
 
   if (!isOwner) return;
+
+  container.querySelectorAll("[data-tripsy-add-item-toggle]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const menu = container.querySelector(`[data-tripsy-add-item-menu="${btn.dataset.key}"]`);
+      menu.style.display = menu.style.display === "none" ? "block" : "none";
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-add-item-choice]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const tripKeyForAdd = btn.dataset.key;
+      const item = TRIPSY_ADD_MENU_ITEMS[Number(btn.dataset.idx)];
+      const trip = tripsyDecryptedTrips.find(t => t.key === tripKeyForAdd);
+      container.querySelector(`[data-tripsy-add-item-menu="${tripKeyForAdd}"]`).style.display = "none";
+      const addPanel = container.querySelector(`[data-tripsy-add-item-panel="${tripKeyForAdd}"]`);
+      const blankRaw = tripsyBlankRaw(item.resource, item.category);
+      renderTripsyEditPanel(addPanel, blankRaw, tripKeyForAdd, trip.name, item.label, {
+        pendingChangeId: crypto.randomUUID(),
+        tripsyTripId: tripsyTripIdFromKey(tripKeyForAdd),
+      });
+      addPanel.style.display = "block";
+    });
+  });
+
+  // Re-derives the pending change fresh from Store rather than trusting a
+  // closure over `pendingChanges`, same reasoning as the real-event edit
+  // handler above.
+  container.querySelectorAll("[data-tripsy-edit-pending-create]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const changeId = btn.dataset.changeId;
+      const change = (await Store.listTripsyPendingChanges()).find(c => c.id === changeId);
+      if (!change) return;
+      const trip = tripsyDecryptedTrips.find(t => t.key === change.tripKey);
+      const addPanel = container.querySelector(`[data-tripsy-add-item-panel="${change.tripKey}"]`);
+      const mergedRaw = { ...tripsyBlankRaw(change.tripsyResource, null), ...change.fields };
+      renderTripsyEditPanel(addPanel, mergedRaw, change.tripKey, change.tripName, change.eventSummary, {
+        pendingChangeId: change.id,
+        tripsyTripId: change.tripsyTripId,
+      });
+      addPanel.style.display = "block";
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-remove-pending-create]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const ok = await Store.cancelTripsyChange(btn.dataset.changeId);
+      if (!ok) toast("Could not remove — storage error. Please try again.", "error");
+      renderTripsyEventsList();
+      const pendingPanel = document.getElementById("tripsy-pending-panel");
+      if (pendingPanel && pendingPanel.style.display !== "none") renderTripsyPendingChangesPanelContent();
+      updateTripsyPendingWarningBadge();
+    });
+  });
 
   container.querySelectorAll("[data-tripsy-delete-trip]").forEach(btn => {
     btn.addEventListener("click", async () => {
@@ -6549,6 +6839,7 @@ const TRIPSY_PENDING_CHANGE_LABEL = {
   edit_event: '✏️ Edit',
   delete_event: '🗑️ Delete event',
   delete_trip: '🗑️ Delete trip',
+  create_event: '➕ New item',
 };
 
 // Owner-only review list of everything queued in driveData.tripsyPendingChanges
@@ -6576,6 +6867,7 @@ async function renderTripsyPendingChangesPanelContent() {
             <div style="margin-top:2px; font-size:13px; color:var(--text); font-weight:600;">${esc(c.eventSummary || c.tripName)}</div>
             <div style="font-size:12px; color:var(--muted);">${esc(c.tripName)}</div>
             ${c.type === 'edit_event' ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">${Object.keys(c.changes).map(k => esc(k)).join(', ')} changed</div>` : ''}
+            ${c.type === 'create_event' ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">${esc(tripsySlugToLabel(c.fields.category) || TRIPIT_TYPE_LABEL[c.tripsyResource === 'hosting' ? 'hotel' : 'other'])} • ${Object.keys(c.fields).length} field${Object.keys(c.fields).length === 1 ? '' : 's'} filled in</div>` : ''}
           </div>
           <button class="btn" data-tripsy-cancel-pending data-change-id="${esc(c.id)}" style="font-size:11px; padding:3px 8px; flex-shrink:0;">Cancel</button>
         </div>
@@ -6613,6 +6905,7 @@ async function updateTripsyPendingWarningBadge() {
 }
 
 async function renderTripsyTrips() {
+  resetAllTripsyTripsCollapsed();
   const homeIconInner = TRIPIT_HOME_ICON_B64
     ? `<img src="data:image/png;base64,${TRIPIT_HOME_ICON_B64}" style="max-width:80px; max-height:56px; width:auto; height:auto; display:block;" alt="Home">`
     : `<span style="font-size:32px; display:block;">🏠</span>`;
