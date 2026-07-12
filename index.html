@@ -566,6 +566,7 @@
     <div class="rail-brand">Travel Tracker<small>Simplifying Luxury Travel</small><small id="view-only-badge" style="display:none; color:var(--amber); font-weight:700;">VIEW ONLY</small></div>
     <button class="rail-item" data-view="home"><span class="nav-icon" id="nav-home-icon">📊</span>Home</button>
     <button class="rail-item" data-view="tripsytrips"><span class="nav-icon">🧭</span>Tripsy Trips</button>
+    <button class="rail-item" data-view="mytrips"><span class="nav-icon">🗺️</span>My Trips</button>
     <button class="rail-item" data-submenu-toggle="passengers" id="passengers-toggle">
       <span class="nav-icon">✈️</span>NetJets
       <span id="passengers-caret" style="margin-left:auto; font-size:22px; padding:2px 6px; cursor:pointer;">▸</span>
@@ -1082,6 +1083,103 @@ const Store = {
   },
   async getReport() {
     return driveData.report || null;
+  },
+  // ---- My Trips (direct data model, replaces the Tripsy snapshot pipeline
+  // for newly-added trips -- see index.html's "My Trips" section below).
+  // Unlike Tripsy Trips, there is no external system to reconcile with, so
+  // these write straight into driveData with no pending-changes queue.
+  async listTrips() {
+    return [...(driveData.trips || [])];
+  },
+  async saveTrip(trip) {
+    try {
+      if (!driveData.trips) driveData.trips = [];
+      const now = new Date().toISOString();
+      const idx = driveData.trips.findIndex(t => t.id === trip.id);
+      if (idx >= 0) {
+        driveData.trips[idx] = { ...driveData.trips[idx], ...trip, updatedAt: now };
+      } else {
+        driveData.trips.push({ events: [], ...trip, createdAt: trip.createdAt || now, updatedAt: now });
+      }
+      await persistDriveData();
+      return { ok: true };
+    } catch (e) {
+      console.error('Store.saveTrip failed:', e);
+      return { ok: false, error: e.message || String(e) };
+    }
+  },
+  async deleteTrip(tripId) {
+    try {
+      driveData.trips = (driveData.trips || []).filter(t => t.id !== tripId);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.deleteTrip failed:', e);
+      return false;
+    }
+  },
+  async saveTripEvent(tripId, event) {
+    try {
+      const trip = (driveData.trips || []).find(t => t.id === tripId);
+      if (!trip) throw new Error(`Trip ${tripId} not found`);
+      if (!trip.events) trip.events = [];
+      const now = new Date().toISOString();
+      const idx = trip.events.findIndex(e => e.id === event.id);
+      if (idx >= 0) {
+        trip.events[idx] = { ...trip.events[idx], ...event, tripId, updatedAt: now };
+      } else {
+        trip.events.push({ hidden: false, ...event, tripId, createdAt: event.createdAt || now, updatedAt: now });
+      }
+      await persistDriveData();
+      return { ok: true };
+    } catch (e) {
+      console.error('Store.saveTripEvent failed:', e);
+      return { ok: false, error: e.message || String(e) };
+    }
+  },
+  async deleteTripEvent(tripId, eventId) {
+    try {
+      const trip = (driveData.trips || []).find(t => t.id === tripId);
+      if (!trip) throw new Error(`Trip ${tripId} not found`);
+      trip.events = (trip.events || []).filter(e => e.id !== eventId);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.deleteTripEvent failed:', e);
+      return false;
+    }
+  },
+  async resolveTripEvent(tripId, eventId, edits) {
+    try {
+      const trip = (driveData.trips || []).find(t => t.id === tripId);
+      if (!trip) throw new Error(`Trip ${tripId} not found`);
+      const event = (trip.events || []).find(e => e.id === eventId);
+      if (!event) throw new Error(`Event ${eventId} not found on trip ${tripId}`);
+      Object.assign(event, edits);
+      event._warnings = null;
+      event._resolvedAt = new Date().toISOString();
+      event.updatedAt = event._resolvedAt;
+      await persistDriveData();
+      return { ok: true };
+    } catch (e) {
+      console.error('Store.resolveTripEvent failed:', e);
+      return { ok: false, error: e.message || String(e) };
+    }
+  },
+  async setTripEventHidden(tripId, eventId, hidden) {
+    try {
+      const trip = (driveData.trips || []).find(t => t.id === tripId);
+      if (!trip) throw new Error(`Trip ${tripId} not found`);
+      const event = (trip.events || []).find(e => e.id === eventId);
+      if (!event) throw new Error(`Event ${eventId} not found on trip ${tripId}`);
+      event.hidden = !!hidden;
+      event.updatedAt = new Date().toISOString();
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.setTripEventHidden failed:', e);
+      return false;
+    }
   },
 };
 
@@ -2604,6 +2702,7 @@ async function navigate(view, param) {
     else if (view === "trends") await renderTrends();
     else if (view === "triptrips") await renderTripitTrips();
     else if (view === "tripsytrips") await renderTripsyTrips();
+    else if (view === "mytrips") await renderMyTrips();
     else if (view === "reservations") await renderReservations();
     else if (view === "psbalance") await renderPsBalance();
     else if (view === "psinvoices") await renderPsInvoices();
@@ -5787,6 +5886,304 @@ async function renderTripitTrips() {
   }
 
   await renderTripitEventsList();
+}
+
+// ---- My Trips (direct data model -- driveData.trips) ----
+// Replaces the Tripsy snapshot pipeline for newly-added trips: trip/event
+// data is written straight into the shared driveData file (Store.saveTrip
+// etc., defined above), the same way PS reservations/invoices already work,
+// with no external service and no pending-changes queue to reconcile.
+// Trips can come from three places: a Claude Code session parsing a
+// document (e.g. an itinerary PDF) and calling Store.saveTrip/saveTripEvent
+// directly in a signed-in browser session, an automated Gmail-scanning
+// scheduled task doing the same, or (eventually) in-app creation forms.
+// Email-sourced events always start with a non-null _warnings array so a
+// human confirms them at least once before they're treated as authoritative
+// -- see resolveTripEvent's usage below, which mirrors resolveLeg's
+// Review Queue pattern for invoice legs.
+// NOTE: the existing Tripsy Trips page/pipeline below this section is
+// intentionally untouched -- it keeps running as-is until this replacement
+// is built out and proven, at which point retiring it is a separate,
+// deliberate step.
+
+const MY_TRIPS_TYPE_LABEL = {
+  flight: "✈️ Flight",
+  transportation: "🚗 Transportation",
+  hotel: "🏨 Lodging",
+  dining: "🍽️ Dining",
+  concert: "🎵 Concert",
+  tour: "🗺️ Tour",
+  other: "Other",
+};
+function myTripsTypeLabel(type) {
+  return MY_TRIPS_TYPE_LABEL[type] || (type ? type.charAt(0).toUpperCase() + type.slice(1) : "Other");
+}
+const MY_TRIPS_TYPE_INDENT = { flight: 0, transportation: 1, hotel: 2, dining: 3, concert: 3, tour: 3, other: 3 };
+function myTripsTypeIndent(type) {
+  return MY_TRIPS_TYPE_INDENT[type] ?? 3;
+}
+
+// Personal display preference (like TripIt's collapse state) -- not shared
+// data, so localStorage rather than driveData is appropriate here too.
+const MY_TRIPS_COLLAPSE_STORAGE_PREFIX = 'mytrips-trip-collapsed:';
+function isMyTripCollapsed(tripId) {
+  try {
+    return localStorage.getItem(MY_TRIPS_COLLAPSE_STORAGE_PREFIX + tripId) === '1';
+  } catch (e) {
+    return false;
+  }
+}
+function setMyTripCollapsed(tripId, collapsed) {
+  try {
+    if (collapsed) localStorage.setItem(MY_TRIPS_COLLAPSE_STORAGE_PREFIX + tripId, '1');
+    else localStorage.removeItem(MY_TRIPS_COLLAPSE_STORAGE_PREFIX + tripId);
+  } catch (e) {
+    console.error('setMyTripCollapsed failed:', e);
+  }
+}
+
+// Shared edit panel used both for normal edits and for resolving a
+// review-flagged (_warnings-carrying) event -- the only difference is which
+// Store call Save makes and whether a no-edits "Dismiss" option is shown.
+function renderMyTripsEditPanel(panel, tripId, ev) {
+  const startDateStr = (ev.start || '').slice(0, 10);
+  const endDateStr = (ev.end || '').slice(0, 10);
+  const isReview = !!(ev._warnings && ev._warnings.length);
+  panel.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:10px; max-width:420px;">
+      ${isReview ? `<div style="font-size:12px; color:var(--amber);">${esc(ev._warnings.join(' '))}</div>` : ''}
+      <label style="font-size:12px; color:var(--muted);">Description
+        <input type="text" data-mytrips-edit-summary value="${esc(ev.summary || '')}" style="width:100%; margin-top:2px;">
+      </label>
+      <div style="display:flex; gap:8px;">
+        <label style="font-size:12px; color:var(--muted); flex:1;">Start date
+          <input type="date" data-mytrips-edit-start value="${esc(startDateStr)}" style="width:100%; margin-top:2px;">
+        </label>
+        <label style="font-size:12px; color:var(--muted); flex:1;">End date
+          <input type="date" data-mytrips-edit-end value="${esc(endDateStr)}" style="width:100%; margin-top:2px;">
+        </label>
+      </div>
+      <label style="font-size:12px; color:var(--muted);">Category
+        <select data-mytrips-edit-category style="width:100%; margin-top:2px;">
+          ${TRIPIT_EDITABLE_CATEGORIES.map(c => `<option value="${c.value}" ${ev.type === c.value ? 'selected' : ''}>${esc(c.label)}</option>`).join("")}
+        </select>
+      </label>
+      <label style="font-size:12px; color:var(--muted);">Location
+        <input type="text" data-mytrips-edit-location value="${esc(ev.location || '')}" style="width:100%; margin-top:2px;">
+      </label>
+      <label style="font-size:12px; color:var(--muted);">Notes
+        <textarea data-mytrips-edit-notes rows="2" style="width:100%; margin-top:2px; font-family:inherit;">${esc(ev.notes || '')}</textarea>
+      </label>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button class="btn primary" data-mytrips-edit-save style="font-size:11px; padding:4px 10px;">Save</button>
+        ${isReview ? `<button class="btn" data-mytrips-edit-dismiss style="font-size:11px; padding:4px 10px;">Accept as-is</button>` : ''}
+        <button class="btn" data-mytrips-edit-cancel style="font-size:11px; padding:4px 10px; margin-left:auto;">Cancel</button>
+      </div>
+    </div>
+  `;
+
+  panel.querySelector("[data-mytrips-edit-cancel]").addEventListener("click", () => {
+    panel.style.display = "none";
+    panel.innerHTML = "";
+  });
+
+  const readEdits = () => ({
+    summary: panel.querySelector("[data-mytrips-edit-summary]").value.trim() || null,
+    start: panel.querySelector("[data-mytrips-edit-start]").value ? `${panel.querySelector("[data-mytrips-edit-start]").value}T${(ev.start || '').slice(11) || '00:00:00'}` : ev.start,
+    end: panel.querySelector("[data-mytrips-edit-end]").value ? `${panel.querySelector("[data-mytrips-edit-end]").value}T${(ev.end || '').slice(11) || '00:00:00'}` : ev.end,
+    type: panel.querySelector("[data-mytrips-edit-category]").value || ev.type,
+    location: panel.querySelector("[data-mytrips-edit-location]").value.trim() || null,
+    notes: panel.querySelector("[data-mytrips-edit-notes]").value.trim() || null,
+  });
+
+  panel.querySelector("[data-mytrips-edit-save]").addEventListener("click", async () => {
+    const saveBtn = panel.querySelector("[data-mytrips-edit-save]");
+    saveBtn.disabled = true;
+    const edits = readEdits();
+    const result = isReview
+      ? await Store.resolveTripEvent(tripId, ev.id, edits)
+      : await Store.saveTripEvent(tripId, { ...ev, ...edits });
+    if (!result.ok) toast("Could not save changes — storage error. Please try again.", "error");
+    renderMyTripsEventsList();
+  });
+
+  if (isReview) {
+    panel.querySelector("[data-mytrips-edit-dismiss]").addEventListener("click", async () => {
+      const dismissBtn = panel.querySelector("[data-mytrips-edit-dismiss]");
+      dismissBtn.disabled = true;
+      const result = await Store.resolveTripEvent(tripId, ev.id, {});
+      if (!result.ok) toast("Could not save changes — storage error. Please try again.", "error");
+      renderMyTripsEventsList();
+    });
+  }
+}
+
+async function renderMyTripsEventsList() {
+  const container = document.getElementById("mytrips-card");
+  const trips = (await Store.listTrips()).slice().sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+
+  if (!trips.length) {
+    container.innerHTML = `<div class="card"><div class="empty-state">No trips yet.</div></div>`;
+    return;
+  }
+
+  container.innerHTML = trips.map(trip => {
+    const subtitle = [formatTripitDateRange(trip.start, trip.end), trip.location].filter(Boolean).join(" • ");
+    const collapsed = isMyTripCollapsed(trip.id);
+    const visibleEvents = (trip.events || []).filter(ev => !ev.hidden).slice().sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+    const hiddenCount = (trip.events || []).length - visibleEvents.length;
+    const eventRows = collapsed ? "" : visibleEvents.map(ev => {
+      const departTime = formatTripitTime(ev.start);
+      const arriveTime = formatTripitTime(ev.end);
+      const showTimes = (ev.type === 'flight' || ev.type === 'transportation') && (departTime || arriveTime);
+      const needsReview = !!(ev._warnings && ev._warnings.length);
+      return `
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); margin-top:10px; margin-left:${myTripsTypeIndent(ev.type) * TRIPIT_INDENT_PX}px;">
+        <div>
+          <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">
+            ${esc(myTripsTypeLabel(ev.type))}${ev.start ? ` • ${esc(formatTripitDateRange(ev.start, ev.end))}` : ''}
+            ${needsReview ? ` • <span style="color:#e67e22;">Needs Review</span>` : ''}
+          </div>
+          <div style="margin-top:6px; font-size:13px; color:var(--text);">${esc(ev.summary)}</div>
+          ${showTimes ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">${departTime ? `Departs ${esc(departTime)}` : ''}${departTime && arriveTime ? ' · ' : ''}${arriveTime ? `Arrives ${esc(arriveTime)}` : ''}</div>` : ''}
+          ${ev.location ? `<div style="margin-top:4px; font-size:13px; color:var(--muted);">${esc(ev.location)}</div>` : ''}
+          ${ev.notes ? `<div style="margin-top:4px; font-size:12px; color:var(--muted); font-style:italic;">${esc(ev.notes)}</div>` : ''}
+        </div>
+        ${isOwner ? `
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="btn" data-mytrips-edit-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px; ${needsReview ? 'background:#e67e22; color:#fff; border-color:#e67e22;' : ''}">${needsReview ? 'Review' : 'Edit'}</button>
+            <button class="btn" data-mytrips-hide-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px;">Hide</button>
+            <button class="btn" data-mytrips-delete-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" data-summary="${esc(ev.summary || '')}" style="font-size:11px; padding:3px 8px;">Delete</button>
+          </div>
+        ` : ''}
+      </div>
+      ${isOwner ? `<div data-mytrips-edit-panel="${esc(ev.id)}" style="display:none; margin-top:8px; margin-left:${myTripsTypeIndent(ev.type) * TRIPIT_INDENT_PX}px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
+      `;
+    }).join("");
+    return `
+      <div class="card" id="mytrips-trip-card-${esc(trip.id)}" style="margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+          <div>
+            <div style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">${esc(trip.name)}</div>
+            ${subtitle ? `<div style="margin-top:2px; font-size:13px; color:var(--muted);">${esc(subtitle)}</div>` : ''}
+          </div>
+          <button data-mytrips-toggle-collapse data-id="${esc(trip.id)}" title="${collapsed ? 'Expand' : 'Collapse'}" style="background:none; border:none; cursor:pointer; color:var(--amber); font-size:26px; line-height:1; padding:0; flex-shrink:0;">${collapsed ? '▸' : '▾'}</button>
+        </div>
+        ${eventRows}
+        ${!collapsed && isOwner && hiddenCount ? `
+          <div style="margin-top:12px; text-align:right;">
+            <button class="btn" data-mytrips-show-hidden-events data-id="${esc(trip.id)}" style="font-size:11px; padding:3px 8px;">Show Hidden Events (${hiddenCount})</button>
+          </div>
+          <div data-mytrips-hidden-events-panel="${esc(trip.id)}" style="display:none; margin-top:10px;"></div>
+        ` : ''}
+        ${isOwner ? `
+          <div style="margin-top:12px; text-align:right;">
+            <button class="btn" data-mytrips-delete-trip data-id="${esc(trip.id)}" data-name="${esc(trip.name || '')}" style="font-size:11px; padding:3px 8px;">Delete Trip</button>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }).join("");
+
+  container.querySelectorAll("[data-mytrips-toggle-collapse]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.id;
+      setMyTripCollapsed(id, !isMyTripCollapsed(id));
+      renderMyTripsEventsList();
+    });
+  });
+
+  if (!isOwner) return;
+
+  container.querySelectorAll("[data-mytrips-edit-event]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const tripId = btn.dataset.tripId;
+      const id = btn.dataset.id;
+      const panel = container.querySelector(`[data-mytrips-edit-panel="${id}"]`);
+      const isOpen = panel.style.display !== "none";
+      if (isOpen) {
+        panel.style.display = "none";
+        panel.innerHTML = "";
+        return;
+      }
+      const trip = (await Store.listTrips()).find(t => t.id === tripId);
+      const ev = trip && (trip.events || []).find(e => e.id === id);
+      if (!ev) return;
+      renderMyTripsEditPanel(panel, tripId, ev);
+      panel.style.display = "block";
+    });
+  });
+
+  container.querySelectorAll("[data-mytrips-hide-event]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const ok = await Store.setTripEventHidden(btn.dataset.tripId, btn.dataset.id, true);
+      if (!ok) toast("Could not hide this item — storage error. Please try again.", "error");
+      renderMyTripsEventsList();
+    });
+  });
+
+  container.querySelectorAll("[data-mytrips-delete-event]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm(`Delete "${btn.dataset.summary}"? This can't be undone.`)) return;
+      btn.disabled = true;
+      const ok = await Store.deleteTripEvent(btn.dataset.tripId, btn.dataset.id);
+      if (!ok) toast("Could not delete this item — storage error. Please try again.", "error");
+      renderMyTripsEventsList();
+    });
+  });
+
+  container.querySelectorAll("[data-mytrips-delete-trip]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm(`Delete the entire trip "${btn.dataset.name}"? This can't be undone.`)) return;
+      btn.disabled = true;
+      const ok = await Store.deleteTrip(btn.dataset.id);
+      if (!ok) toast("Could not delete this trip — storage error. Please try again.", "error");
+      renderMyTripsEventsList();
+    });
+  });
+
+  container.querySelectorAll("[data-mytrips-show-hidden-events]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      const panel = container.querySelector(`[data-mytrips-hidden-events-panel="${id}"]`);
+      const isOpen = panel.style.display !== "none";
+      if (isOpen) {
+        panel.style.display = "none";
+        return;
+      }
+      const trip = (await Store.listTrips()).find(t => t.id === id);
+      const hiddenEvents = trip ? (trip.events || []).filter(ev => ev.hidden) : [];
+      panel.innerHTML = `
+        <div style="border-top:1px solid var(--line); padding-top:10px;">
+          ${hiddenEvents.map(ev => `
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:6px 0;">
+              <div style="font-size:12px; color:var(--muted);">${esc(myTripsTypeLabel(ev.type))} • ${esc(ev.summary)}</div>
+              <button class="btn" data-mytrips-show-event data-trip-id="${esc(id)}" data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px; flex-shrink:0;">Show</button>
+            </div>
+          `).join("")}
+        </div>
+      `;
+      panel.style.display = "block";
+      panel.querySelectorAll("[data-mytrips-show-event]").forEach(showBtn => {
+        showBtn.addEventListener("click", async () => {
+          showBtn.disabled = true;
+          const ok = await Store.setTripEventHidden(showBtn.dataset.tripId, showBtn.dataset.id, false);
+          if (!ok) toast("Could not update — storage error. Please try again.", "error");
+          renderMyTripsEventsList();
+        });
+      });
+    });
+  });
+}
+
+async function renderMyTrips() {
+  main.innerHTML = `
+    <div class="page-title">My Trips</div>
+    <div class="page-sub" style="margin-bottom:20px;">Trips added directly to Travel Tracker — from parsed documents or auto-imported from email.</div>
+    <div id="mytrips-card"><div class="card"><div class="empty-state">Loading…</div></div></div>
+  `;
+  await renderMyTripsEventsList();
 }
 
 // ---- Tripsy Trips (embedded-snapshot page, see TRIPSY_TRIPS_DATA above) ----
