@@ -396,7 +396,7 @@
      form fields, so there's nothing else to inherit from and browser
      defaults look out of place against this theme. */
   .field-input {
-    width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+    box-sizing: border-box; width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
     background: var(--panel-2); color: var(--text); font-family: var(--sans); font-size: 14px;
   }
   .field-input:focus { outline: none; border-color: var(--amber); }
@@ -6181,14 +6181,14 @@ const TRIPSY_EDIT_FIELDS = {
     { key: 'company', label: 'Company', kind: 'company', group: 'transportDetails' },
     { key: 'transportNumber', label: 'Number', kind: 'text', group: 'transportDetails' },
     { key: 'vehicleDescription', label: 'Equipment', kind: 'text', group: 'transportDetails' },
-    { key: 'departureDescription', label: 'Departure location', kind: 'text', group: 'departure' },
-    { key: 'departureTerminal', label: 'Departure terminal', kind: 'text', group: 'departure' },
-    { key: 'departureAt', label: 'Departure time', kind: 'datetime', group: 'departure' },
-    { key: 'arrivalDescription', label: 'Arrival location', kind: 'text', group: 'arrival' },
-    { key: 'arrivalTerminal', label: 'Arrival terminal', kind: 'text', group: 'arrival' },
-    { key: 'arrivalAt', label: 'Arrival time', kind: 'datetime', group: 'arrival' },
-    { key: 'seatClass', label: 'Seat class', kind: 'text', group: 'seat' },
-    { key: 'seatNumber', label: 'Seat number', kind: 'text', group: 'seat' },
+    { key: 'departureDescription', label: 'Location', kind: 'text', group: 'departure' },
+    { key: 'departureTerminal', label: 'Terminal', kind: 'text', group: 'departure' },
+    { key: 'departureAt', label: 'Time', kind: 'datetime', group: 'departure' },
+    { key: 'arrivalDescription', label: 'Location', kind: 'text', group: 'arrival' },
+    { key: 'arrivalTerminal', label: 'Terminal', kind: 'text', group: 'arrival' },
+    { key: 'arrivalAt', label: 'Time', kind: 'datetime', group: 'arrival' },
+    { key: 'seatClass', label: 'Class', kind: 'text', group: 'seat' },
+    { key: 'seatNumber', label: 'Number', kind: 'text', group: 'seat' },
     ...TRIPSY_TRAVEL_AGENT_FIELDS,
     { key: 'notes', label: 'Notes', kind: 'textarea', group: 'notes' },
   ],
@@ -6206,22 +6206,24 @@ function tripsyBlankRaw(resource, presetCategory) {
   return blank;
 }
 
-// The choices offered by the + button on an expanded trip card -- the
-// first six are deliberately the same items Tripsy itself offers when
-// adding to a trip; Spa/Concert/Museum were added on top of those by
-// owner request. Each maps onto one of the three resources
+// The choices offered by the + button on an expanded trip card -- started
+// as the same items Tripsy itself offers when adding to a trip, since
+// customized by owner request (Stay->Lodging, Restaurant->Dining, Car+Train
+// merged into one Ground Transportation choice, Spa/Concert/Museum/Event/
+// Theater added). Each maps onto one of the three resources
 // renderTripsyEditPanel already knows how to render, with `category`
 // preset to match.
 const TRIPSY_ADD_MENU_ITEMS = [
-  { label: 'Flight', resource: 'transportation', category: 'airplane' },
-  { label: 'Stay', resource: 'hosting', category: null },
-  { label: 'Restaurant', resource: 'activity', category: 'restaurant' },
-  { label: 'Tour', resource: 'activity', category: 'tour' },
-  { label: 'Car', resource: 'transportation', category: 'car' },
-  { label: 'Train', resource: 'transportation', category: 'train' },
-  { label: 'Spa', resource: 'activity', category: TRIPSY_CUSTOM_CATEGORY_SPA_SLUG },
   { label: 'Concert', resource: 'activity', category: 'concert' },
+  { label: 'Dining', resource: 'activity', category: 'restaurant' },
+  { label: 'Event', resource: 'activity', category: 'event' },
+  { label: 'Flight', resource: 'transportation', category: 'airplane' },
+  { label: 'Ground Transportation', resource: 'transportation', category: 'car' },
+  { label: 'Lodging', resource: 'hosting', category: null },
   { label: 'Museum', resource: 'activity', category: 'museum' },
+  { label: 'Spa', resource: 'activity', category: TRIPSY_CUSTOM_CATEGORY_SPA_SLUG },
+  { label: 'Theater', resource: 'activity', category: 'theater' },
+  { label: 'Tour', resource: 'activity', category: 'tour' },
 ];
 
 // Stable key for a Tripsy-sourced event across renders (and across the
@@ -6318,6 +6320,83 @@ function tripsyTripIdFromKey(tripKey) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Groups one resource's field list into labeled sections in first-seen
+// order -- shared by the editable form (renderTripsyEditPanel) and the
+// read-only details view (renderTripsyViewPanel) so both lay fields out
+// identically (same section boxes, same two-column grid).
+function tripsyFieldGroups(resource) {
+  const fields = TRIPSY_EDIT_FIELDS[resource] || [];
+  const groupOrder = [];
+  const byGroup = {};
+  for (const f of fields) {
+    if (!byGroup[f.group]) { byGroup[f.group] = []; groupOrder.push(f.group); }
+    byGroup[f.group].push(f);
+  }
+  return { groupOrder, byGroup };
+}
+
+// Formats a stored local-wall-clock ISO string (see the Timestamps note in
+// the refresh procedure) as a combined date + time string for read-only
+// display, e.g. "Aug 2, 2026, 10:00 AM".
+function formatTripsyFieldDateTime(iso) {
+  const parts = parseTripitLocalParts(iso);
+  if (!parts) return null;
+  const dateLabel = tripitPartsToUtcDate(parts).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+  const timeLabel = formatTripitTime(iso);
+  return timeLabel ? `${dateLabel}, ${timeLabel}` : dateLabel;
+}
+
+// Renders a read-only details view of one Tripsy-sourced event's raw
+// fields into `panel` -- same section/grid layout as renderTripsyEditPanel,
+// just plain text instead of inputs, so selecting an event shows its
+// details without exposing anything editable. Empty fields (and groups
+// that end up entirely empty) are skipped rather than shown blank.
+// `onEdit`, if provided, renders an Edit button that swaps this same panel
+// over to renderTripsyEditPanel -- omitted entirely for view-only users.
+function renderTripsyViewPanel(panel, raw, eventSummary, onEdit) {
+  const { groupOrder, byGroup } = tripsyFieldGroups(raw.resource);
+  const displayValue = f => {
+    const val = raw[f.key];
+    if (val === null || val === undefined || val === '') return null;
+    if (f.kind === 'select') return tripsySlugToLabel(val);
+    if (f.kind === 'datetime') return formatTripsyFieldDateTime(val) || val;
+    return val;
+  };
+  const sectionHtml = group => {
+    const rows = byGroup[group].map(f => ({ f, val: displayValue(f) })).filter(r => r.val != null);
+    if (!rows.length) return '';
+    return `
+      <div style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px 18px;">
+        <div style="font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:var(--amber); margin-bottom:12px;">${esc(TRIPSY_EDIT_GROUP_LABEL[group] || group)}</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px;">
+          ${rows.map(({ f, val }) => `
+            <div style="${f.kind === 'textarea' ? 'grid-column:1 / -1;' : ''}">
+              <div style="font-size:12px; font-weight:600; color:var(--muted); margin-bottom:6px;">${esc(f.label)}</div>
+              <div style="font-size:14px; color:var(--text); white-space:${f.kind === 'textarea' ? 'pre-line' : 'normal'};">${esc(val)}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  };
+  const sections = groupOrder.map(sectionHtml).filter(Boolean).join('');
+  panel.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
+      ${sections || `<div style="font-size:13px; color:var(--muted);">No details available.</div>`}
+      <div style="display:flex; gap:10px; align-items:center;">
+        ${onEdit ? `<button class="btn primary" data-tripsy-view-edit style="font-size:13px; padding:8px 18px;">Edit</button>` : ''}
+        <button class="btn" data-tripsy-view-close style="font-size:13px; padding:8px 18px;">Close</button>
+      </div>
+    </div>
+  `;
+  if (onEdit) panel.querySelector("[data-tripsy-view-edit]").addEventListener("click", onEdit);
+  panel.querySelector("[data-tripsy-view-close]").addEventListener("click", () => {
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    panel.dataset.mode = "";
+  });
+}
+
 // Renders the inline edit form for one Tripsy-sourced event's raw fields
 // into `panel`, wiring Save (queues an edit_event pending change) and Exit
 // without saving. `raw` is the CURRENT effective raw fields (including any
@@ -6362,12 +6441,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
   // Grouped into labeled sections (order taken from the field list itself)
   // rather than one long flat stack -- each section is its own bordered
   // box with a two-column grid, and Notes always spans the full width.
-  const groupOrder = [];
-  const byGroup = {};
-  for (const f of fields) {
-    if (!byGroup[f.group]) { byGroup[f.group] = []; groupOrder.push(f.group); }
-    byGroup[f.group].push(f);
-  }
+  const { groupOrder, byGroup } = tripsyFieldGroups(raw.resource);
   const sectionHtml = group => `
     <div style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px 18px;">
       <div style="font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:var(--amber); margin-bottom:12px;">${esc(TRIPSY_EDIT_GROUP_LABEL[group] || group)}</div>
@@ -6565,10 +6639,17 @@ async function renderTripsyEventsList() {
             <button class="btn" data-tripsy-edit-event data-key="${esc(eventKey)}" style="font-size:11px; padding:3px 8px;" title="Edit">✏️</button>
             <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:11px; padding:3px 8px;" title="Delete">🗑️</button>
           </div>`;
-      const panelKey = canEditDelete && !isPendingDelete && !renderedPanelKeys.has(eventKey) ? (renderedPanelKeys.add(eventKey), eventKey) : null;
+      // Available to every viewer (not just isOwner) since selecting an
+      // event to see its read-only details doesn't require edit access --
+      // only the Edit/Delete icons themselves are owner-gated.
+      const panelKey = !!eventKey && !isPendingDelete && !renderedPanelKeys.has(eventKey) ? (renderedPanelKeys.add(eventKey), eventKey) : null;
+      // The view-click target is this inner content div specifically, not
+      // the outer row -- actionsHtml (Edit/Delete icons) is a SIBLING div,
+      // not a descendant, so clicks on those icons never bubble into it.
+      const viewAttr = panelKey ? `data-tripsy-view-event="${esc(panelKey)}" style="cursor:pointer;"` : '';
       const flightHtml = `
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); margin-top:10px; margin-left:${indentLevel * TRIPIT_INDENT_PX}px; ${ev.type === 'other' ? 'opacity:0.6;' : ''} ${isPendingDelete ? 'opacity:0.5;' : ''}">
-        <div>
+        <div ${viewAttr}>
           <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">
             ${esc(TRIPIT_TYPE_LABEL[ev.type] || ev.type)}${ev.start ? ` • ${esc(formatTripitDateRange(ev.start, ev.end))}` : ''}
           </div>
@@ -6619,7 +6700,7 @@ async function renderTripsyEventsList() {
             <div style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">${esc(trip.name)}</div>
             ${subtitle ? `<div style="margin-top:2px; font-size:13px; color:var(--muted);">${esc(subtitle)}</div>` : ''}
           </div>
-          <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+          <div style="display:flex; align-items:center; gap:20px; flex-shrink:0;">
             ${showAddButton ? `
               <div style="position:relative;">
                 <button data-tripsy-add-item-toggle data-key="${esc(trip.key)}" title="Add item to trip" style="background:var(--home-green); border:none; border-radius:50%; width:28px; height:28px; cursor:pointer; color:#04210F; font-size:18px; font-weight:700; line-height:1; display:flex; align-items:center; justify-content:center; padding:0;">+</button>
@@ -6664,6 +6745,38 @@ async function renderTripsyEventsList() {
   // wired before the isOwner gate below.
   container.querySelectorAll("[data-tripsy-goto-reservation]").forEach(el => {
     el.addEventListener("click", () => goToReservation(el.dataset.tripsyGotoReservation));
+  });
+
+  // Selecting an event shows its read-only details -- available to every
+  // viewer (not owner-gated), unlike the Edit/Delete icons. The panel
+  // tracks its own open mode ('view'/'edit') in data-mode so this and the
+  // Edit-icon handler below can tell whether to toggle closed or switch
+  // mode instead of blindly re-rendering.
+  container.querySelectorAll("[data-tripsy-view-event]").forEach(el => {
+    el.addEventListener("click", async () => {
+      const key = el.dataset.tripsyViewEvent;
+      const panel = container.querySelector(`[data-tripsy-edit-panel="${key}"]`);
+      if (!panel) return;
+      if (panel.style.display !== "none" && panel.dataset.mode === "view") {
+        panel.style.display = "none";
+        panel.innerHTML = "";
+        panel.dataset.mode = "";
+        return;
+      }
+      const found = findTripsyRawByKey(key);
+      if (!found) return;
+      const pending = isOwner ? await Store.listTripsyPendingChanges() : [];
+      const editChange = pending.find(c => c.type === 'edit_event' && c.eventKey === key);
+      const effectiveRaw = editChange ? { ...found.raw, ...editChange.changes } : found.raw;
+      const display = tripsyRawToDisplay(effectiveRaw.resource, effectiveRaw);
+      const onEdit = isOwner ? () => {
+        renderTripsyEditPanel(panel, effectiveRaw, found.tripKey, found.tripName, display.summary);
+        panel.dataset.mode = "edit";
+      } : null;
+      renderTripsyViewPanel(panel, effectiveRaw, display.summary, onEdit);
+      panel.dataset.mode = "view";
+      panel.style.display = "block";
+    });
   });
 
   if (!isOwner) return;
@@ -6800,10 +6913,14 @@ async function renderTripsyEventsList() {
     btn.addEventListener("click", async () => {
       const key = btn.dataset.key;
       const panel = container.querySelector(`[data-tripsy-edit-panel="${key}"]`);
-      const isOpen = panel.style.display !== "none";
-      if (isOpen) {
+      // Only toggle closed if the edit form is ALREADY what's open -- if
+      // the read-only view is open instead, this switches it to the edit
+      // form rather than closing it.
+      const isEditOpen = panel.style.display !== "none" && panel.dataset.mode === "edit";
+      if (isEditOpen) {
         panel.style.display = "none";
         panel.innerHTML = "";
+        panel.dataset.mode = "";
         return;
       }
       const found = findTripsyRawByKey(key);
@@ -6813,6 +6930,7 @@ async function renderTripsyEventsList() {
       const effectiveRaw = editChange ? { ...found.raw, ...editChange.changes } : found.raw;
       const display = tripsyRawToDisplay(effectiveRaw.resource, effectiveRaw);
       renderTripsyEditPanel(panel, effectiveRaw, found.tripKey, found.tripName, display.summary);
+      panel.dataset.mode = "edit";
       panel.style.display = "block";
     });
   });
