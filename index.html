@@ -565,8 +565,7 @@
   <div class="rail">
     <div class="rail-brand">Travel Tracker<small>Simplifying Luxury Travel</small><small id="view-only-badge" style="display:none; color:var(--amber); font-weight:700;">VIEW ONLY</small></div>
     <button class="rail-item" data-view="home"><span class="nav-icon" id="nav-home-icon">📊</span>Home</button>
-    <button class="rail-item" data-view="tripsytrips"><span class="nav-icon">🧭</span>Tripsy Trips</button>
-    <button class="rail-item" data-view="mytrips"><span class="nav-icon">🗺️</span>My Trips</button>
+    <button class="rail-item" data-view="mytrips"><span class="nav-icon">🧳</span>My Trips</button>
     <button class="rail-item" data-submenu-toggle="passengers" id="passengers-toggle">
       <span class="nav-icon">✈️</span>NetJets
       <span id="passengers-caret" style="margin-left:auto; font-size:22px; padding:2px 6px; cursor:pointer;">▸</span>
@@ -587,7 +586,8 @@
     </div>
     <button class="rail-item" data-view="trends"><span class="nav-icon">📈</span>Trends</button>
     <div id="storage-health-banner"></div>
-    <button class="rail-item" data-view="triptrips" style="margin-top:auto;"><span class="nav-icon">🧳</span>Trips</button>
+    <button class="rail-item" data-view="tripsytrips" style="margin-top:auto;"><span class="nav-icon">🧭</span>Tripsy Trips</button>
+    <button class="rail-item" data-view="triptrips"><span class="nav-icon">🗺️</span>Trips</button>
     <button class="rail-item" data-submenu-toggle="utilities" id="utilities-toggle" style="display:none;">
       <span class="nav-icon">🛠️</span>Utilities
       <span id="utilities-caret" style="margin-left:auto; font-size:22px;">▸</span>
@@ -5942,68 +5942,293 @@ function setMyTripCollapsed(tripId, collapsed) {
   }
 }
 
-// Shared edit panel used both for normal edits and for resolving a
-// review-flagged (_warnings-carrying) event -- the only difference is which
-// Store call Save makes and whether a no-edits "Dismiss" option is shown.
-function renderMyTripsEditPanel(panel, tripId, ev) {
-  const startDateStr = (ev.start || '').slice(0, 10);
-  const endDateStr = (ev.end || '').slice(0, 10);
-  const isReview = !!(ev._warnings && ev._warnings.length);
-  panel.innerHTML = `
-    <div style="display:flex; flex-direction:column; gap:10px; max-width:420px;">
-      ${isReview ? `<div style="font-size:12px; color:var(--amber);">${esc(ev._warnings.join(' '))}</div>` : ''}
-      <label style="font-size:12px; color:var(--muted);">Description
-        <input type="text" data-mytrips-edit-summary value="${esc(ev.summary || '')}" style="width:100%; margin-top:2px;">
-      </label>
-      <div style="display:flex; gap:8px;">
-        <label style="font-size:12px; color:var(--muted); flex:1;">Start date
-          <input type="date" data-mytrips-edit-start value="${esc(startDateStr)}" style="width:100%; margin-top:2px;">
-        </label>
-        <label style="font-size:12px; color:var(--muted); flex:1;">End date
-          <input type="date" data-mytrips-edit-end value="${esc(endDateStr)}" style="width:100%; margin-top:2px;">
-        </label>
+// Field-group config for the read-only detail view and edit form below --
+// deliberately independent from Tripsy Trips's TRIPSY_EDIT_FIELDS/
+// TRIPSY_EDIT_GROUP_LABEL (same shape, on purpose, since raw event fields
+// use the same key names) so a future Tripsy Trips retirement pass can
+// delete that page's code without touching this one. The vocabulary/
+// formatting helpers used below (TRIPSY_ACTIVITY_TYPES,
+// TRIPSY_TRANSPORTATION_TYPES, tripsySlugToLabel, tripsyActivityCategoryToType,
+// tripsyTransportationHeaderLabel, formatTripsyFieldDateTime,
+// getAllTripsyAirlines/addTripsyCustomAirline) ARE still shared, since
+// they're generic vocabulary/formatting utilities rather than page-specific
+// rendering -- fine to keep sharing even after that retirement.
+const MY_TRIPS_EDIT_GROUP_LABEL = {
+  eventDetails: 'Event Details', lodgingDetails: 'Lodging Details', transportDetails: 'Transportation Details',
+  timing: 'Timing', contact: 'Contact Information', departure: 'Departure', arrival: 'Arrival', seat: 'Seat', notes: 'Notes',
+};
+const MY_TRIPS_EDIT_FIELDS = {
+  activity: [
+    { key: 'name', label: 'Name', kind: 'text', group: 'eventDetails' },
+    { key: 'category', label: 'Category', kind: 'select', optionsKey: 'activity', group: 'eventDetails', optionSort: true },
+    { key: 'startsAt', label: 'Start', kind: 'datetime', group: 'timing' },
+    { key: 'endsAt', label: 'End', kind: 'datetime', group: 'timing' },
+    { key: 'address', label: 'Location', kind: 'text', group: 'contact' },
+    { key: 'confirmation', label: 'Confirmation #', kind: 'text', group: 'contact' },
+    { key: 'phone', label: 'Phone', kind: 'text', group: 'contact' },
+    { key: 'website', label: 'Website', kind: 'text', group: 'contact' },
+    { key: 'notes', label: 'Notes', kind: 'textarea', group: 'notes' },
+  ],
+  hosting: [
+    { key: 'name', label: 'Name', kind: 'text', group: 'lodgingDetails' },
+    { key: 'confirmation', label: 'Confirmation #', kind: 'text', group: 'lodgingDetails' },
+    { key: 'startsAt', label: 'Check-in', kind: 'datetime', group: 'timing' },
+    { key: 'endsAt', label: 'Check-out', kind: 'datetime', group: 'timing' },
+    { key: 'address', label: 'Address', kind: 'text', group: 'contact' },
+    { key: 'phone', label: 'Phone', kind: 'text', group: 'contact' },
+    { key: 'website', label: 'Website', kind: 'text', group: 'contact' },
+    { key: 'notes', label: 'Notes', kind: 'textarea', group: 'notes' },
+  ],
+  transportation: [
+    { key: 'category', label: 'Type', kind: 'select', optionsKey: 'transportation', group: 'transportDetails' },
+    { key: 'confirmation', label: 'Confirmation #', kind: 'text', group: 'transportDetails' },
+    { key: 'company', label: 'Company', kind: 'company', group: 'transportDetails' },
+    { key: 'transportNumber', label: 'Number', kind: 'text', group: 'transportDetails' },
+    { key: 'vehicleDescription', label: 'Equipment', kind: 'text', group: 'transportDetails' },
+    { key: 'departureDescription', label: 'Location', kind: 'text', group: 'departure' },
+    { key: 'departureTerminal', label: 'Terminal', kind: 'text', group: 'departure' },
+    { key: 'departureAt', label: 'Time', kind: 'datetime', group: 'departure' },
+    { key: 'arrivalDescription', label: 'Location', kind: 'text', group: 'arrival' },
+    { key: 'arrivalTerminal', label: 'Terminal', kind: 'text', group: 'arrival' },
+    { key: 'arrivalAt', label: 'Time', kind: 'datetime', group: 'arrival' },
+    { key: 'seatClass', label: 'Class', kind: 'text', group: 'seat' },
+    { key: 'seatNumber', label: 'Number', kind: 'text', group: 'seat' },
+    { key: 'notes', label: 'Notes', kind: 'textarea', group: 'notes' },
+  ],
+};
+// Resolves an optionsKey to its vocab list lazily (inside a function body,
+// called only at render time) rather than embedding TRIPSY_ACTIVITY_TYPES/
+// TRIPSY_TRANSPORTATION_TYPES directly as MY_TRIPS_EDIT_FIELDS values --
+// those consts are declared later in the file (Tripsy Trips section), and
+// a top-level const initializer runs immediately at its own position, so
+// referencing them directly there would hit the temporal dead zone.
+function myTripsFieldOptions(optionsKey) {
+  return optionsKey === 'activity' ? TRIPSY_ACTIVITY_TYPES : TRIPSY_TRANSPORTATION_TYPES;
+}
+function myTripsFieldGroups(resource) {
+  const fields = MY_TRIPS_EDIT_FIELDS[resource] || [];
+  const groupOrder = [];
+  const byGroup = {};
+  for (const f of fields) {
+    if (!byGroup[f.group]) { byGroup[f.group] = []; groupOrder.push(f.group); }
+    byGroup[f.group].push(f);
+  }
+  return { groupOrder, byGroup };
+}
+
+// Rebuilds the display fields (type/summary/location/notes/start/end/
+// extra) from an event's raw fields -- same join rules as Tripsy's
+// tripsyRawToDisplay, kept as its own copy so raw is the single source of
+// truth for both pipelines without a cross-page function dependency.
+function myTripsRawToDisplay(resource, raw) {
+  const extra = parts => parts.filter(Boolean).join(' • ') || null;
+  if (resource === 'hosting') {
+    return {
+      type: 'hotel', summary: raw.name, location: raw.address || null, notes: raw.notes || null,
+      start: raw.startsAt, end: raw.endsAt,
+      extra: extra([raw.confirmation ? `Confirmation: ${raw.confirmation}` : '', raw.phone || '', raw.website || '']),
+    };
+  }
+  if (resource === 'activity') {
+    return {
+      type: tripsyActivityCategoryToType(raw.category), summary: raw.name, location: raw.address || null, notes: raw.notes || null,
+      start: raw.startsAt, end: raw.endsAt,
+      extra: extra([raw.confirmation ? `Confirmation: ${raw.confirmation}` : '', raw.phone || '', raw.website || '']),
+    };
+  }
+  const dep = raw.departureDescription || '';
+  const arr = raw.arrivalDescription || '';
+  return {
+    type: raw.category === 'airplane' ? 'flight' : 'transportation',
+    summary: `${raw.company || ''} ${raw.transportNumber || ''}`.trim() || raw.name || 'Transportation',
+    location: dep && arr ? `${dep} → ${arr}` : (dep || arr || null),
+    notes: raw.notes || null, start: raw.departureAt, end: raw.arrivalAt,
+    extra: extra([
+      raw.confirmation ? `Confirmation: ${raw.confirmation}` : '',
+      raw.seatClass ? (raw.seatNumber ? `Seat: ${raw.seatClass} (${raw.seatNumber})` : `Seat: ${raw.seatClass}`) : '',
+      raw.vehicleDescription || '',
+      raw.departureTerminal ? `Terminal ${raw.departureTerminal}` : '',
+    ]),
+  };
+}
+
+// Blank raw fields for the "add new item" flow -- same field set
+// renderMyTripsEditPanel knows how to render/save for that resource.
+function myTripsBlankRaw(resource, presetCategory) {
+  const blank = { resource, id: null };
+  for (const f of MY_TRIPS_EDIT_FIELDS[resource]) blank[f.key] = null;
+  if (presetCategory) blank.category = presetCategory;
+  return blank;
+}
+
+// Reuses Tripsy's add-menu item list (pure resource/category data, not
+// Tripsy-specific) but with its own data attributes so this page's click
+// wiring never collides with Tripsy Trips's.
+function myTripsAddMenuButtonsHtml(tripId) {
+  let idx = 0;
+  return TRIPSY_ADD_MENU_GROUPS.map((group, gi) => {
+    const buttonsHtml = group.map(item => {
+      const html = `<button data-mytrips-add-item-choice data-trip-id="${esc(tripId)}" data-idx="${idx}" style="display:block; width:100%; text-align:left; background:none; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px;">${esc(item.label)}</button>`;
+      idx++;
+      return html;
+    }).join('');
+    const isLastGroup = gi === TRIPSY_ADD_MENU_GROUPS.length - 1;
+    const separatorHtml = isLastGroup ? '' : `<div style="height:1px; width:70%; margin:6px 0 6px 10px; background:#fff;"></div>`;
+    return buttonsHtml + separatorHtml;
+  }).join('');
+}
+
+// Read-only, grouped field-by-field detail view for one event's raw
+// fields -- same section/grid layout as renderMyTripsEditPanel, just plain
+// text instead of inputs. `onEdit`, if provided, renders an Edit button
+// that swaps this same panel over to renderMyTripsEditPanel.
+function renderMyTripsViewPanel(panel, raw, onEdit) {
+  const { groupOrder, byGroup } = myTripsFieldGroups(raw.resource);
+  const displayValue = f => {
+    const val = raw[f.key];
+    if (val === null || val === undefined || val === '') return null;
+    if (f.kind === 'select') return tripsySlugToLabel(val);
+    if (f.kind === 'datetime') return formatTripsyFieldDateTime(val) || val;
+    return val;
+  };
+  const sectionHtml = group => {
+    const rows = byGroup[group].map(f => ({ f, val: displayValue(f) })).filter(r => r.val != null);
+    if (!rows.length) return '';
+    return `
+      <div style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px 18px;">
+        <div style="font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:var(--amber); margin-bottom:12px;">${esc(MY_TRIPS_EDIT_GROUP_LABEL[group] || group)}</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px;">
+          ${rows.map(({ f, val }) => `
+            <div style="${f.kind === 'textarea' ? 'grid-column:1 / -1;' : ''}">
+              <div style="font-size:12px; font-weight:600; color:var(--muted); margin-bottom:6px;">${esc(f.label)}</div>
+              <div style="font-size:14px; color:var(--text); white-space:${f.kind === 'textarea' ? 'pre-line' : 'normal'};">${esc(val)}</div>
+            </div>
+          `).join('')}
+        </div>
       </div>
-      <label style="font-size:12px; color:var(--muted);">Category
-        <select data-mytrips-edit-category style="width:100%; margin-top:2px;">
-          ${TRIPIT_EDITABLE_CATEGORIES.map(c => `<option value="${c.value}" ${ev.type === c.value ? 'selected' : ''}>${esc(c.label)}</option>`).join("")}
-        </select>
-      </label>
-      <label style="font-size:12px; color:var(--muted);">Location
-        <input type="text" data-mytrips-edit-location value="${esc(ev.location || '')}" style="width:100%; margin-top:2px;">
-      </label>
-      <label style="font-size:12px; color:var(--muted);">Notes
-        <textarea data-mytrips-edit-notes rows="2" style="width:100%; margin-top:2px; font-family:inherit;">${esc(ev.notes || '')}</textarea>
-      </label>
-      <div style="display:flex; gap:8px; align-items:center;">
-        <button class="btn primary" data-mytrips-edit-save style="font-size:11px; padding:4px 10px;">Save</button>
-        ${isReview ? `<button class="btn" data-mytrips-edit-dismiss style="font-size:11px; padding:4px 10px;">Accept as-is</button>` : ''}
-        <button class="btn" data-mytrips-edit-cancel style="font-size:11px; padding:4px 10px; margin-left:auto;">Cancel</button>
+    `;
+  };
+  const sections = groupOrder.map(sectionHtml).filter(Boolean).join('');
+  panel.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
+      ${sections || `<div style="font-size:13px; color:var(--muted);">No details available.</div>`}
+      <div style="display:flex; gap:10px; align-items:center;">
+        ${onEdit ? `<button class="btn primary" data-mytrips-view-edit style="font-size:13px; padding:8px 18px;">Edit</button>` : ''}
+        <button class="btn" data-mytrips-view-close style="font-size:13px; padding:8px 18px;">Close</button>
+      </div>
+    </div>
+  `;
+  if (onEdit) panel.querySelector("[data-mytrips-view-edit]").addEventListener("click", onEdit);
+  panel.querySelector("[data-mytrips-view-close]").addEventListener("click", () => {
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    panel.dataset.mode = "";
+  });
+}
+
+// Edit form for one event's raw fields, also used for creating a new item
+// (eventId === null) and for resolving a review-flagged event (warnings
+// non-empty) -- writes straight into driveData via Store.saveTripEvent/
+// resolveTripEvent, no pending-changes queue (unlike Tripsy Trips, there's
+// no external system here to reconcile with).
+function renderMyTripsEditPanel(panel, tripId, eventId, raw, warnings) {
+  const isReview = !!(warnings && warnings.length);
+  const fields = MY_TRIPS_EDIT_FIELDS[raw.resource] || [];
+  const airlineDatalistId = 'mytrips-airline-datalist-' + Math.random().toString(36).slice(2, 10);
+  const inputHtml = f => {
+    const val = raw[f.key] || '';
+    if (f.kind === 'select') {
+      const baseOptions = myTripsFieldOptions(f.optionsKey);
+      let options = baseOptions.includes(val) || !val ? baseOptions : [val, ...baseOptions];
+      if (f.optionSort) options = options.slice().sort((a, b) => tripsySlugToLabel(a).localeCompare(tripsySlugToLabel(b)));
+      return `<select data-mytrips-edit-field="${f.key}" class="field-input">
+        ${options.map(o => `<option value="${esc(o)}" ${o === val ? 'selected' : ''}>${esc(tripsySlugToLabel(o))}</option>`).join('')}
+      </select>`;
+    }
+    if (f.kind === 'textarea') return `<textarea data-mytrips-edit-field="${f.key}" rows="3" class="field-input">${esc(val)}</textarea>`;
+    if (f.kind === 'datetime') return `<input type="datetime-local" data-mytrips-edit-field="${f.key}" value="${esc(val.slice(0, 16))}" class="field-input">`;
+    if (f.kind === 'company') {
+      return `<input type="text" data-mytrips-edit-field="${f.key}" value="${esc(val)}" class="field-input" list="${airlineDatalistId}" autocomplete="off"><datalist id="${airlineDatalistId}"></datalist>`;
+    }
+    return `<input type="text" data-mytrips-edit-field="${f.key}" value="${esc(val)}" class="field-input">`;
+  };
+  const { groupOrder, byGroup } = myTripsFieldGroups(raw.resource);
+  const sectionHtml = group => `
+    <div style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px 18px;">
+      <div style="font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:var(--amber); margin-bottom:12px;">${esc(MY_TRIPS_EDIT_GROUP_LABEL[group] || group)}</div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px;">
+        ${byGroup[group].map(f => `
+          <label style="font-size:13px; font-weight:600; color:var(--text); ${f.kind === 'textarea' ? 'grid-column:1 / -1;' : ''}">
+            <span style="display:block; margin-bottom:6px;">${esc(f.label)}</span>
+            ${inputHtml(f)}
+          </label>
+        `).join('')}
+      </div>
+    </div>
+  `;
+  panel.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
+      ${isReview ? `<div style="font-size:13px; color:var(--amber);">${esc(warnings.join(' '))}</div>` : ''}
+      ${groupOrder.map(sectionHtml).join('')}
+      <div style="display:flex; gap:10px; align-items:center;">
+        <button class="btn primary" data-mytrips-edit-save style="font-size:13px; padding:8px 18px;">Save</button>
+        ${isReview ? `<button class="btn" data-mytrips-edit-dismiss style="font-size:13px; padding:8px 18px;">Accept as-is</button>` : ''}
+        <button class="btn" data-mytrips-edit-exit style="font-size:13px; padding:8px 18px; margin-left:auto;">${eventId ? 'Exit without saving' : 'Cancel'}</button>
       </div>
     </div>
   `;
 
-  panel.querySelector("[data-mytrips-edit-cancel]").addEventListener("click", () => {
+  if (raw.resource === 'transportation') {
+    const categorySelect = panel.querySelector('[data-mytrips-edit-field="category"]');
+    const airlineDatalist = document.getElementById(airlineDatalistId);
+    const refreshAirlineOptions = () => {
+      airlineDatalist.innerHTML = categorySelect.value === 'airplane'
+        ? getAllTripsyAirlines().map(a => `<option value="${esc(a)}"></option>`).join('')
+        : '';
+    };
+    categorySelect.addEventListener('change', refreshAirlineOptions);
+    refreshAirlineOptions();
+  }
+
+  panel.querySelector("[data-mytrips-edit-exit]").addEventListener("click", () => {
     panel.style.display = "none";
     panel.innerHTML = "";
-  });
-
-  const readEdits = () => ({
-    summary: panel.querySelector("[data-mytrips-edit-summary]").value.trim() || null,
-    start: panel.querySelector("[data-mytrips-edit-start]").value ? `${panel.querySelector("[data-mytrips-edit-start]").value}T${(ev.start || '').slice(11) || '00:00:00'}` : ev.start,
-    end: panel.querySelector("[data-mytrips-edit-end]").value ? `${panel.querySelector("[data-mytrips-edit-end]").value}T${(ev.end || '').slice(11) || '00:00:00'}` : ev.end,
-    type: panel.querySelector("[data-mytrips-edit-category]").value || ev.type,
-    location: panel.querySelector("[data-mytrips-edit-location]").value.trim() || null,
-    notes: panel.querySelector("[data-mytrips-edit-notes]").value.trim() || null,
+    panel.dataset.mode = "";
   });
 
   panel.querySelector("[data-mytrips-edit-save]").addEventListener("click", async () => {
     const saveBtn = panel.querySelector("[data-mytrips-edit-save]");
     saveBtn.disabled = true;
-    const edits = readEdits();
-    const result = isReview
-      ? await Store.resolveTripEvent(tripId, ev.id, edits)
-      : await Store.saveTripEvent(tripId, { ...ev, ...edits });
+
+    if (raw.resource === 'transportation') {
+      const finalCategory = panel.querySelector('[data-mytrips-edit-field="category"]').value;
+      const finalCompany = panel.querySelector('[data-mytrips-edit-field="company"]').value.trim();
+      if (finalCategory === 'airplane' && finalCompany) addTripsyCustomAirline(finalCompany);
+    }
+
+    const newRaw = { resource: raw.resource, id: raw.id ?? null };
+    for (const f of fields) {
+      const el = panel.querySelector(`[data-mytrips-edit-field="${f.key}"]`);
+      let val = el.value.trim();
+      if (f.kind === 'datetime' && val) val = val.length === 16 ? `${val}:00` : val;
+      newRaw[f.key] = val || null;
+    }
+    const display = myTripsRawToDisplay(raw.resource, newRaw);
+
+    let result;
+    if (isReview) {
+      result = await Store.resolveTripEvent(tripId, eventId, { ...display, raw: newRaw });
+    } else if (eventId) {
+      result = await Store.saveTripEvent(tripId, { id: eventId, tripId, ...display, raw: newRaw });
+    } else {
+      result = await Store.saveTripEvent(tripId, {
+        id: crypto.randomUUID(), tripId, ...display, raw: newRaw,
+        hidden: false, source: 'manual', imageUrl: null, _warnings: null, _resolvedAt: null,
+      });
+    }
     if (!result.ok) toast("Could not save changes — storage error. Please try again.", "error");
+    panel.style.display = "none";
+    panel.innerHTML = "";
     renderMyTripsEventsList();
   });
 
@@ -6011,7 +6236,7 @@ function renderMyTripsEditPanel(panel, tripId, ev) {
     panel.querySelector("[data-mytrips-edit-dismiss]").addEventListener("click", async () => {
       const dismissBtn = panel.querySelector("[data-mytrips-edit-dismiss]");
       dismissBtn.disabled = true;
-      const result = await Store.resolveTripEvent(tripId, ev.id, {});
+      const result = await Store.resolveTripEvent(tripId, eventId, {});
       if (!result.ok) toast("Could not save changes — storage error. Please try again.", "error");
       renderMyTripsEventsList();
     });
@@ -6037,38 +6262,67 @@ async function renderMyTripsEventsList() {
       const arriveTime = formatTripitTime(ev.end);
       const showTimes = (ev.type === 'flight' || ev.type === 'transportation') && (departTime || arriveTime);
       const needsReview = !!(ev._warnings && ev._warnings.length);
+      const indentLevel = myTripsTypeIndent(ev.type);
+      const hasRaw = !!ev.raw;
+      const headerLabel = (hasRaw && ev.raw.resource === 'transportation')
+        ? tripsyTransportationHeaderLabel(ev.raw.category)
+        : myTripsTypeLabel(ev.type);
+      const locationLine = ev.location ? `<div style="margin-top:4px; font-size:13px; color:var(--muted);">${esc(ev.location)}</div>` : '';
+      const timesLine = showTimes ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">${departTime ? `Departs ${esc(departTime)}` : ''}${departTime && arriveTime ? ' · ' : ''}${arriveTime ? `Arrives ${esc(arriveTime)}` : ''}</div>` : '';
+      const summaryLine = `<div style="margin-top:6px; font-size:13px; color:var(--text);">${esc(ev.summary)}</div>`;
+      const extraLine = ev.extra ? `<div style="margin-top:4px; font-size:12px; color:var(--teal);">${esc(ev.extra)}</div>` : '';
+      const notesLine = ev.notes ? `<div style="margin-top:4px; font-size:12px; color:var(--muted); font-style:italic; white-space:pre-line;">${esc(ev.notes)}</div>` : '';
+      const bodyLines = (hasRaw && ev.raw.resource === 'transportation')
+        ? [locationLine, timesLine, summaryLine, extraLine, notesLine]
+        : [summaryLine, timesLine, locationLine, extraLine, notesLine];
+      // The view-click target is this inner content div specifically, not
+      // the outer row -- the Edit/Hide/Delete icons are a SIBLING div, not
+      // a descendant, so clicks on those icons never bubble into it.
+      const viewAttr = hasRaw ? `data-mytrips-view-event="${esc(ev.id)}" style="cursor:pointer;"` : '';
       return `
-      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); margin-top:10px; margin-left:${myTripsTypeIndent(ev.type) * TRIPIT_INDENT_PX}px;">
-        <div>
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); margin-top:10px; margin-left:${indentLevel * TRIPIT_INDENT_PX}px;">
+        <div ${viewAttr}>
           <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">
-            ${esc(myTripsTypeLabel(ev.type))}${ev.start ? ` • ${esc(formatTripitDateRange(ev.start, ev.end))}` : ''}
+            ${esc(headerLabel)}${ev.start ? ` • ${esc(formatTripitDateRange(ev.start, ev.end))}` : ''}
             ${needsReview ? ` • <span style="color:#e67e22;">Needs Review</span>` : ''}
           </div>
-          <div style="margin-top:6px; font-size:13px; color:var(--text);">${esc(ev.summary)}</div>
-          ${showTimes ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">${departTime ? `Departs ${esc(departTime)}` : ''}${departTime && arriveTime ? ' · ' : ''}${arriveTime ? `Arrives ${esc(arriveTime)}` : ''}</div>` : ''}
-          ${ev.location ? `<div style="margin-top:4px; font-size:13px; color:var(--muted);">${esc(ev.location)}</div>` : ''}
-          ${ev.notes ? `<div style="margin-top:4px; font-size:12px; color:var(--muted); font-style:italic;">${esc(ev.notes)}</div>` : ''}
+          ${bodyLines.join('')}
         </div>
         ${isOwner ? `
           <div style="display:flex; gap:6px; flex-shrink:0;">
-            <button class="btn" data-mytrips-edit-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px; ${needsReview ? 'background:#e67e22; color:#fff; border-color:#e67e22;' : ''}">${needsReview ? 'Review' : 'Edit'}</button>
-            <button class="btn" data-mytrips-hide-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px;">Hide</button>
-            <button class="btn" data-mytrips-delete-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" data-summary="${esc(ev.summary || '')}" style="font-size:11px; padding:3px 8px;">Delete</button>
+            ${hasRaw ? `<button class="btn" data-mytrips-edit-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px; ${needsReview ? 'background:#e67e22; color:#fff; border-color:#e67e22;' : ''}" title="Edit">${needsReview ? 'Review' : '✏️'}</button>` : ''}
+            <button class="btn" data-mytrips-hide-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px;" title="Hide">🙈</button>
+            <button class="btn" data-mytrips-delete-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" data-summary="${esc(ev.summary || '')}" style="font-size:11px; padding:3px 8px;" title="Delete">🗑️</button>
           </div>
         ` : ''}
       </div>
-      ${isOwner ? `<div data-mytrips-edit-panel="${esc(ev.id)}" style="display:none; margin-top:8px; margin-left:${myTripsTypeIndent(ev.type) * TRIPIT_INDENT_PX}px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
+      ${hasRaw ? `<div data-mytrips-edit-panel="${esc(ev.id)}" style="display:none; margin-top:8px; margin-left:${indentLevel * TRIPIT_INDENT_PX}px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
       `;
     }).join("");
+    // The add-item + button (and its menu/panel) only makes sense once the
+    // card is expanded -- collapsed cards don't show the events list it'd
+    // be adding alongside.
+    const showAddButton = !collapsed && isOwner;
     return `
       <div class="card" id="mytrips-trip-card-${esc(trip.id)}" style="margin-bottom:14px;">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
-          <div>
+          <div data-mytrips-header-toggle="${esc(trip.id)}" style="cursor:pointer;">
             <div style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">${esc(trip.name)}</div>
             ${subtitle ? `<div style="margin-top:2px; font-size:13px; color:var(--muted);">${esc(subtitle)}</div>` : ''}
           </div>
-          <button data-mytrips-toggle-collapse data-id="${esc(trip.id)}" title="${collapsed ? 'Expand' : 'Collapse'}" style="background:none; border:none; cursor:pointer; color:var(--amber); font-size:26px; line-height:1; padding:0; flex-shrink:0;">${collapsed ? '▸' : '▾'}</button>
+          <div style="display:flex; align-items:center; gap:20px; flex-shrink:0;">
+            ${showAddButton ? `
+              <div style="position:relative;">
+                <button data-mytrips-add-item-toggle data-trip-id="${esc(trip.id)}" title="Add item to trip" style="background:var(--home-green); border:none; border-radius:50%; width:28px; height:28px; cursor:pointer; color:#04210F; font-size:18px; font-weight:700; line-height:1; display:flex; align-items:center; justify-content:center; padding:0;">+</button>
+                <div data-mytrips-add-item-menu="${esc(trip.id)}" style="display:none; position:absolute; top:100%; right:0; margin-top:6px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+                  ${myTripsAddMenuButtonsHtml(trip.id)}
+                </div>
+              </div>
+            ` : ''}
+            <button data-mytrips-toggle-collapse data-id="${esc(trip.id)}" title="${collapsed ? 'Expand' : 'Collapse'}" style="background:none; border:none; cursor:pointer; color:var(--amber); font-size:26px; line-height:1; padding:0;">${collapsed ? '▸' : '▾'}</button>
+          </div>
         </div>
+        ${showAddButton ? `<div data-mytrips-add-item-panel="${esc(trip.id)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${eventRows}
         ${!collapsed && isOwner && hiddenCount ? `
           <div style="margin-top:12px; text-align:right;">
@@ -6085,11 +6339,42 @@ async function renderMyTripsEventsList() {
     `;
   }).join("");
 
+  const toggleMyTripsCollapse = id => {
+    setMyTripCollapsed(id, !isMyTripCollapsed(id));
+    renderMyTripsEventsList();
+  };
   container.querySelectorAll("[data-mytrips-toggle-collapse]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const id = btn.dataset.id;
-      setMyTripCollapsed(id, !isMyTripCollapsed(id));
-      renderMyTripsEventsList();
+    btn.addEventListener("click", () => toggleMyTripsCollapse(btn.dataset.id));
+  });
+  // Selecting the trip's own name/subtitle also toggles collapse, same as
+  // the caret button -- collapsed expands, expanded collapses.
+  container.querySelectorAll("[data-mytrips-header-toggle]").forEach(el => {
+    el.addEventListener("click", () => toggleMyTripsCollapse(el.dataset.mytripsHeaderToggle));
+  });
+
+  // Selecting an event shows its read-only details -- available to every
+  // viewer (not owner-gated), unlike the Edit/Hide/Delete icons.
+  container.querySelectorAll("[data-mytrips-view-event]").forEach(el => {
+    el.addEventListener("click", async () => {
+      const id = el.dataset.mytripsViewEvent;
+      const panel = container.querySelector(`[data-mytrips-edit-panel="${id}"]`);
+      if (!panel) return;
+      if (panel.style.display !== "none" && panel.dataset.mode === "view") {
+        panel.style.display = "none";
+        panel.innerHTML = "";
+        panel.dataset.mode = "";
+        return;
+      }
+      const trip = (await Store.listTrips()).find(t => (t.events || []).some(e => e.id === id));
+      const ev = trip && trip.events.find(e => e.id === id);
+      if (!ev || !ev.raw) return;
+      const onEdit = isOwner ? () => {
+        renderMyTripsEditPanel(panel, trip.id, ev.id, ev.raw, ev._warnings);
+        panel.dataset.mode = "edit";
+      } : null;
+      renderMyTripsViewPanel(panel, ev.raw, onEdit);
+      panel.dataset.mode = "view";
+      panel.style.display = "block";
     });
   });
 
@@ -6100,16 +6385,18 @@ async function renderMyTripsEventsList() {
       const tripId = btn.dataset.tripId;
       const id = btn.dataset.id;
       const panel = container.querySelector(`[data-mytrips-edit-panel="${id}"]`);
-      const isOpen = panel.style.display !== "none";
+      const isOpen = panel.style.display !== "none" && panel.dataset.mode === "edit";
       if (isOpen) {
         panel.style.display = "none";
         panel.innerHTML = "";
+        panel.dataset.mode = "";
         return;
       }
       const trip = (await Store.listTrips()).find(t => t.id === tripId);
       const ev = trip && (trip.events || []).find(e => e.id === id);
-      if (!ev) return;
-      renderMyTripsEditPanel(panel, tripId, ev);
+      if (!ev || !ev.raw) return;
+      renderMyTripsEditPanel(panel, tripId, ev.id, ev.raw, ev._warnings);
+      panel.dataset.mode = "edit";
       panel.style.display = "block";
     });
   });
@@ -6173,6 +6460,26 @@ async function renderMyTripsEventsList() {
           renderMyTripsEventsList();
         });
       });
+    });
+  });
+
+  container.querySelectorAll("[data-mytrips-add-item-toggle]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const menu = container.querySelector(`[data-mytrips-add-item-menu="${btn.dataset.tripId}"]`);
+      menu.style.display = menu.style.display === "none" ? "block" : "none";
+    });
+  });
+
+  container.querySelectorAll("[data-mytrips-add-item-choice]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const tripId = btn.dataset.tripId;
+      const item = TRIPSY_ADD_MENU_ITEMS[Number(btn.dataset.idx)];
+      const trip = (await Store.listTrips()).find(t => t.id === tripId);
+      container.querySelector(`[data-mytrips-add-item-menu="${tripId}"]`).style.display = "none";
+      const addPanel = container.querySelector(`[data-mytrips-add-item-panel="${tripId}"]`);
+      const blankRaw = myTripsBlankRaw(item.resource, item.category);
+      renderMyTripsEditPanel(addPanel, tripId, null, blankRaw, null);
+      addPanel.style.display = "block";
     });
   });
 }
