@@ -6243,9 +6243,25 @@ function renderMyTripsEditPanel(panel, tripId, eventId, raw, warnings) {
   }
 }
 
+// Matches a flight event against the shared P/S reservations list, reusing
+// Tripsy Trips's matching logic (matchPsReservationToTripsyFlight is
+// generic over any {type, summary, start, end} event shape, not tied to
+// Tripsy-sourced data) -- takes the reservations list as a parameter
+// rather than reading the Tripsy page's own tripsyPsReservations global,
+// since My Trips loads its own copy independently.
+function findMyTripsPsMatch(ev, psReservations) {
+  if (!psReservations || ev.type !== 'flight') return null;
+  for (const res of psReservations) {
+    const direction = matchPsReservationToTripsyFlight(res, ev);
+    if (direction) return { reservation: res, direction };
+  }
+  return null;
+}
+
 async function renderMyTripsEventsList() {
   const container = document.getElementById("mytrips-card");
   const trips = (await Store.listTrips()).slice().sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+  const psReservations = await Store.listReservations();
 
   if (!trips.length) {
     container.innerHTML = `<div class="card"><div class="empty-state">No trips yet.</div></div>`;
@@ -6257,12 +6273,17 @@ async function renderMyTripsEventsList() {
     const collapsed = isMyTripCollapsed(trip.id);
     const visibleEvents = (trip.events || []).filter(ev => !ev.hidden).slice().sort((a, b) => (a.start || '').localeCompare(b.start || ''));
     const hiddenCount = (trip.events || []).length - visibleEvents.length;
+    // Once any event in this trip has a matching P/S Reservation card
+    // inserted, every OTHER event shifts one indent level to the right so
+    // the P/S card reads as the leftmost/outermost item in the list --
+    // same rule as Tripsy Trips.
+    const hasPsMatchInTrip = visibleEvents.some(ev => findMyTripsPsMatch(ev, psReservations));
     const eventRows = collapsed ? "" : visibleEvents.map(ev => {
       const departTime = formatTripitTime(ev.start);
       const arriveTime = formatTripitTime(ev.end);
       const showTimes = (ev.type === 'flight' || ev.type === 'transportation') && (departTime || arriveTime);
       const needsReview = !!(ev._warnings && ev._warnings.length);
-      const indentLevel = myTripsTypeIndent(ev.type);
+      const indentLevel = myTripsTypeIndent(ev.type) + (hasPsMatchInTrip ? 1 : 0);
       const hasRaw = !!ev.raw;
       const headerLabel = (hasRaw && ev.raw.resource === 'transportation')
         ? tripsyTransportationHeaderLabel(ev.raw.category)
@@ -6279,7 +6300,7 @@ async function renderMyTripsEventsList() {
       // the outer row -- the Edit/Hide/Delete icons are a SIBLING div, not
       // a descendant, so clicks on those icons never bubble into it.
       const viewAttr = hasRaw ? `data-mytrips-view-event="${esc(ev.id)}" style="cursor:pointer;"` : '';
-      return `
+      const eventHtml = `
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); margin-top:10px; margin-left:${indentLevel * TRIPIT_INDENT_PX}px;">
         <div ${viewAttr}>
           <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">
@@ -6298,6 +6319,10 @@ async function renderMyTripsEventsList() {
       </div>
       ${hasRaw ? `<div data-mytrips-edit-panel="${esc(ev.id)}" style="display:none; margin-top:8px; margin-left:${indentLevel * TRIPIT_INDENT_PX}px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
       `;
+      const psMatch = findMyTripsPsMatch(ev, psReservations);
+      if (!psMatch) return eventHtml;
+      const psHtml = renderPsReservationTripsyEntryHtml(psMatch.reservation);
+      return psMatch.direction === 'before' ? psHtml + eventHtml : eventHtml + psHtml;
     }).join("");
     // The add-item + button (and its menu/panel) only makes sense once the
     // card is expanded -- collapsed cards don't show the events list it'd
@@ -6350,6 +6375,13 @@ async function renderMyTripsEventsList() {
   // the caret button -- collapsed expands, expanded collapses.
   container.querySelectorAll("[data-mytrips-header-toggle]").forEach(el => {
     el.addEventListener("click", () => toggleMyTripsCollapse(el.dataset.mytripsHeaderToggle));
+  });
+
+  // Jump from a P/S reservation card straight to its match on the P/S
+  // Reservations page -- available to view-only users too, so this is
+  // wired before the isOwner gate below.
+  container.querySelectorAll("[data-tripsy-goto-reservation]").forEach(el => {
+    el.addEventListener("click", () => goToReservation(el.dataset.tripsyGotoReservation));
   });
 
   // Selecting an event shows its read-only details -- available to every
