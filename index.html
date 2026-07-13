@@ -562,7 +562,6 @@
 </div>
 <div class="app" id="app-root" style="display:none;">
   <button id="tripsy-pending-warning-badge" title="Tripsy Trips has changes waiting to be pushed -- click for instructions" style="display:none; position:fixed; top:14px; right:14px; z-index:500; background:none; border:none; cursor:pointer; font-size:30px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));">⚠️</button>
-  <button id="tripsy-sync-complete-btn" title="Mark all queued Tripsy changes as pushed and clear this warning" style="display:none; position:fixed; top:50px; right:14px; z-index:500; background:var(--panel-2); border:1px solid var(--line); color:var(--text); border-radius:6px; cursor:pointer; font-size:11px; font-weight:600; padding:4px 8px; box-shadow:0 1px 3px rgba(0,0,0,0.4);">Sync Complete</button>
   <button id="trip-email-scan-badge" title="Trips haven't been updated from email today -- click for instructions" style="display:none; position:fixed; top:14px; right:56px; z-index:500; background:none; border:none; cursor:pointer; font-size:30px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));">📭</button>
   <div class="rail">
     <div class="rail-brand">Travel Tracker<small>Simplifying Luxury Travel</small><small id="view-only-badge" style="display:none; color:var(--amber); font-weight:700;">VIEW ONLY</small></div>
@@ -5145,8 +5144,15 @@ async function renderUtilitiesReparsePsReservations() {
 // updateTripsyPendingWarningBadge).
 async function renderUtilitiesTripsyPush() {
   const changes = isOwner ? await Store.listTripsyPendingChanges() : [];
+  const readyToClear = tripsyChangesReadyToClear(changes);
   main.innerHTML = `
     <div class="page-title">Tripsy Push</div>
+    ${readyToClear ? `
+      <div class="card" style="margin-bottom:16px; border-color:var(--home-green); text-align:center;">
+        <div style="font-size:20px; font-weight:700; color:var(--home-green); margin-bottom:6px;">Sync Completed on ${esc(formatSyncTimestamp(TRIPSY_SNAPSHOT_GENERATED_AT))}</div>
+        <button id="tripsy-sync-complete-clear-btn" class="btn primary" style="margin-top:6px;">Press Button To Clear</button>
+      </div>
+    ` : ''}
     <div class="page-sub">Edits and deletes made on the Tripsy Trips page don't reach Tripsy by themselves -- the browser has no access to Tripsy's API or to this app's own source file. They're queued here instead, waiting for a Claude Code session to actually push them.</div>
     <div class="card" style="margin-bottom:16px;">
       <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:6px;">${changes.length ? `${changes.length} change${changes.length === 1 ? '' : 's'} waiting` : 'Nothing waiting'}</div>
@@ -5167,12 +5173,21 @@ async function renderUtilitiesTripsyPush() {
           <li>Open the existing conversation for this project (<b>Travel Tracker</b> / <b>jskagan/Flight-data</b>), or start a new one in that project.</li>
           <li>Send: <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span></li>
           <li>Claude applies each queued change directly to Tripsy's API, pulls fresh data, and republishes the page. It'll report back when done.</li>
-          <li>Reload this page and click the small <b>Sync Complete</b> button that appears under the warning triangle -- this is a manual confirmation step (Claude has no way to write to this app's own saved data), so only click it once Claude has actually confirmed the changes were pushed.</li>
+          <li>Reload this page -- the top-right badge turns from a yellow warning triangle into a green circle once a refresh has happened. Come back to this page and press "Press Button To Clear" in the green box above to dismiss it.</li>
         </ol>
         <p style="margin-top:10px;"><b>On a Mac or PC:</b> same thing, from the Claude Code CLI, the desktop app, or claude.ai/code -- whichever you'd normally use for this project.</p>
       </div>
     </div>
   `;
+  if (readyToClear) {
+    document.getElementById('tripsy-sync-complete-clear-btn').addEventListener('click', async () => {
+      const ok = await Store.clearAllTripsyPendingChanges();
+      if (ok) {
+        await updateTripsyPendingWarningBadge();
+        renderUtilitiesTripsyPush();
+      }
+    });
+  }
 }
 
 async function renderUtilitiesUpdateTrips() {
@@ -8216,33 +8231,47 @@ async function renderTripsyPendingChangesPanelContent() {
   });
 }
 
-// Shows/hides the fixed top-right warning triangle (present in the app
+// True once every queued change was queued against an older snapshot than
+// the one this page was built with -- i.e. a Claude Code refresh has
+// actually happened since everything currently in the queue was added,
+// rather than just "something is queued". A change missing the stamp
+// (from before this field existed) is treated as arbitrarily old, so it
+// still counts as ready rather than blocking readiness forever. Shared by
+// the top-right badge (which icon to show) and the Tripsy Push page
+// (whether to show the "Sync Completed" clear box).
+function tripsyChangesReadyToClear(changes) {
+  return changes.length > 0 && changes.every(c => (c.queuedSnapshotAt || '') < TRIPSY_SNAPSHOT_GENERATED_AT);
+}
+
+// Shows/hides and re-skins the fixed top-right badge (present in the app
 // shell, outside #main, so it survives navigating between views) --
 // owner-only, since only the owner's actions ever queue a Tripsy change and
 // only the owner can act on the Tripsy Push instructions it links to.
+// Yellow warning triangle while something's queued but no refresh has
+// happened yet; green circle once a refresh has -- both link to the same
+// Tripsy Push page, which shows the matching content for whichever state.
 // Called once after sign-in and again after every action that adds to or
 // clears driveData.tripsyPendingChanges.
 async function updateTripsyPendingWarningBadge() {
   const badge = document.getElementById('tripsy-pending-warning-badge');
-  const syncCompleteBtn = document.getElementById('tripsy-sync-complete-btn');
   if (!badge) return;
   if (!isOwner) {
     badge.style.display = 'none';
-    if (syncCompleteBtn) syncCompleteBtn.style.display = 'none';
     return;
   }
   const changes = await Store.listTripsyPendingChanges();
-  const hasChanges = changes.length > 0;
-  badge.style.display = hasChanges ? '' : 'none';
-  // Only reveal "Sync Complete" once every queued change was queued against
-  // an older snapshot than the one this page was built with -- i.e. a
-  // refresh has actually happened since. A change missing the stamp (from
-  // before this field existed) is treated as arbitrarily old, so it still
-  // counts as "ready" rather than blocking the button forever.
-  const refreshedSinceAllQueued = hasChanges && changes.every(
-    c => (c.queuedSnapshotAt || '') < TRIPSY_SNAPSHOT_GENERATED_AT
-  );
-  if (syncCompleteBtn) syncCompleteBtn.style.display = refreshedSinceAllQueued ? '' : 'none';
+  if (!changes.length) {
+    badge.style.display = 'none';
+    return;
+  }
+  badge.style.display = '';
+  if (tripsyChangesReadyToClear(changes)) {
+    badge.textContent = '🟢';
+    badge.title = 'Tripsy sync complete -- click to clear';
+  } else {
+    badge.textContent = '⚠️';
+    badge.title = 'Tripsy Trips has changes waiting to be pushed -- click for instructions';
+  }
 }
 
 async function renderTripsyTrips() {
@@ -9131,15 +9160,6 @@ document.getElementById('signout-btn').addEventListener('click', () => {
 });
 
 document.getElementById('tripsy-pending-warning-badge').addEventListener('click', () => navigate('utilitiestripsypush'));
-document.getElementById('tripsy-sync-complete-btn').addEventListener('click', async () => {
-  if (!confirm('Mark all queued Tripsy changes as pushed and clear this warning? Only do this after a Claude Code session has confirmed the refresh actually applied them to Tripsy.')) return;
-  const ok = await Store.clearAllTripsyPendingChanges();
-  if (ok) {
-    await updateTripsyPendingWarningBadge();
-    const pendingPanel = document.getElementById('tripsy-pending-panel');
-    if (pendingPanel && pendingPanel.style.display !== 'none') renderTripsyPendingChangesPanelContent();
-  }
-});
 document.getElementById('trip-email-scan-badge').addEventListener('click', () => navigate('utilitiesupdatetrips'));
 
 </script>
