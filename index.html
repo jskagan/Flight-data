@@ -562,6 +562,7 @@
 </div>
 <div class="app" id="app-root" style="display:none;">
   <button id="tripsy-pending-warning-badge" title="Tripsy Trips has changes waiting to be pushed -- click for instructions" style="display:none; position:fixed; top:14px; right:14px; z-index:500; background:none; border:none; cursor:pointer; font-size:30px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));">⚠️</button>
+  <button id="tripsy-sync-complete-btn" title="Mark all queued Tripsy changes as pushed and clear this warning" style="display:none; position:fixed; top:50px; right:14px; z-index:500; background:var(--panel-2); border:1px solid var(--line); color:var(--text); border-radius:6px; cursor:pointer; font-size:11px; font-weight:600; padding:4px 8px; box-shadow:0 1px 3px rgba(0,0,0,0.4);">Sync Complete</button>
   <button id="trip-email-scan-badge" title="Trips haven't been updated from email today -- click for instructions" style="display:none; position:fixed; top:14px; right:56px; z-index:500; background:none; border:none; cursor:pointer; font-size:30px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));">📭</button>
   <div class="rail">
     <div class="rail-brand">Travel Tracker<small>Simplifying Luxury Travel</small><small id="view-only-badge" style="display:none; color:var(--amber); font-weight:700;">VIEW ONLY</small></div>
@@ -991,6 +992,11 @@ const Store = {
   async queueTripsyChange(change) {
     try {
       if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
+      // Stamp with the snapshot version live at queue time -- lets the
+      // "Sync Complete" button (see updateTripsyPendingWarningBadge) tell
+      // whether a refresh has actually happened since this was queued,
+      // rather than appearing the instant something's queued.
+      change = { ...change, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT };
       // Re-saving with the same id (e.g. editing a not-yet-created pending
       // item again before it's applied) replaces the earlier entry rather
       // than piling up duplicates.
@@ -1024,6 +1030,21 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.cancelTripsyChange failed:', e);
+      return false;
+    }
+  },
+  // Bulk version of cancelTripsyChange -- backs the "Sync Complete" button
+  // next to the warning badge, for clearing the whole queue at once after a
+  // Claude Code session confirms everything in it has actually been pushed
+  // to Tripsy (rather than clicking Cancel one entry at a time on the
+  // Tripsy Push page).
+  async clearAllTripsyPendingChanges() {
+    try {
+      driveData.tripsyPendingChanges = [];
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.clearAllTripsyPendingChanges failed:', e);
       return false;
     }
   },
@@ -5144,9 +5165,9 @@ async function renderUtilitiesTripsyPush() {
         <ol style="margin:6px 0 0 20px; padding:0;">
           <li>Open Safari (or the Claude app) and go to <b>claude.ai/code</b>.</li>
           <li>Open the existing conversation for this project (<b>Travel Tracker</b> / <b>jskagan/Flight-data</b>), or start a new one in that project.</li>
-          <li>Send: <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Apply the pending Tripsy Trips changes and refresh the snapshot</span></li>
-          <li>Claude signs into this app in its own browser tab, applies each queued change directly to Tripsy, clears the queue, then pulls fresh data and republishes the page. It'll report back when done.</li>
-          <li>Reload this page -- the warning triangle in the top-right corner clears once the queue is empty.</li>
+          <li>Send: <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span></li>
+          <li>Claude applies each queued change directly to Tripsy's API, pulls fresh data, and republishes the page. It'll report back when done.</li>
+          <li>Reload this page and click the small <b>Sync Complete</b> button that appears under the warning triangle -- this is a manual confirmation step (Claude has no way to write to this app's own saved data), so only click it once Claude has actually confirmed the changes were pushed.</li>
         </ol>
         <p style="margin-top:10px;"><b>On a Mac or PC:</b> same thing, from the Claude Code CLI, the desktop app, or claude.ai/code -- whichever you'd normally use for this project.</p>
       </div>
@@ -8203,13 +8224,25 @@ async function renderTripsyPendingChangesPanelContent() {
 // clears driveData.tripsyPendingChanges.
 async function updateTripsyPendingWarningBadge() {
   const badge = document.getElementById('tripsy-pending-warning-badge');
+  const syncCompleteBtn = document.getElementById('tripsy-sync-complete-btn');
   if (!badge) return;
   if (!isOwner) {
     badge.style.display = 'none';
+    if (syncCompleteBtn) syncCompleteBtn.style.display = 'none';
     return;
   }
   const changes = await Store.listTripsyPendingChanges();
-  badge.style.display = changes.length ? '' : 'none';
+  const hasChanges = changes.length > 0;
+  badge.style.display = hasChanges ? '' : 'none';
+  // Only reveal "Sync Complete" once every queued change was queued against
+  // an older snapshot than the one this page was built with -- i.e. a
+  // refresh has actually happened since. A change missing the stamp (from
+  // before this field existed) is treated as arbitrarily old, so it still
+  // counts as "ready" rather than blocking the button forever.
+  const refreshedSinceAllQueued = hasChanges && changes.every(
+    c => (c.queuedSnapshotAt || '') < TRIPSY_SNAPSHOT_GENERATED_AT
+  );
+  if (syncCompleteBtn) syncCompleteBtn.style.display = refreshedSinceAllQueued ? '' : 'none';
 }
 
 async function renderTripsyTrips() {
@@ -9098,6 +9131,15 @@ document.getElementById('signout-btn').addEventListener('click', () => {
 });
 
 document.getElementById('tripsy-pending-warning-badge').addEventListener('click', () => navigate('utilitiestripsypush'));
+document.getElementById('tripsy-sync-complete-btn').addEventListener('click', async () => {
+  if (!confirm('Mark all queued Tripsy changes as pushed and clear this warning? Only do this after a Claude Code session has confirmed the refresh actually applied them to Tripsy.')) return;
+  const ok = await Store.clearAllTripsyPendingChanges();
+  if (ok) {
+    await updateTripsyPendingWarningBadge();
+    const pendingPanel = document.getElementById('tripsy-pending-panel');
+    if (pendingPanel && pendingPanel.style.display !== 'none') renderTripsyPendingChangesPanelContent();
+  }
+});
 document.getElementById('trip-email-scan-badge').addEventListener('click', () => navigate('utilitiesupdatetrips'));
 
 </script>
