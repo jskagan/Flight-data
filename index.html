@@ -562,6 +562,7 @@
 </div>
 <div class="app" id="app-root" style="display:none;">
   <button id="tripsy-pending-warning-badge" title="Tripsy Trips has changes waiting to be pushed -- click for instructions" style="display:none; position:fixed; top:14px; right:14px; z-index:500; background:none; border:none; cursor:pointer; font-size:30px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));">⚠️</button>
+  <button id="trip-email-scan-badge" title="Trips haven't been updated from email today -- click for instructions" style="display:none; position:fixed; top:14px; right:56px; z-index:500; background:none; border:none; cursor:pointer; font-size:30px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));">📭</button>
   <div class="rail">
     <div class="rail-brand">Travel Tracker<small>Simplifying Luxury Travel</small><small id="view-only-badge" style="display:none; color:var(--amber); font-weight:700;">VIEW ONLY</small></div>
     <button class="rail-item" data-view="home"><span class="nav-icon" id="nav-home-icon">📊</span>Home</button>
@@ -599,6 +600,7 @@
       <button class="rail-item rail-subitem" data-view="utilitiesreparsepsreservations">Re-Parse P/S Reservations</button>
       <button class="rail-item rail-subitem" data-view="utilitiesreparsepsinvoices">Re-Parse P/S Invoices</button>
       <button class="rail-item rail-subitem" data-view="utilitiestripsypush">Tripsy Push</button>
+      <button class="rail-item rail-subitem" data-view="utilitiesupdatetrips">Update Trips</button>
     </div>
     <button class="rail-item" data-view="upload" id="nav-upload-btn"><span class="nav-icon">📥</span>Upload</button>
     <button class="rail-item" data-view="invoices"><span class="nav-icon" id="invoices-icon">📋</span>Invoices<span class="count" id="nav-invoice-count"></span></button>
@@ -1178,6 +1180,47 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.setTripEventHidden failed:', e);
+      return false;
+    }
+  },
+  // ---- Trip email scan status ----
+  // Tracks the automated Gmail-scan pipeline's daily run so the app can
+  // show an "Updating trips..." indicator until today's scan has actually
+  // happened, and so the scheduled task itself (running in a live signed-in
+  // browser session -- see the trip-email-scan runbook) knows whether it
+  // still needs to run today. processedMessageIds records EVERY Gmail
+  // message id the scan has ever looked at, whether it resulted in a
+  // created event or was deliberately skipped (duplicate/cancelled/
+  // non-travel/dismissed-by-owner) -- kept in driveData rather than a local
+  // file so it's visible and resumable from any device/session, and so a
+  // message explicitly dismissed once (e.g. "ignore this trip") never gets
+  // re-surfaced by a later run.
+  async getTripEmailScanStatus() {
+    return driveData.tripEmailScan || { lastRunDate: null, lastRunAt: null, lastRunSummary: null, processedMessageIds: {} };
+  },
+  async recordTripEmailScanRun(summary) {
+    try {
+      if (!driveData.tripEmailScan) driveData.tripEmailScan = { processedMessageIds: {} };
+      const now = new Date();
+      driveData.tripEmailScan.lastRunDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      driveData.tripEmailScan.lastRunAt = now.toISOString();
+      driveData.tripEmailScan.lastRunSummary = summary;
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.recordTripEmailScanRun failed:', e);
+      return false;
+    }
+  },
+  async markEmailProcessed(messageId, outcome) {
+    try {
+      if (!driveData.tripEmailScan) driveData.tripEmailScan = { processedMessageIds: {} };
+      if (!driveData.tripEmailScan.processedMessageIds) driveData.tripEmailScan.processedMessageIds = {};
+      driveData.tripEmailScan.processedMessageIds[messageId] = outcome;
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.markEmailProcessed failed:', e);
       return false;
     }
   },
@@ -1834,6 +1877,59 @@ async function runBackgroundSyncs() {
   } catch (e) {
     console.error('Background TripIt sync failed:', e);
   }
+}
+
+// ---- Trip email scan "hasn't run today" badge ----
+// The scheduled trip-email-scan task (see /Users/jskagan/.claude/
+// scheduled-tasks/trip-email-scan/SKILL.md) can only run while both Claude
+// itself and a live signed-in tab to this app are open at the same moment
+// -- there's no way for this page to trigger it directly. This badge is
+// just an honest status indicator (like tripsy-pending-warning-badge):
+// shown whenever today's scan hasn't completed yet, clicking it opens the
+// Update Trips utility page with instructions for running it manually.
+// Polls the Drive file directly (not just this tab's in-memory driveData)
+// since the scan runs in a separate session/device from whichever tab is
+// showing the badge, so it can still clear itself without a reload if the
+// scan happens to complete while this tab is sitting open.
+let tripEmailScanPollTimer = null;
+function todayLocalDateString() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+async function updateTripEmailScanBadge() {
+  const badge = document.getElementById('trip-email-scan-badge');
+  if (!badge) return;
+  if (!isOwner) {
+    badge.style.display = 'none';
+    return;
+  }
+  const status = await Store.getTripEmailScanStatus();
+  if (status.lastRunDate === todayLocalDateString()) {
+    badge.style.display = 'none';
+    if (tripEmailScanPollTimer) { clearInterval(tripEmailScanPollTimer); tripEmailScanPollTimer = null; }
+    return;
+  }
+  badge.style.display = '';
+  if (tripEmailScanPollTimer) return;
+  tripEmailScanPollTimer = setInterval(async () => {
+    try {
+      const fresh = await loadDriveDataFile(driveFileId);
+      if (fresh.tripEmailScan && fresh.tripEmailScan.lastRunDate === todayLocalDateString()) {
+        driveData.tripEmailScan = fresh.tripEmailScan;
+        // Pull in whatever new trips/events the scan created too, so the
+        // page doesn't need a manual reload to see them.
+        if (fresh.trips) driveData.trips = fresh.trips;
+        badge.style.display = 'none';
+        clearInterval(tripEmailScanPollTimer);
+        tripEmailScanPollTimer = null;
+        if (currentView === 'mytrips') await renderMyTripsEventsList();
+        else if (currentView === 'utilitiesupdatetrips') await renderUtilitiesUpdateTrips();
+        toast(fresh.tripEmailScan.lastRunSummary || 'Trip email scan complete.');
+      }
+    } catch (e) {
+      console.error('Trip email scan poll failed:', e);
+    }
+  }, 30000);
 }
 
 // Manual "Refresh All" -- runs every sync pipeline plus a passenger-report
@@ -2673,7 +2769,7 @@ function setActiveNav(view, param) {
   document.getElementById("psreservations-submenu").classList.toggle("collapsed", !isPsReservationsView);
   document.getElementById("psreservations-caret").textContent = isPsReservationsView ? "▾" : "▸";
 
-  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiestripsypush";
+  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiestripsypush" || view === "utilitiesupdatetrips";
   document.getElementById("utilities-toggle").classList.toggle("active", isUtilitiesView);
   document.getElementById("utilities-submenu").classList.toggle("collapsed", !isUtilitiesView);
   document.getElementById("utilities-caret").textContent = isUtilitiesView ? "▾" : "▸";
@@ -2712,6 +2808,7 @@ async function navigate(view, param) {
     else if (view === "utilitiesreparsepsreservations") await renderUtilitiesReparsePsReservations();
     else if (view === "utilitiesreparsepsinvoices") await renderUtilitiesReparsePsInvoices();
     else if (view === "utilitiestripsypush") await renderUtilitiesTripsyPush();
+    else if (view === "utilitiesupdatetrips") await renderUtilitiesUpdateTrips();
     else if (view === "passengers") await renderPassengerReport(param || "totals");
   } catch (e) {
     // Catch-all so a bug in one view shows a visible error instead of an
@@ -5004,6 +5101,42 @@ async function renderUtilitiesTripsyPush() {
           <li>Reload this page -- the warning triangle in the top-right corner clears once the queue is empty.</li>
         </ol>
         <p style="margin-top:10px;"><b>On a Mac or PC:</b> same thing, from the Claude Code CLI, the desktop app, or claude.ai/code -- whichever you'd normally use for this project.</p>
+      </div>
+    </div>
+  `;
+}
+
+async function renderUtilitiesUpdateTrips() {
+  const status = isOwner ? await Store.getTripEmailScanStatus() : { lastRunDate: null, lastRunAt: null, lastRunSummary: null };
+  const ranToday = status.lastRunDate === todayLocalDateString();
+  main.innerHTML = `
+    <div class="page-title">Update Trips</div>
+    <div class="page-sub">The email scan that pulls new travel confirmations into My Trips can't run entirely on its own -- it needs a live Claude session with this app open and signed in at the same moment. This page explains its current status and how to trigger it yourself when you don't want to wait.</div>
+    <div class="card" style="margin-bottom:16px;">
+      <div style="font-family:var(--mono); font-size:14px; color:${ranToday ? 'var(--home-green)' : 'var(--amber)'}; font-weight:700; margin-bottom:6px;">
+        ${ranToday ? '✅ Ran today' : '⚠️ Has not run today'}
+      </div>
+      <div style="font-size:13px; color:var(--muted);">
+        ${status.lastRunAt ? `Last ran ${esc(new Date(status.lastRunAt).toLocaleString())}` : 'Never run yet.'}
+        ${status.lastRunSummary ? `<div style="margin-top:6px; color:var(--text);">${esc(status.lastRunSummary)}</div>` : ''}
+      </div>
+    </div>
+    <div class="card">
+      <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">How it normally runs</div>
+      <div style="font-size:13px; line-height:1.6;">
+        <p>A Claude scheduled task ("trip-email-scan") checks in every 2 hours between 7am and 11pm. Each check only does real work if it finds this app open and signed in at that exact moment -- otherwise it does nothing and waits for the next check. Simply having this tab open around one of those times is what lets it run; there's nothing else to do.</p>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px;">
+      <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">Run it yourself right now</div>
+      <div style="font-size:13px; line-height:1.6;">
+        <p>Keep this tab open and signed in, then in the <b>Claude app</b> (not the Chrome extension -- the main app or claude.ai/code where you talk to Claude):</p>
+        <ol style="margin:6px 0 0 20px; padding:0;">
+          <li>Open the <b>Scheduled Tasks</b> section in Claude's own sidebar.</li>
+          <li>Find <b>trip-email-scan</b> in the list.</li>
+          <li>Click <b>Run now</b>.</li>
+        </ol>
+        <p style="margin-top:10px;">Or, simpler: just tell Claude directly, in any conversation on this project -- <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">scan my email for new trips</span> -- with this tab open and signed in. Either way, refresh this page afterward to see the result above.</p>
       </div>
     </div>
   `;
@@ -8607,7 +8740,7 @@ document.getElementById("psreservations-toggle").addEventListener("click", () =>
 });
 document.getElementById("utilities-toggle").addEventListener("click", () => {
   const submenu = document.getElementById("utilities-submenu");
-  const isUtilitiesView = currentView === "utilitiesusers" || currentView === "utilitiesdeletepsreservations" || currentView === "utilitiesreparsepsreservations" || currentView === "utilitiesreparsepsinvoices" || currentView === "utilitiestripsypush";
+  const isUtilitiesView = currentView === "utilitiesusers" || currentView === "utilitiesdeletepsreservations" || currentView === "utilitiesreparsepsreservations" || currentView === "utilitiesreparsepsinvoices" || currentView === "utilitiestripsypush" || currentView === "utilitiesupdatetrips";
   if (submenu.classList.contains("collapsed") || !isUtilitiesView) {
     navigate("utilitiesusers");
   } else {
@@ -8749,6 +8882,7 @@ async function completeSignIn() {
       document.getElementById('utilities-toggle').style.display = '';
     }
     try { await updateTripsyPendingWarningBadge(); } catch (e) { console.error('updateTripsyPendingWarningBadge on startup failed:', e); }
+    try { await updateTripEmailScanBadge(); } catch (e) { console.error('updateTripEmailScanBadge on startup failed:', e); }
 
     // Correct this browser's cached scope-tier hint now that we actually
     // know who's signed in -- see SCOPE_TIER_KEY above. Doesn't affect
@@ -8871,6 +9005,7 @@ document.getElementById('signout-btn').addEventListener('click', () => {
 });
 
 document.getElementById('tripsy-pending-warning-badge').addEventListener('click', () => navigate('utilitiestripsypush'));
+document.getElementById('trip-email-scan-badge').addEventListener('click', () => navigate('utilitiesupdatetrips'));
 
 </script>
 </body>
