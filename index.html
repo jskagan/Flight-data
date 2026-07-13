@@ -6249,6 +6249,24 @@ function renderMyTripsEditPanel(panel, tripId, eventId, raw, warnings) {
 // Tripsy-sourced data) -- takes the reservations list as a parameter
 // rather than reading the Tripsy page's own tripsyPsReservations global,
 // since My Trips loads its own copy independently.
+// Splits a lodging event into separate Check-in / Check-out rows at render
+// time, matching Tripsy Trips's expandTripsyHotelEvents -- a hotel stay is
+// stored as ONE event (start = check-in, end = check-out), but always
+// displayed as two, same as the calendar-synced Trips page. This never
+// touches driveData, only what gets rendered; both split rows carry
+// `realId` pointing back at the one real event.id so Edit/Hide/Delete and
+// the view/edit panel all operate on the actual stored event, not a
+// synthetic per-row id.
+function expandMyTripsHotelEvents(events) {
+  return events.flatMap(ev => {
+    if (ev.type !== 'hotel') return [{ ...ev, realId: ev.id }];
+    return [
+      { ...ev, id: `${ev.id}-checkin`, realId: ev.id, summary: `Check-in: ${ev.summary}`, end: null },
+      { ...ev, id: `${ev.id}-checkout`, realId: ev.id, summary: `Check-out: ${ev.summary}`, start: ev.end, end: null, notes: null, extra: null },
+    ];
+  });
+}
+
 function findMyTripsPsMatch(ev, psReservations) {
   if (!psReservations || ev.type !== 'flight') return null;
   for (const res of psReservations) {
@@ -6278,13 +6296,24 @@ async function renderMyTripsEventsList() {
     // the P/S card reads as the leftmost/outermost item in the list --
     // same rule as Tripsy Trips.
     const hasPsMatchInTrip = visibleEvents.some(ev => findMyTripsPsMatch(ev, psReservations));
-    const eventRows = collapsed ? "" : visibleEvents.map(ev => {
+    const expandedEvents = expandMyTripsHotelEvents(visibleEvents).sort((a, b) => {
+      const special = tripsyMultiDayEventOrder(a, b);
+      if (special != null) return special;
+      return new Date(a.start || 0) - new Date(b.start || 0);
+    });
+    // The Check-in/Check-out split shares one edit panel per underlying
+    // event -- only emit the panel container once per realId, even though
+    // both split rows can offer an Edit button that opens it.
+    const renderedPanelKeys = new Set();
+    const eventRows = collapsed ? "" : expandedEvents.map(ev => {
       const departTime = formatTripitTime(ev.start);
       const arriveTime = formatTripitTime(ev.end);
       const showTimes = (ev.type === 'flight' || ev.type === 'transportation') && (departTime || arriveTime);
       const needsReview = !!(ev._warnings && ev._warnings.length);
       const indentLevel = myTripsTypeIndent(ev.type) + (hasPsMatchInTrip ? 1 : 0);
       const hasRaw = !!ev.raw;
+      const realId = ev.realId || ev.id;
+      const panelKey = hasRaw && !renderedPanelKeys.has(realId) ? (renderedPanelKeys.add(realId), realId) : null;
       const headerLabel = (hasRaw && ev.raw.resource === 'transportation')
         ? tripsyTransportationHeaderLabel(ev.raw.category)
         : myTripsTypeLabel(ev.type);
@@ -6299,7 +6328,7 @@ async function renderMyTripsEventsList() {
       // The view-click target is this inner content div specifically, not
       // the outer row -- the Edit/Hide/Delete icons are a SIBLING div, not
       // a descendant, so clicks on those icons never bubble into it.
-      const viewAttr = hasRaw ? `data-mytrips-view-event="${esc(ev.id)}" style="cursor:pointer;"` : '';
+      const viewAttr = hasRaw ? `data-mytrips-view-event="${esc(realId)}" style="cursor:pointer;"` : '';
       const eventHtml = `
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); margin-top:10px; margin-left:${indentLevel * TRIPIT_INDENT_PX}px;">
         <div ${viewAttr}>
@@ -6311,13 +6340,13 @@ async function renderMyTripsEventsList() {
         </div>
         ${isOwner ? `
           <div style="display:flex; gap:6px; flex-shrink:0;">
-            ${hasRaw ? `<button class="btn" data-mytrips-edit-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px; ${needsReview ? 'background:#e67e22; color:#fff; border-color:#e67e22;' : ''}" title="Edit">${needsReview ? 'Review' : '✏️'}</button>` : ''}
-            <button class="btn" data-mytrips-hide-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" style="font-size:11px; padding:3px 8px;" title="Hide">🙈</button>
-            <button class="btn" data-mytrips-delete-event data-trip-id="${esc(trip.id)}" data-id="${esc(ev.id)}" data-summary="${esc(ev.summary || '')}" style="font-size:11px; padding:3px 8px;" title="Delete">🗑️</button>
+            ${hasRaw ? `<button class="btn" data-mytrips-edit-event data-trip-id="${esc(trip.id)}" data-id="${esc(realId)}" style="font-size:11px; padding:3px 8px; ${needsReview ? 'background:#e67e22; color:#fff; border-color:#e67e22;' : ''}" title="Edit">${needsReview ? 'Review' : '✏️'}</button>` : ''}
+            <button class="btn" data-mytrips-hide-event data-trip-id="${esc(trip.id)}" data-id="${esc(realId)}" style="font-size:11px; padding:3px 8px;" title="Hide">🙈</button>
+            <button class="btn" data-mytrips-delete-event data-trip-id="${esc(trip.id)}" data-id="${esc(realId)}" data-summary="${esc(ev.summary || '')}" style="font-size:11px; padding:3px 8px;" title="Delete">🗑️</button>
           </div>
         ` : ''}
       </div>
-      ${hasRaw ? `<div data-mytrips-edit-panel="${esc(ev.id)}" style="display:none; margin-top:8px; margin-left:${indentLevel * TRIPIT_INDENT_PX}px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
+      ${panelKey ? `<div data-mytrips-edit-panel="${esc(panelKey)}" style="display:none; margin-top:8px; margin-left:${indentLevel * TRIPIT_INDENT_PX}px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
       `;
       const psMatch = findMyTripsPsMatch(ev, psReservations);
       if (!psMatch) return eventHtml;
