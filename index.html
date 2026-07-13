@@ -1224,6 +1224,54 @@ const Store = {
       return false;
     }
   },
+  // Moves an event from one trip to another -- used to resolve an
+  // ambiguous email-scan trip assignment (see event._tripAssignmentCandidates)
+  // once the owner picks the right trip. Clears the ambiguity flag on the
+  // moved event as part of the same operation. If the FROM trip was an
+  // auto-created placeholder (trip.autoCreated) and ends up with no events
+  // left after the move, it's deleted too rather than leaving an empty
+  // orphan trip behind.
+  async moveTripEvent(fromTripId, eventId, toTripId) {
+    try {
+      const fromTrip = (driveData.trips || []).find(t => t.id === fromTripId);
+      if (!fromTrip) throw new Error(`Trip ${fromTripId} not found`);
+      const idx = (fromTrip.events || []).findIndex(e => e.id === eventId);
+      if (idx < 0) throw new Error(`Event ${eventId} not found on trip ${fromTripId}`);
+      const toTrip = (driveData.trips || []).find(t => t.id === toTripId);
+      if (!toTrip) throw new Error(`Trip ${toTripId} not found`);
+      const [event] = fromTrip.events.splice(idx, 1);
+      event.tripId = toTripId;
+      event._tripAssignmentCandidates = null;
+      event.updatedAt = new Date().toISOString();
+      if (!toTrip.events) toTrip.events = [];
+      toTrip.events.push(event);
+      if (fromTrip.autoCreated && fromTrip.events.length === 0) {
+        driveData.trips = driveData.trips.filter(t => t.id !== fromTripId);
+      }
+      await persistDriveData();
+      return { ok: true };
+    } catch (e) {
+      console.error('Store.moveTripEvent failed:', e);
+      return { ok: false, error: e.message || String(e) };
+    }
+  },
+  // Dismisses an ambiguous trip assignment without moving the event --
+  // the owner confirmed the auto-created trip is correct as-is.
+  async clearTripAssignmentCandidates(tripId, eventId) {
+    try {
+      const trip = (driveData.trips || []).find(t => t.id === tripId);
+      if (!trip) throw new Error(`Trip ${tripId} not found`);
+      const event = (trip.events || []).find(e => e.id === eventId);
+      if (!event) throw new Error(`Event ${eventId} not found on trip ${tripId}`);
+      event._tripAssignmentCandidates = null;
+      event.updatedAt = new Date().toISOString();
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.clearTripAssignmentCandidates failed:', e);
+      return false;
+    }
+  },
 };
 
 // ---- PS Reservations (Gmail-sourced) ----
@@ -6264,8 +6312,9 @@ function renderMyTripsViewPanel(panel, raw, onEdit) {
 // non-empty) -- writes straight into driveData via Store.saveTripEvent/
 // resolveTripEvent, no pending-changes queue (unlike Tripsy Trips, there's
 // no external system here to reconcile with).
-function renderMyTripsEditPanel(panel, tripId, eventId, raw, warnings) {
+function renderMyTripsEditPanel(panel, tripId, eventId, raw, warnings, candidates) {
   const isReview = !!(warnings && warnings.length);
+  const hasCandidates = !!(candidates && candidates.length);
   const fields = MY_TRIPS_EDIT_FIELDS[raw.resource] || [];
   const airlineDatalistId = 'mytrips-airline-datalist-' + Math.random().toString(36).slice(2, 10);
   const inputHtml = f => {
@@ -6302,6 +6351,17 @@ function renderMyTripsEditPanel(panel, tripId, eventId, raw, warnings) {
   panel.innerHTML = `
     <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
       ${isReview ? `<div style="font-size:13px; color:var(--amber);">${esc(warnings.join(' '))}</div>` : ''}
+      ${hasCandidates ? `
+        <div style="background:var(--bg); border:1px solid var(--amber); border-radius:10px; padding:16px 18px;">
+          <div style="font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:var(--amber); margin-bottom:10px;">Which trip is this?</div>
+          <div style="font-size:13px; color:var(--muted); margin-bottom:10px;">This could belong to more than one trip -- pick one below, or leave it as its own new trip.</div>
+          <select data-mytrips-trip-candidate class="field-input" style="width:100%; margin-bottom:10px;">
+            <option value="">Keep as a new trip</option>
+            ${candidates.map(c => `<option value="${esc(c.tripId)}">${esc(c.tripName)}</option>`).join('')}
+          </select>
+          <button class="btn primary" data-mytrips-resolve-candidate style="font-size:13px; padding:6px 14px;">Apply</button>
+        </div>
+      ` : ''}
       ${groupOrder.map(sectionHtml).join('')}
       <div style="display:flex; gap:10px; align-items:center;">
         <button class="btn primary" data-mytrips-edit-save style="font-size:13px; padding:8px 18px;">Save</button>
@@ -6321,6 +6381,26 @@ function renderMyTripsEditPanel(panel, tripId, eventId, raw, warnings) {
     };
     categorySelect.addEventListener('change', refreshAirlineOptions);
     refreshAirlineOptions();
+  }
+
+  if (hasCandidates) {
+    panel.querySelector("[data-mytrips-resolve-candidate]").addEventListener("click", async () => {
+      const applyBtn = panel.querySelector("[data-mytrips-resolve-candidate]");
+      applyBtn.disabled = true;
+      const toTripId = panel.querySelector("[data-mytrips-trip-candidate]").value;
+      const result = toTripId
+        ? await Store.moveTripEvent(tripId, eventId, toTripId)
+        : await (async () => ({ ok: await Store.clearTripAssignmentCandidates(tripId, eventId) }))();
+      if (!result.ok) {
+        toast("Could not update trip assignment — storage error. Please try again.", "error");
+        applyBtn.disabled = false;
+        return;
+      }
+      toast(toTripId ? "Moved to the selected trip." : "Kept as its own trip.");
+      panel.style.display = "none";
+      panel.innerHTML = "";
+      renderMyTripsEventsList();
+    });
   }
 
   panel.querySelector("[data-mytrips-edit-exit]").addEventListener("click", () => {
@@ -6443,6 +6523,7 @@ async function renderMyTripsEventsList() {
       const arriveTime = formatTripitTime(ev.end);
       const showTimes = (ev.type === 'flight' || ev.type === 'transportation') && (departTime || arriveTime);
       const needsReview = !!(ev._warnings && ev._warnings.length);
+      const needsTripConfirm = !!(ev._tripAssignmentCandidates && ev._tripAssignmentCandidates.length);
       const indentLevel = myTripsTypeIndent(ev.type) + (hasPsMatchInTrip ? 1 : 0);
       const hasRaw = !!ev.raw;
       const realId = ev.realId || ev.id;
@@ -6467,13 +6548,13 @@ async function renderMyTripsEventsList() {
         <div ${viewAttr}>
           <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">
             ${esc(headerLabel)}${ev.start ? ` • ${esc(formatTripitDateRange(ev.start, ev.end))}` : ''}
-            ${needsReview ? ` • <span style="color:#e67e22;">Needs Review</span>` : ''}
+            ${needsTripConfirm ? ` • <span style="color:#e67e22;">Confirm Trip</span>` : (needsReview ? ` • <span style="color:#e67e22;">Needs Review</span>` : '')}
           </div>
           ${bodyLines.join('')}
         </div>
         ${isOwner ? `
           <div style="display:flex; gap:6px; flex-shrink:0;">
-            ${hasRaw ? `<button class="btn" data-mytrips-edit-event data-trip-id="${esc(trip.id)}" data-id="${esc(realId)}" style="font-size:11px; padding:3px 8px; ${needsReview ? 'background:#e67e22; color:#fff; border-color:#e67e22;' : ''}" title="Edit">${needsReview ? 'Review' : '✏️'}</button>` : ''}
+            ${hasRaw ? `<button class="btn" data-mytrips-edit-event data-trip-id="${esc(trip.id)}" data-id="${esc(realId)}" style="font-size:11px; padding:3px 8px; ${(needsReview || needsTripConfirm) ? 'background:#e67e22; color:#fff; border-color:#e67e22;' : ''}" title="Edit">${needsTripConfirm ? 'Confirm' : (needsReview ? 'Review' : '✏️')}</button>` : ''}
             <button class="btn" data-mytrips-hide-event data-trip-id="${esc(trip.id)}" data-id="${esc(realId)}" style="font-size:11px; padding:3px 8px;" title="Hide">🙈</button>
             <button class="btn" data-mytrips-delete-event data-trip-id="${esc(trip.id)}" data-id="${esc(realId)}" data-summary="${esc(ev.summary || '')}" style="font-size:11px; padding:3px 8px;" title="Delete">🗑️</button>
           </div>
@@ -6563,7 +6644,7 @@ async function renderMyTripsEventsList() {
       const ev = trip && trip.events.find(e => e.id === id);
       if (!ev || !ev.raw) return;
       const onEdit = isOwner ? () => {
-        renderMyTripsEditPanel(panel, trip.id, ev.id, ev.raw, ev._warnings);
+        renderMyTripsEditPanel(panel, trip.id, ev.id, ev.raw, ev._warnings, ev._tripAssignmentCandidates);
         panel.dataset.mode = "edit";
       } : null;
       renderMyTripsViewPanel(panel, ev.raw, onEdit);
@@ -6589,7 +6670,7 @@ async function renderMyTripsEventsList() {
       const trip = (await Store.listTrips()).find(t => t.id === tripId);
       const ev = trip && (trip.events || []).find(e => e.id === id);
       if (!ev || !ev.raw) return;
-      renderMyTripsEditPanel(panel, tripId, ev.id, ev.raw, ev._warnings);
+      renderMyTripsEditPanel(panel, tripId, ev.id, ev.raw, ev._warnings, ev._tripAssignmentCandidates);
       panel.dataset.mode = "edit";
       panel.style.display = "block";
     });
