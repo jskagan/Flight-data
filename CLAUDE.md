@@ -32,6 +32,12 @@ language and getting the user's explicit go-ahead.** This applies every session,
 the user asks for it in the moment — don't treat silence or an unrelated request as consent to
 commit pending changes.
 
+**Exception: Tripsy Trips snapshot-only refreshes.** When following the "Refresh Tripsy Trips
+snapshot" procedure (see `TRIPSY_SNAPSHOT_GENERATED_AT`/`TRIPSY_ENCRYPTED` in `index.html`) and the
+resulting diff touches *only* those two constants — no other lines changed — commit and push
+without asking first. Still describe what was refreshed (trip/event counts, any pending changes
+applied) after the fact. If the diff touches anything else, the normal go-ahead rule applies.
+
 The user runs multiple sessions against this repo (different devices, sometimes in parallel), so
 `main` can move without this session knowing. **Every session should start with `git fetch origin`
 and a look at `git log main..origin/main`**, before making any local edits — catching divergence
