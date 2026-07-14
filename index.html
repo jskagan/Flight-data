@@ -8329,7 +8329,31 @@ function renderTripsyPsReservationViewPanel(panel, res) {
   if (goToBtn) goToBtn.addEventListener("click", () => goToReservation(res.reservationNumber));
 }
 
-async function renderTripsyEventsList() {
+// Serializes overlapping calls so they run one at a time, in call order,
+// instead of racing. Without this, a render triggered by a user click
+// (e.g. expanding a trip) and a render triggered by something else (e.g.
+// the automatic on-load background sync completing) could interleave --
+// both read collapse/hidden state at the start of their own run, but if
+// the click's render's DOM write landed BEFORE the other one's, the other
+// (stale) render's write would overwrite it, making the click appear to
+// have done nothing. This was most noticeable on first interacting with a
+// trip right after page load, while background syncs were still settling.
+// Chaining every call onto the same promise guarantees the LAST call made
+// is also the last to actually run (and thus read the freshest state), no
+// matter how long any earlier call's own work takes.
+let _tripsyEventsListRenderChain = Promise.resolve();
+let _tripsyAttachmentsMenuOutsideClickBound = false;
+function renderTripsyEventsList() {
+  const run = _tripsyEventsListRenderChain.then(() => renderTripsyEventsListImpl());
+  // Swallow the wrapper's own rejection so one failed render doesn't
+  // permanently wedge the chain for every render after it -- the real
+  // error still surfaces to whoever called renderTripsyEventsList()
+  // this time, via the returned (unswallowed) promise below.
+  _tripsyEventsListRenderChain = run.catch(() => {});
+  return run;
+}
+
+async function renderTripsyEventsListImpl() {
   const container = document.getElementById("tripsy-card");
   const allTrips = tripsyDecryptedTrips || [];
 
@@ -8768,11 +8792,11 @@ async function renderTripsyEventsList() {
   // existing add-item-menu's own click-outside behavior isn't present
   // today, so this is new, but the same one-open-at-a-time pattern above
   // makes a stray open menu confusing to leave hanging otherwise.
-  if (!renderTripsyEventsList._attachmentsMenuOutsideClickBound) {
+  if (!_tripsyAttachmentsMenuOutsideClickBound) {
     document.addEventListener("click", () => {
       document.querySelectorAll("[data-tripsy-attachments-menu]").forEach(m => { m.style.display = "none"; });
     });
-    renderTripsyEventsList._attachmentsMenuOutsideClickBound = true;
+    _tripsyAttachmentsMenuOutsideClickBound = true;
   }
 
   container.querySelectorAll("[data-tripsy-view-attachment]").forEach(btn => {
