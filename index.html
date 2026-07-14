@@ -6991,6 +6991,39 @@ function isTripsyTripEffectivelyHidden(trip) {
   return lastActivity < cutoff;
 }
 
+// Same idea, one level down: an individual EVENT can also be hidden by
+// default -- currently only dining events the refresh procedure found
+// outside their trip's own date range come in this way (hidden:true baked
+// into the snapshot at generation time, see TRIPSY_ENCRYPTED's shape
+// comment) -- with the same localStorage-backed manual override pattern
+// as the trip-level hide above, so any viewer can reveal (or re-hide) one
+// on their own device regardless of that baked-in default.
+const TRIPSY_EVENT_OVERRIDE_STORAGE_PREFIX = 'tripsy-event-override:';
+function getTripsyEventOverride(eventKey) {
+  try {
+    return localStorage.getItem(TRIPSY_EVENT_OVERRIDE_STORAGE_PREFIX + eventKey) || null;
+  } catch (e) {
+    return null;
+  }
+}
+function setTripsyEventOverride(eventKey, value) {
+  try {
+    if (value) localStorage.setItem(TRIPSY_EVENT_OVERRIDE_STORAGE_PREFIX + eventKey, value);
+    else localStorage.removeItem(TRIPSY_EVENT_OVERRIDE_STORAGE_PREFIX + eventKey);
+  } catch (e) {
+    console.error('setTripsyEventOverride failed:', e);
+  }
+}
+function isTripsyEventEffectivelyHidden(ev) {
+  const eventKey = tripsyEventKey(ev.tripsyRaw);
+  if (eventKey) {
+    const override = getTripsyEventOverride(eventKey);
+    if (override === 'shown') return false;
+    if (override === 'hidden') return true;
+  }
+  return !!ev.hidden;
+}
+
 const TRIPSY_PASSPHRASE_DRIVE_FILENAME = 'Tripsy Trips Passphrase';
 
 // Primary passphrase source: the same private Drive file the scheduled
@@ -8040,6 +8073,13 @@ async function renderTripsyEventsList() {
     // and both split halves (sharing one underlying hosting record) show
     // the same pending badge.
     const effectiveEvents = trip.events.map(ev => getEffectiveTripsyEvent(ev, pendingChanges));
+    // Events hidden by default (currently: dining events the refresh
+    // procedure found outside their trip's date range) or manually hidden
+    // never enter the main timeline -- they're set aside, same
+    // "excluded, not deleted" shape as the trip-level hide, and surfaced
+    // instead in the centralized "Hidden Events" box on the Hidden Trips
+    // page (see renderTripsyHiddenTripsPanelContent).
+    const visibleEvents = effectiveEvents.filter(ev => !isTripsyEventEffectivelyHidden(ev));
     // Queued new items are folded into the SAME chronological, day-grouped
     // list as real events (rather than a separate always-trailing block)
     // so they land on the day they'll actually occur once pushed to
@@ -8059,7 +8099,7 @@ async function renderTripsyEventsList() {
     // (real or pending-create) are expanded into separate Check-in/
     // Check-out rows first so each half sorts independently by its own
     // date.
-    const sortedEvents = expandMultiDayTripsyEvents([...effectiveEvents, ...pendingCreateEvents]).sort((a, b) => {
+    const sortedEvents = expandMultiDayTripsyEvents([...visibleEvents, ...pendingCreateEvents]).sort((a, b) => {
       const special = tripsyMultiDayEventOrder(a, b);
       if (special != null) return special;
       return new Date(a.start || 0) - new Date(b.start || 0);
@@ -8499,34 +8539,70 @@ async function renderTripsyEventsList() {
   });
 }
 
+// Second box below "Hidden Trips" for individually-hidden EVENTS --
+// currently these are dining events the refresh procedure found outside
+// their trip's date range (see the refresh procedure), or anything
+// manually hidden. Only gathered from trips that are themselves still
+// shown -- a trip that's ALREADY in the "Hidden Trips" box above has
+// already hidden all of its events by virtue of the whole trip being
+// hidden, so listing them again here would be redundant.
 function renderTripsyHiddenTripsPanelContent() {
   const panel = document.getElementById("tripsy-hidden-panel");
   if (!panel) return;
-  const hiddenTrips = (tripsyDecryptedTrips || []).filter(t => isTripsyTripEffectivelyHidden(t));
+  const allTrips = tripsyDecryptedTrips || [];
+  const hiddenTrips = allTrips.filter(t => isTripsyTripEffectivelyHidden(t));
+  const hiddenEventEntries = [];
+  allTrips.filter(t => !isTripsyTripEffectivelyHidden(t)).forEach(trip => {
+    trip.events.forEach(ev => {
+      if (isTripsyEventEffectivelyHidden(ev)) hiddenEventEntries.push({ trip, ev });
+    });
+  });
 
-  if (!hiddenTrips.length) {
-    panel.innerHTML = `<div class="card"><div class="empty-state">No hidden trips.</div></div>`;
-    return;
-  }
-
-  panel.innerHTML = `
+  const hiddenTripsHtml = `
     <div class="card">
       <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:6px;">Hidden Trips</div>
-      ${hiddenTrips.map(trip => `
+      ${!hiddenTrips.length ? `<div class="empty-state">No hidden trips.</div>` : hiddenTrips.map(trip => `
         <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 0; border-top:1px solid var(--line);">
           <div>
             <div style="font-size:13px; color:var(--text); font-weight:600;">${esc(trip.name)}</div>
             <div style="font-size:12px; color:var(--muted);">${esc(formatTripitDateRange(trip.start, trip.end))}</div>
           </div>
-          <button class="btn" data-tripsy-show-trip data-key="${esc(trip.key)}" style="font-size:11px; padding:3px 8px; flex-shrink:0;">Show</button>
+          <button class="btn" data-tripsy-show-trip data-key="${esc(trip.key)}" style="font-size:11px; padding:3px 8px; flex-shrink:0;">👁️ Show</button>
         </div>
       `).join("")}
     </div>
   `;
 
+  const hiddenEventsHtml = `
+    <div class="card" style="margin-top:16px;">
+      <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:6px;">Hidden Events</div>
+      ${!hiddenEventEntries.length ? `<div class="empty-state">No hidden events.</div>` : hiddenEventEntries.map(({ trip, ev }) => {
+        const eventKey = tripsyEventKey(ev.tripsyRaw);
+        return `
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 0; border-top:1px solid var(--line);">
+            <div>
+              <div style="font-size:13px; color:var(--text); font-weight:600;">${esc(ev.summary)}</div>
+              <div style="font-size:12px; color:var(--muted);">${esc(trip.name)}${ev.start ? ' • ' + esc(formatTripitDateRange(ev.start, null)) : ''}</div>
+            </div>
+            ${eventKey ? `<button class="btn" data-tripsy-show-event data-key="${esc(eventKey)}" style="font-size:11px; padding:3px 8px; flex-shrink:0;">👁️ Show</button>` : ''}
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+
+  panel.innerHTML = hiddenTripsHtml + hiddenEventsHtml;
+
   panel.querySelectorAll("[data-tripsy-show-trip]").forEach(btn => {
     btn.addEventListener("click", () => {
       setTripsyTripOverride(btn.dataset.key, 'shown');
+      renderTripsyEventsList();
+      renderTripsyHiddenTripsPanelContent();
+    });
+  });
+  panel.querySelectorAll("[data-tripsy-show-event]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      setTripsyEventOverride(btn.dataset.key, 'shown');
       renderTripsyEventsList();
       renderTripsyHiddenTripsPanelContent();
     });
