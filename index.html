@@ -1019,18 +1019,28 @@ const Store = {
       // item again before it's applied) replaces the earlier entry rather
       // than piling up duplicates.
       driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(c => c.id !== change.id);
-      // An edit queued twice for the same event should amend the existing
-      // pending edit rather than pile up duplicates that would otherwise
-      // get applied in some arbitrary order later.
+      // An edit queued twice for the same event (or trip) should amend the
+      // existing pending edit rather than pile up duplicates that would
+      // otherwise get applied in some arbitrary order later.
       if (change.type === 'edit_event') {
         driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
           c => !(c.type === 'edit_event' && c.eventKey === change.eventKey)
         );
       }
-      // A delete makes any pending edit for the same event moot.
+      if (change.type === 'edit_trip') {
+        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
+          c => !(c.type === 'edit_trip' && c.tripKey === change.tripKey)
+        );
+      }
+      // A delete makes any pending edit for the same event (or trip) moot.
       if (change.type === 'delete_event') {
         driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
           c => !(c.type === 'edit_event' && c.eventKey === change.eventKey)
+        );
+      }
+      if (change.type === 'delete_trip') {
+        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
+          c => !(c.type === 'edit_trip' && c.tripKey === change.tripKey)
         );
       }
       driveData.tripsyPendingChanges.push(change);
@@ -5585,16 +5595,6 @@ function setTripCollapsed(tripKey, collapsed) {
   }
 }
 
-// Used by Home's "Upcoming Trips" table: jumps to the Trips page, force-
-// expanding the selected trip's card (if it was collapsed) and scrolling
-// it into view.
-async function goToTripitTrip(tripKey) {
-  setTripCollapsed(tripKey, false);
-  await navigate("triptrips");
-  const card = document.getElementById(TRIPIT_TRIP_CARD_ID_PREFIX + tripKey);
-  if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
 // Used by Home's "Upcoming Reservations" table: jumps to the P/S
 // Reservations page and scrolls to the matching reservation's card.
 async function goToReservation(reservationNumber) {
@@ -7526,6 +7526,16 @@ function getEffectiveTripsyEvent(ev, pendingChanges) {
   };
 }
 
+// Same idea, one level up: overlays a pending edit_trip change's name/
+// start/end onto a trip for display, so a just-saved title/date edit
+// shows immediately without waiting for a future refresh to actually push
+// it to Tripsy.
+function getEffectiveTripsyTrip(trip, pendingChanges) {
+  const editChange = pendingChanges.find(c => c.type === 'edit_trip' && c.tripKey === trip.key);
+  if (!editChange) return trip;
+  return { ...trip, ...editChange.changes };
+}
+
 // Looks up a Tripsy-sourced event's raw fields by its stable eventKey
 // (resource:id) across every trip in the decrypted snapshot -- used to
 // re-derive fresh values when opening the edit panel, rather than trusting
@@ -7779,6 +7789,71 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
         changes,
       });
     }
+    if (!ok) toast("Could not save changes — storage error. Please try again.", "error");
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    renderTripsyEventsList();
+    updateTripsyPendingWarningBadge();
+  });
+}
+
+// A trip's own name/start/end -- much simpler than renderTripsyEditPanel's
+// per-resource field list above, since a trip has just these three editable
+// properties. Reads from effectiveTrip so re-opening the form after a save
+// (but before the next real sync) shows the pending values, not the stale
+// snapshot ones.
+function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
+  panel.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:14px; max-width:420px;">
+      <label style="font-size:13px; font-weight:600; color:var(--text);">
+        <span style="display:block; margin-bottom:6px;">Trip Name</span>
+        <input type="text" data-tripsy-edit-trip-field="name" value="${esc(effectiveTrip.name || '')}" class="field-input">
+      </label>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+        <label style="font-size:13px; font-weight:600; color:var(--text);">
+          <span style="display:block; margin-bottom:6px;">Start Date</span>
+          <input type="date" data-tripsy-edit-trip-field="start" value="${esc((effectiveTrip.start || '').slice(0, 10))}" class="field-input">
+        </label>
+        <label style="font-size:13px; font-weight:600; color:var(--text);">
+          <span style="display:block; margin-bottom:6px;">End Date</span>
+          <input type="date" data-tripsy-edit-trip-field="end" value="${esc((effectiveTrip.end || '').slice(0, 10))}" class="field-input">
+        </label>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <button class="btn primary" data-tripsy-edit-trip-save style="font-size:13px; padding:8px 18px;">Save</button>
+        <button class="btn" data-tripsy-edit-trip-cancel style="font-size:13px; padding:8px 18px;">Cancel</button>
+      </div>
+    </div>
+  `;
+
+  panel.querySelector("[data-tripsy-edit-trip-cancel]").addEventListener("click", () => {
+    panel.style.display = "none";
+    panel.innerHTML = "";
+  });
+
+  panel.querySelector("[data-tripsy-edit-trip-save]").addEventListener("click", async () => {
+    const saveBtn = panel.querySelector("[data-tripsy-edit-trip-save]");
+    saveBtn.disabled = true;
+    const changes = {};
+    ['name', 'start', 'end'].forEach(key => {
+      const newVal = panel.querySelector(`[data-tripsy-edit-trip-field="${key}"]`).value.trim();
+      const oldVal = effectiveTrip[key] || '';
+      if (newVal && newVal !== oldVal) changes[key] = newVal;
+    });
+    if (Object.keys(changes).length === 0) {
+      panel.style.display = "none";
+      panel.innerHTML = "";
+      return;
+    }
+    const ok = await Store.queueTripsyChange({
+      id: crypto.randomUUID(),
+      type: 'edit_trip',
+      createdAt: new Date().toISOString(),
+      tripKey: trip.key,
+      tripName: trip.name,
+      tripsyTripId: tripsyTripIdFromKey(trip.key),
+      changes,
+    });
     if (!ok) toast("Could not save changes — storage error. Please try again.", "error");
     panel.style.display = "none";
     panel.innerHTML = "";
@@ -8050,7 +8125,11 @@ async function renderTripsyEventsList() {
   container.innerHTML = trips.map(trip => {
     const pendingDeleteTrip = pendingChanges.find(c => c.type === 'delete_trip' && c.tripKey === trip.key);
     const pendingCreates = pendingChanges.filter(c => c.type === 'create_event' && c.tripKey === trip.key);
-    const subtitle = [formatTripitDateRange(trip.start, trip.end), trip.location].filter(Boolean).join(" • ");
+    // Overlays a pending edit_trip's name/start/end, if any, so a just-
+    // saved title/date edit shows immediately without waiting for a future
+    // refresh to actually push it to Tripsy.
+    const effectiveTrip = getEffectiveTripsyTrip(trip, pendingChanges);
+    const subtitle = [formatTripitDateRange(effectiveTrip.start, effectiveTrip.end), effectiveTrip.location].filter(Boolean).join(" • ");
 
     if (pendingDeleteTrip) {
       return `
@@ -8259,20 +8338,29 @@ async function renderTripsyEventsList() {
       `<button class="btn" data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}" title="Delete Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">🗑️</button>`,
       'Delete'
     ) : '';
+    // Edits a trip's own name/dates (a real change queued for the next
+    // Tripsy sync, unlike Hide which is a purely local view override) --
+    // owner-gated the same as Delete Trip, since both mutate real data.
+    const editButtonHtml = isOwner ? iconLabelButton(
+      `<button class="btn" data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}" title="Edit Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">✏️</button>`,
+      'Edit'
+    ) : '';
     return `
       <div class="card" style="margin-bottom:14px;">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
           <div data-tripsy-header-toggle="${esc(trip.key)}" style="cursor:pointer;">
-            <div style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">${esc(trip.name)}</div>
+            <div style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">${esc(effectiveTrip.name)}</div>
             ${subtitle ? `<div style="margin-top:2px; font-size:13px; color:var(--muted);">${esc(subtitle)}</div>` : ''}
           </div>
           <div style="display:flex; align-items:flex-start; gap:16px; flex-shrink:0;">
             ${addButtonHtml}
+            ${editButtonHtml}
             ${hideButtonHtml}
             ${deleteButtonHtml}
           </div>
         </div>
         ${showAddButton ? `<div data-tripsy-add-item-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
+        ${isOwner ? `<div data-tripsy-edit-trip-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${timelineHtml}
       </div>
     `;
@@ -8385,6 +8473,28 @@ async function renderTripsyEventsList() {
   });
 
   if (!isOwner) return;
+
+  // Re-derives the trip fresh from tripsyDecryptedTrips/pendingChanges
+  // rather than trusting a closure, same reasoning as the other panel
+  // toggles on this page -- lets the form always open with current values
+  // even if something else re-rendered the list first.
+  container.querySelectorAll("[data-tripsy-edit-trip-toggle]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const key = btn.dataset.key;
+      const panel = container.querySelector(`[data-tripsy-edit-trip-panel="${key}"]`);
+      if (!panel) return;
+      if (panel.style.display !== "none" && panel.innerHTML) {
+        panel.style.display = "none";
+        panel.innerHTML = "";
+        return;
+      }
+      const trip = tripsyDecryptedTrips.find(t => t.key === key);
+      if (!trip) return;
+      renderTripsyEditTripPanel(panel, trip, getEffectiveTripsyTrip(trip, pendingChanges));
+      panel.style.display = "block";
+      panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  });
 
   container.querySelectorAll("[data-tripsy-add-item-toggle]").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -8567,7 +8677,7 @@ function renderTripsyHiddenTripsPanelContent() {
             <div style="font-size:13px; color:var(--text); font-weight:600;">${esc(trip.name)}</div>
             <div style="font-size:12px; color:var(--muted);">${esc(formatTripitDateRange(trip.start, trip.end))}</div>
           </div>
-          <button class="btn" data-tripsy-show-trip data-key="${esc(trip.key)}" style="font-size:11px; padding:3px 8px; flex-shrink:0;">👁️ Show</button>
+          <button class="btn" data-tripsy-show-trip data-key="${esc(trip.key)}" style="font-size:11px; padding:3px 8px; flex-shrink:0; display:flex; align-items:center; gap:5px;"><span style="font-size:20px; line-height:1;">👁️</span> Unhide</button>
         </div>
       `).join("")}
     </div>
@@ -8584,7 +8694,7 @@ function renderTripsyHiddenTripsPanelContent() {
               <div style="font-size:13px; color:var(--text); font-weight:600;">${esc(ev.summary)}</div>
               <div style="font-size:12px; color:var(--muted);">${esc(trip.name)}${ev.start ? ' • ' + esc(formatTripitDateRange(ev.start, null)) : ''}</div>
             </div>
-            ${eventKey ? `<button class="btn" data-tripsy-show-event data-key="${esc(eventKey)}" style="font-size:11px; padding:3px 8px; flex-shrink:0;">👁️ Show</button>` : ''}
+            ${eventKey ? `<button class="btn" data-tripsy-show-event data-key="${esc(eventKey)}" style="font-size:11px; padding:3px 8px; flex-shrink:0; display:flex; align-items:center; gap:5px;"><span style="font-size:20px; line-height:1;">👁️</span> Unhide</button>` : ''}
           </div>
         `;
       }).join("")}
@@ -8611,6 +8721,7 @@ function renderTripsyHiddenTripsPanelContent() {
 
 const TRIPSY_PENDING_CHANGE_LABEL = {
   edit_event: '✏️ Edit',
+  edit_trip: '✏️ Edit trip',
   delete_event: '🗑️ Delete event',
   delete_trip: '🗑️ Delete trip',
   create_event: '➕ New item',
@@ -8681,10 +8792,6 @@ async function renderTripsyTrips() {
     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-top:28px; flex-wrap:wrap;">
       <div style="text-align:left;">
         <div style="display:flex; gap:28px; align-items:flex-start;">
-          <button id="tripsy-refresh-btn" style="background:none; border:none; cursor:pointer; padding:0; display:flex; flex-direction:column; align-items:center; gap:4px; color:var(--text);">
-            <span style="font-size:26px; line-height:1;">🔄</span>
-            <span style="font-size:12px; font-weight:600;">Refresh</span>
-          </button>
           <button id="tripsy-hidden-trips-btn" style="background:none; border:none; cursor:pointer; padding:0; display:flex; flex-direction:column; align-items:center; gap:4px; color:var(--text);">
             <span style="font-size:26px; line-height:1;">👁️</span>
             <span id="tripsy-hidden-trips-btn-label" style="font-size:12px; font-weight:600;">Show Hidden</span>
@@ -8706,7 +8813,6 @@ async function renderTripsyTrips() {
   `;
 
   document.getElementById("fopbp-logo-tripsytrips").addEventListener("click", showFopBpPhoto);
-  document.getElementById("tripsy-refresh-btn").addEventListener("click", () => window.location.reload());
   document.getElementById("tripsy-hidden-trips-btn").addEventListener("click", () => {
     const panel = document.getElementById("tripsy-hidden-panel");
     const tripsCard = document.getElementById("tripsy-card");
@@ -8720,7 +8826,7 @@ async function renderTripsyTrips() {
       renderTripsyHiddenTripsPanelContent();
       panel.style.display = "block";
       tripsCard.style.display = "none";
-      label.textContent = "Show Active";
+      label.textContent = "Show Unhidden";
     }
   });
   document.getElementById("tripsy-nav-trips").addEventListener("click", () => navigate("triptrips"));
@@ -8741,11 +8847,15 @@ async function renderTripsyTrips() {
 // Tries a cached passphrase first (silent, no UI flash); falls back to the
 // unlock form on first visit to this device or if the cached one no longer
 // works (e.g. it was rotated).
-async function unlockTripsyTrips() {
-  if (tripsyDecryptedTrips) {
-    renderTripsyEventsList();
-    return;
-  }
+// Decrypts and caches tripsyDecryptedTrips if it isn't already, with NO
+// page-specific rendering side-effects -- shared by the Tripsy Trips page
+// (unlockTripsyTrips below, which also repopulates that page's own
+// #tripsy-card) and Home's "Upcoming Trips" card, which needs the same
+// decrypted data but has nowhere to put a passphrase-entry form. Returns
+// the decrypted trips array, or null if it couldn't be unlocked
+// automatically (caller decides what to show in that case).
+async function ensureTripsyDecrypted() {
+  if (tripsyDecryptedTrips) return tripsyDecryptedTrips;
 
   // Primary path: fetch the passphrase live from Drive, gated by whether
   // the signed-in user has actually been shared that file. Deliberately
@@ -8755,8 +8865,7 @@ async function unlockTripsyTrips() {
   try {
     const passphrase = await fetchTripsyPassphraseFromDrive();
     tripsyDecryptedTrips = await decryptTripsyData(passphrase);
-    renderTripsyEventsList();
-    return;
+    return tripsyDecryptedTrips;
   } catch (e) {
     console.error('Tripsy auto-unlock via Drive failed, falling back to manual entry:', e);
   }
@@ -8769,14 +8878,22 @@ async function unlockTripsyTrips() {
   if (cached) {
     try {
       tripsyDecryptedTrips = await decryptTripsyData(cached);
-      renderTripsyEventsList();
-      return;
+      return tripsyDecryptedTrips;
     } catch (e) {
-      // Cached passphrase no longer works -- fall through to the form
-      // rather than getting stuck silently.
+      // Cached passphrase no longer works -- fall through so the caller
+      // can decide how to prompt, rather than getting stuck silently.
     }
   }
-  renderTripsyUnlockForm();
+  return null;
+}
+
+async function unlockTripsyTrips() {
+  const decrypted = await ensureTripsyDecrypted();
+  if (decrypted) {
+    renderTripsyEventsList();
+  } else {
+    renderTripsyUnlockForm();
+  }
 }
 
 function renderTripsyUnlockForm(errorMessage) {
@@ -9015,9 +9132,6 @@ async function renderHome() {
         </div>
         <div style="font-family:var(--mono); font-size:20px; font-weight:700; color:var(--amber); margin-bottom:8px;">Upcoming Trips</div>
         <div id="home-upcoming-trips"><div class="empty-state">Loading…</div></div>
-        <div class="home-btn-login-row">
-          <button class="btn home-green" id="home-tripit-login">Tripit</button>
-        </div>
       </div>
       <div class="card">
         <div style="margin-bottom:16px; display:flex; justify-content:center;">
@@ -9074,9 +9188,6 @@ async function renderHome() {
   document.getElementById("home-netjets-login").addEventListener("click", () => {
     window.open("https://fly.netjets.com/home", "_blank", "noopener");
   });
-  document.getElementById("home-tripit-login").addEventListener("click", () => {
-    window.open("https://www.tripit.com/account/login", "_blank", "noopener");
-  });
   document.getElementById("fopbp-logo-home").addEventListener("click", showFopBpPhoto);
   document.getElementById("home-ps-reservations").addEventListener("click", () => navigate("reservations"));
   document.getElementById("home-ps-balance").addEventListener("click", () => navigate("psbalance"));
@@ -9086,40 +9197,45 @@ async function renderHome() {
   });
 
   try {
-    const HOME_UPCOMING_TRIPS_DAYS = 60;
-    const events = await Store.listTripitEvents();
-    const overrides = await Store.listTripitTripOverrides();
-    const now = Date.now();
-    const cutoff = now + HOME_UPCOMING_TRIPS_DAYS * 24 * 60 * 60 * 1000;
-    const upcomingTrips = groupTripitEventsIntoTrips(events)
-      .filter(t => t.key !== TRIPIT_OTHER_PLANS_KEY && !isTripEffectivelyHidden(t, overrides))
-      .filter(t => {
-        const start = t.start ? new Date(t.start).getTime() : null;
-        return start != null && start >= now && start <= cutoff;
-      })
-      .sort((a, b) => new Date(a.start) - new Date(b.start));
-
+    const HOME_UPCOMING_TRIPS_YEARS = 2;
+    const decrypted = await ensureTripsyDecrypted();
     const tripsHost = document.getElementById("home-upcoming-trips");
-    if (!upcomingTrips.length) {
-      tripsHost.innerHTML = `<div class="empty-state">No trips scheduled in the next ${HOME_UPCOMING_TRIPS_DAYS} days.</div>`;
+    if (!decrypted) {
+      tripsHost.innerHTML = `<div class="empty-state">Trip data is locked -- visit Tripsy Trips to unlock.</div>`;
     } else {
-      tripsHost.innerHTML = `
-        <table class="report-table">
-          <colgroup><col style="width:160px;"><col style="width:220px;"><col style="width:180px;"></colgroup>
-          <thead><tr><th>Date</th><th>Name</th><th>Location</th></tr></thead>
-          <tbody>
-            ${upcomingTrips.map(t => `
-              <tr data-home-trip-row data-trip-key="${esc(t.key)}" style="cursor:pointer;">
-                <td>${esc(formatTripitDateRange(t.start, t.end))}</td>
-                <td>${esc(t.name)}</td>
-                <td>${esc(t.location || "—")}</td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>`;
-      tripsHost.querySelectorAll("[data-home-trip-row]").forEach(row => {
-        row.addEventListener("click", () => goToTripitTrip(row.dataset.tripKey));
-      });
+      const now = Date.now();
+      const cutoffDate = new Date();
+      cutoffDate.setFullYear(cutoffDate.getFullYear() + HOME_UPCOMING_TRIPS_YEARS);
+      const cutoff = cutoffDate.getTime();
+      const upcomingTrips = decrypted
+        .filter(t => !isTripsyTripEffectivelyHidden(t))
+        .filter(t => {
+          const start = t.start ? new Date(t.start).getTime() : null;
+          return start != null && start >= now && start <= cutoff;
+        })
+        .sort((a, b) => new Date(a.start) - new Date(b.start));
+
+      if (!upcomingTrips.length) {
+        tripsHost.innerHTML = `<div class="empty-state">No trips scheduled in the next ${HOME_UPCOMING_TRIPS_YEARS} years.</div>`;
+      } else {
+        tripsHost.innerHTML = `
+          <table class="report-table">
+            <colgroup><col style="width:160px;"><col style="width:220px;"><col style="width:180px;"></colgroup>
+            <thead><tr><th>Date</th><th>Name</th><th>Location</th></tr></thead>
+            <tbody>
+              ${upcomingTrips.map(t => `
+                <tr data-home-trip-row style="cursor:pointer;">
+                  <td>${esc(formatTripitDateRange(t.start, t.end))}</td>
+                  <td>${esc(t.name)}</td>
+                  <td>${esc(t.location || "—")}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>`;
+        tripsHost.querySelectorAll("[data-home-trip-row]").forEach(row => {
+          row.addEventListener("click", () => navigate("tripsytrips"));
+        });
+      }
     }
   } catch (e) {
     console.error('renderHome upcoming trips failed:', e);
