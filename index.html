@@ -7883,13 +7883,13 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
 function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
   panel.innerHTML = `
     <div style="display:flex; flex-direction:column; gap:14px; max-width:420px;">
-      <div style="display:flex; justify-content:flex-end;">
-        <button class="btn" data-tripsy-edit-trip-add-pdf style="font-size:12px; padding:5px 12px;">📎 Add PDF</button>
+      <div style="display:flex; justify-content:space-between; align-items:flex-end; gap:14px;">
+        <label style="font-size:13px; font-weight:600; color:var(--text); flex:1;">
+          <span style="display:block; margin-bottom:6px;">Trip Name</span>
+          <input type="text" data-tripsy-edit-trip-field="name" value="${esc(effectiveTrip.name || '')}" class="field-input">
+        </label>
+        <button class="btn" data-tripsy-edit-trip-add-pdf style="font-size:12px; padding:5px 12px; flex-shrink:0;">📄 Add PDF</button>
       </div>
-      <label style="font-size:13px; font-weight:600; color:var(--text);">
-        <span style="display:block; margin-bottom:6px;">Trip Name</span>
-        <input type="text" data-tripsy-edit-trip-field="name" value="${esc(effectiveTrip.name || '')}" class="field-input">
-      </label>
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
         <label style="font-size:13px; font-weight:600; color:var(--text);">
           <span style="display:block; margin-bottom:6px;">Start Date</span>
@@ -7901,8 +7901,8 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
         </label>
       </div>
       <div style="display:flex; gap:10px; align-items:center;">
-        <button class="btn primary" data-tripsy-edit-trip-save style="font-size:13px; padding:8px 18px;">Save</button>
-        <button class="btn" data-tripsy-edit-trip-cancel style="font-size:13px; padding:8px 18px;">Cancel</button>
+        <button class="btn primary" data-tripsy-edit-trip-save style="font-size:13px; padding:8px 18px;">✅ Save</button>
+        <button class="btn" data-tripsy-edit-trip-cancel style="font-size:13px; padding:8px 18px;">❌ Cancel</button>
       </div>
     </div>
   `;
@@ -8342,7 +8342,46 @@ function renderTripsyPsReservationViewPanel(panel, res) {
 // is also the last to actually run (and thus read the freshest state), no
 // matter how long any earlier call's own work takes.
 let _tripsyEventsListRenderChain = Promise.resolve();
-let _tripsyAttachmentsMenuOutsideClickBound = false;
+let _tripsyTripPanelsOutsideClickBound = false;
+
+// Every trip-header dropdown/panel that opens on click (Add-item type menu,
+// Add-item create form, Edit Trip form, Attach-PDF form, PDFs list) --
+// listed here once so "open one, close the rest" and "click outside closes
+// whatever's open" can both be driven off the same list instead of drifting
+// out of sync as new panel types get added.
+const TRIPSY_TRIP_PANEL_SELECTORS = [
+  '[data-tripsy-add-item-menu]',
+  '[data-tripsy-add-item-panel]',
+  '[data-tripsy-edit-trip-panel]',
+  '[data-tripsy-attach-panel]',
+  '[data-tripsy-attachments-menu]',
+];
+// The buttons that open one of the panels above -- a click on one of these
+// is handled by that button's own listener (which itself calls
+// closeAllTripsyTripPanels before opening its target), so the generic
+// outside-click listener below must treat clicking a trigger as "inside",
+// not "outside", or it would immediately re-close whatever the trigger
+// button just opened.
+const TRIPSY_TRIP_PANEL_TRIGGER_SELECTORS = [
+  '[data-tripsy-add-item-toggle]',
+  '[data-tripsy-edit-trip-toggle]',
+  '[data-tripsy-attachments-toggle]',
+  '[data-tripsy-add-pdf-menu-item]',
+];
+function closeAllTripsyTripPanels() {
+  const card = document.getElementById("tripsy-card");
+  if (!card) return;
+  TRIPSY_TRIP_PANEL_SELECTORS.forEach(sel => {
+    card.querySelectorAll(sel).forEach(el => {
+      el.style.display = "none";
+      // Menus (vs. rendered-content panels) have no innerHTML to clear --
+      // clearing it would just delete the same static menu markup the next
+      // render would recreate anyway, so only panels that get their
+      // innerHTML freshly rendered on open need clearing here.
+      if (sel !== '[data-tripsy-add-item-menu]' && sel !== '[data-tripsy-attachments-menu]') el.innerHTML = "";
+    });
+  });
+}
 function renderTripsyEventsList() {
   const run = _tripsyEventsListRenderChain.then(() => renderTripsyEventsListImpl());
   // Swallow the wrapper's own rejection so one failed render doesn't
@@ -8588,6 +8627,8 @@ async function renderTripsyEventsListImpl() {
         <button data-tripsy-add-item-toggle data-key="${esc(trip.key)}" title="Add item to trip" style="background:var(--home-green); border:none; border-radius:50%; width:28px; height:28px; cursor:pointer; color:#04210F; font-size:24px; font-weight:700; line-height:1; display:flex; align-items:center; justify-content:center; padding:0;">+</button>
         <div data-tripsy-add-item-menu="${esc(trip.key)}" style="display:none; position:absolute; top:100%; right:0; margin-top:6px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${tripsyAddMenuButtonsHtml(trip.key)}
+          <div style="height:1px; width:70%; margin:6px 0 6px 10px; background:#fff;"></div>
+          <button data-tripsy-add-pdf-menu-item data-key="${esc(trip.key)}" style="display:block; width:100%; text-align:left; background:none; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px;">📄 Add PDF</button>
         </div>
       </div>
     `, 'Add') : '';
@@ -8755,17 +8796,19 @@ async function renderTripsyEventsListImpl() {
   // Re-derives the trip fresh from tripsyDecryptedTrips/pendingChanges
   // rather than trusting a closure, same reasoning as the other panel
   // toggles on this page -- lets the form always open with current values
-  // even if something else re-rendered the list first.
+  // even if something else re-rendered the list first. Closes every OTHER
+  // trip-header panel/dropdown first (closeAllTripsyTripPanels) so opening
+  // this one is never left alongside a stray Add menu, PDFs dropdown, etc.
+  // from a previous click.
   container.querySelectorAll("[data-tripsy-edit-trip-toggle]").forEach(btn => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
       const key = btn.dataset.key;
       const panel = container.querySelector(`[data-tripsy-edit-trip-panel="${key}"]`);
       if (!panel) return;
-      if (panel.style.display !== "none" && panel.innerHTML) {
-        panel.style.display = "none";
-        panel.innerHTML = "";
-        return;
-      }
+      const wasOpen = panel.style.display !== "none" && !!panel.innerHTML;
+      closeAllTripsyTripPanels();
+      if (wasOpen) return;
       const trip = tripsyDecryptedTrips.find(t => t.key === key);
       if (!trip) return;
       renderTripsyEditTripPanel(panel, trip, getEffectiveTripsyTrip(trip, pendingChanges));
@@ -8775,8 +8818,7 @@ async function renderTripsyEventsListImpl() {
   });
 
   // Toggles the trip-header PDF dropdown (only rendered when the trip has
-  // at least one attachment -- see pdfStatusButtonHtml above). Closes any
-  // other open dropdown first so at most one is open at a time.
+  // at least one attachment -- see pdfStatusButtonHtml above).
   container.querySelectorAll("[data-tripsy-attachments-toggle]").forEach(btn => {
     btn.addEventListener("click", e => {
       e.stopPropagation();
@@ -8784,19 +8826,25 @@ async function renderTripsyEventsListImpl() {
       const menu = container.querySelector(`[data-tripsy-attachments-menu="${tripKey}"]`);
       if (!menu) return;
       const wasOpen = menu.style.display !== "none";
-      container.querySelectorAll("[data-tripsy-attachments-menu]").forEach(m => { m.style.display = "none"; });
-      menu.style.display = wasOpen ? "none" : "block";
+      closeAllTripsyTripPanels();
+      if (!wasOpen) menu.style.display = "block";
     });
   });
-  // Clicking anywhere outside an open dropdown closes it -- matches the
-  // existing add-item-menu's own click-outside behavior isn't present
-  // today, so this is new, but the same one-open-at-a-time pattern above
-  // makes a stray open menu confusing to leave hanging otherwise.
-  if (!_tripsyAttachmentsMenuOutsideClickBound) {
-    document.addEventListener("click", () => {
-      document.querySelectorAll("[data-tripsy-attachments-menu]").forEach(m => { m.style.display = "none"; });
+
+  // Clicking anywhere outside every trip-header panel/dropdown -- including
+  // ON a different trigger button not part of the currently-open one --
+  // closes whatever's open. A click ON one of the panels themselves, or ON
+  // one of the trigger buttons (which each already call
+  // closeAllTripsyTripPanels in their own handler above/below before
+  // opening their target), is treated as "inside" so this doesn't
+  // immediately undo what that click just opened.
+  if (!_tripsyTripPanelsOutsideClickBound) {
+    document.addEventListener("click", e => {
+      const insideSelectors = [...TRIPSY_TRIP_PANEL_SELECTORS, ...TRIPSY_TRIP_PANEL_TRIGGER_SELECTORS];
+      if (insideSelectors.some(sel => e.target.closest(sel))) return;
+      closeAllTripsyTripPanels();
     });
-    _tripsyAttachmentsMenuOutsideClickBound = true;
+    _tripsyTripPanelsOutsideClickBound = true;
   }
 
   container.querySelectorAll("[data-tripsy-view-attachment]").forEach(btn => {
@@ -8853,9 +8901,32 @@ async function renderTripsyEventsListImpl() {
   });
 
   container.querySelectorAll("[data-tripsy-add-item-toggle]").forEach(btn => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
       const menu = container.querySelector(`[data-tripsy-add-item-menu="${btn.dataset.key}"]`);
-      menu.style.display = menu.style.display === "none" ? "block" : "none";
+      const wasOpen = menu.style.display !== "none";
+      closeAllTripsyTripPanels();
+      if (!wasOpen) menu.style.display = "block";
+    });
+  });
+
+  // The Add menu's trailing "Add PDF" option -- opens the same combination
+  // of panels (Edit Trip + its Add PDF button's attach form) as manually
+  // clicking Edit then Add PDF would, as a shortcut straight from Add.
+  container.querySelectorAll("[data-tripsy-add-pdf-menu-item]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const tripKey = btn.dataset.key;
+      const trip = tripsyDecryptedTrips.find(t => t.key === tripKey);
+      if (!trip) return;
+      closeAllTripsyTripPanels();
+      const editPanel = container.querySelector(`[data-tripsy-edit-trip-panel="${tripKey}"]`);
+      const attachPanel = container.querySelector(`[data-tripsy-attach-panel="${tripKey}"]`);
+      if (!editPanel || !attachPanel) return;
+      renderTripsyEditTripPanel(editPanel, trip, getEffectiveTripsyTrip(trip, pendingChanges));
+      editPanel.style.display = "block";
+      renderTripsyAttachPanel(attachPanel, { scope: 'trip', tripKey, eventKey: null });
+      attachPanel.style.display = "block";
+      attachPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
   });
 
