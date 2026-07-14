@@ -415,6 +415,26 @@
      setTripsyEditIconActive and the delete confirm handler). */
   [data-tripsy-edit-event]:focus, [data-tripsy-delete-event]:focus { outline: none; }
 
+  /* Tripsy Trips day-grouped timeline row (see tripsyTimelineRowHtml).
+     Every row gets the same flush, uniform left offset (no per-type
+     indentation -- tried and reverted per user feedback); only the time
+     column's own font/color set it apart. The dot's double ring -- a
+     --bg knockout plus a light rim -- keeps each icon legible regardless
+     of its own fill color or what's behind it. */
+  .tripsy-tl-row { display:flex; align-items:flex-start; gap:20px; padding:18px 0 18px 40px; border-top:1px solid var(--line); }
+  .tripsy-tl-time { width:70px; flex-shrink:0; text-align:right; font-family:var(--mono); font-size:14px; font-weight:700; color:var(--amber); padding-top:6px; }
+  .tripsy-tl-dot { position:relative; z-index:1; flex-shrink:0; width:44px; height:44px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 0 0 3px var(--bg), 0 0 0 5px rgba(255,255,255,0.18); }
+  /* One continuous connecting line running through every icon center, from
+     the trip's first event to its last (see .tripsy-tl-trip wrapper and
+     the connector-positioning pass in renderTripsyEventsList) -- day
+     header bars sit ABOVE it (z-index 2, opaque background) so the line
+     reads as interrupted/passing behind them, never on top. Day headers'
+     exact heights depend on font metrics/line-height, so the connector's
+     top/height are measured from the real rendered dots via JS rather
+     than hardcoded here. */
+  .tripsy-tl-trip { position:relative; }
+  .tripsy-tl-connector { position:absolute; width:3px; background:rgba(255,255,255,0.85); z-index:0; display:none; }
+
   .btn {
     font-family: var(--sans); font-weight: 600; font-size: 13.5px; padding: 9px 16px;
     border-radius: 7px; border: 1px solid var(--line); background: var(--panel-2);
@@ -6514,8 +6534,8 @@ function renderMyTripsEditPanel(panel, tripId, eventId, raw, warnings, candidate
 // rather than reading the Tripsy page's own tripsyPsReservations global,
 // since My Trips loads its own copy independently.
 // Splits a lodging event into separate Check-in / Check-out rows at render
-// time, matching Tripsy Trips's expandTripsyHotelEvents -- a hotel stay is
-// stored as ONE event (start = check-in, end = check-out), but always
+// time, matching Tripsy Trips's expandMultiDayTripsyEvents (hotel case) --
+// a hotel stay is stored as ONE event (start = check-in, end = check-out), but always
 // displayed as two, same as the calendar-synced Trips page. This never
 // touches driveData, only what gets rendered; both split rows carry
 // `realId` pointing back at the one real event.id so Edit/Hide/Delete and
@@ -7103,66 +7123,60 @@ function renderPsReservationTripsyEntryHtml(res) {
   `;
 }
 
-// Splits a lodging event into separate Check-in / Check-out rows at render
-// time, matching how a hotel stay always appears as two events on the
-// calendar-synced Trips page -- Tripsy's own snapshot instead carries one
-// record per stay (start = check-in, end = check-out), so this expansion
-// never touches the underlying decrypted data, only what gets displayed.
-function expandTripsyHotelEvents(events) {
+// Splits ANY event whose start and end fall on different local calendar
+// days into two single-day entries (a "begin" half on the start day, an
+// "end" half on the end day) -- generalizes what used to be a hotel-only
+// Check-in/Check-out split, per the rule that an event spanning midnight
+// should show as two separate timeline entries rather than one row with
+// an "Ends ..." aside. EXCEPTION: flights are never split -- a flight's
+// arrival date (when different from its departure date) and time instead
+// appear as its own last detail line (see tripsyTimelineDetailLines).
+// Hotels (a real Tripsy stay always has a real end date, so it always
+// splits) and every other type alike put the event's own name FIRST, then
+// the "Check-in"/"Check-out" or "Begins"/"Ends" label, so the two halves
+// read distinctly under their different day headers. Both halves keep the
+// SAME tripsyRaw
+// (same resource+id), so the existing panelKey dedup in
+// renderTripsyEventsList (keyed by tripsyEventKey, not ev.id) still shares
+// one edit/view panel between them automatically.
+function expandMultiDayTripsyEvents(events) {
   return events.flatMap(ev => {
-    if (ev.type !== 'hotel') return [ev];
+    const isFlight = ev.tripsyRaw && ev.tripsyRaw.resource === 'transportation' && ev.tripsyRaw.category === 'airplane';
+    if (isFlight) return [ev];
+    const startDay = tripsyDayKey(ev.start);
+    const endDay = tripsyDayKey(ev.end);
+    if (!startDay || !endDay || startDay === endDay) return [ev];
+    if (ev.type === 'hotel') {
+      return [
+        { ...ev, id: `${ev.id}-checkin`, summary: `${ev.summary} Check-in`, end: null, _splitHalf: 'begin' },
+        { ...ev, id: `${ev.id}-checkout`, summary: `${ev.summary} Check-out`, start: ev.end, end: null, notes: null, tripsyExtra: null, _splitHalf: 'end' },
+      ];
+    }
     return [
-      { ...ev, id: `${ev.id}-checkin`, summary: `Check-in: ${ev.summary}`, end: null },
-      { ...ev, id: `${ev.id}-checkout`, summary: `Check-out: ${ev.summary}`, start: ev.end, end: null, notes: null, tripsyExtra: null },
+      { ...ev, id: `${ev.id}-begin`, summary: `${ev.summary} Begins`, end: null, _splitHalf: 'begin' },
+      { ...ev, id: `${ev.id}-end`, summary: `${ev.summary} Ends`, start: ev.end, end: null, notes: null, tripsyExtra: null, _splitHalf: 'end' },
     ];
   });
 }
 
-// Generalizes the flight arrival/departure same-day tie-break
-// (tripitFlightEventOrder) to ANY multi-day Tripsy event vs. a single-day
-// event sharing one of its boundary days -- Tripsy Trips only, since here a
-// "multi-day event" isn't limited to flights (tours, cruises, and other
-// multi-day activities all carry real start/end dates too, and hotel stays
-// have already been split into single-day Check-in/Check-out rows by
-// expandTripsyHotelEvents by the time this runs). On the multi-day event's
-// first day, the single-day event is listed first; on its last day, the
-// multi-day event is listed first, then the single-day event.
+// File-scope so both tripsyMultiDayEventOrder and the day-timeline's
+// detail-line builder (tripsyTimelineDetailLines) can tell a Check-in row
+// from a Check-out row without duplicating the "ends with" check.
+const tripsyIsCheckoutEvent = ev => typeof ev.id === 'string' && ev.id.endsWith('-checkout');
+const tripsyIsCheckinEvent = ev => typeof ev.id === 'string' && ev.id.endsWith('-checkin');
+
+// Explicit tie-break for two split halves landing on the same day (e.g.
+// one hotel's check-out the same day another's check-in starts, or a
+// tour's end the same day a flight's begin) -- always list the "end" half
+// first. By the time this runs every event has already been split into
+// single-day halves by expandMultiDayTripsyEvents, so no other special
+// multi-day-vs-single-day logic is needed here.
 function tripsyMultiDayEventOrder(a, b) {
-  const dayKey = iso => {
-    const p = parseTripitLocalParts(iso);
-    return p ? `${p.year}-${p.month}-${p.day}` : null;
-  };
-  // Explicit Check-out/Check-in tie-break: when one multi-day stay's
-  // check-out lands on the same day another's check-in starts (back-to-back
-  // hotels, or a hotel touching another multi-day event), always list the
-  // check-out entry first. Don't rely on the underlying events' original
-  // array order for this -- pending edits or out-of-order sync data can
-  // silently break that assumption.
-  const isCheckout = ev => typeof ev.id === 'string' && ev.id.endsWith('-checkout');
-  const isCheckin = ev => typeof ev.id === 'string' && ev.id.endsWith('-checkin');
-  const aDay = dayKey(a.start);
-  if (aDay && aDay === dayKey(b.start)) {
-    if (isCheckout(a) && isCheckin(b)) return -1;
-    if (isCheckin(a) && isCheckout(b)) return 1;
+  const aDay = tripsyDayKey(a.start);
+  if (aDay && aDay === tripsyDayKey(b.start)) {
+    if (a._splitHalf === 'end' && b._splitHalf === 'begin') return -1;
+    if (a._splitHalf === 'begin' && b._splitHalf === 'end') return 1;
   }
-  const isMultiDay = ev => {
-    const s = dayKey(ev.start);
-    const e = dayKey(ev.end);
-    return !!(s && e && s !== e);
-  };
-  const multi = isMultiDay(a) ? a : (isMultiDay(b) ? b : null);
-  const single = multi === a ? b : (multi === b ? a : null);
-  if (!multi || !single || isMultiDay(single)) return null;
-
-  const multiStartDay = dayKey(multi.start);
-  const multiEndDay = dayKey(multi.end);
-  const singleDay = dayKey(single.start) || dayKey(single.end);
-
-  const startMatch = multiStartDay && singleDay && multiStartDay === singleDay;
-  const endMatch = multiEndDay && singleDay && multiEndDay === singleDay;
-  if (startMatch && endMatch) return null;
-  if (startMatch) return multi === a ? 1 : -1; // single-day event listed first
-  if (endMatch) return multi === a ? -1 : 1;   // multi-day event listed first
   return null;
 }
 
@@ -7263,15 +7277,6 @@ const TRIPSY_ACTIVITY_CATEGORY_TO_TYPE = {
 };
 function tripsyActivityCategoryToType(category) {
   return TRIPSY_ACTIVITY_CATEGORY_TO_TYPE[category] || 'other';
-}
-
-// Same TRIPIT_TYPE_LABEL-driven display type a real event would get, but
-// for a pending create_event change (which has no snapshot event to derive
-// it from) -- reads straight from the queued change's own fields.
-function tripsyPendingCreateDisplayType(change) {
-  if (change.tripsyResource === 'hosting') return 'hotel';
-  if (change.tripsyResource === 'activity') return tripsyActivityCategoryToType(change.fields.category);
-  return change.fields.category === 'airplane' ? 'flight' : 'transportation';
 }
 
 // Each field's `group` drives the section it's rendered under in the edit
@@ -7749,6 +7754,248 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
   });
 }
 
+// ---- Tripsy Trips day-grouped timeline ----
+// Replaces the old flat, category-indented event list with a vertical
+// timeline grouped by each event's own local calendar day (never the
+// viewer's), matching TripIt's own trip page. Tripsy-Trips-scoped only --
+// deliberately not touching TRIPIT_TYPE_LABEL/TRIPIT_TYPE_INDENT/
+// TRIPIT_INDENT_PX, which the older TripIt Trips and newer My Trips pages
+// still rely on for their own (unchanged) indentation-based layout.
+
+// Local calendar-day bucket key for an event, via the same
+// parseTripitLocalParts local-wall-clock parsing every other date/time
+// helper on this page already uses -- never reinterprets through a real
+// time zone. Returns null if ev has no parseable date.
+function tripsyDayKey(iso) {
+  const p = parseTripitLocalParts(iso);
+  return p ? `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}` : null;
+}
+function tripsyDayHeaderLabel(dayKey) {
+  const [year, month, day] = dayKey.split('-').map(Number);
+  return tripitPartsToUtcDate({ year, month, day }).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+// Per-category dot color/icon for the timeline -- a new, small palette
+// distinct from the app's structural amber (reserved for day headers/trip
+// titles) so each event type reads as visually distinct at a glance.
+const TRIPSY_TIMELINE_TYPE_COLOR = {
+  flight: 'var(--home-yellow)',
+  transportation: 'var(--teal)',
+  hotel: 'var(--home-green)',
+  dining: '#E2914B',
+  concert: '#B98CE0',
+  tour: '#6FA8DC',
+  other: 'var(--muted)',
+};
+const TRIPSY_TIMELINE_TYPE_ICON = { flight: '✈️', hotel: '🏨', dining: '🍽️', concert: '🎵', tour: '📷', other: '📍' };
+function tripsyTimelineDotColor(ev) {
+  return TRIPSY_TIMELINE_TYPE_COLOR[ev.type] || TRIPSY_TIMELINE_TYPE_COLOR.other;
+}
+// Transportation keeps its existing per-subtype icon (train/ferry/bus etc,
+// TRIPSY_TRANSPORTATION_TYPE_ICON) instead of one generic glyph.
+function tripsyTimelineDotIcon(ev) {
+  if (ev.tripsyRaw && ev.tripsyRaw.resource === 'transportation') {
+    return TRIPSY_TRANSPORTATION_TYPE_ICON[ev.tripsyRaw.category] || TRIPSY_TRANSPORTATION_TYPE_ICON.car;
+  }
+  return TRIPSY_TIMELINE_TYPE_ICON[ev.type] || '📍';
+}
+
+// Short, separately-labeled detail lines for the row body -- replaces the
+// old single packed "tripsyExtra" string (e.g. "Confirmation: X • phone •
+// website") with only the essentials, one fact per line. Phone/website/
+// travel-agent fields AND confirmation numbers are deliberately dropped
+// here (still shown in full via the untouched View panel,
+// renderTripsyViewPanel) -- per the user's explicit "show less" direction.
+// Sourced straight from ev.tripsyRaw's own fields (see TRIPSY_EDIT_FIELDS)
+// -- no new data invented.
+function tripsyTimelineDetailLines(ev) {
+  const raw = ev.tripsyRaw;
+  if (!raw) return [];
+  if (raw.resource === 'hosting') {
+    // Lodging rows leave the left-side time blank (see timeLabel in
+    // renderTripsyEventsList) -- the Check-in/Check-out time instead
+    // appears here, as this row's own first detail line.
+    const lines = [];
+    const t = formatTripitTime(ev.start);
+    if (t) lines.push(`${tripsyIsCheckoutEvent(ev) ? 'Check-out' : 'Check-in'} time: ${t}`);
+    if (raw.address) lines.push(raw.address);
+    return lines;
+  }
+  if (raw.resource === 'activity') {
+    return raw.address ? [raw.address] : [];
+  }
+  // transportation (including flight)
+  const lines = [];
+  const isFlight = raw.category === 'airplane';
+  const numberParts = [raw.company, raw.transportNumber].filter(Boolean).join(' ').trim();
+  if (numberParts) lines.push(`${isFlight ? 'Flight' : tripsySlugToLabel(raw.category)} ${numberParts}`);
+  if (ev._splitHalf === 'end') {
+    // Arrival half of an overnight NON-FLIGHT leg split by
+    // expandMultiDayTripsyEvents (flights are never split) -- its own
+    // left-side time IS the arrival time, so only the arrival-specific
+    // terminal is left to show here.
+    if (raw.arrivalTerminal) lines.push(`Terminal ${raw.arrivalTerminal}`);
+  } else {
+    if (raw.departureTerminal) lines.push(`Terminal ${raw.departureTerminal}`);
+    if (raw.seatClass) lines.push(`Seat: ${raw.seatClass}${raw.seatNumber ? ` (${raw.seatNumber})` : ''}`);
+    // Equipment (e.g. "A350") is dropped for flights specifically -- still
+    // shown for other transportation types (e.g. a rental car's model).
+    if (!isFlight && raw.vehicleDescription) lines.push(raw.vehicleDescription);
+  }
+  // Arrival date (only shown when it differs from the departure date) +
+  // time, always as the LAST line -- only for an unsplit leg. Flights are
+  // NEVER split (see expandMultiDayTripsyEvents), so this is always where
+  // a flight's arrival info lives, date included whenever it lands on a
+  // different day. Non-flight transportation only reaches here unsplit
+  // when it's a same-day leg, where the date can never differ -- a split
+  // leg's arrival time is already its own "end" half's left-side time, so
+  // showing it here too would be the exact duplicate the user asked to
+  // remove.
+  if (!ev._splitHalf && ev.end) {
+    const startDay = tripsyDayKey(ev.start);
+    const endDay = tripsyDayKey(ev.end);
+    const arriveTime = formatTripitTime(ev.end);
+    const arriveLabel = (startDay && startDay === endDay)
+      ? arriveTime
+      : [formatTripitDateRange(ev.end, null), arriveTime].filter(Boolean).join(' ');
+    if (arriveLabel) lines.push(`Arrive ${arriveLabel}`);
+  }
+  return lines;
+}
+
+// Shared row shell for the timeline -- one function for real events, the
+// P/S Reservation cross-reference row, and pending-create rows alike
+// (unifying what were three separate ad-hoc templates). No per-type or
+// per-row indentation (tried in earlier iterations, reverted per user
+// feedback: everything reads better fully in-line) -- every row gets the
+// SAME uniform left offset, from .tripsy-tl-row's own padding-left, so
+// times line up under the comma in the day header above (e.g. "Tue,").
+function tripsyTimelineRowHtml(spec) {
+  const {
+    dotColor, dotGlyph, dotImageB64, timeLabel,
+    title, isStrikethrough,
+    detailLines = [], statusBadge, actionsHtml, viewAttr, panelHtml,
+  } = spec;
+  // LAX_NAV_ICON_B64 is a wide logo, not square (see its other usages
+  // elsewhere in the file, all constrained via max-width/max-height with
+  // width/height:auto) -- forcing equal width+height here stretched it
+  // vertically, so this preserves its natural aspect ratio the same way.
+  // 44x31 keeps that same ~1.43:1 bounding-box ratio. The image's own
+  // artwork sits low in its bounding box (mostly-empty space above the
+  // canopy shape), so nudging it up a few px (position:relative, top:-4px)
+  // both centers the actual artwork better in the dot AND leaves enough
+  // clearance below to size it up from the previous 40x28 without the
+  // bottom of the shape crowding the dot's edge.
+  const dotInner = dotImageB64
+    ? `<img src="data:image/png;base64,${dotImageB64}" style="max-width:44px; max-height:31px; width:auto; height:auto; display:block; position:relative; top:-4px;" alt="">`
+    : esc(dotGlyph || '');
+  return `
+    <div class="tripsy-tl-row">
+      <div class="tripsy-tl-time">${timeLabel ? esc(timeLabel) : ''}</div>
+      <div style="display:flex; align-items:flex-start; gap:20px; flex:1; min-width:0;">
+        <div class="tripsy-tl-dot" style="background:${dotColor};">${dotInner}</div>
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex:1; min-width:0;">
+          <div ${viewAttr || ''}>
+            <div style="font-size:14px; font-weight:700; color:var(--text); ${isStrikethrough ? 'text-decoration:line-through;' : ''}">${esc(title)}</div>
+            ${detailLines.map(l => `<div style="margin-top:3px; font-size:12px; color:var(--muted);">${esc(l)}</div>`).join('')}
+            ${statusBadge ? `<div style="margin-top:4px; font-size:11px;">${statusBadge}</div>` : ''}
+          </div>
+          ${actionsHtml || ''}
+        </div>
+      </div>
+    </div>
+    ${panelHtml || ''}
+  `;
+}
+
+// P/S Reservation cross-reference row, built as its own timeline spec (own
+// dot/node on the line) rather than nested inside its matching event. NOT
+// the same function as renderPsReservationTripsyEntryHtml above -- that
+// one is shared with the My Trips page (index.html ~6630) and must keep
+// returning a plain HTML string unchanged; this one is Tripsy-Trips-
+// timeline-only. Clicking the row expands the SAME kind of "all details"
+// panel every other row gets (see renderTripsyPsReservationViewPanel and
+// its data-tripsy-view-ps-reservation wiring in renderTripsyEventsList),
+// replacing the old click-straight-through-to-the-reservation-page
+// behavior (still offered as a link inside the expanded panel).
+function tripsyTimelinePsReservationSpec(res) {
+  // The "Arrive by" time (or, lacking that, the plane's own arrival time)
+  // becomes this row's own left-side time instead of a duplicated line in
+  // the details -- same "don't repeat the time on the right" rule every
+  // other row now follows.
+  const timeLabel = res.arriveByTime || res.arrivalTime || null;
+  const detailLines = [];
+  if (!res.arriveByTime && res.arrivalAirport) detailLines.push(`Plane Arrives: ${res.arrivalAirport}`);
+  const travelers = (res.travelers || []).map(t => t.name).join(', ');
+  if (travelers) detailLines.push(`Travelers: ${travelers}`);
+  // No confirmation/reservation number shown here either, matching every
+  // other event type -- still visible in the expanded panel.
+  const panelKey = res.reservationNumber ? `ps:${res.reservationNumber}` : null;
+  const viewAttr = panelKey ? `data-tripsy-view-ps-reservation="${esc(panelKey)}" style="cursor:pointer;"` : '';
+  const panelHtml = panelKey ? `<div data-tripsy-edit-panel="${esc(panelKey)}" style="display:none; margin:8px 0 0 194px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : '';
+  return {
+    // Dark navy, not amber -- amber is now the timeline's TIME text color
+    // (see .tripsy-tl-time), so the P/S dot needed its own distinct color.
+    dotColor: '#1E3A5C',
+    dotImageB64: LAX_NAV_ICON_B64,
+    timeLabel,
+    title: `P/S Reservation${res.experience ? ' • ' + res.experience : ''}`,
+    detailLines,
+    viewAttr,
+    panelHtml,
+    // Flush with flights (indentPx 0, the default) -- it's airport
+    // logistics tied to the flight, not a city-stay event, so it belongs
+    // at the same "outermost" level flights sit at, same as before.
+  };
+}
+
+// Read-only "all details" panel for a P/S Reservation row -- same visual
+// language as renderTripsyViewPanel's field cards, but for a reservation
+// object (Gmail-parsed, no tripsyRaw/TRIPSY_EDIT_FIELDS shape) rather than
+// a Tripsy-sourced event, so it can't reuse that function directly. Only
+// ever one section, and only ever shows fields that actually have a value
+// -- same "no empty cards" rule as the Tripsy view panel.
+function renderTripsyPsReservationViewPanel(panel, res) {
+  const rows = [
+    ['Date', res.date],
+    ['Experience', res.experience],
+    ['Arrive By', res.arriveByTime],
+    ['Plane Arrives', res.arrivalAirport ? `${res.arrivalAirport}${res.arrivalTime ? ' ' + res.arrivalTime : ''}` : null],
+    ['Travelers', (res.travelers || []).map(t => t.name).join(', ') || null],
+    ['Reservation #', res.reservationNumber],
+    ['Status', res.status],
+  ].filter(([, val]) => val != null && val !== '');
+  panel.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
+      <div style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px 18px;">
+        <div style="font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:var(--amber); margin-bottom:12px;">P/S Reservation</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px;">
+          ${rows.map(([label, val]) => `
+            <div>
+              <div style="font-size:12px; font-weight:600; color:var(--muted); margin-bottom:6px;">${esc(label)}</div>
+              <div style="font-size:14px; color:var(--text);">${esc(val)}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        ${res.reservationNumber ? `<button class="btn primary" data-tripsy-ps-goto style="font-size:13px; padding:8px 18px;">View Full Reservation</button>` : ''}
+        <button class="btn" data-tripsy-view-close style="font-size:13px; padding:8px 18px;">Close</button>
+      </div>
+    </div>
+  `;
+  panel.querySelector("[data-tripsy-view-close]").addEventListener("click", () => {
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    panel.dataset.mode = "";
+  });
+  // This button is rendered after the page's initial event-wiring pass
+  // already ran, so it needs its own listener here rather than a
+  // container.querySelectorAll(...) wiring pass in renderTripsyEventsList.
+  const goToBtn = panel.querySelector("[data-tripsy-ps-goto]");
+  if (goToBtn) goToBtn.addEventListener("click", () => goToReservation(res.reservationNumber));
+}
+
 async function renderTripsyEventsList() {
   const container = document.getElementById("tripsy-card");
   const allTrips = tripsyDecryptedTrips || [];
@@ -7793,31 +8040,71 @@ async function renderTripsyEventsList() {
     // and both split halves (sharing one underlying hosting record) show
     // the same pending badge.
     const effectiveEvents = trip.events.map(ev => getEffectiveTripsyEvent(ev, pendingChanges));
+    // Queued new items are folded into the SAME chronological, day-grouped
+    // list as real events (rather than a separate always-trailing block)
+    // so they land on the day they'll actually occur once pushed to
+    // Tripsy. Built the same way the "edit pending create" handler below
+    // already builds a mergedRaw, then run through tripsyRawToDisplay so a
+    // pending Lodging create gets type:'hotel' and so also gets the
+    // Check-in/Check-out day-split below, same as a real hotel stay.
+    const pendingCreateEvents = pendingCreates.map(c => {
+      const raw = { ...tripsyBlankRaw(c.tripsyResource, null), ...c.fields };
+      const display = tripsyRawToDisplay(c.tripsyResource, raw);
+      return { ...display, id: `pending-create-${c.id}`, tripsyRaw: raw, _pendingCreate: c };
+    });
     // Snapshot events come pre-sorted chronologically from generation time,
     // but re-sort here (multi-day/single-day same-day tie-break, see
     // tripsyMultiDayEventOrder) so manual edits to the generator, or future
     // snapshots, can't silently drift from that ordering. Lodging events
-    // are expanded into separate Check-in/Check-out rows first so each
-    // half sorts independently by its own date.
-    const sortedEvents = expandTripsyHotelEvents(effectiveEvents).sort((a, b) => {
+    // (real or pending-create) are expanded into separate Check-in/
+    // Check-out rows first so each half sorts independently by its own
+    // date.
+    const sortedEvents = expandMultiDayTripsyEvents([...effectiveEvents, ...pendingCreateEvents]).sort((a, b) => {
       const special = tripsyMultiDayEventOrder(a, b);
       if (special != null) return special;
       return new Date(a.start || 0) - new Date(b.start || 0);
     });
-    // Once any event in this trip has a matching P/S Reservation card
-    // inserted, every OTHER event shifts one indent level to the right so
-    // the P/S card reads as the leftmost/outermost item in the list.
-    const hasPsMatchInTrip = sortedEvents.some(ev => findMatchingTripsyPsReservation(ev));
     // The Check-in/Check-out split shares one edit panel per underlying
     // record -- only emit the panel container once per key, even though
     // both split rows can offer an Edit button that opens it.
     const renderedPanelKeys = new Set();
-    const eventRows = collapsed ? "" : sortedEvents.map(ev => {
-      const departTime = formatTripitTime(ev.start);
-      const arriveTime = formatTripitTime(ev.end);
-      const showTimes = (ev.type === 'flight' || ev.type === 'transportation') && (departTime || arriveTime);
+    // Builds each item's timeline-row spec (dot color/icon, time label,
+    // title, detail lines, actions) plus its day bucket key -- day-bucket
+    // assembly (below) determines final render order, then each spec is
+    // turned into HTML via tripsyTimelineRowHtml.
+    const timelineItems = sortedEvents.map(ev => {
+      if (ev._pendingCreate) {
+        const c = ev._pendingCreate;
+        const actionsHtml = `<div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="btn" data-tripsy-edit-pending-create data-change-id="${esc(c.id)}" style="font-size:17px; padding:4px 10px;" title="Edit">✏️</button>
+            <button class="btn" data-tripsy-remove-pending-create data-change-id="${esc(c.id)}" style="font-size:17px; padding:4px 10px;" title="Remove">🗑️</button>
+          </div>`;
+        // Clicking the row's own content (not just the pencil icon) also
+        // opens the edit form -- reuses the SAME data-tripsy-edit-pending-
+        // create attribute the pencil button already uses, so the existing
+        // container.querySelectorAll("[data-tripsy-edit-pending-create]")
+        // wiring below picks this element up automatically, no extra
+        // listener needed. A not-yet-created item has no separate "view"
+        // concept -- the edit form IS its full details.
+        const viewAttr = `data-tripsy-edit-pending-create data-change-id="${esc(c.id)}" style="cursor:pointer;"`;
+        return {
+          dayKey: tripsyDayKey(ev.start),
+          psMatch: null,
+          spec: {
+            dotColor: tripsyTimelineDotColor(ev),
+            dotGlyph: tripsyTimelineDotIcon(ev),
+            // Blank for lodging -- its Check-in/Check-out time is shown as
+            // a detail line instead (see tripsyTimelineDetailLines).
+            timeLabel: ev.tripsyRaw.resource === 'hosting' ? null : formatTripitTime(ev.start),
+            title: ev.summary,
+            detailLines: tripsyTimelineDetailLines(ev),
+            statusBadge: `<span style="color:var(--home-green);">➕ Not yet created in Tripsy — syncs next refresh</span>`,
+            actionsHtml,
+            viewAttr,
+          },
+        };
+      }
       const psMatch = findMatchingTripsyPsReservation(ev);
-      const indentLevel = (TRIPIT_TYPE_INDENT[ev.type] ?? 3) + (hasPsMatchInTrip ? 1 : 0);
       const eventKey = tripsyEventKey(ev.tripsyRaw);
       const canEditDelete = isOwner && !!eventKey;
       const isPendingDelete = !!ev._pendingDeleteId;
@@ -7825,87 +8112,113 @@ async function renderTripsyEventsList() {
       const actionsHtml = !canEditDelete ? '' : isPendingDelete
         ? `<div style="flex-shrink:0;"><button class="btn" data-tripsy-undo-delete-event data-change-id="${esc(ev._pendingDeleteId)}" style="font-size:11px; padding:3px 8px;">Undo</button></div>`
         : `<div style="display:flex; gap:6px; flex-shrink:0;">
-            <button class="btn" data-tripsy-edit-event data-key="${esc(eventKey)}" style="font-size:11px; padding:3px 8px;" title="Edit">✏️</button>
-            <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:11px; padding:3px 8px;" title="Delete">🗑️</button>
+            <button class="btn" data-tripsy-edit-event data-key="${esc(eventKey)}" style="font-size:17px; padding:4px 10px;" title="Edit">✏️</button>
+            <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:17px; padding:4px 10px;" title="Delete">🗑️</button>
           </div>`;
       // Available to every viewer (not just isOwner) since selecting an
       // event to see its read-only details doesn't require edit access --
       // only the Edit/Delete icons themselves are owner-gated.
       const panelKey = !!eventKey && !isPendingDelete && !renderedPanelKeys.has(eventKey) ? (renderedPanelKeys.add(eventKey), eventKey) : null;
-      // The view-click target is this inner content div specifically, not
-      // the outer row -- actionsHtml (Edit/Delete icons) is a SIBLING div,
-      // not a descendant, so clicks on those icons never bubble into it.
       // Keyed by eventKey (not panelKey) so the Check-out half of a
       // Check-in/Check-out split -- which shares its panel container with
       // Check-in and so never gets its own panelKey -- still opens the
       // one shared panel when clicked.
       const viewAttr = (eventKey && !isPendingDelete) ? `data-tripsy-view-event="${esc(eventKey)}" style="cursor:pointer;"` : '';
-      // Transportation gets its own icon + specific-type header ("Train",
-      // "Ferry", etc, "Flight" for airplane) instead of the generic
-      // TRIPIT_TYPE_LABEL "🚗 Transportation" catch-all every other type
-      // still uses.
-      const headerLabel = ev.tripsyRaw && ev.tripsyRaw.resource === 'transportation'
-        ? tripsyTransportationHeaderLabel(ev.tripsyRaw.category)
-        : (TRIPIT_TYPE_LABEL[ev.type] || ev.type);
-      // Flights: the route (locationLine) sits directly under the type/date
-      // header and reads as the header's second line, so it's bolded --
-      // the airline/flight number (summaryLine) is just body detail and
-      // stays plain. The type/date header itself stays amber/bold.
-      const locationLine = ev.location ? `<div style="margin-top:4px; font-size:13px; ${ev.type === 'flight' ? 'color:var(--text); font-weight:700;' : 'color:var(--muted);'}">${esc(ev.location)}</div>` : '';
-      const timesLine = showTimes ? `<div style="margin-top:4px; font-size:12px; color:var(--muted);">${departTime ? `Departs ${esc(departTime)}` : ''}${departTime && arriveTime ? ' · ' : ''}${arriveTime ? `Arrives ${esc(arriveTime)}` : ''}</div>` : '';
-      const summaryLine = `<div style="margin-top:6px; font-size:13px; color:var(--text); ${isPendingDelete ? 'text-decoration:line-through;' : ''}">${esc(ev.summary)}</div>`;
-      const extraLine = ev.tripsyExtra ? `<div style="margin-top:4px; font-size:12px; color:var(--teal);">${esc(ev.tripsyExtra)}</div>` : '';
-      const notesLine = ev.notes ? `<div style="margin-top:4px; font-size:12px; color:var(--muted); font-style:italic; white-space:pre-line;">${esc(ev.notes)}</div>` : '';
-      // Transportation: location, then times, then company/number
-      // (summary), then confirmation/seat (extra) -- everything else keeps
-      // the original summary-first order (summary is the primary display
-      // field for hotel/activity events, unlike transportation where it's
-      // just company+number).
-      const bodyLines = ev.tripsyRaw && ev.tripsyRaw.resource === 'transportation'
-        ? [locationLine, timesLine, summaryLine, extraLine, notesLine]
-        : [summaryLine, timesLine, locationLine, extraLine, notesLine];
-      const flightHtml = `
-      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px solid var(--line); margin-top:10px; margin-left:${indentLevel * TRIPIT_INDENT_PX}px; ${ev.type === 'other' ? 'opacity:0.6;' : ''} ${isPendingDelete ? 'opacity:0.5;' : ''}">
-        <div ${viewAttr}>
-          <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700;">
-            ${esc(headerLabel)}${ev.start ? ` • ${esc(formatTripitDateRange(ev.start, ev.end))}` : ''}
-          </div>
-          ${bodyLines.join('')}
-          ${isPendingDelete ? `<div style="margin-top:4px; font-size:11px; color:var(--red, #c0392b);">🗑 Pending delete — syncs next refresh</div>` : ''}
-          ${isPendingEdit && !isPendingDelete ? `<div style="margin-top:4px; font-size:11px; color:var(--amber);">✏️ Pending edit — syncs next refresh</div>` : ''}
-        </div>
-        ${actionsHtml}
-      </div>
-      ${panelKey ? `<div data-tripsy-edit-panel="${esc(panelKey)}" style="display:none; margin-top:8px; margin-left:${indentLevel * TRIPIT_INDENT_PX}px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
-      `;
-      if (!psMatch) return flightHtml;
-      const psHtml = renderPsReservationTripsyEntryHtml(psMatch.reservation);
-      return psMatch.direction === 'before' ? psHtml + flightHtml : flightHtml + psHtml;
-    }).join("");
-    // Queued new items don't exist in the snapshot yet, so they're rendered
-    // from the pending change itself rather than through the normal
-    // ev/tripsyRaw path -- dashed green border and an Undo-style Remove
-    // action mark them as not-yet-real, same idea as the pending
-    // edit/delete badges above but visually distinct since there's no
-    // underlying Tripsy record to point at yet.
-    const pendingCreateRows = collapsed ? "" : pendingCreates.map(c => `
-      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-top:1px dashed var(--home-green); margin-top:10px;">
-        <div>
-          <div style="font-family:var(--mono); font-size:13px; color:var(--home-green); font-weight:700;">
-            ${esc(TRIPIT_TYPE_LABEL[tripsyPendingCreateDisplayType(c)] || 'New item')}
-          </div>
-          <div style="margin-top:6px; font-size:13px; color:var(--text);">${esc(c.eventSummary)}</div>
-          <div style="margin-top:4px; font-size:11px; color:var(--home-green);">➕ Not yet created in Tripsy — syncs next refresh</div>
-        </div>
-        <div style="display:flex; gap:6px; flex-shrink:0;">
-          <button class="btn" data-tripsy-edit-pending-create data-change-id="${esc(c.id)}" style="font-size:11px; padding:3px 8px;" title="Edit">✏️</button>
-          <button class="btn" data-tripsy-remove-pending-create data-change-id="${esc(c.id)}" style="font-size:11px; padding:3px 8px;" title="Remove">🗑️</button>
-        </div>
-      </div>
-    `).join("");
+      // Transportation's title is the route (dep -> arr), matching the
+      // reference -- every other type's title is just its summary/name.
+      const title = (ev.tripsyRaw.resource === 'transportation' && ev.location) ? ev.location : ev.summary;
+      const statusBadge = [
+        isPendingDelete ? `<span style="color:var(--red, #c0392b);">🗑 Pending delete — syncs next refresh</span>` : '',
+        (isPendingEdit && !isPendingDelete) ? `<span style="color:var(--amber);">✏️ Pending edit — syncs next refresh</span>` : '',
+      ].filter(Boolean).join('<br>') || null;
+      // Aligned under the content column, skipping the row's own left
+      // padding (see .tripsy-tl-row), the time column, its gap, the dot,
+      // and its gap (40 + 70 + 20 + 44 + 20 = 194px).
+      const panelHtml = panelKey ? `<div data-tripsy-edit-panel="${esc(panelKey)}" style="display:none; margin:8px 0 0 194px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : '';
+      return {
+        dayKey: tripsyDayKey(ev.start),
+        psMatch,
+        spec: {
+          dotColor: tripsyTimelineDotColor(ev),
+          dotGlyph: tripsyTimelineDotIcon(ev),
+          // Blank for lodging -- its Check-in/Check-out time is shown as
+          // a detail line instead (see tripsyTimelineDetailLines).
+          timeLabel: ev.tripsyRaw.resource === 'hosting' ? null : formatTripitTime(ev.start),
+          title,
+          isStrikethrough: isPendingDelete,
+          detailLines: tripsyTimelineDetailLines(ev),
+          statusBadge,
+          actionsHtml,
+          viewAttr,
+          panelHtml,
+        },
+      };
+    });
+    // P/S Reservation cards get their own timeline node in the same day
+    // bucket as their matched event, immediately before/after it per
+    // psMatch.direction (same ordering as before) -- no more shifting
+    // every other row in the trip over by an indent level.
+    const flatItems = [];
+    timelineItems.forEach(item => {
+      if (item.psMatch) {
+        const psEntry = { dayKey: item.dayKey, spec: tripsyTimelinePsReservationSpec(item.psMatch.reservation) };
+        if (item.psMatch.direction === 'before') flatItems.push(psEntry, item);
+        else flatItems.push(item, psEntry);
+      } else {
+        flatItems.push(item);
+      }
+    });
+    // Bucket into day-groups (a day with nothing simply produces no
+    // group), plus a trailing undated bucket (no header bar) for anything
+    // with no resolvable date.
+    const dayGroups = [];
+    const undatedItems = [];
+    flatItems.forEach(item => {
+      if (!item.dayKey) { undatedItems.push(item); return; }
+      const lastGroup = dayGroups[dayGroups.length - 1];
+      if (lastGroup && lastGroup.dayKey === item.dayKey) lastGroup.items.push(item);
+      else dayGroups.push({ dayKey: item.dayKey, items: [item] });
+    });
+    const renderTimelineGroup = items => items.map(it => tripsyTimelineRowHtml(it.spec)).join('');
+    // z-index:2 (above the connector's 0) + position:relative + its own
+    // opaque background is what makes each day header visually interrupt
+    // the connecting line running behind it -- see .tripsy-tl-connector.
+    const dayHeaderHtml = dayKey => `<div style="position:relative; z-index:2; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;">${esc(tripsyDayHeaderLabel(dayKey))}</div>`;
+    const timelineHtml = collapsed ? '' : `<div class="tripsy-tl-trip" data-tripsy-connector-trip="${esc(trip.key)}"><div class="tripsy-tl-connector"></div>${[
+      ...dayGroups.map(g => `${dayHeaderHtml(g.dayKey)}${renderTimelineGroup(g.items)}`),
+      undatedItems.length ? renderTimelineGroup(undatedItems) : '',
+    ].join('')}</div>`;
     // The add-item + button only makes sense once the card is expanded --
     // collapsed cards don't show the events list it'd be adding alongside.
+    // Hide/Delete Trip aren't gated by collapsed state -- they act on the
+    // whole trip regardless of whether its events are currently shown.
     const showAddButton = !collapsed && isOwner;
+    // Add/Hide/Delete share this icon-circle-plus-one-word-label shape --
+    // same 28px circle size as the original Add button, which the caret
+    // (removed -- collapse/expand is still reachable by clicking the trip
+    // name/subtitle, via data-tripsy-header-toggle) used to sit next to.
+    const iconLabelButton = (innerHtml, label) => `
+      <div style="display:flex; flex-direction:column; align-items:center; gap:3px;">
+        ${innerHtml}
+        <span style="font-size:10px; color:var(--muted);">${esc(label)}</span>
+      </div>
+    `;
+    const addButtonHtml = showAddButton ? iconLabelButton(`
+      <div style="position:relative;">
+        <button data-tripsy-add-item-toggle data-key="${esc(trip.key)}" title="Add item to trip" style="background:var(--home-green); border:none; border-radius:50%; width:28px; height:28px; cursor:pointer; color:#04210F; font-size:18px; font-weight:700; line-height:1; display:flex; align-items:center; justify-content:center; padding:0;">+</button>
+        <div data-tripsy-add-item-menu="${esc(trip.key)}" style="display:none; position:absolute; top:100%; right:0; margin-top:6px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+          ${tripsyAddMenuButtonsHtml(trip.key)}
+        </div>
+      </div>
+    `, 'Add') : '';
+    const hideButtonHtml = iconLabelButton(
+      `<button class="btn" data-tripsy-hide-trip data-key="${esc(trip.key)}" title="Hide Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:18px; display:flex; align-items:center; justify-content:center;">🙈</button>`,
+      'Hide'
+    );
+    const deleteButtonHtml = isOwner ? iconLabelButton(
+      `<button class="btn" data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}" title="Delete Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:18px; display:flex; align-items:center; justify-content:center;">🗑️</button>`,
+      'Delete'
+    ) : '';
     return `
       <div class="card" style="margin-bottom:14px;">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
@@ -7913,38 +8226,47 @@ async function renderTripsyEventsList() {
             <div style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">${esc(trip.name)}</div>
             ${subtitle ? `<div style="margin-top:2px; font-size:13px; color:var(--muted);">${esc(subtitle)}</div>` : ''}
           </div>
-          <div style="display:flex; align-items:center; gap:20px; flex-shrink:0;">
-            ${showAddButton ? `
-              <div style="position:relative;">
-                <button data-tripsy-add-item-toggle data-key="${esc(trip.key)}" title="Add item to trip" style="background:var(--home-green); border:none; border-radius:50%; width:28px; height:28px; cursor:pointer; color:#04210F; font-size:18px; font-weight:700; line-height:1; display:flex; align-items:center; justify-content:center; padding:0;">+</button>
-                <div data-tripsy-add-item-menu="${esc(trip.key)}" style="display:none; position:absolute; top:100%; right:0; margin-top:6px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-                  ${tripsyAddMenuButtonsHtml(trip.key)}
-                </div>
-              </div>
-            ` : ''}
-            <button data-tripsy-toggle-collapse data-key="${esc(trip.key)}" title="${collapsed ? 'Expand' : 'Collapse'}" style="background:none; border:none; cursor:pointer; color:var(--amber); font-size:26px; line-height:1; padding:0;">${collapsed ? '▸' : '▾'}</button>
+          <div style="display:flex; align-items:flex-start; gap:16px; flex-shrink:0;">
+            ${addButtonHtml}
+            ${hideButtonHtml}
+            ${deleteButtonHtml}
           </div>
         </div>
         ${showAddButton ? `<div data-tripsy-add-item-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
-        ${eventRows}
-        ${pendingCreateRows}
-        <div style="margin-top:12px; text-align:right; display:flex; gap:8px; justify-content:flex-end;">
-          <button class="btn" data-tripsy-hide-trip data-key="${esc(trip.key)}" style="font-size:11px; padding:3px 8px;">Hide Trip</button>
-          ${isOwner ? `<button class="btn" data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}" style="font-size:11px; padding:3px 8px;">Delete Trip</button>` : ''}
-        </div>
+        ${timelineHtml}
       </div>
     `;
   }).join("");
+
+  // Positions each trip's connecting line (see .tripsy-tl-connector) to
+  // run from the vertical center of its FIRST event icon to its LAST,
+  // spanning every day header in between (which sit above it, z-index 2,
+  // so their own opaque background visually interrupts the line rather
+  // than the line drawing over them). Day header heights depend on font
+  // metrics/line-height, which aren't reliable to hardcode, so this reads
+  // real positions off the rendered DOM instead of computing them.
+  container.querySelectorAll("[data-tripsy-connector-trip]").forEach(tripEl => {
+    const connector = tripEl.querySelector(".tripsy-tl-connector");
+    const dots = tripEl.querySelectorAll(".tripsy-tl-dot");
+    if (!connector || dots.length < 2) return;
+    const tripTop = tripEl.getBoundingClientRect().top;
+    const firstDot = dots[0].getBoundingClientRect();
+    const lastDot = dots[dots.length - 1].getBoundingClientRect();
+    const firstCenterY = firstDot.top + firstDot.height / 2 - tripTop;
+    const lastCenterY = lastDot.top + lastDot.height / 2 - tripTop;
+    connector.style.top = `${firstCenterY}px`;
+    connector.style.height = `${lastCenterY - firstCenterY}px`;
+    connector.style.left = `${dots[0].offsetLeft + dots[0].offsetWidth / 2}px`;
+    connector.style.display = "block";
+  });
 
   const toggleTripsyCollapse = key => {
     setTripsyTripCollapsed(key, !isTripsyTripCollapsed(key));
     renderTripsyEventsList();
   };
-  container.querySelectorAll("[data-tripsy-toggle-collapse]").forEach(btn => {
-    btn.addEventListener("click", () => toggleTripsyCollapse(btn.dataset.key));
-  });
-  // Selecting the trip's own name/subtitle also toggles collapse, same as
-  // the caret button -- collapsed expands, expanded collapses.
+  // Selecting the trip's own name/subtitle toggles collapse -- the caret
+  // button that used to do this too has been removed, so this is now the
+  // only way to collapse/expand a trip.
   container.querySelectorAll("[data-tripsy-header-toggle]").forEach(el => {
     el.addEventListener("click", () => toggleTripsyCollapse(el.dataset.tripsyHeaderToggle));
   });
@@ -7958,11 +8280,30 @@ async function renderTripsyEventsList() {
     });
   });
 
-  // Jump from a P/S reservation card straight to its match on the P/S
-  // Reservations page -- available to view-only users too, so this is
-  // wired before the isOwner gate below.
-  container.querySelectorAll("[data-tripsy-goto-reservation]").forEach(el => {
-    el.addEventListener("click", () => goToReservation(el.dataset.tripsyGotoReservation));
+  // Selecting a P/S Reservation card shows its own read-only details panel
+  // (renderTripsyPsReservationViewPanel) -- available to view-only users
+  // too, same as the real-event view panel below. Jumping straight to the
+  // matching card on the P/S Reservations page is still offered, as a
+  // button INSIDE that panel now, rather than as this row's own click.
+  container.querySelectorAll("[data-tripsy-view-ps-reservation]").forEach(el => {
+    el.addEventListener("click", () => {
+      const key = el.dataset.tripsyViewPsReservation;
+      const reservationNumber = key.startsWith('ps:') ? key.slice(3) : key;
+      const panel = container.querySelector(`[data-tripsy-edit-panel="${key}"]`);
+      if (!panel) return;
+      if (panel.style.display !== "none" && panel.dataset.mode === "view") {
+        panel.style.display = "none";
+        panel.innerHTML = "";
+        panel.dataset.mode = "";
+        return;
+      }
+      const res = (tripsyPsReservations || []).find(r => r.reservationNumber === reservationNumber);
+      if (!res) return;
+      renderTripsyPsReservationViewPanel(panel, res);
+      panel.dataset.mode = "view";
+      panel.style.display = "block";
+      panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
   });
 
   // Selecting an event shows its read-only details -- available to every
@@ -7996,6 +8337,10 @@ async function renderTripsyEventsList() {
       panel.dataset.mode = "view";
       panel.style.display = "block";
       setTripsyEditIconActive(key, false);
+      // Under the day-grouped timeline, a Check-out row's shared panel can
+      // render far above it (under Check-in's day) -- scroll it into view
+      // so opening it from a distant row doesn't look like nothing happened.
+      panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
   });
 
@@ -8149,6 +8494,7 @@ async function renderTripsyEventsList() {
       panel.dataset.mode = "edit";
       panel.style.display = "block";
       setTripsyEditIconActive(key, true);
+      panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
   });
 }
