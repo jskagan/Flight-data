@@ -7999,29 +7999,8 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
   });
 }
 
-// Renders one attached PDF as a small row: filename + open-in-Drive link,
-// a "Flagged for parsing" badge if that's its purpose, and (owner only) a
-// delete button. Used both under a trip header and under an event.
-function tripsyAttachmentRowHtml(a) {
-  const badge = a.purpose === 'parse'
-    ? `<span style="color:var(--amber); font-size:11px;" title="Flagged for a future Claude Code session to read and extract trip data from">🏷️ Flagged for parsing${a.parseStatus === 'done' ? ' (done)' : ''}</span>`
-    : '';
-  return `
-    <div style="display:flex; align-items:center; gap:8px; padding:4px 0; font-size:13px;">
-      <a href="https://drive.google.com/file/d/${esc(a.driveFileId)}/view" target="_blank" rel="noopener" style="color:var(--text); text-decoration:none; display:flex; align-items:center; gap:6px;">
-        📄 <span style="text-decoration:underline;">${esc(a.fileName)}</span>
-      </a>
-      ${badge}
-      ${isOwner ? `<button class="btn" data-tripsy-delete-attachment data-attachment-id="${esc(a.id)}" style="font-size:12px; padding:2px 7px; margin-left:auto;" title="Remove attachment">🗑️</button>` : ''}
-    </div>
-  `;
-}
-
-// Row for the trip-header PDF dropdown menu: filename on the left, View/
-// Copy/Delete on the right (View opens the Drive link, Copy copies it to
-// the clipboard, Delete removes the attachment -- same underlying action
-// as tripsyAttachmentRowHtml's trash icon, just relabeled to fit a row of
-// three explicit actions instead of one lone icon).
+// Row for the trip- or event-header PDF dropdown menu: filename on the
+// left (click to open), View/Edit-name/Copy/Delete on the right.
 function tripsyAttachmentMenuRowHtml(a) {
   const badge = a.purpose === 'parse'
     ? `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for a future Claude Code session to read and extract trip data from">🏷️ Flagged for parsing${a.parseStatus === 'done' ? ' (done)' : ''}</div>`
@@ -8247,7 +8226,7 @@ function tripsyTimelineRowHtml(spec) {
   const {
     dotColor, dotGlyph, dotImageB64, timeLabel,
     title, isStrikethrough,
-    detailLines = [], statusBadge, actionsHtml, viewAttr, panelHtml, attachmentsHtml, dotPanelKey,
+    detailLines = [], statusBadge, actionsHtml, viewAttr, panelHtml, dotPanelKey,
   } = spec;
   // LAX_NAV_ICON_B64 is a wide logo, not square (see its other usages
   // elsewhere in the file, all constrained via max-width/max-height with
@@ -8272,7 +8251,6 @@ function tripsyTimelineRowHtml(spec) {
             <div style="font-size:14px; font-weight:700; color:var(--text); ${isStrikethrough ? 'text-decoration:line-through;' : ''}">${esc(title)}</div>
             ${detailLines.map(l => `<div style="margin-top:3px; font-size:12px; color:var(--muted);">${esc(l)}</div>`).join('')}
             ${statusBadge ? `<div style="margin-top:4px; font-size:11px;">${statusBadge}</div>` : ''}
-            ${attachmentsHtml || ''}
           </div>
           ${actionsHtml || ''}
         </div>
@@ -8604,17 +8582,37 @@ async function renderTripsyEventsListImpl() {
       const canEditDelete = isOwner && !!eventKey;
       const isPendingDelete = !!ev._pendingDeleteId;
       const isPendingEdit = !!ev._pendingEditId;
-      const actionsHtml = !canEditDelete ? '' : isPendingDelete
-        ? `<div style="flex-shrink:0;"><button class="btn" data-tripsy-undo-delete-event data-change-id="${esc(ev._pendingDeleteId)}" style="font-size:11px; padding:3px 8px;">Undo</button></div>`
-        : `<div style="display:flex; gap:6px; flex-shrink:0;">
-            <button class="btn" data-tripsy-edit-event data-key="${esc(eventKey)}" style="font-size:17px; padding:4px 10px;" title="Edit">✏️</button>
-            <button class="btn" data-tripsy-attach-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" style="font-size:17px; padding:4px 10px;" title="Attach PDF">📎</button>
-            <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:17px; padding:4px 10px;" title="Delete">🗑️</button>
-          </div>`;
       // Available to every viewer (not just isOwner) since selecting an
       // event to see its read-only details doesn't require edit access --
       // only the Edit/Delete icons themselves are owner-gated.
       const panelKey = !!eventKey && !isPendingDelete && !renderedPanelKeys.has(eventKey) ? (renderedPanelKeys.add(eventKey), eventKey) : null;
+      // Only computed on the first occurrence of a shared eventKey (gated
+      // by panelKey, same reasoning as panelHtml below) so a Check-in/
+      // Check-out split doesn't get two separate PDF icons for the same
+      // underlying attachments.
+      const eventAttachments = panelKey ? attachments.filter(a => a.scope === 'event' && a.eventKey === eventKey) : [];
+      // Same icon-toggles-a-dropdown pattern as the trip header's PDFs
+      // button (pdfStatusButtonHtml above) -- data-tripsy-attachments-toggle/
+      // -menu are keyed generically by whatever data-key they're given, so
+      // reusing them here with eventKey (rather than trip.key) needs no
+      // wiring changes; eventKey's own "resource:id" shape never collides
+      // with a trip key's "tripsy-id" shape.
+      const pdfIconHtml = eventAttachments.length ? `
+        <div style="position:relative;">
+          <button class="btn" data-tripsy-attachments-toggle data-key="${esc(eventKey)}" style="font-size:17px; padding:4px 10px;" title="Attached PDFs">📄</button>
+          <div data-tripsy-attachments-menu="${esc(eventKey)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:260px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+            ${eventAttachments.map(tripsyAttachmentMenuRowHtml).join('')}
+          </div>
+        </div>
+      ` : '';
+      const actionsHtml = !canEditDelete ? '' : isPendingDelete
+        ? `<div style="flex-shrink:0;"><button class="btn" data-tripsy-undo-delete-event data-change-id="${esc(ev._pendingDeleteId)}" style="font-size:11px; padding:3px 8px;">Undo</button></div>`
+        : `<div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="btn" data-tripsy-edit-event data-key="${esc(eventKey)}" style="font-size:17px; padding:4px 10px;" title="Edit">✏️</button>
+            ${pdfIconHtml}
+            <button class="btn" data-tripsy-attach-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" style="font-size:17px; padding:4px 10px;" title="Attach PDF">📎</button>
+            <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:17px; padding:4px 10px;" title="Delete">🗑️</button>
+          </div>`;
       // Keyed by eventKey (not panelKey) so the Check-out half of a
       // Check-in/Check-out split -- which shares its panel container with
       // Check-in and so never gets its own panelKey -- still opens the
@@ -8631,12 +8629,6 @@ async function renderTripsyEventsListImpl() {
       // padding (see .tripsy-tl-row), the time column, its gap, the dot,
       // and its gap (40 + 70 + 20 + 44 + 20 = 194px).
       const panelHtml = panelKey ? `<div data-tripsy-edit-panel="${esc(panelKey)}" style="display:none; margin:8px 0 0 194px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : '';
-      // Only rendered on the first occurrence of a shared eventKey (gated
-      // by panelKey, same as panelHtml above) so a Check-in/Check-out split
-      // doesn't list the same attachments twice, once per half.
-      const attachmentsHtml = panelKey
-        ? attachments.filter(a => a.scope === 'event' && a.eventKey === eventKey).map(tripsyAttachmentRowHtml).join('')
-        : '';
       return {
         dayKey: tripsyDayKey(ev.start),
         psMatch,
@@ -8653,7 +8645,6 @@ async function renderTripsyEventsListImpl() {
           actionsHtml,
           viewAttr,
           panelHtml,
-          attachmentsHtml,
           // Keyed by eventKey (not panelKey) same as viewAttr -- both split
           // halves of a Check-in/Check-out pair need to point the connector
           // logic at the ONE shared panel, not just whichever half happened
