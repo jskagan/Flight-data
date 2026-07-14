@@ -8776,17 +8776,52 @@ async function renderTripsyEventsListImpl() {
       'Edit'
     ) : '';
     // A visible-even-when-collapsed indicator + dropdown, only shown once
-    // the trip actually has attachments -- sits directly left of Edit,
-    // rather than always occupying a slot the way Add/Edit/Hide/Delete do.
-    // Adding a PDF itself now happens from inside the Edit panel (see
-    // renderTripsyEditTripPanel's "Add PDF" button) rather than its own
-    // top-level icon.
+    // the trip has ANY attachment (trip- or event-scoped) -- sits directly
+    // left of Edit, rather than always occupying a slot the way Add/Edit/
+    // Hide/Delete do. Adding a PDF itself now happens from inside the Edit
+    // panel (see renderTripsyEditTripPanel's "Add PDF" button) rather than
+    // its own top-level icon.
     const tripAttachments = attachments.filter(a => a.scope === 'trip' && a.tripKey === trip.key);
-    const pdfStatusButtonHtml = tripAttachments.length ? iconLabelButton(`
+    // A consolidated view of every OTHER PDF in the trip, grouped by the
+    // owning event's date -- one row per event (not per file), even if
+    // that event has several attachments, since clicking through opens
+    // that event's own PDF dropdown (built earlier via pdfIconHtml) where
+    // the individual files live. Looked up against timelineItems (already
+    // built above) rather than re-deriving date/title from the raw event,
+    // since a Check-in/Check-out split's two rows share one eventKey and
+    // the first match's date/title is a fine representative either way.
+    const eventAttachmentKeys = [...new Set(
+      attachments.filter(a => a.scope === 'event' && a.tripKey === trip.key).map(a => a.eventKey)
+    )];
+    const eventAttachmentEntries = eventAttachmentKeys
+      .map(key => {
+        const item = timelineItems.find(it => it.spec.dotPanelKey === key);
+        return item ? { eventKey: key, dayKey: item.dayKey, title: item.spec.title } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => (a.dayKey || '').localeCompare(b.dayKey || ''));
+    let lastEventPdfDayKey = null;
+    const otherEventPdfsHtml = eventAttachmentEntries.length ? `
+      ${tripAttachments.length ? `<div style="height:1px; background:var(--line); margin:8px 0;"></div>` : ''}
+      ${eventAttachmentEntries.map(entry => {
+        const dayHtml = entry.dayKey !== lastEventPdfDayKey
+          ? `<div style="font-family:var(--mono); font-size:11px; color:var(--muted); margin:${lastEventPdfDayKey === null ? '0' : '8px'} 0 4px;">${esc(entry.dayKey ? tripsyDayHeaderLabel(entry.dayKey) : 'Undated')}</div>`
+          : '';
+        lastEventPdfDayKey = entry.dayKey;
+        return `
+          ${dayHtml}
+          <div data-tripsy-open-event-attachments data-key="${esc(entry.eventKey)}" style="display:flex; align-items:center; gap:6px; padding:4px 0; font-size:13px; color:var(--text); cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+            📄 ${esc(entry.title)}
+          </div>
+        `;
+      }).join('')}
+    ` : '';
+    const pdfStatusButtonHtml = (tripAttachments.length || eventAttachmentEntries.length) ? iconLabelButton(`
       <div style="position:relative;">
         <button class="btn" data-tripsy-attachments-toggle data-key="${esc(trip.key)}" title="Attached PDFs" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">📄</button>
-        <div data-tripsy-attachments-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:260px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+        <div data-tripsy-attachments-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:260px; max-width:340px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${tripAttachments.map(tripsyAttachmentMenuRowHtml).join('')}
+          ${otherEventPdfsHtml}
         </div>
       </div>
     `, 'PDFs') : '';
@@ -8963,6 +8998,24 @@ async function renderTripsyEventsListImpl() {
         // stays right-aligned to the button instead of drifting left.
         menu.style.left = `${rect.right - menu.offsetWidth}px`;
       }
+    });
+  });
+
+  // A row in the trip-level PDFs dropdown's "other events" section --
+  // jumps to that specific event's own PDF button and opens IT instead of
+  // listing files here too, so there's one place (the event's own
+  // dropdown) that actually manages a given file's View/Edit/Copy/Delete.
+  container.querySelectorAll("[data-tripsy-open-event-attachments]").forEach(el => {
+    el.addEventListener("click", () => {
+      const eventKey = el.dataset.key;
+      closeAllTripsyTripPanels();
+      const targetBtn = container.querySelector(`[data-tripsy-attachments-toggle][data-key="${eventKey}"]`);
+      if (!targetBtn) return;
+      targetBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+      // Give the smooth scroll a moment to land before opening -- the
+      // dropdown's position is computed from the button's rect at click
+      // time, which would still reflect the pre-scroll location otherwise.
+      setTimeout(() => targetBtn.click(), 300);
     });
   });
 
