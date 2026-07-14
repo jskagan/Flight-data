@@ -7883,6 +7883,9 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
 function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
   panel.innerHTML = `
     <div style="display:flex; flex-direction:column; gap:14px; max-width:420px;">
+      <div style="display:flex; justify-content:flex-end;">
+        <button class="btn" data-tripsy-edit-trip-add-pdf style="font-size:12px; padding:5px 12px;">📎 Add PDF</button>
+      </div>
       <label style="font-size:13px; font-weight:600; color:var(--text);">
         <span style="display:block; margin-bottom:6px;">Trip Name</span>
         <input type="text" data-tripsy-edit-trip-field="name" value="${esc(effectiveTrip.name || '')}" class="field-input">
@@ -7903,6 +7906,23 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
       </div>
     </div>
   `;
+
+  // The attach panel is a sibling div in the same trip card (rendered
+  // alongside this edit-trip panel and the add-item panel), not a child of
+  // this one -- reached via closest('.card') rather than threading tripKey/
+  // a direct reference through renderTripsyEditTripPanel's own params.
+  panel.querySelector("[data-tripsy-edit-trip-add-pdf]").addEventListener("click", () => {
+    const attachPanel = panel.closest('.card').querySelector('[data-tripsy-attach-panel]');
+    if (!attachPanel) return;
+    if (attachPanel.style.display !== "none" && attachPanel.innerHTML) {
+      attachPanel.style.display = "none";
+      attachPanel.innerHTML = "";
+      return;
+    }
+    renderTripsyAttachPanel(attachPanel, { scope: 'trip', tripKey: trip.key, eventKey: null });
+    attachPanel.style.display = "block";
+    attachPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
 
   panel.querySelector("[data-tripsy-edit-trip-cancel]").addEventListener("click", () => {
     panel.style.display = "none";
@@ -7954,6 +7974,30 @@ function tripsyAttachmentRowHtml(a) {
       </a>
       ${badge}
       ${isOwner ? `<button class="btn" data-tripsy-delete-attachment data-attachment-id="${esc(a.id)}" style="font-size:12px; padding:2px 7px; margin-left:auto;" title="Remove attachment">🗑️</button>` : ''}
+    </div>
+  `;
+}
+
+// Row for the trip-header PDF dropdown menu: filename on the left, View/
+// Copy/Delete on the right (View opens the Drive link, Copy copies it to
+// the clipboard, Delete removes the attachment -- same underlying action
+// as tripsyAttachmentRowHtml's trash icon, just relabeled to fit a row of
+// three explicit actions instead of one lone icon).
+function tripsyAttachmentMenuRowHtml(a) {
+  const badge = a.purpose === 'parse'
+    ? `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for a future Claude Code session to read and extract trip data from">🏷️ Flagged for parsing${a.parseStatus === 'done' ? ' (done)' : ''}</div>`
+    : '';
+  return `
+    <div style="display:flex; align-items:center; gap:8px; padding:6px 4px; border-top:1px solid var(--line);">
+      <div style="min-width:0; flex:1;">
+        <div style="font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${esc(a.fileName)}">📄 ${esc(a.fileName)}</div>
+        ${badge}
+      </div>
+      <div style="display:flex; gap:4px; flex-shrink:0;">
+        <button class="btn" data-tripsy-view-attachment data-drive-file-id="${esc(a.driveFileId)}" style="font-size:11px; padding:3px 7px;" title="View">👁️</button>
+        <button class="btn" data-tripsy-copy-attachment data-drive-file-id="${esc(a.driveFileId)}" style="font-size:11px; padding:3px 7px;" title="Copy link">📋</button>
+        ${isOwner ? `<button class="btn" data-tripsy-delete-attachment data-attachment-id="${esc(a.id)}" style="font-size:11px; padding:3px 7px;" title="Delete">🗑️</button>` : ''}
+      </div>
     </div>
   `;
 }
@@ -8538,11 +8582,21 @@ async function renderTripsyEventsList() {
       `<button class="btn" data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}" title="Edit Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">✏️</button>`,
       'Edit'
     ) : '';
-    const attachButtonHtml = isOwner ? iconLabelButton(
-      `<button class="btn" data-tripsy-attach-toggle data-key="${esc(trip.key)}" title="Attach PDF" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">📎</button>`,
-      'Attach'
-    ) : '';
-    const tripAttachmentsHtml = attachments.filter(a => a.scope === 'trip' && a.tripKey === trip.key).map(tripsyAttachmentRowHtml).join('');
+    // A visible-even-when-collapsed indicator + dropdown, only shown once
+    // the trip actually has attachments -- sits directly left of Edit,
+    // rather than always occupying a slot the way Add/Edit/Hide/Delete do.
+    // Adding a PDF itself now happens from inside the Edit panel (see
+    // renderTripsyEditTripPanel's "Add PDF" button) rather than its own
+    // top-level icon.
+    const tripAttachments = attachments.filter(a => a.scope === 'trip' && a.tripKey === trip.key);
+    const pdfStatusButtonHtml = tripAttachments.length ? iconLabelButton(`
+      <div style="position:relative;">
+        <button class="btn" data-tripsy-attachments-toggle data-key="${esc(trip.key)}" title="Attached PDFs" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">📄</button>
+        <div data-tripsy-attachments-menu="${esc(trip.key)}" style="display:none; position:absolute; top:100%; right:0; margin-top:6px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:260px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+          ${tripAttachments.map(tripsyAttachmentMenuRowHtml).join('')}
+        </div>
+      </div>
+    `, 'PDFs') : '';
     return `
       <div class="card" style="margin-bottom:14px;">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
@@ -8552,13 +8606,12 @@ async function renderTripsyEventsList() {
           </div>
           <div style="display:flex; align-items:flex-start; gap:16px; flex-shrink:0;">
             ${addButtonHtml}
+            ${pdfStatusButtonHtml}
             ${editButtonHtml}
-            ${attachButtonHtml}
             ${hideButtonHtml}
             ${deleteButtonHtml}
           </div>
         </div>
-        ${tripAttachmentsHtml ? `<div style="margin-top:8px;">${tripAttachmentsHtml}</div>` : ''}
         ${showAddButton ? `<div data-tripsy-add-item-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${isOwner ? `<div data-tripsy-edit-trip-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${isOwner ? `<div data-tripsy-attach-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
@@ -8697,19 +8750,48 @@ async function renderTripsyEventsList() {
     });
   });
 
-  container.querySelectorAll("[data-tripsy-attach-toggle]").forEach(btn => {
-    btn.addEventListener("click", () => {
+  // Toggles the trip-header PDF dropdown (only rendered when the trip has
+  // at least one attachment -- see pdfStatusButtonHtml above). Closes any
+  // other open dropdown first so at most one is open at a time.
+  container.querySelectorAll("[data-tripsy-attachments-toggle]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
       const tripKey = btn.dataset.key;
-      const panel = container.querySelector(`[data-tripsy-attach-panel="${tripKey}"]`);
-      if (!panel) return;
-      if (panel.style.display !== "none" && panel.innerHTML) {
-        panel.style.display = "none";
-        panel.innerHTML = "";
-        return;
+      const menu = container.querySelector(`[data-tripsy-attachments-menu="${tripKey}"]`);
+      if (!menu) return;
+      const wasOpen = menu.style.display !== "none";
+      container.querySelectorAll("[data-tripsy-attachments-menu]").forEach(m => { m.style.display = "none"; });
+      menu.style.display = wasOpen ? "none" : "block";
+    });
+  });
+  // Clicking anywhere outside an open dropdown closes it -- matches the
+  // existing add-item-menu's own click-outside behavior isn't present
+  // today, so this is new, but the same one-open-at-a-time pattern above
+  // makes a stray open menu confusing to leave hanging otherwise.
+  if (!renderTripsyEventsList._attachmentsMenuOutsideClickBound) {
+    document.addEventListener("click", () => {
+      document.querySelectorAll("[data-tripsy-attachments-menu]").forEach(m => { m.style.display = "none"; });
+    });
+    renderTripsyEventsList._attachmentsMenuOutsideClickBound = true;
+  }
+
+  container.querySelectorAll("[data-tripsy-view-attachment]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      window.open(`https://drive.google.com/file/d/${btn.dataset.driveFileId}/view`, '_blank', 'noopener');
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-copy-attachment]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const link = `https://drive.google.com/file/d/${btn.dataset.driveFileId}/view`;
+      try {
+        await navigator.clipboard.writeText(link);
+        toast("Link copied.");
+      } catch (err) {
+        toast("Could not copy link.", "error");
       }
-      renderTripsyAttachPanel(panel, { scope: 'trip', tripKey, eventKey: null });
-      panel.style.display = "block";
-      panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
   });
 
