@@ -3103,6 +3103,7 @@ async function navigate(view, param) {
     else if (view === "trends") await renderTrends();
     else if (view === "triptrips") await renderTripitTrips();
     else if (view === "tripsytrips") await renderTripsyTrips();
+    else if (view === "tripsyparsereview") await renderTripsyParseReview();
     else if (view === "mytrips") await renderMyTrips();
     else if (view === "reservations") await renderReservations();
     else if (view === "psbalance") await renderPsBalance();
@@ -5553,6 +5554,7 @@ async function renderUtilitiesParsingPdfs() {
   const attachments = isOwner ? (await Store.listTripsyAttachments()).filter(a => a.purpose === 'parse') : [];
   const tripNameFor = tripKey => ((tripsyDecryptedTrips || []).find(t => t.key === tripKey) || {}).name || tripKey;
   const pending = attachments.filter(a => a.parseStatus === 'pending');
+  const staged = attachments.filter(a => a.parseStatus === 'staged');
   const done = attachments.filter(a => a.parseStatus === 'done');
   const attachmentRowHtml = a => `
     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:8px 0; border-top:1px solid var(--line); font-size:13px;">
@@ -5570,9 +5572,11 @@ async function renderUtilitiesParsingPdfs() {
       <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">Flagged Attachments</div>
       <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700; margin-bottom:6px;">${pending.length ? `${pending.length} waiting to be parsed` : 'None waiting to be parsed'}</div>
       ${pending.length ? pending.map(attachmentRowHtml).join("") : `<div style="font-size:13px; color:var(--muted);">Nothing is currently flagged and unprocessed.</div>`}
-      <div style="font-family:var(--mono); font-size:13px; color:var(--home-green); font-weight:700; margin:14px 0 6px;">${done.length ? `${done.length} parsed -- ready for you to clear` : 'None parsed and awaiting clearing'}</div>
-      ${done.length ? done.map(attachmentRowHtml).join("") : `<div style="font-size:13px; color:var(--muted);">Nothing is waiting on you right now.</div>`}
-      ${done.length ? `<div style="font-size:12px; color:var(--muted); margin-top:8px;">Clear each one from the Tripsy Trips page itself -- open the trip (or event)'s PDFs dropdown and click its "🏷️ Flagged for parsing (done)" badge.</div>` : ''}
+      <div style="font-family:var(--mono); font-size:13px; color:var(--home-green); font-weight:700; margin:14px 0 6px;">${staged.length ? `${staged.length} parsed -- awaiting your review` : 'None awaiting review'}</div>
+      ${staged.length ? staged.map(attachmentRowHtml).join("") : `<div style="font-size:13px; color:var(--muted);">Nothing is waiting on your review right now.</div>`}
+      ${staged.length ? `<div style="font-size:12px; color:var(--muted); margin-top:8px;">Review these on the <a href="#" data-nav="tripsyparsereview" style="color:var(--amber);">Review Parsed PDFs</a> page (also reachable via the top-right green badge).</div>` : ''}
+      <div style="font-family:var(--mono); font-size:13px; color:var(--muted); font-weight:700; margin:14px 0 6px;">${done.length ? `${done.length} fully reviewed` : 'None fully reviewed yet'}</div>
+      ${done.length ? done.map(attachmentRowHtml).join("") : `<div style="font-size:13px; color:var(--muted);">Nothing has finished review yet.</div>`}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
@@ -5581,13 +5585,14 @@ async function renderUtilitiesParsingPdfs() {
         <p>Every PDF attached to a Tripsy trip or event is stored with a <b>purpose</b>, chosen when it's uploaded:</p>
         <ul style="margin:6px 0 0 20px; padding:0;">
           <li><b>Just store for reference</b> -- a plain attachment. Shows up in the PDFs dropdown with no badge; nothing ever reads it automatically.</li>
-          <li style="margin-top:6px;"><b>Flag for parsing into trip data</b> -- marks it for a human (via a live Claude Code session) to read and turn into trip/event data. This one has its own sub-status:</li>
+          <li style="margin-top:6px;"><b>Flag for parsing into trip data</b> -- marks it for a human (via a live Claude Code session) to read and turn into trip/event data. This one moves through three sub-states:</li>
         </ul>
         <ul style="margin:10px 0 0 20px; padding:0;">
           <li><span style="color:var(--amber);">🏷️ Flagged for parsing</span> (no suffix) -- <b>pending</b>. Uploaded and flagged, but no session has processed it yet.</li>
-          <li style="margin-top:6px;"><span style="color:var(--amber);">🏷️ Flagged for parsing (done)</span> -- <b>done</b>. A session has read the PDF and, wherever it found extractable event details, queued them as a pending Tripsy change (the same "➕ Not yet created in Tripsy" row you'd get from manually adding an item) -- reviewable/editable on the trip's timeline before the next Tripsy Refresh actually pushes it. This badge is clickable (owner only): clicking it acknowledges the parse and downgrades the attachment back to a plain reference file, clearing the badge for good.</li>
+          <li style="margin-top:6px;"><span style="color:var(--amber);">🏷️ Flagged for parsing (staged)</span> -- <b>staged</b>. A session has read the PDF and proposed whatever it could extract, but nothing has been sent to Tripsy yet -- it's a draft, sitting on the <a href="#" data-nav="tripsyparsereview" style="color:var(--amber);">Review Parsed PDFs</a> page for you to accept, modify, or reject event by event.</li>
+          <li style="margin-top:6px;"><span style="color:var(--amber);">🏷️ Flagged for parsing (done)</span> -- <b>done</b>. Every proposed event has been resolved one way or another. This badge is clickable (owner only, from the trip/event's PDFs dropdown): clicking it acknowledges the review and downgrades the attachment back to a plain reference file, clearing the badge for good.</li>
         </ul>
-        <p style="margin-top:10px;">Nothing about this flag ever pushes data to Tripsy directly -- parsing only ever produces a normal queued change, subject to the exact same review-then-refresh process described on the <a href="#" data-nav="utilitiestripsyrefresh" style="color:var(--amber);">Tripsy Refresh</a> page.</p>
+        <p style="margin-top:10px;">Only accepting (or modifying and accepting) an event on the review page ever queues a real Tripsy change -- subject to the exact same review-then-refresh process described on the <a href="#" data-nav="utilitiestripsyrefresh" style="color:var(--amber);">Tripsy Refresh</a> page. Rejecting an event never queues anything.</p>
       </div>
     </div>
 
@@ -5600,8 +5605,8 @@ async function renderUtilitiesParsingPdfs() {
           <li>Open Safari (or the Claude app) and go to <b>claude.ai/code</b>.</li>
           <li>Open the existing conversation for this project (<b>Travel Tracker</b> / <b>jskagan/Flight-data</b>), or start a new one in that project.</li>
           <li>Send: <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Process flagged Tripsy PDFs</span></li>
-          <li>Claude finds a live signed-in tab (or asks you to sign in if needed), downloads each pending flagged PDF, reads it, and queues whatever it can extract. It'll report back what it found per file.</li>
-          <li>Come back to the Tripsy Trips page to review the new "➕ Not yet created in Tripsy" row(s), and clear each attachment's "(done)" badge once you're satisfied.</li>
+          <li>Claude finds a live signed-in tab (or asks you to sign in if needed), downloads each pending flagged PDF, reads it, and stages whatever it can extract as a proposal -- nothing is sent to Tripsy at this point. It'll report back what it found per file.</li>
+          <li>Come back here (or tap the green badge) to open <a href="#" data-nav="tripsyparsereview" style="color:var(--amber);">Review Parsed PDFs</a> and accept, modify, or reject each proposed event.</li>
         </ol>
         <p style="margin-top:10px;"><b>On a Mac or PC:</b> same thing, from the Claude Code CLI, the desktop app, or claude.ai/code -- whichever you'd normally use for this project.</p>
       </div>
@@ -8141,16 +8146,27 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
         positionTripsyTimelineConnectors();
         return;
       }
-      ok = await Store.queueTripsyChange({
-        id: createOptions.pendingChangeId,
-        type: 'create_event',
-        createdAt: new Date().toISOString(),
-        tripKey, tripName,
-        tripsyResource: raw.resource,
-        tripsyTripId: createOptions.tripsyTripId,
-        eventSummary: newFields.name || newFields.company || tripsySlugToLabel(newFields.category) || 'New item',
-        fields: newFields,
-      });
+      // The PDF-parse review page's "Modify then import" flow sets onSave
+      // instead of pendingChangeId/tripsyTripId -- it doesn't want a real
+      // Tripsy change queued directly from here, just the edited field
+      // values handed back so it can route them through its own
+      // import-with-these-fields logic (same destination-trip/create_trip
+      // handling as "Import as-is", just with these fields instead of the
+      // originally-extracted ones).
+      if (createOptions.onSave) {
+        ok = await createOptions.onSave(newFields);
+      } else {
+        ok = await Store.queueTripsyChange({
+          id: createOptions.pendingChangeId,
+          type: 'create_event',
+          createdAt: new Date().toISOString(),
+          tripKey, tripName,
+          tripsyResource: raw.resource,
+          tripsyTripId: createOptions.tripsyTripId,
+          eventSummary: newFields.name || newFields.company || tripsySlugToLabel(newFields.category) || 'New item',
+          fields: newFields,
+        });
+      }
     } else {
       const changes = {};
       for (const f of fields) {
@@ -8287,8 +8303,10 @@ function tripsyAttachmentMenuRowHtml(a) {
   // fail silently for them regardless.
   const badge = a.purpose === 'parse'
     ? (a.parseStatus === 'done' && isOwner
-        ? `<div data-tripsy-clear-parse-flag data-attachment-id="${esc(a.id)}" style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Parsing complete -- click to clear this flag (the file stays attached as a reference)">🏷️ Flagged for parsing (done)</div>`
-        : `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for a future Claude Code session to read and extract trip data from">🏷️ Flagged for parsing${a.parseStatus === 'done' ? ' (done)' : ''}</div>`)
+        ? `<div data-tripsy-clear-parse-flag data-attachment-id="${esc(a.id)}" style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Review complete -- click to clear this flag (the file stays attached as a reference)">🏷️ Flagged for parsing (done)</div>`
+        : a.parseStatus === 'staged'
+        ? `<div data-tripsy-goto-parse-review style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Parsed, awaiting your review -- click to open Review Parsed PDFs">🏷️ Flagged for parsing (staged)</div>`
+        : `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for a future Claude Code session to read and extract trip data from">🏷️ Flagged for parsing</div>`)
     : '';
   return `
     <div style="display:flex; align-items:center; gap:8px; padding:6px 4px; border-top:1px solid var(--line);">
@@ -8445,18 +8463,33 @@ function tripsyParseMatchTrips(dayKey, trips) {
 // deliberately excludes other proposals' still-pending events, so two
 // undecided proposals never conflict with each other before either is
 // resolved.
-function tripsyParseFindConflicts(proposedEvent, destinationTrip, otherAcceptedEvents) {
+function tripsyParseFindConflicts(proposedEvent, destinationTrip, pendingChanges) {
   if (!destinationTrip) return [];
   const dayKey = tripsyDayKey(proposedEvent.fields.startsAt || proposedEvent.fields.departureAt);
   const candidates = [
+    // isRealEvent:true carries enough (raw/eventKey/tripKey/tripName) for
+    // the review page's "Modify existing instead" to open that event's own
+    // real renderTripsyEditPanel, zero new form code.
     ...(destinationTrip.events || []).map(ev => ({
       resource: ev.tripsyRaw && ev.tripsyRaw.resource,
       start: ev.start, end: ev.end, summary: ev.summary,
+      isRealEvent: true, raw: ev.tripsyRaw, eventKey: tripsyEventKey(ev.tripsyRaw),
+      tripKey: destinationTrip.key, tripName: destinationTrip.name,
     })),
-    ...otherAcceptedEvents.filter(e => e.destinationTripKey === destinationTrip.key).map(e => {
-      const f = e.modifiedFields || e.fields;
-      return { resource: e.tripsyResource, start: f.startsAt || f.departureAt, end: f.endsAt || f.arrivalAt, summary: e.eventSummary };
-    }),
+    // Accepted-but-not-yet-synced events -- ANY pending create_event queued
+    // against this trip, not just ones that came from another PDF-parse
+    // proposal accepted this session. Once a proposal event is accepted it
+    // becomes exactly this kind of pending change (via
+    // Store.queueTripsyChange), so checking the real queue here covers
+    // that case automatically along with manually-added items -- no need
+    // to separately track "other accepted proposal events." isRealEvent:
+    // false since it isn't a real Tripsy event yet, just a pending create
+    // -- "Modify existing instead" doesn't apply to it (only Keep new/
+    // Keep existing).
+    ...pendingChanges.filter(c => c.type === 'create_event' && c.tripKey === destinationTrip.key).map(c => ({
+      resource: c.tripsyResource, start: c.fields.startsAt || c.fields.departureAt, end: c.fields.endsAt || c.fields.arrivalAt,
+      summary: c.eventSummary, isRealEvent: false,
+    })),
   ];
   if (proposedEvent.tripsyResource === 'transportation') {
     const newStart = proposedEvent.fields.departureAt, newEnd = proposedEvent.fields.arrivalAt;
@@ -9531,6 +9564,13 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
+  container.querySelectorAll("[data-tripsy-goto-parse-review]").forEach(el => {
+    el.addEventListener("click", e => {
+      e.stopPropagation();
+      navigate('tripsyparsereview');
+    });
+  });
+
   container.querySelectorAll("[data-tripsy-attach-event]").forEach(btn => {
     btn.addEventListener("click", () => {
       const eventKey = btn.dataset.key;
@@ -9926,22 +9966,357 @@ async function updateTripsyPdfParseBadge() {
   }
   const attachments = await Store.listTripsyAttachments();
   const pending = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'pending');
-  const done = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'done');
+  // 'staged' means parsed with a proposal awaiting review (see
+  // Store.markTripsyAttachmentParsed) -- 'done' now means fully reviewed,
+  // so the green state keys off 'staged', not 'done'.
+  const staged = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'staged');
   if (pending.length) {
     badge.style.display = 'flex';
     badge.style.background = '#f5c518';
     badge.style.color = '#1a1500';
     badge.textContent = '!';
     badge.title = `${pending.length} PDF${pending.length === 1 ? '' : 's'} waiting to be parsed -- click to see the list`;
-  } else if (done.length) {
+  } else if (staged.length) {
     badge.style.display = 'flex';
     badge.style.background = 'var(--home-green)';
     badge.style.color = '#04210F';
     badge.textContent = '✓';
-    badge.title = `${done.length} PDF${done.length === 1 ? '' : 's'} parsed -- click to review`;
+    badge.title = `${staged.length} PDF${staged.length === 1 ? '' : 's'} parsed -- click to review`;
   } else {
     badge.style.display = 'none';
   }
+}
+
+// ---- PDF-parse review-and-accept page ----
+// Reached from the top-right green "✓" badge once at least one attachment
+// is 'staged' (parsed, awaiting review). Nothing extracted from a PDF
+// becomes a real Tripsy change until the owner explicitly resolves each
+// proposed event here -- see Store.resolveTripsyParseProposalEvent.
+
+// Read-only field breakdown for one proposed event -- same
+// tripsyFieldGroups/TRIPSY_EDIT_FIELDS-driven approach renderTripsyViewPanel
+// already uses for real events, just flattened into one compact grid
+// instead of separate bordered section boxes (this page already has a lot
+// on screen per event -- day header, fields, trip-select, conflicts,
+// three action buttons -- so a lighter-weight layout keeps each card
+// scannable).
+function tripsyParseEventFieldsHtml(resource, fields) {
+  const { groupOrder, byGroup } = tripsyFieldGroups(resource);
+  const displayValue = f => {
+    const val = fields[f.key];
+    if (val === null || val === undefined || val === '') return null;
+    if (f.kind === 'select') return tripsySlugToLabel(val);
+    if (f.kind === 'datetime') return formatTripsyFieldDateTime(val) || val;
+    return val;
+  };
+  const rows = groupOrder.flatMap(g => byGroup[g].map(f => ({ f, val: displayValue(f) }))).filter(r => r.val != null);
+  if (!rows.length) return `<div style="font-size:13px; color:var(--muted);">No details extracted.</div>`;
+  return `
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; margin-top:6px;">
+      ${rows.map(({ f, val }) => `
+        <div>
+          <div style="font-size:11px; color:var(--muted);">${esc(f.label)}</div>
+          <div style="font-size:13px; color:var(--text);">${esc(val)}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+// Shared by "Import as-is" and "Modify then import" -- the only difference
+// between them is whether fieldsOverride (the edited fields) is passed.
+// Creates the destination trip first if the reviewer picked "new trip"
+// (prompting for a name; single-day range defaulting to the event's own
+// day -- editable for real once it syncs, or just Cancel and redo if it's
+// wrong), then queues the real create_event, then records the resolution.
+// Returns false (and toasts) on any storage failure, without leaving the
+// proposal event stuck in a half-resolved state.
+async function tripsyParseImportProposalEvent(proposal, event, destinationValue, fieldsOverride) {
+  const fields = fieldsOverride || event.fields;
+  let tripKey, tripName, tripsyTripId;
+  if (destinationValue === '__new__') {
+    const name = prompt('Name for the new trip:', event.eventSummary || 'New Trip');
+    if (!name || !name.trim()) return false;
+    const dayKey = tripsyDayKey(fields.startsAt || fields.departureAt) || new Date().toISOString().slice(0, 10);
+    tripKey = `tripsy-pending-${crypto.randomUUID().slice(0, 8)}`;
+    tripName = name.trim();
+    tripsyTripId = null;
+    const tripOk = await Store.queueTripsyChange({
+      id: crypto.randomUUID(), type: 'create_trip', createdAt: new Date().toISOString(),
+      tripKey, name: tripName, start: dayKey, end: dayKey,
+    });
+    if (!tripOk) { toast('Could not create the new trip — storage error. Please try again.', 'error'); return false; }
+  } else {
+    const trip = tripsyDecryptedTrips.find(t => t.key === destinationValue);
+    if (!trip) { toast('Could not find that trip.', 'error'); return false; }
+    tripKey = trip.key; tripName = trip.name; tripsyTripId = tripsyTripIdFromKey(trip.key);
+  }
+  const changeId = crypto.randomUUID();
+  const eventOk = await Store.queueTripsyChange({
+    id: changeId, type: 'create_event', createdAt: new Date().toISOString(),
+    tripKey, tripName, tripsyResource: event.tripsyResource, tripsyTripId,
+    eventSummary: event.eventSummary, fields,
+  });
+  if (!eventOk) { toast('Could not queue the event — storage error. Please try again.', 'error'); return false; }
+  await Store.resolveTripsyParseProposalEvent(proposal.id, event.id, {
+    resolution: fieldsOverride ? 'modified-accepted' : 'accepted',
+    resolvedAt: new Date().toISOString(),
+    destinationTripKey: tripKey,
+    modifiedFields: fieldsOverride || null,
+    appliedChangeId: changeId,
+  });
+  return true;
+}
+
+// Once every event in a proposal has been resolved (one way or another),
+// it's done -- flip the attachment to 'done' and remove the now-empty
+// proposal, same terminal state Store.markTripsyAttachmentReviewed exists
+// for.
+async function tripsyParseMaybeFinishProposal(proposalId) {
+  const proposal = (await Store.listTripsyParseProposals()).find(p => p.id === proposalId);
+  if (proposal && proposal.events.every(e => e.resolution !== 'pending')) {
+    await Store.markTripsyAttachmentReviewed(proposal.attachmentId);
+    await Store.deleteTripsyParseProposal(proposal.id);
+  }
+}
+
+// One proposal's "chart" -- title/summary at top, then every still-pending
+// proposed event grouped by day, each with its full extracted details, a
+// destination-trip picker (defaulting to the first date-matched trip, or
+// "create a new trip" if none), any conflicts, and Import/Modify/Reject.
+// A trailing cluster prompt covers events that matched no existing trip
+// AND fall close enough together in time to plausibly be their own trip
+// (see tripsyParseFindCluster).
+function tripsyParseReviewCardHtml(proposal, pendingChanges) {
+  const pendingEvents = proposal.events.filter(e => e.resolution === 'pending');
+  const byDay = new Map();
+  pendingEvents.forEach(ev => {
+    const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt) || 'undated';
+    if (!byDay.has(dayKey)) byDay.set(dayKey, []);
+    byDay.get(dayKey).push(ev);
+  });
+  const sortedDayKeys = [...byDay.keys()].sort();
+
+  const eventRowHtml = ev => {
+    const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
+    const matches = tripsyParseMatchTrips(dayKey, tripsyDecryptedTrips);
+    const selectOptions = [
+      ...matches.map(t => `<option value="${esc(t.key)}">${esc(t.name)}</option>`),
+      `<option value="__new__">➕ Create a new trip</option>`,
+    ].join('');
+    const destTrip = matches[0] || null;
+    const conflicts = destTrip ? tripsyParseFindConflicts(ev, destTrip, pendingChanges) : [];
+    return `
+      <div data-parse-event-row data-event-id="${esc(ev.id)}" data-proposal-id="${esc(proposal.id)}" style="border-top:1px solid var(--line); padding:12px 0;">
+        <div style="font-size:14px; font-weight:600; color:var(--text);">${esc(ev.eventSummary)} <span style="color:var(--muted); font-weight:400; font-size:12px;">(${esc(tripsySlugToLabel(ev.tripsyResource))})</span></div>
+        ${tripsyParseEventFieldsHtml(ev.tripsyResource, ev.fields)}
+        <div style="margin-top:10px; font-size:12px; color:var(--muted);">${matches.length ? `Falls within an existing trip:` : `Doesn't match any existing trip.`}</div>
+        <select data-parse-event-trip-select class="field-input" style="margin-top:4px; font-size:13px; max-width:280px;">${selectOptions}</select>
+        ${conflicts.length ? `
+          <div data-parse-conflict-box style="margin-top:8px; padding:8px; border:1px solid var(--amber); border-radius:6px;">
+            <div style="font-size:12px; color:var(--amber); font-weight:700;">⚠️ Possible conflict with an existing item</div>
+            ${conflicts.map(c => `<div style="font-size:12px; color:var(--text); margin-top:4px;">${esc(c.summary || 'Existing event')} — ${esc(formatTripitDateRange(c.start, c.end))}</div>`).join('')}
+            <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+              <button class="btn" data-parse-conflict-keep-new style="font-size:11px; padding:3px 8px;">Keep new</button>
+              <button class="btn" data-parse-conflict-keep-existing style="font-size:11px; padding:3px 8px;">Keep existing</button>
+              ${conflicts[0].isRealEvent ? `<button class="btn" data-parse-conflict-modify-existing data-event-key="${esc(conflicts[0].eventKey)}" data-trip-key="${esc(conflicts[0].tripKey)}" data-trip-name="${esc(conflicts[0].tripName)}" data-summary="${esc(conflicts[0].summary || '')}" style="font-size:11px; padding:3px 8px;">Modify existing instead</button>` : ''}
+            </div>
+            <div data-parse-conflict-edit-panel style="display:none; margin-top:10px;"></div>
+          </div>
+        ` : ''}
+        <div data-parse-actions style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn primary" data-parse-import style="font-size:12px; padding:5px 12px;">Import as-is</button>
+          <button class="btn" data-parse-modify style="font-size:12px; padding:5px 12px;">Modify then import</button>
+          <button class="btn" data-parse-reject style="font-size:12px; padding:5px 12px;">Reject</button>
+        </div>
+        <div data-parse-modify-panel style="display:none; margin-top:12px;"></div>
+      </div>
+    `;
+  };
+
+  const clusterCandidates = pendingEvents.filter(ev => !tripsyParseMatchTrips(tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt), tripsyDecryptedTrips).length);
+  const cluster = tripsyParseFindCluster(clusterCandidates);
+
+  return `
+    <div class="card" style="margin-bottom:16px;">
+      <div style="font-family:var(--mono); font-size:15px; font-weight:700; color:var(--amber);">${esc(proposal.sourceFileName)}</div>
+      <div style="font-size:13px; color:var(--muted); margin-bottom:4px;">${esc(proposal.summary)}</div>
+      ${sortedDayKeys.map(dayKey => `
+        <div style="font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:12px;">${dayKey === 'undated' ? 'Undated' : esc(tripsyDayHeaderLabel(dayKey))}</div>
+        ${byDay.get(dayKey).map(eventRowHtml).join('')}
+      `).join('')}
+      ${cluster ? `
+        <div data-parse-cluster-box data-proposal-id="${esc(proposal.id)}" data-event-ids="${esc(cluster.eventIds.join(','))}" style="margin-top:16px; padding:10px 12px; border:1px solid var(--home-green); border-radius:6px;">
+          <div style="font-size:13px; color:var(--home-green); font-weight:700;">These ${cluster.eventIds.length} events (${esc(formatTripitDateRange(cluster.start, cluster.end))}) don't match any existing trip — create a new trip for them?</div>
+          <input type="text" data-parse-cluster-name value="${esc(proposal.sourceFileName.replace(/\.pdf$/i, ''))}" class="field-input" style="margin-top:8px; max-width:320px;">
+          <div style="margin-top:8px; display:flex; gap:8px;">
+            <button class="btn primary" data-parse-cluster-accept style="font-size:12px; padding:5px 12px;">Create trip for these ${cluster.eventIds.length} events</button>
+            <button class="btn" data-parse-cluster-dismiss style="font-size:12px; padding:5px 12px;">No thanks</button>
+          </div>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+async function renderTripsyParseReview() {
+  main.innerHTML = `
+    <div class="page-title">Review Parsed PDFs</div>
+    <div class="page-sub">Nothing below has been sent to Tripsy yet. Review each proposed event, then Import, Modify &amp; Import, or Reject it.</div>
+    <div id="tripsy-parse-review-container"><div class="card"><div class="empty-state">Loading…</div></div></div>
+  `;
+  const container = document.getElementById("tripsy-parse-review-container");
+
+  if (!isOwner) {
+    container.innerHTML = `<div class="card"><div class="empty-state">Owner only.</div></div>`;
+    return;
+  }
+
+  const trips = await ensureTripsyDecrypted();
+  if (!trips) {
+    container.innerHTML = `<div class="card"><div class="empty-state">Trip data isn't unlocked on this device yet — visit <a href="#" data-parse-review-nav-tripsy style="color:var(--amber);">Tripsy Trips</a> first.</div></div>`;
+    container.querySelector("[data-parse-review-nav-tripsy]").addEventListener("click", e => { e.preventDefault(); navigate('tripsytrips'); });
+    return;
+  }
+
+  const allProposals = await Store.listTripsyParseProposals();
+  const proposals = allProposals.filter(p => p.events.some(e => e.resolution === 'pending'));
+  if (!proposals.length) {
+    container.innerHTML = `<div class="card"><div class="empty-state">Nothing waiting for review. 🎉</div></div>`;
+    return;
+  }
+  // Conflict-checking reads the real pending-changes queue (not just this
+  // session's own accepted proposal events) so it also catches manually-
+  // added items and anything accepted in an earlier review session --
+  // see tripsyParseFindConflicts.
+  const pendingChanges = await Store.listTripsyPendingChanges();
+
+  container.innerHTML = proposals.map(p => tripsyParseReviewCardHtml(p, pendingChanges)).join('');
+
+  // Every action below follows the same shape: mutate, then re-render this
+  // whole page fresh (matches how the rest of the Tripsy Trips code
+  // re-renders its own full list after any single action, rather than
+  // hand-patching individual rows) plus refresh the top-right badge.
+  const afterAction = async proposalId => {
+    await tripsyParseMaybeFinishProposal(proposalId);
+    await updateTripsyPdfParseBadge();
+    await renderTripsyParseReview();
+  };
+
+  container.querySelectorAll("[data-parse-import]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const row = btn.closest("[data-parse-event-row]");
+      const proposalId = row.dataset.proposalId, eventId = row.dataset.eventId;
+      const proposal = proposals.find(p => p.id === proposalId);
+      const event = proposal.events.find(e => e.id === eventId);
+      const destValue = row.querySelector("[data-parse-event-trip-select]").value;
+      btn.disabled = true;
+      const ok = await tripsyParseImportProposalEvent(proposal, event, destValue, null);
+      if (ok) { toast("Imported."); await afterAction(proposalId); } else { btn.disabled = false; }
+    });
+  });
+
+  container.querySelectorAll("[data-parse-reject]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const row = btn.closest("[data-parse-event-row]");
+      const proposalId = row.dataset.proposalId, eventId = row.dataset.eventId;
+      btn.disabled = true;
+      await Store.resolveTripsyParseProposalEvent(proposalId, eventId, { resolution: 'rejected', resolvedAt: new Date().toISOString() });
+      await afterAction(proposalId);
+    });
+  });
+
+  container.querySelectorAll("[data-parse-modify]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest("[data-parse-event-row]");
+      const proposalId = row.dataset.proposalId, eventId = row.dataset.eventId;
+      const proposal = proposals.find(p => p.id === proposalId);
+      const event = proposal.events.find(e => e.id === eventId);
+      const panel = row.querySelector("[data-parse-modify-panel]");
+      const wasOpen = panel.style.display !== "none" && !!panel.innerHTML;
+      panel.style.display = "none";
+      panel.innerHTML = "";
+      if (wasOpen) return;
+      const raw = { ...tripsyBlankRaw(event.tripsyResource, null), ...event.fields };
+      renderTripsyEditPanel(panel, raw, null, null, event.eventSummary, {
+        onSave: async newFields => {
+          const destValue = row.querySelector("[data-parse-event-trip-select]").value;
+          const ok = await tripsyParseImportProposalEvent(proposal, event, destValue, newFields);
+          if (ok) { toast("Imported with your changes."); afterAction(proposalId); }
+          return ok;
+        },
+      });
+      panel.style.display = "block";
+    });
+  });
+
+  // Conflict box: "Keep new" just dismisses the warning so Import/Modify
+  // proceed normally; "Keep existing" rejects the proposed event outright
+  // (same effect as the Reject button); "Modify existing instead" opens
+  // the real conflicting event's own normal edit panel inline.
+  container.querySelectorAll("[data-parse-conflict-keep-new]").forEach(btn => {
+    btn.addEventListener("click", () => { btn.closest("[data-parse-conflict-box]").style.display = "none"; });
+  });
+  container.querySelectorAll("[data-parse-conflict-keep-existing]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const row = btn.closest("[data-parse-event-row]");
+      const proposalId = row.dataset.proposalId, eventId = row.dataset.eventId;
+      btn.disabled = true;
+      await Store.resolveTripsyParseProposalEvent(proposalId, eventId, { resolution: 'rejected', resolvedAt: new Date().toISOString() });
+      await afterAction(proposalId);
+    });
+  });
+  container.querySelectorAll("[data-parse-conflict-modify-existing]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const panel = btn.closest("[data-parse-conflict-box]").querySelector("[data-parse-conflict-edit-panel]");
+      const wasOpen = panel.style.display !== "none" && !!panel.innerHTML;
+      panel.style.display = "none";
+      panel.innerHTML = "";
+      if (wasOpen) return;
+      const raw = findTripsyRawByKey(btn.dataset.eventKey);
+      if (!raw) { toast("Could not find that event — it may have changed.", "error"); return; }
+      renderTripsyViewPanel(panel, raw, btn.dataset.summary, () => {
+        renderTripsyEditPanel(panel, raw, btn.dataset.tripKey, btn.dataset.tripName, btn.dataset.summary);
+      });
+      panel.style.display = "block";
+    });
+  });
+
+  container.querySelectorAll("[data-parse-cluster-accept]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const box = btn.closest("[data-parse-cluster-box]");
+      const proposalId = box.dataset.proposalId;
+      const eventIds = box.dataset.eventIds.split(',');
+      const proposal = proposals.find(p => p.id === proposalId);
+      const name = box.querySelector("[data-parse-cluster-name]").value.trim();
+      if (!name) { toast("Enter a name for the new trip.", "error"); return; }
+      const clusterEvents = eventIds.map(id => proposal.events.find(e => e.id === id)).filter(Boolean);
+      const dayKeys = clusterEvents.map(e => tripsyDayKey(e.fields.startsAt || e.fields.departureAt)).filter(Boolean).sort();
+      btn.disabled = true;
+      const tripKey = `tripsy-pending-${crypto.randomUUID().slice(0, 8)}`;
+      const tripOk = await Store.queueTripsyChange({
+        id: crypto.randomUUID(), type: 'create_trip', createdAt: new Date().toISOString(),
+        tripKey, name, start: dayKeys[0], end: dayKeys[dayKeys.length - 1],
+      });
+      if (!tripOk) { toast("Could not create the new trip — storage error. Please try again.", "error"); btn.disabled = false; return; }
+      const patches = [];
+      for (const ev of clusterEvents) {
+        const changeId = crypto.randomUUID();
+        const eventOk = await Store.queueTripsyChange({
+          id: changeId, type: 'create_event', createdAt: new Date().toISOString(),
+          tripKey, tripName: name, tripsyResource: ev.tripsyResource, tripsyTripId: null,
+          eventSummary: ev.eventSummary, fields: ev.fields,
+        });
+        if (eventOk) patches.push({ eventId: ev.id, patch: { resolution: 'accepted', resolvedAt: new Date().toISOString(), destinationTripKey: tripKey, appliedChangeId: changeId } });
+      }
+      await Store.resolveTripsyParseProposalEvents(proposalId, patches);
+      toast(`Created "${name}" with ${patches.length} event${patches.length === 1 ? '' : 's'}.`);
+      await afterAction(proposalId);
+    });
+  });
+  container.querySelectorAll("[data-parse-cluster-dismiss]").forEach(btn => {
+    btn.addEventListener("click", () => { btn.closest("[data-parse-cluster-box]").style.display = "none"; });
+  });
 }
 
 async function renderTripsyTrips() {
@@ -10810,7 +11185,11 @@ document.getElementById('signout-btn').addEventListener('click', () => {
 });
 
 document.getElementById('tripsy-pending-warning-badge').addEventListener('click', () => navigate('utilitiestripsyrefresh'));
-document.getElementById('tripsy-pdf-parse-badge').addEventListener('click', () => navigate('utilitiesparsingpdfs'));
+document.getElementById('tripsy-pdf-parse-badge').addEventListener('click', async () => {
+  const attachments = await Store.listTripsyAttachments();
+  const hasStaged = attachments.some(a => a.purpose === 'parse' && a.parseStatus === 'staged');
+  navigate(hasStaged ? 'tripsyparsereview' : 'utilitiesparsingpdfs');
+});
 
 // The left nav rail is static markup (not re-rendered by navigate()), so
 // the P/S icon there can't use a template literal like every other spot
