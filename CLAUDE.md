@@ -36,7 +36,10 @@ commit pending changes.
 snapshot" procedure (see `TRIPSY_SNAPSHOT_GENERATED_AT`/`TRIPSY_ENCRYPTED` in `index.html`) and the
 resulting diff touches *only* those two constants — no other lines changed — commit and push
 without asking first. Still describe what was refreshed (trip/event counts, any pending changes
-applied) after the fact. If the diff touches anything else, the normal go-ahead rule applies.
+applied) after the fact. If the diff touches anything else, the normal go-ahead rule applies. This
+exception also covers the `tripsy-trips-refresh-retry` and `tripsy-trips-refresh-retry-2` scheduled
+tasks (9:00am/9:30am conditional retries of that same task's pending-changes step) — same scope,
+same diff restriction, no separate authorization needed for them.
 
 The user runs multiple sessions against this repo (different devices, sometimes in parallel), so
 `main` can move without this session knowing. **Every session should start with `git fetch origin`
