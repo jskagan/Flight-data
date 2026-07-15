@@ -1382,20 +1382,6 @@ const Store = {
       return false;
     }
   },
-  // Bulk version backing the trip header's single "Save All Offline"
-  // toggle -- sets keepOffline on every attachment under this trip (both
-  // trip- and event-scoped) in one write, rather than one Drive PATCH per
-  // doc.
-  async setTripsyTripAttachmentsKeepOffline(tripKey, keepOffline) {
-    try {
-      (driveData.tripsyAttachments || []).filter(a => a.tripKey === tripKey).forEach(a => { a.keepOffline = keepOffline; });
-      await persistDriveData();
-      return true;
-    } catch (e) {
-      console.error('Store.setTripsyTripAttachmentsKeepOffline failed:', e);
-      return false;
-    }
-  },
   // Called by the tripsy-doc-parse runbook right after it saves this
   // attachment's proposal (Store.saveTripsyParseProposal) -- flips
   // parseStatus to 'staged', meaning "parsed, waiting on the owner's
@@ -7546,12 +7532,7 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
 
 // Row for the trip- or event-header Doc dropdown menu: filename on the
 // left (click to open), View/Edit-name/Copy/Delete on the right.
-// `isCachedLocally`: whether THIS device already has the doc's bytes in
-// IndexedDB. Independent of `a.keepOffline` (the shared cross-device
-// marker) -- a doc can be marked keepOffline but not yet downloaded here
-// (e.g. this device was offline when it was marked), which is its own
-// "syncing" status below rather than either plain state.
-function tripsyAttachmentMenuRowHtml(a, isCachedLocally) {
+function tripsyAttachmentMenuRowHtml(a) {
   // Once parsing has actually completed, the badge itself is the "clear"
   // control -- click it to acknowledge and downgrade this attachment back
   // to a plain reference doc (Store.clearTripsyAttachmentParseFlag). Still-
@@ -7566,31 +7547,46 @@ function tripsyAttachmentMenuRowHtml(a, isCachedLocally) {
         ? `<div data-tripsy-goto-parse-review style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Parsed, awaiting your review -- click to open Review Parsed Docs">🏷️ Flagged for parsing (staged)</div>`
         : `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for a future Claude Code session to read and extract trip data from">🏷️ Flagged for parsing</div>`)
     : '';
-  // Read-only status, shown to every viewer (not owner-gated) -- there's no
-  // per-doc "add to offline" control anymore (see the trip header's single
-  // "Save All Offline" toggle instead), only a status indicator plus a
-  // remove action once a doc IS marked offline.
-  const offlineStatusHtml = a.keepOffline
-    ? (isCachedLocally
-        ? `<span style="font-size:14px;" title="Available offline on this device">✅</span>`
-        : `<span style="font-size:14px;" title="Marked for offline viewing -- will download to this device next time it's online">⏳</span>`)
-    : '';
-  const removeOfflineButtonHtml = (isOwner && a.keepOffline)
-    ? `<button class="btn" data-tripsy-remove-offline data-attachment-id="${esc(a.id)}" data-drive-file-id="${esc(a.driveFileId)}" style="font-size:18px; padding:4px 9px;" title="Remove from offline availability (on every device)">🚫</button>`
-    : '';
   return `
     <div style="display:flex; align-items:center; gap:8px; padding:6px 4px; border-top:1px solid var(--line);">
       <div style="min-width:0; flex:1;">
         <div data-tripsy-open-attachment data-drive-file-id="${esc(a.driveFileId)}" style="font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" title="${esc(a.fileName)}">📄 ${esc(a.fileName)}</div>
         ${badge}
       </div>
-      ${offlineStatusHtml}
       <div style="display:flex; gap:4px; flex-shrink:0;">
-        ${removeOfflineButtonHtml}
         ${isOwner ? `<button class="btn" data-tripsy-rename-attachment data-attachment-id="${esc(a.id)}" data-current-name="${esc(a.fileName)}" style="font-size:18px; padding:4px 9px;" title="Edit name">✏️</button>` : ''}
         <button class="btn" data-tripsy-copy-attachment data-drive-file-id="${esc(a.driveFileId)}" style="font-size:18px; padding:4px 9px;" title="Copy link">📋</button>
         ${isOwner ? `<button class="btn" data-tripsy-delete-attachment data-attachment-id="${esc(a.id)}" data-drive-file-id="${esc(a.driveFileId)}" style="font-size:18px; padding:4px 9px;" title="Delete">🗑️</button>` : ''}
       </div>
+    </div>
+  `;
+}
+
+// Dedicated row for the trip header's separate "Offline" dropdown (see
+// offlineMenuButtonHtml) -- offline availability is now controlled purely
+// per-document here, one combined status+action icon per row: ⬇️ (not
+// offline yet -- click to save), ✅ (offline and cached on THIS device --
+// click to remove), ⏳ (marked offline but not yet downloaded to this
+// device -- click cancels the same as remove). `a.keepOffline` is the
+// shared cross-device marker (driveData.tripsyAttachments);
+// `isCachedLocally` is just this device's own IndexedDB state, which can
+// lag behind it until reconcileTripsyOfflineDocs next runs (or this
+// button's own click, which updates both immediately for the device that
+// clicked it).
+function tripsyOfflineMenuRowHtml(a, isCachedLocally) {
+  const icon = a.keepOffline ? (isCachedLocally ? '✅' : '⏳') : '⬇️';
+  const title = a.keepOffline
+    ? (isCachedLocally
+        ? 'Available offline on this device -- click to remove (on every device)'
+        : 'Marked for offline viewing -- will download to this device soon (click to cancel)')
+    : 'Save for offline viewing (syncs to every device)';
+  const controlHtml = isOwner
+    ? `<button class="btn" data-tripsy-offline-item-toggle data-attachment-id="${esc(a.id)}" data-drive-file-id="${esc(a.driveFileId)}" data-trip-key="${esc(a.tripKey)}" data-file-name="${esc(a.fileName)}" data-mime-type="${esc(a.mimeType || 'application/octet-stream')}" data-currently-offline="${a.keepOffline ? 'true' : 'false'}" style="font-size:18px; padding:4px 9px;" title="${esc(title)}">${icon}</button>`
+    : `<span style="font-size:14px;" title="${esc(title)}">${icon}</span>`;
+  return `
+    <div style="display:flex; align-items:center; gap:8px; padding:6px 4px; border-top:1px solid var(--line);">
+      <div data-tripsy-open-attachment data-drive-file-id="${esc(a.driveFileId)}" style="min-width:0; flex:1; font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" title="${esc(a.fileName)}">📄 ${esc(a.fileName)}</div>
+      ${controlHtml}
     </div>
   `;
 }
@@ -8087,6 +8083,7 @@ const TRIPSY_TRIP_PANEL_SELECTORS = [
   '[data-tripsy-edit-trip-panel]',
   '[data-tripsy-attach-panel]',
   '[data-tripsy-attachments-menu]',
+  '[data-tripsy-offline-menu]',
   '[data-tripsy-sort-menu]',
 ];
 // The buttons that open one of the panels above -- a click on one of these
@@ -8099,6 +8096,7 @@ const TRIPSY_TRIP_PANEL_TRIGGER_SELECTORS = [
   '[data-tripsy-add-item-toggle]',
   '[data-tripsy-edit-trip-toggle]',
   '[data-tripsy-attachments-toggle]',
+  '[data-tripsy-offline-menu-toggle]',
   '[data-tripsy-add-doc-menu-item]',
   '[data-tripsy-sort-toggle]',
 ];
@@ -8112,7 +8110,7 @@ function closeAllTripsyTripPanels() {
       // clearing it would just delete the same static menu markup the next
       // render would recreate anyway, so only panels that get their
       // innerHTML freshly rendered on open need clearing here.
-      if (sel !== '[data-tripsy-add-item-menu]' && sel !== '[data-tripsy-attachments-menu]' && sel !== '[data-tripsy-sort-menu]') el.innerHTML = "";
+      if (sel !== '[data-tripsy-add-item-menu]' && sel !== '[data-tripsy-attachments-menu]' && sel !== '[data-tripsy-offline-menu]' && sel !== '[data-tripsy-sort-menu]') el.innerHTML = "";
     });
   });
 }
@@ -8313,7 +8311,7 @@ async function renderTripsyEventsListImpl() {
         <div style="position:relative;">
           <button class="btn" data-tripsy-attachments-toggle data-key="${esc(eventKey)}" style="font-size:17px; padding:4px 10px;" title="Attached Docs">📄</button>
           <div data-tripsy-attachments-menu="${esc(eventKey)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:360px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-            ${eventAttachments.map(a => tripsyAttachmentMenuRowHtml(a, offlineDriveFileIds.has(a.driveFileId))).join('')}
+            ${eventAttachments.map(tripsyAttachmentMenuRowHtml).join('')}
           </div>
         </div>
       ` : '';
@@ -8516,26 +8514,44 @@ async function renderTripsyEventsListImpl() {
       <div style="position:relative;">
         <button class="btn" data-tripsy-attachments-toggle data-key="${esc(trip.key)}" title="Attached Docs" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">📄</button>
         <div data-tripsy-attachments-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:360px; max-width:440px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-          ${tripAttachments.map(a => tripsyAttachmentMenuRowHtml(a, offlineDriveFileIds.has(a.driveFileId))).join('')}
+          ${tripAttachments.map(tripsyAttachmentMenuRowHtml).join('')}
           ${otherEventDocsHtml}
         </div>
       </div>
     `, 'Docs') : '';
-    // Single trip-wide toggle replacing the old per-doc save/remove control
-    // -- sets/clears keepOffline on EVERY doc under this trip (trip- and
-    // event-scoped alike) in one Store call, then reconcileTripsyOfflineDocs
-    // downloads/drops each one's local copy accordingly. Owner-gated like
-    // rename/delete/edit above, since it writes the shared keepOffline flag;
-    // a viewer's device still benefits automatically (see
-    // reconcileTripsyOfflineDocs, not owner-gated) once the owner sets it.
-    // "All offline" only when the trip HAS docs and every one is marked --
-    // an empty trip or a mixed state both show the "Save All" (⬇️) action.
-    const allTripAttachments = attachments.filter(a => a.tripKey === trip.key);
-    const allTripDocsKeptOffline = allTripAttachments.length > 0 && allTripAttachments.every(a => a.keepOffline);
-    const offlineAllButtonHtml = (isOwner && allTripAttachments.length) ? iconLabelButton(
-      `<button class="btn" data-tripsy-trip-offline-toggle data-key="${esc(trip.key)}" data-currently-all-offline="${allTripDocsKeptOffline ? 'true' : 'false'}" title="${allTripDocsKeptOffline ? 'Every doc in this trip is saved for offline viewing on every device -- click to remove them all' : 'Save every doc in this trip for offline viewing on every device'}" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">${allTripDocsKeptOffline ? '✅' : '⬇️'}</button>`,
-      allTripDocsKeptOffline ? 'Offline' : 'Save All'
-    ) : '';
+    // Separate "Offline" dropdown, own trigger/menu pair
+    // (data-tripsy-offline-menu-toggle/-menu, not the Docs button's
+    // data-tripsy-attachments-toggle/-menu -- reusing that would collide,
+    // since both would be keyed by the same trip.key). Organized exactly
+    // like the Docs dropdown above (trip-scoped docs, then a divider, then
+    // event-scoped docs grouped by day) but every doc -- including event-
+    // scoped ones -- gets its own inline offline status+toggle row
+    // (tripsyOfflineMenuRowHtml) instead of Docs' click-through summary,
+    // since offline availability is controlled per-document here.
+    let lastOfflineEventDocDayKey = null;
+    const offlineEventDocsHtml = eventAttachmentEntries.length ? `
+      ${tripAttachments.length ? `<div style="height:1px; background:var(--line); margin:8px 0;"></div>` : ''}
+      ${eventAttachmentEntries.map(entry => {
+        const dayHtml = entry.dayKey !== lastOfflineEventDocDayKey
+          ? `<div style="font-family:var(--mono); font-size:13px; color:var(--muted); margin:${lastOfflineEventDocDayKey === null ? '0' : '8px'} 0 4px;">${esc(entry.dayKey ? tripsyDayHeaderLabel(entry.dayKey) : 'Undated')}</div>`
+          : '';
+        lastOfflineEventDocDayKey = entry.dayKey;
+        return `
+          ${dayHtml}
+          <div style="font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:4px;">${esc(entry.title)}</div>
+          ${entry.files.map(f => tripsyOfflineMenuRowHtml(f, offlineDriveFileIds.has(f.driveFileId))).join('')}
+        `;
+      }).join('')}
+    ` : '';
+    const offlineMenuButtonHtml = (tripAttachments.length || eventAttachmentEntries.length) ? iconLabelButton(`
+      <div style="position:relative;">
+        <button class="btn" data-tripsy-offline-menu-toggle data-key="${esc(trip.key)}" title="Offline Docs" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">📥</button>
+        <div data-tripsy-offline-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:360px; max-width:440px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+          ${tripAttachments.map(a => tripsyOfflineMenuRowHtml(a, offlineDriveFileIds.has(a.driveFileId))).join('')}
+          ${offlineEventDocsHtml}
+        </div>
+      </div>
+    `, 'Offline') : '';
     // A trip queued via the doc-parse review page's "create a new trip"
     // option but not yet real in Tripsy -- Cancel is its only trip-level
     // action (no Edit/Hide/Docs/Sort/Delete: there's nothing real yet to
@@ -8559,7 +8575,7 @@ async function renderTripsyEventsListImpl() {
             ${isPendingCreateTrip ? cancelPendingTripButtonHtml : `
             ${addButtonHtml}
             ${docStatusButtonHtml}
-            ${offlineAllButtonHtml}
+            ${offlineMenuButtonHtml}
             ${editButtonHtml}
             ${sortButtonHtml}
             ${hideButtonHtml}
@@ -8594,7 +8610,7 @@ async function renderTripsyEventsListImpl() {
   // down the still-open dropdown out from under the user.
   container.querySelectorAll("[data-tripsy-header-toggle]").forEach(el => {
     el.addEventListener("click", e => {
-      if (e.target.closest('button, a, [data-tripsy-add-item-menu], [data-tripsy-attachments-menu], [data-tripsy-sort-menu]')) return;
+      if (e.target.closest('button, a, [data-tripsy-add-item-menu], [data-tripsy-attachments-menu], [data-tripsy-offline-menu], [data-tripsy-sort-menu]')) return;
       toggleTripsyCollapse(el.dataset.tripsyHeaderToggle);
     });
   });
@@ -8610,24 +8626,58 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
-  // Bulk offline toggle -- sets/clears keepOffline on every doc in the
-  // trip in one write, then runs reconcileTripsyOfflineDocs to actually
-  // download (or drop) each one's local copy on THIS device right away,
-  // rather than waiting for the next sign-in. Downloading several docs can
-  // take a moment, hence the disabled/spinner state.
-  container.querySelectorAll("[data-tripsy-trip-offline-toggle]").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      const turningOn = btn.dataset.currentlyAllOffline !== "true";
+  // Toggles the trip-header Offline dropdown -- same fixed-position
+  // pattern as the Docs dropdown just below (own trigger/menu attribute
+  // pair so the two don't collide despite sharing the same trip.key).
+  container.querySelectorAll("[data-tripsy-offline-menu-toggle]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const tripKey = btn.dataset.key;
+      const menu = container.querySelector(`[data-tripsy-offline-menu="${tripKey}"]`);
+      if (!menu) return;
+      const wasOpen = menu.style.display !== "none";
+      closeAllTripsyTripPanels();
+      if (!wasOpen) {
+        const rect = btn.getBoundingClientRect();
+        menu.style.top = `${rect.bottom + 6}px`;
+        menu.style.left = `${rect.right - menu.offsetWidth}px`;
+        menu.style.display = "block";
+        menu.style.left = `${rect.right - menu.offsetWidth}px`;
+      }
+    });
+  });
+
+  // Per-doc offline toggle inside that dropdown (tripsyOfflineMenuRowHtml)
+  // -- sets/clears the shared keepOffline flag for just this one doc, then
+  // immediately downloads/drops ITS local copy on this device rather than
+  // waiting for the next sign-in's reconcileTripsyOfflineDocs pass. If the
+  // immediate download/removal fails (e.g. offline right now), the
+  // keepOffline flag itself has already been saved either way, so the next
+  // reconcile pass on any device will pick it up.
+  container.querySelectorAll("[data-tripsy-offline-item-toggle]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const { attachmentId, driveFileId, tripKey, fileName, mimeType } = btn.dataset;
+      const turningOn = btn.dataset.currentlyOffline !== "true";
       btn.disabled = true;
-      btn.textContent = "⏳";
-      const ok = await Store.setTripsyTripAttachmentsKeepOffline(btn.dataset.key, turningOn);
+      const ok = await Store.setTripsyAttachmentKeepOffline(attachmentId, turningOn);
       if (!ok) {
         toast("Could not update — storage error. Please try again.", "error");
-        renderTripsyEventsList();
+        btn.disabled = false;
         return;
       }
-      await reconcileTripsyOfflineDocs();
-      toast(turningOn ? "Saving this trip's docs for offline viewing…" : "Removed this trip's docs from offline availability.");
+      try {
+        if (turningOn) {
+          const blob = await downloadDriveFileBlob(driveFileId);
+          await saveTripsyOfflineDoc({ driveFileId, blob, mimeType, fileName, tripKey, cachedAt: new Date().toISOString() });
+          toast("Saved for offline viewing.");
+        } else {
+          await deleteTripsyOfflineDoc(driveFileId);
+          toast("Removed from offline availability.");
+        }
+      } catch (err) {
+        toast(turningOn ? "Marked for offline — will download once this device is back online." : "Removed from offline availability.");
+      }
       renderTripsyEventsList();
     });
   });
@@ -8872,25 +8922,6 @@ async function renderTripsyEventsListImpl() {
     const driveUrl = `https://drive.google.com/file/d/${driveFileId}/view`;
     if (tab) tab.location.href = driveUrl; else window.open(driveUrl, '_blank', 'noopener');
   };
-
-  // Clears the shared keepOffline flag (so every other device drops its
-  // local copy too, next time it syncs) and removes THIS device's own
-  // local copy immediately rather than waiting for that next sync.
-  container.querySelectorAll("[data-tripsy-remove-offline]").forEach(btn => {
-    btn.addEventListener("click", async e => {
-      e.stopPropagation();
-      btn.disabled = true;
-      const ok = await Store.setTripsyAttachmentKeepOffline(btn.dataset.attachmentId, false);
-      if (!ok) {
-        toast("Could not update — storage error. Please try again.", "error");
-        btn.disabled = false;
-        return;
-      }
-      await deleteTripsyOfflineDoc(btn.dataset.driveFileId);
-      toast("Removed from offline availability.");
-      renderTripsyEventsList();
-    });
-  });
 
   container.querySelectorAll("[data-tripsy-open-attachment]").forEach(el => {
     el.addEventListener("click", e => {
