@@ -6507,10 +6507,12 @@ function findMatchingTripsyPsReservation(ev) {
 // (same resource+id), so the existing panelKey dedup in
 // renderTripsyEventsList (keyed by tripsyEventKey, not ev.id) still shares
 // one edit/view panel between them automatically.
+function tripsyIsFlightEvent(ev) {
+  return !!(ev.tripsyRaw && ev.tripsyRaw.resource === 'transportation' && ev.tripsyRaw.category === 'airplane');
+}
 function expandMultiDayTripsyEvents(events) {
   return events.flatMap(ev => {
-    const isFlight = ev.tripsyRaw && ev.tripsyRaw.resource === 'transportation' && ev.tripsyRaw.category === 'airplane';
-    if (isFlight) return [ev];
+    if (tripsyIsFlightEvent(ev)) return [ev];
     const startDay = tripsyDayKey(ev.start);
     const endDay = tripsyDayKey(ev.end);
     if (!startDay || !endDay || startDay === endDay) return [ev];
@@ -6546,6 +6548,89 @@ function tripsyMultiDayEventOrder(a, b) {
     if (a._splitHalf === 'begin' && b._splitHalf === 'end') return 1;
   }
   return null;
+}
+
+const TRIPSY_LAYOVER_MAX_MINUTES = 20 * 60;
+function tripsyNormalizeAirportDesc(s) {
+  return (s || '').trim().toLowerCase();
+}
+function tripsyFormatLayoverDuration(minutes) {
+  const total = Math.max(0, Math.round(minutes));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+
+// Finds every pair of connecting flights -- back to back in the flight
+// sequence (ignoring any non-flight events that fall chronologically
+// between them), landing/departing the same airport, within
+// TRIPSY_LAYOVER_MAX_MINUTES of each other -- and returns a Map from the
+// earlier flight's index (in `events`) to { idxB, layover } describing the
+// synthetic layover row to insert between them. Keyed by index rather than
+// event identity since flights (never split by expandMultiDayTripsyEvents)
+// keep stable positions in the already-sorted array this reads from.
+function tripsyFindLayoverPairs(events) {
+  const flightIndices = [];
+  events.forEach((ev, i) => { if (tripsyIsFlightEvent(ev)) flightIndices.push(i); });
+  const pairs = new Map();
+  for (let k = 0; k < flightIndices.length - 1; k++) {
+    const idxA = flightIndices[k];
+    const idxB = flightIndices[k + 1];
+    const flightA = events[idxA];
+    const flightB = events[idxB];
+    const arrDesc = tripsyNormalizeAirportDesc(flightA.tripsyRaw.arrivalDescription);
+    const depDesc = tripsyNormalizeAirportDesc(flightB.tripsyRaw.departureDescription);
+    if (!arrDesc || !depDesc || arrDesc !== depDesc) continue;
+    const arriveAt = new Date(flightA.end || flightA.tripsyRaw.arrivalAt);
+    const departAt = new Date(flightB.start || flightB.tripsyRaw.departureAt);
+    const gapMinutes = (departAt - arriveAt) / 60000;
+    if (!(gapMinutes > 0 && gapMinutes <= TRIPSY_LAYOVER_MAX_MINUTES)) continue;
+    pairs.set(idxA, {
+      idxB,
+      layover: {
+        id: `layover-${flightA.id}-${flightB.id}`,
+        start: flightA.end,
+        _layover: true,
+        _layoverMinutes: gapMinutes,
+        _layoverAirport: flightA.tripsyRaw.arrivalDescription,
+      },
+    });
+  }
+  return pairs;
+}
+
+// Inserts a synthetic layover row between each connecting-flight pair found
+// by tripsyFindLayoverPairs, AND forces the pair (plus its layover row) to
+// sit directly next to each other in the rendered order -- any non-flight
+// events that chronologically fell between them are deferred and re-spliced
+// immediately after the later flight (preserving their own relative order),
+// rather than left wedged between the connection. Chains of 3+ connecting
+// flights are handled by continuing to follow idxA -> idxB links.
+function insertTripsyLayovers(events) {
+  const pairs = tripsyFindLayoverPairs(events);
+  if (!pairs.size) return events;
+  const skip = new Set();
+  const result = [];
+  for (let i = 0; i < events.length; i++) {
+    if (skip.has(i)) continue;
+    result.push(events[i]);
+    let curA = i;
+    const deferred = [];
+    while (pairs.has(curA)) {
+      const { idxB, layover } = pairs.get(curA);
+      for (let k = curA + 1; k < idxB; k++) {
+        deferred.push(events[k]);
+        skip.add(k);
+      }
+      result.push(layover, events[idxB]);
+      skip.add(idxB);
+      curA = idxB;
+    }
+    result.push(...deferred);
+  }
+  return result;
 }
 
 // ---- Tripsy Trips edit/delete ----
@@ -6645,6 +6730,7 @@ function tripsySlugToLabel(slug) {
 // of a Check-in/Check-out split share the same underlying type), and the
 // specific activity category (Restaurant, Museum, ...) for everything else.
 function tripsyEventTypeLabel(ev) {
+  if (ev._layover) return 'Flight';
   const raw = ev.tripsyRaw;
   if (!raw) return null;
   if (raw.resource === 'transportation') return raw.category === 'airplane' ? 'Flight' : tripsySlugToLabel(raw.category);
@@ -7913,11 +7999,15 @@ async function renderTripsyEventsListImpl() {
     // (real or pending-create) are expanded into separate Check-in/
     // Check-out rows first so each half sorts independently by its own
     // date.
-    const sortedEvents = expandMultiDayTripsyEvents([...visibleEvents, ...pendingCreateEvents]).sort((a, b) => {
+    const chronologicalEvents = expandMultiDayTripsyEvents([...visibleEvents, ...pendingCreateEvents]).sort((a, b) => {
       const special = tripsyMultiDayEventOrder(a, b);
       if (special != null) return special;
       return new Date(a.start || 0) - new Date(b.start || 0);
     });
+    // Inserts a synthetic layover row between any two connecting flights
+    // (same airport, <=20h apart) and forces them adjacent in the render
+    // order -- see insertTripsyLayovers.
+    const sortedEvents = insertTripsyLayovers(chronologicalEvents);
     // Every distinct event type present in this trip (always computed off
     // the FULL sortedEvents, not the filtered-down list below), so the Sort
     // menu's checklist doesn't shrink once a filter is already applied.
@@ -7933,6 +8023,22 @@ async function renderTripsyEventsListImpl() {
     // assembly (below) determines final render order, then each spec is
     // turned into HTML via tripsyTimelineRowHtml.
     const timelineItems = filteredEvents.map(ev => {
+      if (ev._layover) {
+        return {
+          dayKey: tripsyDayKey(ev.start),
+          psMatch: null,
+          spec: {
+            dotColor: TRIPSY_TIMELINE_TYPE_COLOR.flight,
+            dotGlyph: '🕐',
+            timeLabel: null,
+            title: `${tripsyFormatLayoverDuration(ev._layoverMinutes)} layover in ${ev._layoverAirport}`,
+            detailLines: [],
+            statusBadge: null,
+            actionsHtml: '',
+            viewAttr: '',
+          },
+        };
+      }
       if (ev._pendingCreate) {
         const c = ev._pendingCreate;
         const actionsHtml = `<div style="display:flex; gap:6px; flex-shrink:0;">
