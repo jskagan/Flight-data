@@ -1033,6 +1033,32 @@ const Store = {
       return false;
     }
   },
+  // Hide/show overrides for Tripsy trips/events. Unlike edit/delete actions
+  // below, these never need to reach Tripsy's real API -- they're pure
+  // display state -- so they write straight into driveData with no
+  // pending-changes queue, same as Store.setTripitTripOverride.
+  async setTripsyTripOverride(tripKey, value) {
+    try {
+      if (!driveData.tripsyTripOverrides) driveData.tripsyTripOverrides = {};
+      driveData.tripsyTripOverrides[tripKey] = value;
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.setTripsyTripOverride failed:', e);
+      return false;
+    }
+  },
+  async setTripsyEventOverride(eventKey, value) {
+    try {
+      if (!driveData.tripsyEventOverrides) driveData.tripsyEventOverrides = {};
+      driveData.tripsyEventOverrides[eventKey] = value;
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.setTripsyEventOverride failed:', e);
+      return false;
+    }
+  },
   // Tripsy Trips edit/delete actions can't touch the real Tripsy account or
   // the deployed index.html directly (the browser has no Tripsy API access
   // and no way to write to a static GitHub Pages file) -- so instead they
@@ -7104,25 +7130,17 @@ function setTripsySortFilter(tripKey, types) {
 }
 
 // Hide/show overrides, same 'hidden'/'shown' semantics as the TripIt Trips
-// page's Store.setTripitTripOverride -- but there's no shared write channel
-// for Tripsy data (it's a public encrypted snapshot, not driveData), so
-// this is localStorage-backed and therefore per-device, not synced across
-// users the way the real Trips page's hide/show is.
-const TRIPSY_OVERRIDE_STORAGE_PREFIX = 'tripsy-trip-override:';
+// page's Store.setTripitTripOverride. Unlike the actual Tripsy trip DATA
+// (which genuinely can't be pulled live -- see the pending-changes queue
+// above), hide/show state never touches Tripsy's real API, so there's no
+// reason it can't live in the same shared driveData every device already
+// reads -- backed by Store.setTripsyTripOverride, synced the same way as
+// the TripIt page instead of being localStorage-only per device.
 function getTripsyTripOverride(tripKey) {
-  try {
-    return localStorage.getItem(TRIPSY_OVERRIDE_STORAGE_PREFIX + tripKey) || null;
-  } catch (e) {
-    return null;
-  }
+  return (driveData.tripsyTripOverrides || {})[tripKey] || null;
 }
-function setTripsyTripOverride(tripKey, value) {
-  try {
-    if (value) localStorage.setItem(TRIPSY_OVERRIDE_STORAGE_PREFIX + tripKey, value);
-    else localStorage.removeItem(TRIPSY_OVERRIDE_STORAGE_PREFIX + tripKey);
-  } catch (e) {
-    console.error('setTripsyTripOverride failed:', e);
-  }
+async function setTripsyTripOverride(tripKey, value) {
+  return await Store.setTripsyTripOverride(tripKey, value);
 }
 
 // Same auto-hide rule as the TripIt Trips page's isTripEffectivelyHidden
@@ -7144,24 +7162,14 @@ function isTripsyTripEffectivelyHidden(trip) {
 // default -- currently only dining events the refresh procedure found
 // outside their trip's own date range come in this way (hidden:true baked
 // into the snapshot at generation time, see TRIPSY_ENCRYPTED's shape
-// comment) -- with the same localStorage-backed manual override pattern
-// as the trip-level hide above, so any viewer can reveal (or re-hide) one
-// on their own device regardless of that baked-in default.
-const TRIPSY_EVENT_OVERRIDE_STORAGE_PREFIX = 'tripsy-event-override:';
+// comment) -- with the same shared-driveData override pattern as the
+// trip-level hide above, so revealing (or re-hiding) one syncs to every
+// device rather than being per-device.
 function getTripsyEventOverride(eventKey) {
-  try {
-    return localStorage.getItem(TRIPSY_EVENT_OVERRIDE_STORAGE_PREFIX + eventKey) || null;
-  } catch (e) {
-    return null;
-  }
+  return (driveData.tripsyEventOverrides || {})[eventKey] || null;
 }
-function setTripsyEventOverride(eventKey, value) {
-  try {
-    if (value) localStorage.setItem(TRIPSY_EVENT_OVERRIDE_STORAGE_PREFIX + eventKey, value);
-    else localStorage.removeItem(TRIPSY_EVENT_OVERRIDE_STORAGE_PREFIX + eventKey);
-  } catch (e) {
-    console.error('setTripsyEventOverride failed:', e);
-  }
+async function setTripsyEventOverride(eventKey, value) {
+  return await Store.setTripsyEventOverride(eventKey, value);
 }
 function isTripsyEventEffectivelyHidden(ev) {
   const eventKey = tripsyEventKey(ev.tripsyRaw);
@@ -8951,8 +8959,10 @@ async function renderTripsyEventsListImpl() {
   });
 
   container.querySelectorAll("[data-tripsy-hide-trip]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      setTripsyTripOverride(btn.dataset.key, 'hidden');
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const ok = await setTripsyTripOverride(btn.dataset.key, 'hidden');
+      if (!ok) toast("Could not hide this trip — storage error. Please try again.", "error");
       renderTripsyEventsList();
       const hiddenPanel = document.getElementById("tripsy-hidden-panel");
       if (hiddenPanel && hiddenPanel.style.display !== "none") renderTripsyHiddenTripsPanelContent();
@@ -9487,15 +9497,19 @@ function renderTripsyHiddenTripsPanelContent() {
   panel.innerHTML = hiddenTripsHtml + hiddenEventsHtml;
 
   panel.querySelectorAll("[data-tripsy-show-trip]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      setTripsyTripOverride(btn.dataset.key, 'shown');
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const ok = await setTripsyTripOverride(btn.dataset.key, 'shown');
+      if (!ok) toast("Could not show this trip — storage error. Please try again.", "error");
       renderTripsyEventsList();
       renderTripsyHiddenTripsPanelContent();
     });
   });
   panel.querySelectorAll("[data-tripsy-show-event]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      setTripsyEventOverride(btn.dataset.key, 'shown');
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const ok = await setTripsyEventOverride(btn.dataset.key, 'shown');
+      if (!ok) toast("Could not show this item — storage error. Please try again.", "error");
       renderTripsyEventsList();
       renderTripsyHiddenTripsPanelContent();
     });
