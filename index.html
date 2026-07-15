@@ -559,6 +559,50 @@
   .invoice-group-title:first-child { margin-top: 0; }
 
   canvas { max-width: 100%; }
+
+  /* ---- Tripsy itinerary print view ----
+     Hidden entirely outside of printing; @media print below hides
+     everything else on the page and shows only this root. Deliberately
+     its own light-on-white palette rather than the app's dark --bg/--panel
+     variables -- printers shouldn't ever render a full-page dark
+     background, and a printed document reads better in a conventional
+     light, high-contrast style anyway. */
+  #tripsy-print-root { display: none; }
+  @media print {
+    body.tripsy-printing > *:not(#tripsy-print-root) { display: none !important; }
+    body.tripsy-printing #tripsy-print-root { display: block !important; }
+  }
+  #tripsy-print-root {
+    font-family: var(--sans); color: #1A222C; background: #fff; max-width: 800px; margin: 0 auto;
+  }
+  .tp-summary-header { margin-bottom: 18px; }
+  .tp-trip-name { font-family: var(--mono); font-size: 24px; font-weight: 700; color: #8A5A12; }
+  .tp-trip-sub { font-size: 14px; color: #556; margin-top: 3px; }
+  .tp-day-heading {
+    font-family: var(--mono); font-size: 13px; font-weight: 700; color: #8A5A12;
+    text-transform: uppercase; letter-spacing: 0.06em; margin: 18px 0 4px; break-after: avoid;
+  }
+  .tp-row {
+    display: flex; align-items: flex-start; gap: 14px; padding: 10px 0; border-top: 1px solid #DDE2E8;
+    break-inside: avoid;
+  }
+  .tp-row-time { width: 64px; flex-shrink: 0; text-align: right; font-family: var(--mono); font-size: 13px; font-weight: 700; color: #8A5A12; }
+  .tp-row-icon { width: 26px; flex-shrink: 0; text-align: center; font-size: 18px; }
+  .tp-row-title { font-size: 13.5px; font-weight: 700; }
+  .tp-row-detail { font-size: 12px; color: #556; margin-top: 2px; }
+  .tp-section-break { break-before: page; }
+  .tp-spread-title { font-family: var(--mono); font-size: 20px; font-weight: 700; color: #8A5A12; margin: 0 0 16px; }
+  .tp-spread {
+    break-inside: avoid; margin-bottom: 28px; padding-bottom: 20px; border-bottom: 1px solid #DDE2E8;
+  }
+  .tp-spread-photo { width: 100%; max-height: 320px; object-fit: cover; border-radius: 8px; display: block; }
+  .tp-spread-photo-fallback {
+    width: 100%; height: 180px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+    font-size: 56px; background: #F0F2F5;
+  }
+  .tp-spread-name { font-family: var(--mono); font-size: 16px; font-weight: 700; margin-top: 10px; }
+  .tp-spread-meta { font-size: 12.5px; color: #556; margin-top: 3px; }
+  .tp-spread-notes { font-size: 13px; line-height: 1.5; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -623,6 +667,7 @@
       <button class="rail-item rail-subitem" data-view="utilitiesreparsepsinvoices">Re-Parse P/S Invoices</button>
       <button class="rail-item rail-subitem" data-view="utilitiestripsyrefresh">Tripsy Refresh</button>
       <button class="rail-item rail-subitem" data-view="utilitiesparsingdocs">Parsing Docs</button>
+      <button class="rail-item rail-subitem" data-view="utilitiesitineraryphotos">Itinerary Photos</button>
     </div>
     <button class="rail-item" data-view="upload" id="nav-upload-btn"><span class="nav-icon">📥</span>Upload</button>
     <button class="rail-item" data-view="invoices"><span class="nav-icon" id="invoices-icon">📋</span>Invoices<span class="count" id="nav-invoice-count"></span></button>
@@ -1559,6 +1604,42 @@ const Store = {
   },
   async getReport() {
     return driveData.report || null;
+  },
+  // Owner-entered Google Places API key, used only by the Tripsy itinerary
+  // print view's photo lookup (fetchTripsyPlacePhoto) -- stored in
+  // driveData rather than hardcoded in index.html since it's a live,
+  // quota-bearing credential (unlike DRIVE_CLIENT_ID, which is meant to be
+  // public), set from the Utilities > Itinerary Photos page.
+  async getPlacesApiKey() {
+    return driveData.placesApiKey || null;
+  },
+  async setPlacesApiKey(key) {
+    try {
+      driveData.placesApiKey = key || null;
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.setPlacesApiKey failed:', e);
+      return false;
+    }
+  },
+  // Cache of fetched Places photos, keyed by a normalized "name|address"
+  // string, shared across every user/device via driveData so the Places
+  // API is only ever called once per distinct place, not once per print.
+  async getTripsyPlacePhoto(cacheKey) {
+    const entry = (driveData.tripsyPlacePhotoCache || {})[cacheKey];
+    return entry || null;
+  },
+  async saveTripsyPlacePhoto(cacheKey, photoDataUrl) {
+    try {
+      if (!driveData.tripsyPlacePhotoCache) driveData.tripsyPlacePhotoCache = {};
+      driveData.tripsyPlacePhotoCache[cacheKey] = { photoDataUrl, fetchedAt: new Date().toISOString() };
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.saveTripsyPlacePhoto failed:', e);
+      return false;
+    }
   },
 };
 
@@ -3057,7 +3138,7 @@ function setActiveNav(view, param) {
   document.getElementById("psreservations-submenu").classList.toggle("collapsed", !isPsReservationsView);
   document.getElementById("psreservations-caret").textContent = isPsReservationsView ? "▾" : "▸";
 
-  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiestripsyrefresh" || view === "utilitiesparsingdocs";
+  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiestripsyrefresh" || view === "utilitiesparsingdocs" || view === "utilitiesitineraryphotos";
   document.getElementById("utilities-toggle").classList.toggle("active", isUtilitiesView);
   document.getElementById("utilities-submenu").classList.toggle("collapsed", !isUtilitiesView);
   document.getElementById("utilities-caret").textContent = isUtilitiesView ? "▾" : "▸";
@@ -3097,6 +3178,7 @@ async function navigate(view, param) {
     else if (view === "utilitiesreparsepsinvoices") await renderUtilitiesReparsePsInvoices();
     else if (view === "utilitiestripsyrefresh") await renderUtilitiesTripsyRefresh();
     else if (view === "utilitiesparsingdocs") await renderUtilitiesParsingDocs();
+    else if (view === "utilitiesitineraryphotos") await renderUtilitiesItineraryPhotos();
     else if (view === "passengers") await renderPassengerReport(param || "totals");
   } catch (e) {
     // Catch-all so a bug in one view shows a visible error instead of an
@@ -5084,6 +5166,46 @@ async function renderUtilitiesUsers() {
     </div>
   `;
   await renderUsersListBody();
+}
+
+// Owner-only settings page for the Google Places API key used by the
+// Tripsy itinerary print view's photo lookup (fetchTripsyPlacePhoto). The
+// key is stored in driveData (Store.setPlacesApiKey), not hardcoded into
+// index.html, since -- unlike DRIVE_CLIENT_ID -- it's a quota/billing-
+// bearing credential. If unset, printing itineraries still works; the
+// visual photo section just falls back to category icons.
+async function renderUtilitiesItineraryPhotos() {
+  const key = await Store.getPlacesApiKey();
+  main.innerHTML = `
+    <div class="page-title">Itinerary Photos</div>
+    <div class="page-sub">The Tripsy Trips page's "Print" button generates a two-part itinerary -- a formal day-by-day summary, followed by a photo spread of each hotel/place. Those photos come from the Google Places API, using the key below.</div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title">Places API Key</div>
+      <p style="color:var(--text); line-height:1.6; font-size:14px; margin-bottom:12px;">
+        Create a key in <a href="https://console.cloud.google.com" target="_blank" rel="noopener" style="color:var(--amber);">console.cloud.google.com</a> with the <strong>Places API</strong> enabled and billing configured on that project (separate from this app's existing Google sign-in setup). Paste it below.
+      </p>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <input id="places-api-key-input" type="text" value="${esc(key || '')}" placeholder="AIza..." style="flex:1; min-width:260px; font-family:var(--mono); font-size:13px; padding:9px 12px; border-radius:7px; border:1px solid var(--line); background:var(--panel-2); color:var(--text);">
+        <button id="places-api-key-save-btn" class="btn primary">Save</button>
+      </div>
+      <div id="places-api-key-status" style="margin-top:10px; font-size:12px; color:var(--muted);"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">How photos are fetched</div>
+      <p style="color:var(--text); line-height:1.6; font-size:14px;">
+        Each place is looked up once, the very first time it's printed, then cached (shared across every user/device) so the same place is never fetched from Places twice. Without a key set here, itineraries still print fine -- the photo spread just uses a category icon instead of a real photo.
+      </p>
+    </div>
+  `;
+  document.getElementById('places-api-key-save-btn').addEventListener('click', async () => {
+    const status = document.getElementById('places-api-key-status');
+    const value = document.getElementById('places-api-key-input').value.trim();
+    status.textContent = 'Saving…';
+    const ok = await Store.setPlacesApiKey(value);
+    status.textContent = ok ? 'Saved.' : 'Could not save -- storage error. Please try again.';
+  });
 }
 
 // Populates the live "Authorized Users" card on the Users utility page --
@@ -7929,6 +8051,171 @@ function tripsyTimelineRowHtml(spec) {
   `;
 }
 
+// Like tripsyTimelineDetailLines, but for the itinerary print view's
+// summary section (part 1 of openTripsyItineraryPrintView) -- adds
+// confirmation number/phone/website, which the on-screen timeline
+// deliberately omits (see tripsyTimelineDetailLines' own comment above),
+// since a standalone printed document should be self-sufficient without
+// the app.
+function tripsyPrintSummaryDetailLines(ev) {
+  const lines = tripsyTimelineDetailLines(ev);
+  const raw = ev.tripsyRaw;
+  if (!raw) return lines;
+  const extra = [];
+  if (raw.confirmation) extra.push(`Confirmation #: ${raw.confirmation}`);
+  if (raw.phone) extra.push(`Phone: ${raw.phone}`);
+  if (raw.website) extra.push(`Website: ${raw.website}`);
+  return [...lines, ...extra];
+}
+
+// Google Places API (New) lookup for the itinerary print view's photo
+// spread (part 2 of openTripsyItineraryPrintView). Uses the modern
+// places.googleapis.com v1 endpoints, not the legacy maps.googleapis.com
+// ones, since v1 supports CORS for browser callers. Requires
+// driveData.placesApiKey (Utilities > Itinerary Photos); returns null
+// (caller falls back to a category icon) if unset or the lookup fails for
+// any reason. Fetched photos are converted to a data URL and cached in
+// driveData (Store.saveTripsyPlacePhoto), shared across every user/device,
+// so a given place is only ever looked up once -- both to keep Places API
+// usage/cost low and so the raw API key itself never ends up embedded in
+// shared driveData (only the resulting image bytes are).
+const TRIPSY_PLACE_PHOTO_TTL_DAYS = 180;
+async function fetchTripsyPlacePhoto(name, address) {
+  const cacheKey = `${name || ''}|${address || ''}`.trim().toLowerCase();
+  if (cacheKey === '|') return null;
+  const cached = await Store.getTripsyPlacePhoto(cacheKey);
+  if (cached && cached.photoDataUrl && (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000) {
+    return cached.photoDataUrl;
+  }
+  const apiKey = await Store.getPlacesApiKey();
+  if (!apiKey) return null;
+  try {
+    const searchRes = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.photos' },
+      body: JSON.stringify({ textQuery: [name, address].filter(Boolean).join(', '), maxResultCount: 1 }),
+    });
+    const searchData = await searchRes.json();
+    const photoName = searchData?.places?.[0]?.photos?.[0]?.name;
+    if (!photoName) return null;
+    const photoRes = await fetch(`https://places.googleapis.com/v1/${photoName}/media?maxWidthPx=800&key=${encodeURIComponent(apiKey)}`);
+    if (!photoRes.ok) return null;
+    const blob = await photoRes.blob();
+    const photoDataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    await Store.saveTripsyPlacePhoto(cacheKey, photoDataUrl);
+    return photoDataUrl;
+  } catch (e) {
+    console.error('fetchTripsyPlacePhoto failed:', e);
+    return null;
+  }
+}
+
+// Builds and triggers window.print() for a two-part printable/save-as-PDF
+// itinerary for one trip: a formal day-by-day summary (part 1), followed
+// by a page-break then a photo spread of each hotel/place (part 2).
+// Reuses the exact same event pipeline renderTripsyEventsListImpl uses for
+// the on-screen timeline (getEffectiveTripsy*/expandMultiDayTripsyEvents/
+// insertTripsyLayovers/tripsyDayKey) so the printed order/content can never
+// drift from what's shown on screen, aside from part 1's extra
+// confirmation/phone/website fields (see tripsyPrintSummaryDetailLines).
+async function openTripsyItineraryPrintView(tripKey) {
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return;
+  const pendingChanges = isOwner ? await Store.listTripsyPendingChanges() : [];
+  const effectiveTrip = getEffectiveTripsyTrip(trip, pendingChanges);
+  const effectiveEvents = trip.events.map(ev => getEffectiveTripsyEvent(ev, pendingChanges));
+  const visibleEvents = effectiveEvents.filter(ev => !isTripsyEventEffectivelyHidden(ev));
+  const chronologicalEvents = expandMultiDayTripsyEvents(visibleEvents).sort((a, b) => {
+    const special = tripsyMultiDayEventOrder(a, b);
+    if (special != null) return special;
+    return new Date(a.start || 0) - new Date(b.start || 0);
+  });
+  const sortedEvents = insertTripsyLayovers(chronologicalEvents);
+
+  // ---- Part 1: summary, grouped by day ----
+  const dayKeys = [];
+  const byDay = new Map();
+  for (const ev of sortedEvents) {
+    const dayKey = tripsyDayKey(ev.start) || 'undated';
+    if (!byDay.has(dayKey)) { byDay.set(dayKey, []); dayKeys.push(dayKey); }
+    byDay.get(dayKey).push(ev);
+  }
+  const summaryHtml = dayKeys.map(dayKey => {
+    const rowsHtml = byDay.get(dayKey).map(ev => {
+      if (ev._layover) {
+        return `<div class="tp-row"><div class="tp-row-time"></div><div class="tp-row-icon">🕐</div><div><div class="tp-row-title">${esc(`${tripsyFormatLayoverDuration(ev._layoverMinutes)} layover in ${ev._layoverAirport}`)}</div></div></div>`;
+      }
+      const timeLabel = ev.tripsyRaw && ev.tripsyRaw.resource === 'hosting' ? '' : (formatTripitTime(ev.start) || '');
+      const detailLines = tripsyPrintSummaryDetailLines(ev);
+      return `
+        <div class="tp-row">
+          <div class="tp-row-time">${esc(timeLabel)}</div>
+          <div class="tp-row-icon">${esc(tripsyTimelineDotIcon(ev))}</div>
+          <div>
+            <div class="tp-row-title">${esc(ev.summary)}</div>
+            ${detailLines.map(l => `<div class="tp-row-detail">${esc(l)}</div>`).join('')}
+          </div>
+        </div>
+      `;
+    }).join('');
+    const heading = dayKey === 'undated' ? 'Undated' : tripsyDayHeaderLabel(dayKey);
+    return `<div class="tp-day-heading">${esc(heading)}</div>${rowsHtml}`;
+  }).join('');
+
+  // ---- Part 2: photo spread, one per hotel stay / named activity ----
+  // Flights and generic ground transportation are skipped -- there's no
+  // single photographable "place" for a flight leg, and that content is
+  // already fully covered in the summary above.
+  const placeEvents = visibleEvents.filter(ev => ev.tripsyRaw && (ev.tripsyRaw.resource === 'hosting' || ev.tripsyRaw.resource === 'activity'));
+  const spreads = await Promise.all(placeEvents.map(async ev => {
+    const raw = ev.tripsyRaw;
+    const name = raw.name || ev.summary;
+    const address = raw.address || '';
+    const photoDataUrl = await fetchTripsyPlacePhoto(name, address);
+    const isStay = raw.resource === 'hosting';
+    const metaParts = [
+      formatTripitDateRange(ev.start, ev.end),
+      address,
+      isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
+    ].filter(Boolean);
+    return `
+      <div class="tp-spread">
+        ${photoDataUrl
+          ? `<img class="tp-spread-photo" src="${esc(photoDataUrl)}" alt="${esc(name)}">`
+          : `<div class="tp-spread-photo-fallback">${esc(tripsyTimelineDotIcon(ev))}</div>`}
+        <div class="tp-spread-name">${esc(name)}</div>
+        ${metaParts.map(m => `<div class="tp-spread-meta">${esc(m)}</div>`).join('')}
+        ${raw.notes ? `<div class="tp-spread-notes">${esc(raw.notes)}</div>` : ''}
+      </div>
+    `;
+  }));
+
+  let printRoot = document.getElementById('tripsy-print-root');
+  if (!printRoot) {
+    printRoot = document.createElement('div');
+    printRoot.id = 'tripsy-print-root';
+    document.body.appendChild(printRoot);
+  }
+  printRoot.innerHTML = `
+    <div class="tp-summary-header">
+      <div class="tp-trip-name">${esc(effectiveTrip.name)}</div>
+      <div class="tp-trip-sub">${esc([formatTripitDateRange(effectiveTrip.start, effectiveTrip.end), effectiveTrip.location].filter(Boolean).join(' • '))}</div>
+    </div>
+    ${summaryHtml}
+    ${spreads.length ? `<div class="tp-section-break"><div class="tp-spread-title">Photos &amp; Details</div>${spreads.join('')}</div>` : ''}
+  `;
+
+  document.body.classList.add('tripsy-printing');
+  const cleanup = () => document.body.classList.remove('tripsy-printing');
+  window.addEventListener('afterprint', cleanup, { once: true });
+  window.print();
+}
+
 // Positions each trip's connecting line as one segment PER GAP between
 // consecutive timeline dots (not one single line spanning first-to-last, as
 // this used to be), so the segment(s) touching a dot whose panel is
@@ -8426,6 +8713,12 @@ async function renderTripsyEventsListImpl() {
       `<button class="btn" data-tripsy-hide-trip data-key="${esc(trip.key)}" title="Hide Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">🙈</button>`,
       'Hide'
     );
+    // Available to every viewer, not just isOwner -- it only formats data
+    // already visible on screen. See openTripsyItineraryPrintView.
+    const printButtonHtml = iconLabelButton(
+      `<button class="btn" data-tripsy-print-itinerary data-key="${esc(trip.key)}" title="Print Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🖨️</button>`,
+      'Print'
+    );
     const deleteButtonHtml = isOwner ? iconLabelButton(
       `<button class="btn" data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}" title="Delete Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">🗑️</button>`,
       'Delete'
@@ -8576,6 +8869,7 @@ async function renderTripsyEventsListImpl() {
             ${addButtonHtml}
             ${docStatusButtonHtml}
             ${offlineMenuButtonHtml}
+            ${printButtonHtml}
             ${editButtonHtml}
             ${sortButtonHtml}
             ${hideButtonHtml}
@@ -8612,6 +8906,24 @@ async function renderTripsyEventsListImpl() {
     el.addEventListener("click", e => {
       if (e.target.closest('button, a, [data-tripsy-add-item-menu], [data-tripsy-attachments-menu], [data-tripsy-offline-menu], [data-tripsy-sort-menu]')) return;
       toggleTripsyCollapse(el.dataset.tripsyHeaderToggle);
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-print-itinerary]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '⏳';
+      try {
+        await openTripsyItineraryPrintView(btn.dataset.key);
+      } catch (err) {
+        console.error('openTripsyItineraryPrintView failed:', err);
+        toast("Could not build the printable itinerary. Please try again.", "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
     });
   });
 
