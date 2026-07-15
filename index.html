@@ -7087,6 +7087,22 @@ function resetAllTripsyTripsCollapsed() {
   }
 }
 
+// "Sort" filter -- narrows a trip's timeline down to only the event types
+// the user checks off (Flight, Lodging, Restaurant, ...). Needs to survive
+// renderTripsyEventsList() re-renders (which rebuild every trip's HTML
+// from scratch), but there's no reason a filter choice should survive a
+// fresh page load, so this is a plain module-level Map rather than
+// localStorage -- same in-visit-only lifetime as the outside-click-bound
+// flag below, not the collapse/hide state above.
+let _tripsySortFilters = new Map();
+function getTripsySortFilter(tripKey) {
+  return _tripsySortFilters.get(tripKey) || null;
+}
+function setTripsySortFilter(tripKey, types) {
+  if (types && types.length) _tripsySortFilters.set(tripKey, types);
+  else _tripsySortFilters.delete(tripKey);
+}
+
 // Hide/show overrides, same 'hidden'/'shown' semantics as the TripIt Trips
 // page's Store.setTripitTripOverride -- but there's no shared write channel
 // for Tripsy data (it's a public encrypted snapshot, not driveData), so
@@ -7434,6 +7450,21 @@ function tripsySlugToLabel(slug) {
   if (TRIPSY_CUSTOM_CATEGORY_LABELS[slug]) return TRIPSY_CUSTOM_CATEGORY_LABELS[slug];
   if (!TRIPSY_ACTIVITY_TYPES.includes(slug) && !TRIPSY_TRANSPORTATION_TYPES.includes(slug)) return slug;
   return slug.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, c => c.toUpperCase());
+}
+
+// The "type" a timeline event is grouped/filtered by on the Sort menu --
+// Flight for an airplane leg (matching tripsyTransportationHeaderLabel),
+// the specific transportation_type for anything else transportation
+// (Train, Car, ...), a flat "Lodging" for any hosting record (both halves
+// of a Check-in/Check-out split share the same underlying type), and the
+// specific activity category (Restaurant, Museum, ...) for everything else.
+function tripsyEventTypeLabel(ev) {
+  const raw = ev.tripsyRaw;
+  if (!raw) return null;
+  if (raw.resource === 'transportation') return raw.category === 'airplane' ? 'Flight' : tripsySlugToLabel(raw.category);
+  if (raw.resource === 'hosting') return 'Lodging';
+  if (raw.resource === 'activity') return tripsySlugToLabel(raw.category) || 'Activity';
+  return null;
 }
 
 const TRIPSY_ACTIVITY_CATEGORY_TO_TYPE = {
@@ -8465,6 +8496,7 @@ const TRIPSY_TRIP_PANEL_SELECTORS = [
   '[data-tripsy-edit-trip-panel]',
   '[data-tripsy-attach-panel]',
   '[data-tripsy-attachments-menu]',
+  '[data-tripsy-sort-menu]',
 ];
 // The buttons that open one of the panels above -- a click on one of these
 // is handled by that button's own listener (which itself calls
@@ -8477,6 +8509,7 @@ const TRIPSY_TRIP_PANEL_TRIGGER_SELECTORS = [
   '[data-tripsy-edit-trip-toggle]',
   '[data-tripsy-attachments-toggle]',
   '[data-tripsy-add-pdf-menu-item]',
+  '[data-tripsy-sort-toggle]',
 ];
 function closeAllTripsyTripPanels() {
   const card = document.getElementById("tripsy-card");
@@ -8488,7 +8521,7 @@ function closeAllTripsyTripPanels() {
       // clearing it would just delete the same static menu markup the next
       // render would recreate anyway, so only panels that get their
       // innerHTML freshly rendered on open need clearing here.
-      if (sel !== '[data-tripsy-add-item-menu]' && sel !== '[data-tripsy-attachments-menu]') el.innerHTML = "";
+      if (sel !== '[data-tripsy-add-item-menu]' && sel !== '[data-tripsy-attachments-menu]' && sel !== '[data-tripsy-sort-menu]') el.innerHTML = "";
     });
   });
 }
@@ -8585,6 +8618,12 @@ async function renderTripsyEventsListImpl() {
       if (special != null) return special;
       return new Date(a.start || 0) - new Date(b.start || 0);
     });
+    // Every distinct event type present in this trip (always computed off
+    // the FULL sortedEvents, not the filtered-down list below), so the Sort
+    // menu's checklist doesn't shrink once a filter is already applied.
+    const availableSortTypes = [...new Set(sortedEvents.map(tripsyEventTypeLabel).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const activeSortFilter = getTripsySortFilter(trip.key);
+    const filteredEvents = activeSortFilter ? sortedEvents.filter(ev => activeSortFilter.includes(tripsyEventTypeLabel(ev))) : sortedEvents;
     // The Check-in/Check-out split shares one edit panel per underlying
     // record -- only emit the panel container once per key, even though
     // both split rows can offer an Edit button that opens it.
@@ -8593,7 +8632,7 @@ async function renderTripsyEventsListImpl() {
     // title, detail lines, actions) plus its day bucket key -- day-bucket
     // assembly (below) determines final render order, then each spec is
     // turned into HTML via tripsyTimelineRowHtml.
-    const timelineItems = sortedEvents.map(ev => {
+    const timelineItems = filteredEvents.map(ev => {
       if (ev._pendingCreate) {
         const c = ev._pendingCreate;
         const actionsHtml = `<div style="display:flex; gap:6px; flex-shrink:0;">
@@ -8775,6 +8814,28 @@ async function renderTripsyEventsListImpl() {
       `<button class="btn" data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}" title="Edit Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">✏️</button>`,
       'Edit'
     ) : '';
+    // Filters the trip's timeline down to only the checked event types.
+    // Reset (no dropdown, just clears the filter directly) replaces Sort
+    // in this same slot once a filter is active -- availableSortTypes is
+    // always the FULL unfiltered list (computed above, before
+    // filteredEvents), so the checklist itself never shrinks.
+    const sortButtonHtml = availableSortTypes.length > 0 ? iconLabelButton(
+      activeSortFilter
+        ? `<button class="btn" data-tripsy-sort-reset data-key="${esc(trip.key)}" title="Reset filter" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">↺</button>`
+        : `<div style="position:relative;">
+            <button class="btn" data-tripsy-sort-toggle data-key="${esc(trip.key)}" title="Filter by event type" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:18px; display:flex; align-items:center; justify-content:center;">🔽</button>
+            <div data-tripsy-sort-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:200px; max-width:280px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+              <button class="btn primary" data-tripsy-sort-apply data-key="${esc(trip.key)}" style="width:100%; margin-bottom:8px;">Sort</button>
+              ${availableSortTypes.map(t => `
+                <label style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:4px 2px; font-size:13px; color:var(--text); cursor:pointer;">
+                  <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(t)}</span>
+                  <input type="checkbox" data-tripsy-sort-type-checkbox data-key="${esc(trip.key)}" data-type="${esc(t)}">
+                </label>
+              `).join('')}
+            </div>
+          </div>`,
+      activeSortFilter ? 'Reset' : 'Sort'
+    ) : '';
     // A visible-even-when-collapsed indicator + dropdown, only shown once
     // the trip has ANY attachment (trip- or event-scoped) -- sits directly
     // left of Edit, rather than always occupying a slot the way Add/Edit/
@@ -8845,6 +8906,7 @@ async function renderTripsyEventsListImpl() {
             ${addButtonHtml}
             ${pdfStatusButtonHtml}
             ${editButtonHtml}
+            ${sortButtonHtml}
             ${hideButtonHtml}
             ${deleteButtonHtml}
           </div>
@@ -9007,6 +9069,48 @@ async function renderTripsyEventsListImpl() {
         // stays right-aligned to the button instead of drifting left.
         menu.style.left = `${rect.right - menu.offsetWidth}px`;
       }
+    });
+  });
+
+  // Same fixed-position dropdown pattern as the PDFs button above, for the
+  // Sort menu's event-type checklist.
+  container.querySelectorAll("[data-tripsy-sort-toggle]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const tripKey = btn.dataset.key;
+      const menu = container.querySelector(`[data-tripsy-sort-menu="${tripKey}"]`);
+      if (!menu) return;
+      const wasOpen = menu.style.display !== "none";
+      closeAllTripsyTripPanels();
+      if (!wasOpen) {
+        const rect = btn.getBoundingClientRect();
+        menu.style.top = `${rect.bottom + 6}px`;
+        menu.style.left = `${rect.right - menu.offsetWidth}px`;
+        menu.style.display = "block";
+        menu.style.left = `${rect.right - menu.offsetWidth}px`;
+      }
+    });
+  });
+  // The dropdown's own "Sort" button -- collects whichever type checkboxes
+  // are checked for this trip and applies them as its filter. No types
+  // checked is treated the same as Reset (an empty filter is meaningless --
+  // storing one would just leave the trip stuck showing nothing until the
+  // user found their way back to Reset).
+  container.querySelectorAll("[data-tripsy-sort-apply]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const tripKey = btn.dataset.key;
+      const checked = [...container.querySelectorAll(`[data-tripsy-sort-type-checkbox][data-key="${tripKey}"]:checked`)].map(cb => cb.dataset.type);
+      setTripsySortFilter(tripKey, checked.length ? checked : null);
+      closeAllTripsyTripPanels();
+      renderTripsyEventsList();
+    });
+  });
+  container.querySelectorAll("[data-tripsy-sort-reset]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      setTripsySortFilter(btn.dataset.key, null);
+      renderTripsyEventsList();
     });
   });
 
