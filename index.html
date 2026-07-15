@@ -585,6 +585,7 @@
 </div>
 <div class="app" id="app-root" style="display:none;">
   <button id="tripsy-pending-warning-badge" title="Tripsy Trips has changes waiting to be pushed -- click for instructions" style="display:none; position:fixed; top:14px; right:14px; z-index:500; background:none; border:none; cursor:pointer; font-size:30px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));">⚠️</button>
+  <button id="tripsy-pdf-parse-badge" title="" style="display:none; position:fixed; top:60px; right:14px; z-index:500; width:30px; height:30px; border-radius:50%; border:none; cursor:pointer; align-items:center; justify-content:center; font-weight:800; font-size:17px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));"></button>
   <div class="rail">
     <div class="rail-brand">Travel Tracker<small>Simplifying Luxury Travel</small><small id="view-only-badge" style="display:none; color:var(--amber); font-weight:700;">VIEW ONLY</small></div>
     <button class="rail-item" data-view="home"><span class="nav-icon" id="nav-home-icon">📊</span>Home</button>
@@ -8289,6 +8290,7 @@ function renderTripsyAttachPanel(panel, target) {
       panel.innerHTML = "";
       panel.dataset.mode = "";
       renderTripsyEventsList();
+      updateTripsyPdfParseBadge();
       toast("Attachment saved.");
     } catch (e) {
       toast(`Could not attach PDF: ${e.message}`, "error");
@@ -9329,15 +9331,15 @@ async function renderTripsyEventsListImpl() {
   });
 
   // Clicking a completed "🏷️ Flagged for parsing (done)" badge acknowledges
-  // and clears it -- available to any viewer (not owner-gated), same as the
-  // rest of this dropdown's read-only affordances, since acknowledging a
-  // parse isn't a data-integrity-sensitive action the way rename/delete are.
+  // and clears it -- owner-gated (see tripsyAttachmentMenuRowHtml), same as
+  // rename/delete, since a non-owner has read-only Drive access anyway.
   container.querySelectorAll("[data-tripsy-clear-parse-flag]").forEach(el => {
     el.addEventListener("click", async e => {
       e.stopPropagation();
       const ok = await Store.clearTripsyAttachmentParseFlag(el.dataset.attachmentId);
       if (!ok) toast("Could not clear the flag — storage error. Please try again.", "error");
       renderTripsyEventsList();
+      updateTripsyPdfParseBadge();
     });
   });
 
@@ -9373,6 +9375,7 @@ async function renderTripsyEventsListImpl() {
       const ok = await Store.deleteTripsyAttachment(btn.dataset.attachmentId);
       if (!ok) toast("Could not remove — storage error. Please try again.", "error");
       renderTripsyEventsList();
+      updateTripsyPdfParseBadge();
     });
   });
 
@@ -9692,6 +9695,44 @@ async function updateTripsyPendingWarningBadge() {
   } else {
     badge.textContent = '⚠️';
     badge.title = 'Tripsy Trips has changes waiting to be pushed -- click for instructions';
+  }
+}
+
+// Same fixed-badge pattern as updateTripsyPendingWarningBadge above, for
+// PDF-parse flags -- a hand-drawn circle (not an emoji, since there's no
+// single "yellow circle with an exclamation point" glyph) rather than text
+// content alone, so both color and symbol can be controlled precisely.
+// Two states, in priority order: yellow "!" while any flagged PDF is still
+// pending (unprocessed); green "✓" once nothing is pending but at least one
+// is done and awaiting the owner's review/clear step. Both link to the same
+// Parsing PDFs Utilities page, which already lists both groups -- once
+// every "done" attachment has been cleared (Store.clearTripsyAttachmentParseFlag)
+// and nothing new is pending, the badge disappears entirely. Owner-gated,
+// same reasoning as the Tripsy badge: only the owner can act on it.
+async function updateTripsyPdfParseBadge() {
+  const badge = document.getElementById('tripsy-pdf-parse-badge');
+  if (!badge) return;
+  if (!isOwner) {
+    badge.style.display = 'none';
+    return;
+  }
+  const attachments = await Store.listTripsyAttachments();
+  const pending = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'pending');
+  const done = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'done');
+  if (pending.length) {
+    badge.style.display = 'flex';
+    badge.style.background = '#f5c518';
+    badge.style.color = '#1a1500';
+    badge.textContent = '!';
+    badge.title = `${pending.length} PDF${pending.length === 1 ? '' : 's'} waiting to be parsed -- click to see the list`;
+  } else if (done.length) {
+    badge.style.display = 'flex';
+    badge.style.background = 'var(--home-green)';
+    badge.style.color = '#04210F';
+    badge.textContent = '✓';
+    badge.title = `${done.length} PDF${done.length === 1 ? '' : 's'} parsed -- click to review`;
+  } else {
+    badge.style.display = 'none';
   }
 }
 
@@ -10438,6 +10479,7 @@ async function completeSignIn() {
       document.getElementById('utilities-toggle').style.display = '';
     }
     try { await updateTripsyPendingWarningBadge(); } catch (e) { console.error('updateTripsyPendingWarningBadge on startup failed:', e); }
+    try { await updateTripsyPdfParseBadge(); } catch (e) { console.error('updateTripsyPdfParseBadge on startup failed:', e); }
 
     // Correct this browser's cached scope-tier hint now that we actually
     // know who's signed in -- see SCOPE_TIER_KEY above. Doesn't affect
@@ -10560,6 +10602,7 @@ document.getElementById('signout-btn').addEventListener('click', () => {
 });
 
 document.getElementById('tripsy-pending-warning-badge').addEventListener('click', () => navigate('utilitiestripsyrefresh'));
+document.getElementById('tripsy-pdf-parse-badge').addEventListener('click', () => navigate('utilitiesparsingpdfs'));
 
 // The left nav rail is static markup (not re-rendered by navigate()), so
 // the P/S icon there can't use a template literal like every other spot
