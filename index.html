@@ -1117,7 +1117,16 @@ const Store = {
   },
   async cancelTripsyChange(changeId) {
     try {
-      driveData.tripsyPendingChanges = (driveData.tripsyPendingChanges || []).filter(c => c.id !== changeId);
+      const changes = driveData.tripsyPendingChanges || [];
+      const change = changes.find(c => c.id === changeId);
+      // Cancelling a not-yet-real trip also cancels everything queued
+      // against its placeholder tripKey -- otherwise those create_event
+      // changes would be orphaned, permanently un-createable (their
+      // tripsyTripId is null and always will be, since the trip they
+      // depend on was just cancelled).
+      driveData.tripsyPendingChanges = (change && change.type === 'create_trip')
+        ? changes.filter(c => c.id !== changeId && !(c.type === 'create_event' && c.tripKey === change.tripKey))
+        : changes.filter(c => c.id !== changeId);
       await persistDriveData();
       return true;
     } catch (e) {
@@ -1181,6 +1190,10 @@ const Store = {
   async deleteTripsyAttachment(attachmentId) {
     try {
       driveData.tripsyAttachments = (driveData.tripsyAttachments || []).filter(a => a.id !== attachmentId);
+      // Cascade: an un-reviewed proposal tied to a now-deleted attachment
+      // would otherwise linger on the review page forever with no way back
+      // to the PDF it came from.
+      driveData.tripsyParseProposals = (driveData.tripsyParseProposals || []).filter(p => p.attachmentId !== attachmentId);
       await persistDriveData();
       return true;
     } catch (e) {
@@ -1200,14 +1213,16 @@ const Store = {
       return false;
     }
   },
-  // Not wired to any UI yet -- exists so a future Claude Code session that
-  // reads a "flagged for parsing" attachment and extracts trip data from it
-  // has a direct Store call to flip parseStatus to 'done' when finished.
+  // Called by the tripsy-pdf-parse runbook right after it saves this
+  // attachment's proposal (Store.saveTripsyParseProposal) -- flips
+  // parseStatus to 'staged', meaning "parsed, waiting on the owner's
+  // review," NOT "fully done." 'done' is now reached separately, once every
+  // proposed event has been resolved (see markTripsyAttachmentReviewed).
   async markTripsyAttachmentParsed(attachmentId) {
     try {
       const a = (driveData.tripsyAttachments || []).find(x => x.id === attachmentId);
       if (!a) return false;
-      a.parseStatus = 'done';
+      a.parseStatus = 'staged';
       a.parsedAt = new Date().toISOString();
       await persistDriveData();
       return true;
@@ -1216,13 +1231,28 @@ const Store = {
       return false;
     }
   },
-  // User-facing "clear" step for a completed parse flag -- clicking the
-  // "(done)" badge (see tripsyAttachmentMenuRowHtml) calls this. Downgrades
-  // the attachment to a plain reference doc (same shape as if "Just store
-  // for reference" had been picked originally) so the badge disappears; the
-  // file itself stays attached. This is deliberately just the "acknowledge
-  // and clear" step -- a further guided "integrate the parsed data into
-  // this trip" flow is a separate, not-yet-designed feature.
+  // Terminal state: every event in this attachment's proposal has been
+  // resolved (accepted/modified-accepted/rejected), or nothing was
+  // extractable in the first place. Called by the review page once a
+  // proposal's last pending event is resolved, and by the runbook directly
+  // when a PDF yields nothing usable to review.
+  async markTripsyAttachmentReviewed(attachmentId) {
+    try {
+      const a = (driveData.tripsyAttachments || []).find(x => x.id === attachmentId);
+      if (!a) return false;
+      a.parseStatus = 'done';
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.markTripsyAttachmentReviewed failed:', e);
+      return false;
+    }
+  },
+  // User-facing "clear" step for a fully-reviewed ('done') parse flag --
+  // clicking the "(done)" badge (see tripsyAttachmentMenuRowHtml) calls
+  // this. Downgrades the attachment to a plain reference doc (same shape as
+  // if "Just store for reference" had been picked originally) so the badge
+  // disappears; the file itself stays attached.
   async clearTripsyAttachmentParseFlag(attachmentId) {
     try {
       const a = (driveData.tripsyAttachments || []).find(x => x.id === attachmentId);
@@ -1234,6 +1264,71 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.clearTripsyAttachmentParseFlag failed:', e);
+      return false;
+    }
+  },
+  // Proposals staged by the tripsy-pdf-parse runbook, one per parsed PDF --
+  // NOT yet real Tripsy changes. Each event inside only becomes a real
+  // Store.queueTripsyChange('create_event', ...) once the owner explicitly
+  // accepts it on the review page, so nothing extracted from a PDF can
+  // reach Tripsy without a human looking at it first.
+  async listTripsyParseProposals() {
+    return [...(driveData.tripsyParseProposals || [])];
+  },
+  async saveTripsyParseProposal(proposal) {
+    try {
+      if (!driveData.tripsyParseProposals) driveData.tripsyParseProposals = [];
+      driveData.tripsyParseProposals.push(proposal);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.saveTripsyParseProposal failed:', e);
+      return false;
+    }
+  },
+  // Single mutator for one proposed event's review outcome. Callers that
+  // accept/modify-accept an event call the real Store.queueTripsyChange
+  // FIRST (so appliedChangeId can be included in patch), then this --
+  // matches how other multi-step UI actions in this app already sequence
+  // plain awaited Store calls rather than needing a transaction primitive.
+  async resolveTripsyParseProposalEvent(proposalId, eventId, patch) {
+    try {
+      const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
+      const event = proposal && proposal.events.find(e => e.id === eventId);
+      if (!event) return false;
+      Object.assign(event, patch);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.resolveTripsyParseProposalEvent failed:', e);
+      return false;
+    }
+  },
+  // Bulk sibling to resolveTripsyParseProposalEvent -- only used by the
+  // cluster-accept flow, where N sibling events resolve together and
+  // shouldn't cost N separate Drive writes. patches is [{eventId, patch}].
+  async resolveTripsyParseProposalEvents(proposalId, patches) {
+    try {
+      const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
+      if (!proposal) return false;
+      for (const { eventId, patch } of patches) {
+        const event = proposal.events.find(e => e.id === eventId);
+        if (event) Object.assign(event, patch);
+      }
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.resolveTripsyParseProposalEvents failed:', e);
+      return false;
+    }
+  },
+  async deleteTripsyParseProposal(proposalId) {
+    try {
+      driveData.tripsyParseProposals = (driveData.tripsyParseProposals || []).filter(p => p.id !== proposalId);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.deleteTripsyParseProposal failed:', e);
       return false;
     }
   },
@@ -8321,6 +8416,74 @@ function tripsyDayHeaderLabel(dayKey) {
   return tripitPartsToUtcDate({ year, month, day }).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
+// Cluster heuristic for the PDF-parse review page: how tightly a PDF's
+// unmatched events need to fall together in time to be offered as "these
+// look like their own trip" rather than shown as separate one-off
+// create-a-new-trip options. Loosely modeled on TRIPIT_AUTO_HIDE_DAYS's
+// single-named-constant style.
+const TRIPSY_PARSE_CLUSTER_MAX_SPAN_DAYS = 45;
+
+// Every real trip whose date range contains dayKey ('YYYY-MM-DD'). Plain
+// string comparison works since tripsyDayKey/trip.start/trip.end all share
+// the same YYYY-MM-DD-prefixed ISO shape. Multiple trips can legitimately
+// overlap, so this returns every match, not just the first.
+function tripsyParseMatchTrips(dayKey, trips) {
+  if (!dayKey) return [];
+  return trips.filter(t => {
+    const start = tripsyDayKey(t.start);
+    const end = tripsyDayKey(t.end) || start;
+    return start && dayKey >= start && dayKey <= end;
+  });
+}
+
+// Heuristic, not exact-duplicate detection -- flags anything that LOOKS
+// like it might already cover the same event so the reviewer can decide,
+// rather than silently creating a duplicate. Checks the destination trip's
+// real synced events (not pending edits to them -- a rare enough edge case
+// for an approximate heuristic to skip) plus any OTHER proposal's events
+// already accepted/modified-accepted (functionally real once queued) --
+// deliberately excludes other proposals' still-pending events, so two
+// undecided proposals never conflict with each other before either is
+// resolved.
+function tripsyParseFindConflicts(proposedEvent, destinationTrip, otherAcceptedEvents) {
+  if (!destinationTrip) return [];
+  const dayKey = tripsyDayKey(proposedEvent.fields.startsAt || proposedEvent.fields.departureAt);
+  const candidates = [
+    ...(destinationTrip.events || []).map(ev => ({
+      resource: ev.tripsyRaw && ev.tripsyRaw.resource,
+      start: ev.start, end: ev.end, summary: ev.summary,
+    })),
+    ...otherAcceptedEvents.filter(e => e.destinationTripKey === destinationTrip.key).map(e => {
+      const f = e.modifiedFields || e.fields;
+      return { resource: e.tripsyResource, start: f.startsAt || f.departureAt, end: f.endsAt || f.arrivalAt, summary: e.eventSummary };
+    }),
+  ];
+  if (proposedEvent.tripsyResource === 'transportation') {
+    const newStart = proposedEvent.fields.departureAt, newEnd = proposedEvent.fields.arrivalAt;
+    return candidates.filter(c => c.resource === 'transportation' && (
+      (newStart && newEnd && c.start && c.end) ? (newStart < c.end && c.start < newEnd) : (tripsyDayKey(c.start) === dayKey)
+    ));
+  }
+  return candidates.filter(c => c.resource === proposedEvent.tripsyResource && tripsyDayKey(c.start) === dayKey);
+}
+
+// Among a proposal's still-pending events that matched NO existing trip,
+// checks whether they're tight enough in time to offer as one "create a
+// new trip for these" prompt instead of N separate one-off options.
+// Returns null if there's nothing to cluster (fewer than 2 such events, or
+// their span exceeds TRIPSY_PARSE_CLUSTER_MAX_SPAN_DAYS).
+function tripsyParseFindCluster(unmatchedPendingEvents) {
+  if (unmatchedPendingEvents.length < 2) return null;
+  const dayKeys = unmatchedPendingEvents
+    .map(e => tripsyDayKey(e.fields.startsAt || e.fields.departureAt))
+    .filter(Boolean)
+    .sort();
+  if (!dayKeys.length) return null;
+  const spanDays = (new Date(dayKeys[dayKeys.length - 1]) - new Date(dayKeys[0])) / 86400000;
+  if (spanDays > TRIPSY_PARSE_CLUSTER_MAX_SPAN_DAYS) return null;
+  return { eventIds: unmatchedPendingEvents.map(e => e.id), start: dayKeys[0], end: dayKeys[dayKeys.length - 1] };
+}
+
 // Per-category dot color/icon for the timeline -- a new, small palette
 // distinct from the app's structural amber (reserved for day headers/trip
 // titles) so each event type reads as visually distinct at a glance.
@@ -9645,6 +9808,7 @@ const TRIPSY_PENDING_CHANGE_LABEL = {
   delete_event: '🗑️ Delete event',
   delete_trip: '🗑️ Delete trip',
   create_event: '➕ New item',
+  create_trip: '➕ New trip',
 };
 
 // True once every queued change was queued against an older snapshot than
@@ -9688,12 +9852,17 @@ async function updateTripsyPendingWarningBadge() {
   badge.style.display = '';
   if (changes.some(c => c.pushConfirmationFailed)) {
     badge.textContent = '🛑';
+    badge.style.color = '';
     badge.title = 'A Tripsy push could not be verified -- click for details';
   } else if (tripsyChangesReadyToClear(changes)) {
-    badge.textContent = '🟢';
+    // Plain text glyph (not an emoji) so it can actually be colored --
+    // there's no single "green triangle" emoji in Unicode.
+    badge.textContent = '▲';
+    badge.style.color = 'var(--home-green)';
     badge.title = 'Tripsy sync complete -- click to clear';
   } else {
     badge.textContent = '⚠️';
+    badge.style.color = '';
     badge.title = 'Tripsy Trips has changes waiting to be pushed -- click for instructions';
   }
 }
