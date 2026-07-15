@@ -806,6 +806,158 @@ async function uploadBinaryFileToDrive(file) {
   return json.id;
 }
 
+async function downloadDriveFileBlob(driveFileId) {
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`);
+  return res.blob();
+}
+
+// ---- Offline doc cache (Tripsy attachments) ----
+// A per-device IndexedDB store of raw file blobs, keyed by driveFileId,
+// entirely separate from driveData -- caching/purging a copy here never
+// touches the shared Drive file or requires write access, so it works the
+// same for viewers as for the owner. Purpose: let a trip's docs (boarding
+// passes, confirmations) open without a network connection, and get
+// cleaned up automatically a week after the trip's last date, AND sync
+// which docs are kept offline across every device (see
+// reconcileTripsyOfflineDocs). Every function here fails soft (resolves
+// to null/false or logs and swallows) -- offline caching is a convenience
+// on top of the real Drive copy, never something that should block or
+// break the actual save/view/delete flows if IndexedDB is unavailable.
+const TRIPSY_OFFLINE_DB_NAME = 'travel-tracker-offline';
+const TRIPSY_OFFLINE_STORE = 'tripsyDocs';
+const TRIPSY_OFFLINE_PURGE_DAYS_AFTER_TRIP = 7;
+function openTripsyOfflineDb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
+    const req = indexedDB.open(TRIPSY_OFFLINE_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(TRIPSY_OFFLINE_STORE, { keyPath: 'driveFileId' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function saveTripsyOfflineDoc(record) {
+  try {
+    const db = await openTripsyOfflineDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_STORE, 'readwrite');
+      tx.objectStore(TRIPSY_OFFLINE_STORE).put(record);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    return true;
+  } catch (e) {
+    console.error('saveTripsyOfflineDoc failed:', e);
+    return false;
+  }
+}
+async function getTripsyOfflineDoc(driveFileId) {
+  try {
+    const db = await openTripsyOfflineDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_STORE, 'readonly');
+      const req = tx.objectStore(TRIPSY_OFFLINE_STORE).get(driveFileId);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  } catch (e) {
+    return null;
+  }
+}
+async function deleteTripsyOfflineDoc(driveFileId) {
+  try {
+    const db = await openTripsyOfflineDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_STORE, 'readwrite');
+      tx.objectStore(TRIPSY_OFFLINE_STORE).delete(driveFileId);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    return true;
+  } catch (e) {
+    console.error('deleteTripsyOfflineDoc failed:', e);
+    return false;
+  }
+}
+// Metadata only (no blobs) -- used by the row template to show which docs
+// are already cached, and by the purge routine to decide what to drop.
+async function listTripsyOfflineDocsMeta() {
+  try {
+    const db = await openTripsyOfflineDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_STORE, 'readonly');
+      const req = tx.objectStore(TRIPSY_OFFLINE_STORE).getAll();
+      req.onsuccess = () => resolve((req.result || []).map(r => ({ driveFileId: r.driveFileId, tripKey: r.tripKey, cachedAt: r.cachedAt })));
+      req.onerror = () => reject(req.error);
+    });
+  } catch (e) {
+    return [];
+  }
+}
+// Reconciles this device's local IndexedDB cache against the shared
+// `keepOffline` flag on each attachment (driveData.tripsyAttachments,
+// synced via the normal Drive PATCH like everything else) -- this is what
+// makes "available offline" a cross-device setting rather than a per-
+// device one: marking a doc offline on one device downloads it here too
+// the next time this runs; un-marking it removes the local copy here too.
+// Also folds in the time-based purge (drops keepOffline itself, not just
+// the local copy, once a trip is TRIPSY_OFFLINE_PURGE_DAYS_AFTER_TRIP past
+// its last date, so an old trip's docs don't get silently re-downloaded on
+// some other device that hasn't run this yet) and orphan cleanup (an
+// attachment record deleted elsewhere still needs its local copy dropped).
+// Called once per sign-in (see completeSignIn) for every user, not just
+// the owner -- downloading/removing local copies needs no Drive write
+// access, only setting keepOffline itself does (gated in the UI to
+// isOwner, same as rename/delete). Needs the decrypted trip list for end
+// dates; if decryption isn't available on this device/sign-in, the purge
+// half no-ops (erring toward keeping a doc too long over risking deleting
+// one still needed) but the download/remove-by-keepOffline half still runs.
+async function reconcileTripsyOfflineDocs() {
+  try {
+    const attachments = await Store.listTripsyAttachments();
+    const attachmentByDriveFileId = new Map(attachments.map(a => [a.driveFileId, a]));
+    const cached = await listTripsyOfflineDocsMeta();
+    const cachedDriveFileIds = new Set(cached.map(d => d.driveFileId));
+
+    for (const doc of cached) {
+      if (!attachmentByDriveFileId.has(doc.driveFileId)) {
+        // Orphaned -- the attachment itself was deleted elsewhere.
+        await deleteTripsyOfflineDoc(doc.driveFileId);
+      }
+    }
+
+    const trips = await ensureTripsyDecrypted(); // may be null -- see above
+    const now = Date.now();
+
+    for (const a of attachments) {
+      const trip = trips ? trips.find(t => t.key === a.tripKey) : null;
+      const lastDate = trip ? (trip.end || trip.start) : null;
+      const expired = !!(lastDate && now > new Date(lastDate).getTime() + TRIPSY_OFFLINE_PURGE_DAYS_AFTER_TRIP * 24 * 60 * 60 * 1000);
+
+      if (expired) {
+        if (a.keepOffline) await Store.setTripsyAttachmentKeepOffline(a.id, false);
+        if (cachedDriveFileIds.has(a.driveFileId)) await deleteTripsyOfflineDoc(a.driveFileId);
+        continue;
+      }
+      if (a.keepOffline) {
+        if (!cachedDriveFileIds.has(a.driveFileId)) {
+          try {
+            const blob = await downloadDriveFileBlob(a.driveFileId);
+            await saveTripsyOfflineDoc({ driveFileId: a.driveFileId, blob, mimeType: a.mimeType, fileName: a.fileName, tripKey: a.tripKey, cachedAt: new Date().toISOString() });
+          } catch (e) {
+            console.error(`Downloading "${a.fileName}" for offline use failed (will retry next sync):`, e);
+          }
+        }
+      } else if (cachedDriveFileIds.has(a.driveFileId)) {
+        await deleteTripsyOfflineDoc(a.driveFileId);
+      }
+    }
+  } catch (e) {
+    console.error('reconcileTripsyOfflineDocs failed (non-fatal):', e);
+  }
+}
+
 async function persistDriveData() {
   if (driveFileId) {
     await updateDriveDataFile(driveFileId, driveData);
@@ -1207,6 +1359,40 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.renameTripsyAttachment failed:', e);
+      return false;
+    }
+  },
+  // `keepOffline` is the one shared, cross-device marker for "this doc
+  // should be cached locally for offline viewing" -- stored here (synced
+  // via the normal driveData PATCH, same as everything else) rather than in
+  // the per-device IndexedDB cache, so marking a doc offline on one device
+  // is what tells every OTHER device to go download its own local copy too
+  // (see reconcileTripsyOfflineDocs). The actual bytes are never put in
+  // driveData itself -- that would bloat the single shared JSON file this
+  // whole app is built around.
+  async setTripsyAttachmentKeepOffline(attachmentId, keepOffline) {
+    try {
+      const a = (driveData.tripsyAttachments || []).find(x => x.id === attachmentId);
+      if (!a) return false;
+      a.keepOffline = keepOffline;
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.setTripsyAttachmentKeepOffline failed:', e);
+      return false;
+    }
+  },
+  // Bulk version backing the trip header's single "Save All Offline"
+  // toggle -- sets keepOffline on every attachment under this trip (both
+  // trip- and event-scoped) in one write, rather than one Drive PATCH per
+  // doc.
+  async setTripsyTripAttachmentsKeepOffline(tripKey, keepOffline) {
+    try {
+      (driveData.tripsyAttachments || []).filter(a => a.tripKey === tripKey).forEach(a => { a.keepOffline = keepOffline; });
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.setTripsyTripAttachmentsKeepOffline failed:', e);
       return false;
     }
   },
@@ -7360,7 +7546,12 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
 
 // Row for the trip- or event-header Doc dropdown menu: filename on the
 // left (click to open), View/Edit-name/Copy/Delete on the right.
-function tripsyAttachmentMenuRowHtml(a) {
+// `isCachedLocally`: whether THIS device already has the doc's bytes in
+// IndexedDB. Independent of `a.keepOffline` (the shared cross-device
+// marker) -- a doc can be marked keepOffline but not yet downloaded here
+// (e.g. this device was offline when it was marked), which is its own
+// "syncing" status below rather than either plain state.
+function tripsyAttachmentMenuRowHtml(a, isCachedLocally) {
   // Once parsing has actually completed, the badge itself is the "clear"
   // control -- click it to acknowledge and downgrade this attachment back
   // to a plain reference doc (Store.clearTripsyAttachmentParseFlag). Still-
@@ -7375,17 +7566,30 @@ function tripsyAttachmentMenuRowHtml(a) {
         ? `<div data-tripsy-goto-parse-review style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Parsed, awaiting your review -- click to open Review Parsed Docs">🏷️ Flagged for parsing (staged)</div>`
         : `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for a future Claude Code session to read and extract trip data from">🏷️ Flagged for parsing</div>`)
     : '';
+  // Read-only status, shown to every viewer (not owner-gated) -- there's no
+  // per-doc "add to offline" control anymore (see the trip header's single
+  // "Save All Offline" toggle instead), only a status indicator plus a
+  // remove action once a doc IS marked offline.
+  const offlineStatusHtml = a.keepOffline
+    ? (isCachedLocally
+        ? `<span style="font-size:14px;" title="Available offline on this device">✅</span>`
+        : `<span style="font-size:14px;" title="Marked for offline viewing -- will download to this device next time it's online">⏳</span>`)
+    : '';
+  const removeOfflineButtonHtml = (isOwner && a.keepOffline)
+    ? `<button class="btn" data-tripsy-remove-offline data-attachment-id="${esc(a.id)}" data-drive-file-id="${esc(a.driveFileId)}" style="font-size:18px; padding:4px 9px;" title="Remove from offline availability (on every device)">🚫</button>`
+    : '';
   return `
     <div style="display:flex; align-items:center; gap:8px; padding:6px 4px; border-top:1px solid var(--line);">
       <div style="min-width:0; flex:1;">
         <div data-tripsy-open-attachment data-drive-file-id="${esc(a.driveFileId)}" style="font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" title="${esc(a.fileName)}">📄 ${esc(a.fileName)}</div>
         ${badge}
       </div>
+      ${offlineStatusHtml}
       <div style="display:flex; gap:4px; flex-shrink:0;">
-        <button class="btn" data-tripsy-view-attachment data-drive-file-id="${esc(a.driveFileId)}" style="font-size:18px; padding:4px 9px;" title="View">👁️</button>
+        ${removeOfflineButtonHtml}
         ${isOwner ? `<button class="btn" data-tripsy-rename-attachment data-attachment-id="${esc(a.id)}" data-current-name="${esc(a.fileName)}" style="font-size:18px; padding:4px 9px;" title="Edit name">✏️</button>` : ''}
         <button class="btn" data-tripsy-copy-attachment data-drive-file-id="${esc(a.driveFileId)}" style="font-size:18px; padding:4px 9px;" title="Copy link">📋</button>
-        ${isOwner ? `<button class="btn" data-tripsy-delete-attachment data-attachment-id="${esc(a.id)}" style="font-size:18px; padding:4px 9px;" title="Delete">🗑️</button>` : ''}
+        ${isOwner ? `<button class="btn" data-tripsy-delete-attachment data-attachment-id="${esc(a.id)}" data-drive-file-id="${esc(a.driveFileId)}" style="font-size:18px; padding:4px 9px;" title="Delete">🗑️</button>` : ''}
       </div>
     </div>
   `;
@@ -7466,6 +7670,18 @@ function renderTripsyAttachPanel(panel, target) {
         uploadedBy: currentUserEmail,
       });
       if (!result.ok) throw new Error(result.error || 'Save failed');
+      // Cache the just-uploaded file locally too, straight from the File
+      // object already in hand -- no extra download round-trip needed.
+      // Non-fatal: offline caching is a convenience on top of the real
+      // Drive save above, which has already succeeded either way.
+      saveTripsyOfflineDoc({
+        driveFileId,
+        blob: file,
+        mimeType: file.type || 'application/octet-stream',
+        fileName: file.name,
+        tripKey: target.tripKey,
+        cachedAt: new Date().toISOString(),
+      });
       panel.style.display = "none";
       panel.innerHTML = "";
       panel.dataset.mode = "";
@@ -7931,6 +8147,9 @@ async function renderTripsyEventsListImpl() {
   // useful to anyone with view access; only the attach/delete buttons
   // themselves are owner-gated below.
   const attachments = await Store.listTripsyAttachments();
+  // Which of those attachments already have a local offline copy on THIS
+  // device -- drives the ⬇️/✅ toggle in tripsyAttachmentMenuRowHtml.
+  const offlineDriveFileIds = new Set((await listTripsyOfflineDocsMeta()).map(d => d.driveFileId));
   // Trips that don't exist in Tripsy yet (queued via the doc-parse review
   // page's "create a new trip" option) render as their own cards, stubbed
   // just enough to flow through the exact same pendingCreates/day-grouping/
@@ -8094,7 +8313,7 @@ async function renderTripsyEventsListImpl() {
         <div style="position:relative;">
           <button class="btn" data-tripsy-attachments-toggle data-key="${esc(eventKey)}" style="font-size:17px; padding:4px 10px;" title="Attached Docs">📄</button>
           <div data-tripsy-attachments-menu="${esc(eventKey)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:360px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-            ${eventAttachments.map(tripsyAttachmentMenuRowHtml).join('')}
+            ${eventAttachments.map(a => tripsyAttachmentMenuRowHtml(a, offlineDriveFileIds.has(a.driveFileId))).join('')}
           </div>
         </div>
       ` : '';
@@ -8226,7 +8445,7 @@ async function renderTripsyEventsListImpl() {
     // always the FULL unfiltered list (computed above, before
     // filteredEvents), so the checklist itself never shrinks.
     const tripsyFunnelIconSvg = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>`;
-    const sortButtonHtml = availableSortTypes.length > 0 ? iconLabelButton(
+    const sortButtonHtml = (!collapsed && availableSortTypes.length > 0) ? iconLabelButton(
       activeSortFilter
         ? `<button class="btn" data-tripsy-sort-reset data-key="${esc(trip.key)}" title="Reset filter" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">↺</button>`
         : `<div style="position:relative;">
@@ -8297,11 +8516,26 @@ async function renderTripsyEventsListImpl() {
       <div style="position:relative;">
         <button class="btn" data-tripsy-attachments-toggle data-key="${esc(trip.key)}" title="Attached Docs" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">📄</button>
         <div data-tripsy-attachments-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:360px; max-width:440px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-          ${tripAttachments.map(tripsyAttachmentMenuRowHtml).join('')}
+          ${tripAttachments.map(a => tripsyAttachmentMenuRowHtml(a, offlineDriveFileIds.has(a.driveFileId))).join('')}
           ${otherEventDocsHtml}
         </div>
       </div>
     `, 'Docs') : '';
+    // Single trip-wide toggle replacing the old per-doc save/remove control
+    // -- sets/clears keepOffline on EVERY doc under this trip (trip- and
+    // event-scoped alike) in one Store call, then reconcileTripsyOfflineDocs
+    // downloads/drops each one's local copy accordingly. Owner-gated like
+    // rename/delete/edit above, since it writes the shared keepOffline flag;
+    // a viewer's device still benefits automatically (see
+    // reconcileTripsyOfflineDocs, not owner-gated) once the owner sets it.
+    // "All offline" only when the trip HAS docs and every one is marked --
+    // an empty trip or a mixed state both show the "Save All" (⬇️) action.
+    const allTripAttachments = attachments.filter(a => a.tripKey === trip.key);
+    const allTripDocsKeptOffline = allTripAttachments.length > 0 && allTripAttachments.every(a => a.keepOffline);
+    const offlineAllButtonHtml = (isOwner && allTripAttachments.length) ? iconLabelButton(
+      `<button class="btn" data-tripsy-trip-offline-toggle data-key="${esc(trip.key)}" data-currently-all-offline="${allTripDocsKeptOffline ? 'true' : 'false'}" title="${allTripDocsKeptOffline ? 'Every doc in this trip is saved for offline viewing on every device -- click to remove them all' : 'Save every doc in this trip for offline viewing on every device'}" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">${allTripDocsKeptOffline ? '✅' : '⬇️'}</button>`,
+      allTripDocsKeptOffline ? 'Offline' : 'Save All'
+    ) : '';
     // A trip queued via the doc-parse review page's "create a new trip"
     // option but not yet real in Tripsy -- Cancel is its only trip-level
     // action (no Edit/Hide/Docs/Sort/Delete: there's nothing real yet to
@@ -8325,6 +8559,7 @@ async function renderTripsyEventsListImpl() {
             ${isPendingCreateTrip ? cancelPendingTripButtonHtml : `
             ${addButtonHtml}
             ${docStatusButtonHtml}
+            ${offlineAllButtonHtml}
             ${editButtonHtml}
             ${sortButtonHtml}
             ${hideButtonHtml}
@@ -8372,6 +8607,28 @@ async function renderTripsyEventsListImpl() {
       renderTripsyEventsList();
       const hiddenPanel = document.getElementById("tripsy-hidden-panel");
       if (hiddenPanel && hiddenPanel.style.display !== "none") renderTripsyHiddenTripsPanelContent();
+    });
+  });
+
+  // Bulk offline toggle -- sets/clears keepOffline on every doc in the
+  // trip in one write, then runs reconcileTripsyOfflineDocs to actually
+  // download (or drop) each one's local copy on THIS device right away,
+  // rather than waiting for the next sign-in. Downloading several docs can
+  // take a moment, hence the disabled/spinner state.
+  container.querySelectorAll("[data-tripsy-trip-offline-toggle]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const turningOn = btn.dataset.currentlyAllOffline !== "true";
+      btn.disabled = true;
+      btn.textContent = "⏳";
+      const ok = await Store.setTripsyTripAttachmentsKeepOffline(btn.dataset.key, turningOn);
+      if (!ok) {
+        toast("Could not update — storage error. Please try again.", "error");
+        renderTripsyEventsList();
+        return;
+      }
+      await reconcileTripsyOfflineDocs();
+      toast(turningOn ? "Saving this trip's docs for offline viewing…" : "Removed this trip's docs from offline availability.");
+      renderTripsyEventsList();
     });
   });
 
@@ -8590,15 +8847,48 @@ async function renderTripsyEventsListImpl() {
     _tripsyTripPanelsOutsideClickBound = true;
   }
 
-  // Shared by the View button and clicking the filename itself.
-  const openTripsyAttachment = driveFileId => {
-    window.open(`https://drive.google.com/file/d/${driveFileId}/view`, '_blank', 'noopener');
+  // Called when the filename itself is clicked. Opens the
+  // local offline copy (works with no network) when this device has one
+  // cached, falling back to the Drive viewer link otherwise. The tab is
+  // opened SYNCHRONOUSLY here, before the async cache lookup, and then
+  // redirected once we know the URL -- opening it only after the `await`
+  // below would lose the click's "user activation" and get popup-blocked
+  // on Safari/iPad. noopener isn't available on the two-argument form that
+  // returns a reference, so `tab.opener = null` achieves the same thing.
+  const openTripsyAttachment = async driveFileId => {
+    const tab = window.open('', '_blank');
+    if (tab) tab.opener = null;
+    try {
+      const cached = await getTripsyOfflineDoc(driveFileId);
+      if (cached && cached.blob) {
+        const url = URL.createObjectURL(cached.blob);
+        if (tab) tab.location.href = url; else window.open(url, '_blank', 'noopener');
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        return;
+      }
+    } catch (e) {
+      console.error('Reading offline doc cache failed, falling back to Drive:', e);
+    }
+    const driveUrl = `https://drive.google.com/file/d/${driveFileId}/view`;
+    if (tab) tab.location.href = driveUrl; else window.open(driveUrl, '_blank', 'noopener');
   };
 
-  container.querySelectorAll("[data-tripsy-view-attachment]").forEach(btn => {
-    btn.addEventListener("click", e => {
+  // Clears the shared keepOffline flag (so every other device drops its
+  // local copy too, next time it syncs) and removes THIS device's own
+  // local copy immediately rather than waiting for that next sync.
+  container.querySelectorAll("[data-tripsy-remove-offline]").forEach(btn => {
+    btn.addEventListener("click", async e => {
       e.stopPropagation();
-      openTripsyAttachment(btn.dataset.driveFileId);
+      btn.disabled = true;
+      const ok = await Store.setTripsyAttachmentKeepOffline(btn.dataset.attachmentId, false);
+      if (!ok) {
+        toast("Could not update — storage error. Please try again.", "error");
+        btn.disabled = false;
+        return;
+      }
+      await deleteTripsyOfflineDoc(btn.dataset.driveFileId);
+      toast("Removed from offline availability.");
+      renderTripsyEventsList();
     });
   });
 
@@ -8686,6 +8976,7 @@ async function renderTripsyEventsListImpl() {
       btn.disabled = true;
       const ok = await Store.deleteTripsyAttachment(btn.dataset.attachmentId);
       if (!ok) toast("Could not remove — storage error. Please try again.", "error");
+      else deleteTripsyOfflineDoc(btn.dataset.driveFileId);
       renderTripsyEventsList();
       updateTripsyDocParseBadge();
     });
@@ -10184,6 +10475,11 @@ async function completeSignIn() {
     // refreshes PS Reservations/Balance/Trips in the background and
     // updates whichever page is on-screen once each finishes.
     runBackgroundSyncs();
+    // Not owner-gated (unlike runBackgroundSyncs) -- the offline doc cache
+    // is per-device/per-browser, so this needs to run for every signed-in
+    // user's device, not just the owner's, to pick up keepOffline changes
+    // and stale local copies alike.
+    reconcileTripsyOfflineDocs();
   } catch (e) {
     console.error(`completeSignIn failed while ${stage}:`, e);
     // Surface the error on the actual sign-in screen -- if this failed
