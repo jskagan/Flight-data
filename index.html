@@ -623,6 +623,7 @@
       <button class="rail-item rail-subitem" data-view="utilitiesreparsepsinvoices">Re-Parse P/S Invoices</button>
       <button class="rail-item rail-subitem" data-view="utilitiestripsyrefresh">Tripsy Refresh</button>
       <button class="rail-item rail-subitem" data-view="utilitiesupdatetrips">Update Trips</button>
+      <button class="rail-item rail-subitem" data-view="utilitiesparsingpdfs">Parsing PDFs</button>
     </div>
     <button class="rail-item" data-view="upload" id="nav-upload-btn"><span class="nav-icon">📥</span>Upload</button>
     <button class="rail-item" data-view="invoices"><span class="nav-icon" id="invoices-icon">📋</span>Invoices<span class="count" id="nav-invoice-count"></span></button>
@@ -1211,6 +1212,27 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.markTripsyAttachmentParsed failed:', e);
+      return false;
+    }
+  },
+  // User-facing "clear" step for a completed parse flag -- clicking the
+  // "(done)" badge (see tripsyAttachmentMenuRowHtml) calls this. Downgrades
+  // the attachment to a plain reference doc (same shape as if "Just store
+  // for reference" had been picked originally) so the badge disappears; the
+  // file itself stays attached. This is deliberately just the "acknowledge
+  // and clear" step -- a further guided "integrate the parsed data into
+  // this trip" flow is a separate, not-yet-designed feature.
+  async clearTripsyAttachmentParseFlag(attachmentId) {
+    try {
+      const a = (driveData.tripsyAttachments || []).find(x => x.id === attachmentId);
+      if (!a) return false;
+      a.purpose = 'reference';
+      a.parseStatus = null;
+      a.parsedAt = null;
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.clearTripsyAttachmentParseFlag failed:', e);
       return false;
     }
   },
@@ -2956,7 +2978,7 @@ function setActiveNav(view, param) {
   document.getElementById("psreservations-submenu").classList.toggle("collapsed", !isPsReservationsView);
   document.getElementById("psreservations-caret").textContent = isPsReservationsView ? "▾" : "▸";
 
-  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiestripsyrefresh" || view === "utilitiesupdatetrips";
+  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiestripsyrefresh" || view === "utilitiesupdatetrips" || view === "utilitiesparsingpdfs";
   document.getElementById("utilities-toggle").classList.toggle("active", isUtilitiesView);
   document.getElementById("utilities-submenu").classList.toggle("collapsed", !isUtilitiesView);
   document.getElementById("utilities-caret").textContent = isUtilitiesView ? "▾" : "▸";
@@ -2996,6 +3018,7 @@ async function navigate(view, param) {
     else if (view === "utilitiesreparsepsinvoices") await renderUtilitiesReparsePsInvoices();
     else if (view === "utilitiestripsyrefresh") await renderUtilitiesTripsyRefresh();
     else if (view === "utilitiesupdatetrips") await renderUtilitiesUpdateTrips();
+    else if (view === "utilitiesparsingpdfs") await renderUtilitiesParsingPdfs();
     else if (view === "passengers") await renderPassengerReport(param || "totals");
   } catch (e) {
     // Catch-all so a bug in one view shows a visible error instead of an
@@ -5428,6 +5451,73 @@ async function renderUtilitiesUpdateTrips() {
       </div>
     </div>
   `;
+}
+
+async function renderUtilitiesParsingPdfs() {
+  const attachments = isOwner ? (await Store.listTripsyAttachments()).filter(a => a.purpose === 'parse') : [];
+  const tripNameFor = tripKey => ((tripsyDecryptedTrips || []).find(t => t.key === tripKey) || {}).name || tripKey;
+  const pending = attachments.filter(a => a.parseStatus === 'pending');
+  const done = attachments.filter(a => a.parseStatus === 'done');
+  const attachmentRowHtml = a => `
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:8px 0; border-top:1px solid var(--line); font-size:13px;">
+      <div>
+        <span>📄 ${esc(a.fileName)}</span>
+        <span style="color:var(--muted);"> (${esc(tripNameFor(a.tripKey))}${a.eventKey ? ', event-level' : ''})</span>
+      </div>
+    </div>
+  `;
+  main.innerHTML = `
+    <div class="page-title">Parsing PDFs</div>
+    <div class="page-sub">Tripsy Trips PDFs flagged "for parsing into trip data" don't get read automatically -- there's no in-browser way to extract structured trip data from an arbitrary PDF layout. This page explains the flags involved and how to actually get a flagged PDF processed.</div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">Flagged Attachments</div>
+      <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700; margin-bottom:6px;">${pending.length ? `${pending.length} waiting to be parsed` : 'None waiting to be parsed'}</div>
+      ${pending.length ? pending.map(attachmentRowHtml).join("") : `<div style="font-size:13px; color:var(--muted);">Nothing is currently flagged and unprocessed.</div>`}
+      <div style="font-family:var(--mono); font-size:13px; color:var(--home-green); font-weight:700; margin:14px 0 6px;">${done.length ? `${done.length} parsed -- ready for you to clear` : 'None parsed and awaiting clearing'}</div>
+      ${done.length ? done.map(attachmentRowHtml).join("") : `<div style="font-size:13px; color:var(--muted);">Nothing is waiting on you right now.</div>`}
+      ${done.length ? `<div style="font-size:12px; color:var(--muted); margin-top:8px;">Clear each one from the Tripsy Trips page itself -- open the trip (or event)'s PDFs dropdown and click its "🏷️ Flagged for parsing (done)" badge.</div>` : ''}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">The Flags Explained</div>
+      <div style="font-size:13px; line-height:1.6;">
+        <p>Every PDF attached to a Tripsy trip or event is stored with a <b>purpose</b>, chosen when it's uploaded:</p>
+        <ul style="margin:6px 0 0 20px; padding:0;">
+          <li><b>Just store for reference</b> -- a plain attachment. Shows up in the PDFs dropdown with no badge; nothing ever reads it automatically.</li>
+          <li style="margin-top:6px;"><b>Flag for parsing into trip data</b> -- marks it for a human (via a live Claude Code session) to read and turn into trip/event data. This one has its own sub-status:</li>
+        </ul>
+        <ul style="margin:10px 0 0 20px; padding:0;">
+          <li><span style="color:var(--amber);">🏷️ Flagged for parsing</span> (no suffix) -- <b>pending</b>. Uploaded and flagged, but no session has processed it yet.</li>
+          <li style="margin-top:6px;"><span style="color:var(--amber);">🏷️ Flagged for parsing (done)</span> -- <b>done</b>. A session has read the PDF and, wherever it found extractable event details, queued them as a pending Tripsy change (the same "➕ Not yet created in Tripsy" row you'd get from manually adding an item) -- reviewable/editable on the trip's timeline before the next Tripsy Refresh actually pushes it. This badge is clickable (owner only): clicking it acknowledges the parse and downgrades the attachment back to a plain reference file, clearing the badge for good.</li>
+        </ul>
+        <p style="margin-top:10px;">Nothing about this flag ever pushes data to Tripsy directly -- parsing only ever produces a normal queued change, subject to the exact same review-then-refresh process described on the <a href="#" data-nav="utilitiestripsyrefresh" style="color:var(--amber);">Tripsy Refresh</a> page.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">Run it yourself</div>
+      <div style="font-size:13px; line-height:1.6;">
+        <p>There's no scheduled task for this one -- flagging a PDF is a deliberate, occasional action, not something worth polling for. Instead, process flagged PDFs on demand from a <b>Claude Code session</b>, the same way you'd trigger a Tripsy Refresh manually. Any device works; iPad steps are below.</p>
+        <p style="margin-top:10px;"><b>On an iPad:</b></p>
+        <ol style="margin:6px 0 0 20px; padding:0;">
+          <li>Open Safari (or the Claude app) and go to <b>claude.ai/code</b>.</li>
+          <li>Open the existing conversation for this project (<b>Travel Tracker</b> / <b>jskagan/Flight-data</b>), or start a new one in that project.</li>
+          <li>Send: <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Process flagged Tripsy PDFs</span></li>
+          <li>Claude finds a live signed-in tab (or asks you to sign in if needed), downloads each pending flagged PDF, reads it, and queues whatever it can extract. It'll report back what it found per file.</li>
+          <li>Come back to the Tripsy Trips page to review the new "➕ Not yet created in Tripsy" row(s), and clear each attachment's "(done)" badge once you're satisfied.</li>
+        </ol>
+        <p style="margin-top:10px;"><b>On a Mac or PC:</b> same thing, from the Claude Code CLI, the desktop app, or claude.ai/code -- whichever you'd normally use for this project.</p>
+      </div>
+    </div>
+  `;
+
+  main.querySelectorAll("[data-nav]").forEach(el => {
+    el.addEventListener("click", e => {
+      e.preventDefault();
+      navigate(el.dataset.nav);
+    });
+  });
 }
 
 async function renderUtilitiesDeletePsReservations() {
@@ -8092,8 +8182,17 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
 // Row for the trip- or event-header PDF dropdown menu: filename on the
 // left (click to open), View/Edit-name/Copy/Delete on the right.
 function tripsyAttachmentMenuRowHtml(a) {
+  // Once parsing has actually completed, the badge itself is the "clear"
+  // control -- click it to acknowledge and downgrade this attachment back
+  // to a plain reference doc (Store.clearTripsyAttachmentParseFlag). Still-
+  // pending flags aren't clickable; there's nothing to acknowledge yet.
+  // Owner-gated same as rename/delete above -- a non-owner has read-only
+  // Drive access at the real permission level, so the write would just
+  // fail silently for them regardless.
   const badge = a.purpose === 'parse'
-    ? `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for a future Claude Code session to read and extract trip data from">🏷️ Flagged for parsing${a.parseStatus === 'done' ? ' (done)' : ''}</div>`
+    ? (a.parseStatus === 'done' && isOwner
+        ? `<div data-tripsy-clear-parse-flag data-attachment-id="${esc(a.id)}" style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Parsing complete -- click to clear this flag (the file stays attached as a reference)">🏷️ Flagged for parsing (done)</div>`
+        : `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for a future Claude Code session to read and extract trip data from">🏷️ Flagged for parsing${a.parseStatus === 'done' ? ' (done)' : ''}</div>`)
     : '';
   return `
     <div style="display:flex; align-items:center; gap:8px; padding:6px 4px; border-top:1px solid var(--line);">
@@ -9229,6 +9328,19 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
+  // Clicking a completed "🏷️ Flagged for parsing (done)" badge acknowledges
+  // and clears it -- available to any viewer (not owner-gated), same as the
+  // rest of this dropdown's read-only affordances, since acknowledging a
+  // parse isn't a data-integrity-sensitive action the way rename/delete are.
+  container.querySelectorAll("[data-tripsy-clear-parse-flag]").forEach(el => {
+    el.addEventListener("click", async e => {
+      e.stopPropagation();
+      const ok = await Store.clearTripsyAttachmentParseFlag(el.dataset.attachmentId);
+      if (!ok) toast("Could not clear the flag — storage error. Please try again.", "error");
+      renderTripsyEventsList();
+    });
+  });
+
   container.querySelectorAll("[data-tripsy-attach-event]").forEach(btn => {
     btn.addEventListener("click", () => {
       const eventKey = btn.dataset.key;
@@ -10184,7 +10296,7 @@ document.getElementById("psreservations-toggle").addEventListener("click", () =>
 });
 document.getElementById("utilities-toggle").addEventListener("click", () => {
   const submenu = document.getElementById("utilities-submenu");
-  const isUtilitiesView = currentView === "utilitiesusers" || currentView === "utilitiesdeletepsreservations" || currentView === "utilitiesreparsepsreservations" || currentView === "utilitiesreparsepsinvoices" || currentView === "utilitiestripsyrefresh" || currentView === "utilitiesupdatetrips";
+  const isUtilitiesView = currentView === "utilitiesusers" || currentView === "utilitiesdeletepsreservations" || currentView === "utilitiesreparsepsreservations" || currentView === "utilitiesreparsepsinvoices" || currentView === "utilitiestripsyrefresh" || currentView === "utilitiesupdatetrips" || currentView === "utilitiesparsingpdfs";
   if (submenu.classList.contains("collapsed") || !isUtilitiesView) {
     navigate("utilitiesusers");
   } else {
