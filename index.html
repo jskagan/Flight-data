@@ -609,6 +609,16 @@
   .tp-day-tile-label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; opacity: 0.7; }
   .tp-day-tile-num { font-family: var(--mono); font-size: 32px; font-weight: 700; margin: 2px 0; }
   .tp-day-tile-date { font-size: 12px; opacity: 0.85; }
+  /* A run of consecutive event-less days (tripsySummaryEmptyRangeBlockHtml)
+     collapses to ONE block spanning the whole run, rather than a separate
+     empty block per day -- the tile shows both day numbers with a
+     vertical rule between them (per explicit request) instead of a
+     single number, and the date line spans first–last date. */
+  .tp-day-block-empty .tp-day-tile { background: #4A5568; }
+  .tp-day-tile-range { display: flex; align-items: center; justify-content: center; gap: 8px; }
+  .tp-day-tile-range .tp-day-tile-num { font-size: 22px; margin: 0; }
+  .tp-day-tile-range-divider { width: 1px; align-self: stretch; background: rgba(255, 255, 255, 0.35); }
+  .tp-row-empty { font-size: 13px; font-style: italic; color: #778; padding: 4px 0; }
   .tp-day-rows { flex: 1; min-width: 0; padding: 14px 18px; }
   .tp-row {
     display: flex; align-items: baseline; gap: 10px; padding: 4px 0;
@@ -8147,6 +8157,26 @@ function tripsyDayNumberFromTripStart(dayKey, tripStartDayKey) {
   };
   return toDayIndex(dayKey) - toDayIndex(tripStartDayKey) + 1;
 }
+// Every calendar day (YYYY-MM-DD) from startDayKey to endDayKey inclusive
+// -- unlike dayKeys (which only lists days that actually have an event),
+// this is the FULL span of the trip, so the print summary can render a
+// "no events" placeholder for the gaps instead of just skipping them.
+function tripsyDayKeyRange(startDayKey, endDayKey) {
+  if (!startDayKey || !endDayKey) return [];
+  const toDayIndex = k => {
+    const [y, m, d] = k.split('-').map(Number);
+    return Math.round(Date.UTC(y, m - 1, d) / 86400000);
+  };
+  const toDayKey = idx => {
+    const d = new Date(idx * 86400000);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  };
+  const startIdx = toDayIndex(startDayKey);
+  const endIdx = toDayIndex(endDayKey);
+  const keys = [];
+  for (let i = startIdx; i <= endIdx; i++) keys.push(toDayKey(i));
+  return keys;
+}
 
 // Cluster heuristic for the doc-parse review page: how tightly a doc's
 // unmatched events need to fall together in time to be offered as "these
@@ -9406,13 +9436,23 @@ async function buildTripsyPrintHtml(tripKey) {
   // breaks on a trip whose summaries haven't been generated yet.
   //
   // dayKeys only contains days that actually have an event -- a free day
-  // in the middle of the trip with nothing on it never shows a block here
-  // at all -- but the "Day N" number still needs to count that skipped
-  // day, so it's computed from the calendar-day offset from the trip's
-  // own start date (tripsyDayNumberFromTripStart), not from position in
-  // dayKeys.
+  // in the middle of the trip previously just vanished from the summary
+  // entirely (no block at all), which read as a gap in the document
+  // rather than a deliberately free day. tripsyFullDayKeys (below) walks
+  // every calendar day of the trip instead, so a run of empty days gets
+  // its own placeholder block -- one block per run, not one per day, with
+  // a day-number range (e.g. "03 | 04") and date range rather than
+  // repeating "No events" once per day.
   const tripStartDayKey = tripsyDayKey(effectiveTrip.start);
-  const summaryHtml = dayKeys.map(dayKey => {
+  const tripEndDayKey = tripsyDayKey(effectiveTrip.end);
+  const eventDayKeySet = new Set(dayKeys.filter(k => k !== 'undated'));
+  const tripsyFullDayKeys = tripsyDayKeyRange(tripStartDayKey, tripEndDayKey);
+
+  const tripsySummaryDayTileDate = dayKey => tripitPartsToUtcDate({
+    year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)),
+  }).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+  const tripsySummaryDayBlockHtml = dayKey => {
     const items = summaryByDay.get(dayKey) || [];
     const rowsHtml = items.map(item => {
       const rowKey = tripsySummaryRowKey(item);
@@ -9433,7 +9473,7 @@ async function buildTripsyPrintHtml(tripKey) {
     const isUndated = dayKey === 'undated';
     const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
     const tileNum = dayNumber != null ? String(dayNumber).padStart(2, '0') : '—';
-    const tileDate = isUndated ? '' : tripitPartsToUtcDate({ year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)) }).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    const tileDate = isUndated ? '' : tripsySummaryDayTileDate(dayKey);
     return `
       <div class="tp-day-block">
         <div class="tp-day-tile">
@@ -9444,7 +9484,55 @@ async function buildTripsyPrintHtml(tripKey) {
         <div class="tp-day-rows">${rowsHtml}</div>
       </div>
     `;
-  }).join('');
+  };
+
+  // One block per RUN of consecutive event-less days -- a vertical rule
+  // between the first and last day number (and their dates) marks the
+  // span, rather than drawing a separate empty block for every single day
+  // in a multi-day gap.
+  const tripsySummaryEmptyRangeBlockHtml = rangeDayKeys => {
+    const firstKey = rangeDayKeys[0];
+    const lastKey = rangeDayKeys[rangeDayKeys.length - 1];
+    const firstNum = String(tripsyDayNumberFromTripStart(firstKey, tripStartDayKey)).padStart(2, '0');
+    const isSingleDay = rangeDayKeys.length === 1;
+    const numHtml = isSingleDay
+      ? `<div class="tp-day-tile-num">${esc(firstNum)}</div>`
+      : `<div class="tp-day-tile-range">
+          <span class="tp-day-tile-num">${esc(firstNum)}</span>
+          <span class="tp-day-tile-range-divider"></span>
+          <span class="tp-day-tile-num">${esc(String(tripsyDayNumberFromTripStart(lastKey, tripStartDayKey)).padStart(2, '0'))}</span>
+        </div>`;
+    const dateHtml = isSingleDay
+      ? tripsySummaryDayTileDate(firstKey)
+      : `${tripsySummaryDayTileDate(firstKey)} – ${tripsySummaryDayTileDate(lastKey)}`;
+    return `
+      <div class="tp-day-block tp-day-block-empty">
+        <div class="tp-day-tile">
+          <div class="tp-day-tile-label">Day</div>
+          ${numHtml}
+          <div class="tp-day-tile-date">${esc(dateHtml)}</div>
+        </div>
+        <div class="tp-day-rows">
+          <div class="tp-row-empty">No events scheduled</div>
+        </div>
+      </div>
+    `;
+  };
+
+  const summaryBlockParts = [];
+  for (let i = 0; i < tripsyFullDayKeys.length; i++) {
+    const dayKey = tripsyFullDayKeys[i];
+    if (eventDayKeySet.has(dayKey)) {
+      summaryBlockParts.push(tripsySummaryDayBlockHtml(dayKey));
+      continue;
+    }
+    let j = i;
+    while (j < tripsyFullDayKeys.length && !eventDayKeySet.has(tripsyFullDayKeys[j])) j++;
+    summaryBlockParts.push(tripsySummaryEmptyRangeBlockHtml(tripsyFullDayKeys.slice(i, j)));
+    i = j - 1;
+  }
+  if (dayKeys.includes('undated')) summaryBlockParts.push(tripsySummaryDayBlockHtml('undated'));
+  const summaryHtml = summaryBlockParts.join('');
 
   // ---- Part 2: one card per event, grouped by day and rendered in the
   // exact chronological (+ P/S-interleaved) order summaryByDay already
