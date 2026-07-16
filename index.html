@@ -603,6 +603,26 @@
   .tp-spread-name { font-family: var(--mono); font-size: 16px; font-weight: 700; margin-top: 10px; }
   .tp-spread-meta { font-size: 12.5px; color: #556; margin-top: 3px; }
   .tp-spread-notes { font-size: 13px; line-height: 1.5; margin-top: 8px; }
+
+  .tp-trip-intro { font-size: 16px; line-height: 1.6; color: #333; margin: 0 0 24px; }
+  .tp-narrative-day { break-before: avoid; margin-bottom: 24px; }
+  .tp-narrative-day-title {
+    font-family: var(--mono); font-size: 18px; font-weight: 700; color: #8A5A12; margin: 24px 0 10px;
+    break-after: avoid;
+  }
+  .tp-narrative-day-text { font-size: 13.5px; line-height: 1.65; color: #333; margin: 0 0 12px; }
+  .tp-place-card {
+    display: flex; gap: 16px; align-items: flex-start; break-inside: avoid; margin: 14px 0;
+  }
+  .tp-place-card-photo { width: 40%; flex-shrink: 0; max-height: 200px; object-fit: cover; border-radius: 8px; display: block; }
+  .tp-place-card-photo-fallback {
+    width: 40%; flex-shrink: 0; height: 140px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+    font-size: 40px; background: #F0F2F5;
+  }
+  .tp-place-card-body { flex: 1; min-width: 0; }
+  .tp-place-card-name { font-family: var(--mono); font-size: 15px; font-weight: 700; }
+  .tp-place-card-meta { font-size: 12px; color: #556; margin-top: 2px; }
+  .tp-place-card-blurb { font-size: 13px; line-height: 1.5; margin-top: 6px; color: #333; }
 </style>
 </head>
 <body>
@@ -6704,6 +6724,34 @@ async function fetchTripsyPassphraseFromDrive() {
   return firstLine;
 }
 
+const ANTHROPIC_KEY_DRIVE_FILENAME = 'Claude Narrative API Key';
+
+// Same shape as fetchTripsyPassphraseFromDrive above -- a private Drive
+// file, read via the signed-in user's own Drive OAuth session, rather than
+// stored in shared driveData. Deliberately NOT stored alongside
+// driveData.placesApiKey: unlike a Google API key, a raw Anthropic key
+// can't be domain-restricted, so putting it in driveData would hand every
+// viewer's browser a credential that (if ever extracted) could run up
+// unrestricted billing anywhere, not just from this app. Scoping it to a
+// dedicated Drive file limits exposure to whoever the owner explicitly
+// shares that file with -- see openTripsyItineraryPrintView, which only
+// calls this for isOwner. No localStorage fallback and no manual-entry
+// form (unlike the passphrase) -- narrative generation is optional and
+// non-blocking, so a fetch failure just means no narrative this print,
+// not a broken page.
+async function fetchAnthropicApiKeyFromDrive() {
+  const q = encodeURIComponent(`name='${ANTHROPIC_KEY_DRIVE_FILENAME}' and mimeType='text/plain' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&spaces=drive`);
+  const json = await res.json();
+  const fileId = (json.files && json.files.length) ? json.files[0].id : null;
+  if (!fileId) throw new Error('Claude Narrative API Key file not found (or not shared with this account).');
+  const contentRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  const text = await contentRes.text();
+  const firstLine = (text.split('\n')[0] || '').trim();
+  if (!firstLine) throw new Error('Claude Narrative API Key file is empty.');
+  return firstLine;
+}
+
 // Decrypts TRIPSY_ENCRYPTED with the given passphrase and returns the
 // parsed trip array. AES-GCM's built-in auth tag makes a wrong passphrase
 // fail loudly here (decrypt throws) rather than silently returning garbage,
@@ -8115,6 +8163,84 @@ async function fetchTripsyPlacePhoto(name, address) {
   }
 }
 
+// Calls the Claude API directly from the browser (anthropic-dangerous-
+// direct-browser-access) to write the itinerary print view's magazine-
+// style narrative section -- a short trip overview plus one titled,
+// prose-narrated section per day, referencing the trip's real places by
+// name so tripsyBuildNarrativePart2Html (below) can attach each place's
+// blurb to its own photo/address card. Owner-only (see
+// fetchAnthropicApiKeyFromDrive's own comment for why) and entirely
+// optional -- any failure (no key file, network error, malformed
+// response) is caught by the caller, which falls back to the plain photo-
+// grid layout with no narrative text. Claude is instructed to only use
+// facts present in dayData, since its blurbs are rendered right next to
+// the real address/confirmation info -- it must not invent details.
+async function generateTripsyItineraryNarrative(effectiveTrip, dayData) {
+  const apiKey = await fetchAnthropicApiKeyFromDrive();
+  const tripSummaryForPrompt = {
+    name: effectiveTrip.name,
+    location: effectiveTrip.location,
+    dateRange: formatTripitDateRange(effectiveTrip.start, effectiveTrip.end),
+    days: dayData.map(d => ({
+      day_key: d.dayKey,
+      date: d.heading,
+      events: d.events.filter(ev => !ev._layover).map(ev => ({
+        type: ev.tripsyRaw ? ev.tripsyRaw.resource : 'other',
+        title: ev.summary,
+        time: formatTripitTime(ev.start) || null,
+        place_name: ev.tripsyRaw ? (ev.tripsyRaw.name || null) : null,
+        address: ev.tripsyRaw ? (ev.tripsyRaw.address || null) : null,
+        notes: ev.tripsyRaw ? (ev.tripsyRaw.notes || null) : null,
+      })),
+    })),
+  };
+  const schema = {
+    type: 'object',
+    properties: {
+      trip_intro: { type: 'string' },
+      days: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            day_key: { type: 'string' },
+            title: { type: 'string' },
+            narrative: { type: 'string' },
+            place_blurbs: { type: 'object', additionalProperties: { type: 'string' } },
+          },
+          required: ['day_key', 'title', 'narrative', 'place_blurbs'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['trip_intro', 'days'],
+    additionalProperties: false,
+  };
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-4-8',
+      max_tokens: 4096,
+      output_config: { format: { type: 'json_schema', schema } },
+      messages: [{
+        role: 'user',
+        content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. Write a short trip_intro paragraph, then for each day: a short evocative title (e.g. "Day 1 -- Travel Day: First Taste of Palma"), 1-3 short narrative paragraphs weaving the day's events together, and one short blurb per named place (hotel/activity) in that day's events, keyed by place_name exactly as given. Only state facts present in the data below -- do not invent hours, prices, history, or amenities. If a day has no named places, place_blurbs can be empty.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
+      }],
+    }),
+  });
+  if (!res.ok) throw new Error(`Claude API error ${res.status}`);
+  const data = await res.json();
+  const textBlock = (data.content || []).find(b => b.type === 'text');
+  if (!textBlock) throw new Error('Claude API returned no text block');
+  return JSON.parse(textBlock.text);
+}
+
 // Builds and triggers window.print() for a two-part printable/save-as-PDF
 // itinerary for one trip: a formal day-by-day summary (part 1), followed
 // by a page-break then a photo spread of each hotel/place (part 2).
@@ -8167,33 +8293,110 @@ async function openTripsyItineraryPrintView(tripKey) {
     return `<div class="tp-day-heading">${esc(heading)}</div>${rowsHtml}`;
   }).join('');
 
-  // ---- Part 2: photo spread, one per hotel stay / named activity ----
-  // Flights and generic ground transportation are skipped -- there's no
-  // single photographable "place" for a flight leg, and that content is
-  // already fully covered in the summary above.
+  // ---- Part 2: one "place" (hotel stay / named activity) per hotel/
+  // activity event. Flights and generic ground transportation are skipped
+  // -- there's no single photographable "place" for a flight leg, and
+  // that content is already fully covered in the summary above. Grouped
+  // by day (via the same tripsyDayKey used for Part 1) so the narrative
+  // path below can attach each place's card to the day it happened on.
   const placeEvents = visibleEvents.filter(ev => ev.tripsyRaw && (ev.tripsyRaw.resource === 'hosting' || ev.tripsyRaw.resource === 'activity'));
-  const spreads = await Promise.all(placeEvents.map(async ev => {
-    const raw = ev.tripsyRaw;
-    const name = raw.name || ev.summary;
-    const address = raw.address || '';
-    const photoDataUrl = await fetchTripsyPlacePhoto(name, address);
-    const isStay = raw.resource === 'hosting';
-    const metaParts = [
-      formatTripitDateRange(ev.start, ev.end),
-      address,
-      isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
-    ].filter(Boolean);
-    return `
-      <div class="tp-spread">
-        ${photoDataUrl
-          ? `<img class="tp-spread-photo" src="${esc(photoDataUrl)}" alt="${esc(name)}">`
-          : `<div class="tp-spread-photo-fallback">${esc(tripsyTimelineDotIcon(ev))}</div>`}
-        <div class="tp-spread-name">${esc(name)}</div>
-        ${metaParts.map(m => `<div class="tp-spread-meta">${esc(m)}</div>`).join('')}
-        ${raw.notes ? `<div class="tp-spread-notes">${esc(raw.notes)}</div>` : ''}
+  const placesByDay = new Map();
+  for (const ev of placeEvents) {
+    const dayKey = tripsyDayKey(ev.start) || 'undated';
+    if (!placesByDay.has(dayKey)) placesByDay.set(dayKey, []);
+    placesByDay.get(dayKey).push(ev);
+  }
+
+  // Owner-only, best-effort: if it fails for any reason (no key file,
+  // network error, malformed response) narrative stays null and Part 2
+  // below falls back to the plain photo-grid layout -- never blocks
+  // printing.
+  let narrative = null;
+  if (isOwner) {
+    try {
+      narrative = await generateTripsyItineraryNarrative(effectiveTrip, dayKeys.map(dayKey => ({
+        dayKey,
+        heading: dayKey === 'undated' ? 'Undated' : tripsyDayHeaderLabel(dayKey),
+        events: byDay.get(dayKey),
+      })));
+    } catch (e) {
+      console.error('generateTripsyItineraryNarrative failed:', e);
+    }
+  }
+
+  let part2Html = '';
+  if (narrative) {
+    const narrativeDayByKey = new Map((narrative.days || []).map(d => [d.day_key, d]));
+    const dayNarrativeHtmlParts = await Promise.all(dayKeys.map(async dayKey => {
+      const nd = narrativeDayByKey.get(dayKey);
+      const heading = (nd && nd.title) || (dayKey === 'undated' ? 'Undated' : tripsyDayHeaderLabel(dayKey));
+      const narrativeParagraphs = ((nd && nd.narrative) || '').split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+      const dayPlaces = placesByDay.get(dayKey) || [];
+      const cardsHtml = (await Promise.all(dayPlaces.map(async ev => {
+        const raw = ev.tripsyRaw;
+        const name = raw.name || ev.summary;
+        const address = raw.address || '';
+        const photoDataUrl = await fetchTripsyPlacePhoto(name, address);
+        const isStay = raw.resource === 'hosting';
+        const metaParts = [
+          formatTripitDateRange(ev.start, ev.end),
+          address,
+          isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
+        ].filter(Boolean);
+        const blurb = (nd && nd.place_blurbs && nd.place_blurbs[name]) || raw.notes || '';
+        return `
+          <div class="tp-place-card">
+            ${photoDataUrl
+              ? `<img class="tp-place-card-photo" src="${esc(photoDataUrl)}" alt="${esc(name)}">`
+              : `<div class="tp-place-card-photo-fallback">${esc(tripsyTimelineDotIcon(ev))}</div>`}
+            <div class="tp-place-card-body">
+              <div class="tp-place-card-name">${esc(name)}</div>
+              ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
+              ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
+            </div>
+          </div>
+        `;
+      }))).join('');
+      return `
+        <div class="tp-narrative-day">
+          <h3 class="tp-narrative-day-title">${esc(heading)}</h3>
+          ${narrativeParagraphs.map(p => `<p class="tp-narrative-day-text">${esc(p)}</p>`).join('')}
+          ${cardsHtml}
+        </div>
+      `;
+    }));
+    part2Html = `
+      <div class="tp-section-break">
+        <div class="tp-spread-title">Itinerary</div>
+        ${narrative.trip_intro ? `<p class="tp-trip-intro">${esc(narrative.trip_intro)}</p>` : ''}
+        ${dayNarrativeHtmlParts.join('')}
       </div>
     `;
-  }));
+  } else if (placeEvents.length) {
+    const spreads = await Promise.all(placeEvents.map(async ev => {
+      const raw = ev.tripsyRaw;
+      const name = raw.name || ev.summary;
+      const address = raw.address || '';
+      const photoDataUrl = await fetchTripsyPlacePhoto(name, address);
+      const isStay = raw.resource === 'hosting';
+      const metaParts = [
+        formatTripitDateRange(ev.start, ev.end),
+        address,
+        isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
+      ].filter(Boolean);
+      return `
+        <div class="tp-spread">
+          ${photoDataUrl
+            ? `<img class="tp-spread-photo" src="${esc(photoDataUrl)}" alt="${esc(name)}">`
+            : `<div class="tp-spread-photo-fallback">${esc(tripsyTimelineDotIcon(ev))}</div>`}
+          <div class="tp-spread-name">${esc(name)}</div>
+          ${metaParts.map(m => `<div class="tp-spread-meta">${esc(m)}</div>`).join('')}
+          ${raw.notes ? `<div class="tp-spread-notes">${esc(raw.notes)}</div>` : ''}
+        </div>
+      `;
+    }));
+    part2Html = `<div class="tp-section-break"><div class="tp-spread-title">Photos &amp; Details</div>${spreads.join('')}</div>`;
+  }
 
   let printRoot = document.getElementById('tripsy-print-root');
   if (!printRoot) {
@@ -8207,7 +8410,7 @@ async function openTripsyItineraryPrintView(tripKey) {
       <div class="tp-trip-sub">${esc([formatTripitDateRange(effectiveTrip.start, effectiveTrip.end), effectiveTrip.location].filter(Boolean).join(' • '))}</div>
     </div>
     ${summaryHtml}
-    ${spreads.length ? `<div class="tp-section-break"><div class="tp-spread-title">Photos &amp; Details</div>${spreads.join('')}</div>` : ''}
+    ${part2Html}
   `;
 
   document.body.classList.add('tripsy-printing');
