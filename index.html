@@ -963,8 +963,19 @@ async function updateDriveDataFile(fileId, data) {
 // a separate function rather than generalizing those two, since they're on
 // the hot path for every persistDriveData() call.
 async function uploadBinaryFileToDrive(file) {
+  return uploadBlobToDrive(file, file.name, file.type || 'application/octet-stream');
+}
+
+// Shared by uploadBinaryFileToDrive (Tripsy attachments) and the itinerary
+// place-photo cache (see fetchTripsyPlacePhoto and friends) -- anything that
+// needs actual bytes to live in their own small Drive file, referenced by
+// id, rather than inline (base64) in the shared driveData JSON. That JSON
+// blob PATCHes in full on every save and now also has to be downloadable
+// whole by tooling that reads it directly, so keeping raw bytes out of it
+// matters for more than just its own size.
+async function uploadBlobToDrive(blob, fileName, mimeType) {
   const folderId = await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
-  const buf = await file.arrayBuffer();
+  const buf = await blob.arrayBuffer();
   // Base64-encode in chunks to avoid a call-stack overflow from
   // String.fromCharCode(...bigArray) on large files.
   let binary = '';
@@ -975,10 +986,10 @@ async function uploadBinaryFileToDrive(file) {
   }
   const base64Data = btoa(binary);
   const boundary = 'flightlogboundary';
-  const metadata = { name: file.name, mimeType: file.type || 'application/octet-stream', parents: [folderId] };
+  const metadata = { name: fileName, mimeType, parents: [folderId] };
   const body =
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
-    `--${boundary}\r\nContent-Type: ${metadata.mimeType}\r\nContent-Transfer-Encoding: base64\r\n\r\n${base64Data}\r\n` +
+    `--${boundary}\r\nContent-Type: ${mimeType}\r\nContent-Transfer-Encoding: base64\r\n\r\n${base64Data}\r\n` +
     `--${boundary}--`;
   const res = await driveApiFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
     method: 'POST',
@@ -1798,6 +1809,30 @@ const Store = {
   cacheTripsyPlacePhotoLocal(cacheKey, fields) {
     if (!driveData.tripsyPlacePhotoCache) driveData.tripsyPlacePhotoCache = {};
     driveData.tripsyPlacePhotoCache[cacheKey] = { ...fields, fetchedAt: new Date().toISOString() };
+  },
+  // Reports how many cache entries exist and how many still carry the old
+  // inline photoDataUrl (pre-uploadBlobToDrive) -- backs the "Photo Cache"
+  // card on the Itinerary Photos utility page.
+  async getTripsyPlacePhotoCacheStats() {
+    const cache = driveData.tripsyPlacePhotoCache || {};
+    const entries = Object.values(cache);
+    return { total: entries.length, legacyInline: entries.filter(e => e.photoDataUrl).length };
+  },
+  // One-time cleanup for cache entries written before photos moved to their
+  // own Drive files (see uploadBlobToDrive) -- those old entries carry a
+  // full base64 photoDataUrl inline, which is what bloated driveData to
+  // tens of MB. Wiping the whole cache is safe: every place just gets
+  // re-fetched (and re-cached the new, small way) the next time its
+  // itinerary is printed/previewed.
+  async clearTripsyPlacePhotoCache() {
+    try {
+      driveData.tripsyPlacePhotoCache = {};
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.clearTripsyPlacePhotoCache failed:', e);
+      return false;
+    }
   },
   // Cache of AI-generated itinerary narrative sections (see
   // generateTripsyItineraryNarrative / renderTripsyNarrativePanel), keyed
@@ -5356,6 +5391,7 @@ async function renderUtilitiesUsers() {
 // visual photo section just falls back to category icons.
 async function renderUtilitiesItineraryPhotos() {
   const key = await Store.getPlacesApiKey();
+  const cacheStats = await Store.getTripsyPlacePhotoCacheStats();
   main.innerHTML = `
     <div class="page-title">Itinerary Photos</div>
     <div class="page-sub">The Tripsy Trips page's "Print" button generates a two-part itinerary -- a formal day-by-day summary, followed by a photo spread of each hotel/place. Those photos come from the Google Places API, using the key below.</div>
@@ -5372,10 +5408,21 @@ async function renderUtilitiesItineraryPhotos() {
       <div id="places-api-key-status" style="margin-top:10px; font-size:12px; color:var(--muted);"></div>
     </div>
 
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title">Photo Cache</div>
+      <p style="color:var(--text); line-height:1.6; font-size:14px; margin-bottom:10px;">
+        ${cacheStats.total} place${cacheStats.total === 1 ? '' : 's'} cached${cacheStats.legacyInline ? `, ${cacheStats.legacyInline} of which ${cacheStats.legacyInline === 1 ? 'is' : 'are'} still in the old format (photo bytes stored inline in the shared data file instead of their own Drive file) -- these are what's been bloating that file's size.` : '.'}
+      </p>
+      ${cacheStats.legacyInline ? `
+        <button id="clear-photo-cache-btn" class="btn">Clear Photo Cache</button>
+        <div id="clear-photo-cache-status" style="margin-top:10px; font-size:12px; color:var(--muted);"></div>
+      ` : ''}
+    </div>
+
     <div class="card">
       <div class="card-title">How photos are fetched</div>
       <p style="color:var(--text); line-height:1.6; font-size:14px;">
-        Each place is looked up once, the very first time it's printed, then cached (shared across every user/device) so the same place is never fetched from Places twice. Without a key set here, itineraries still print fine -- the photo spread just uses a category icon instead of a real photo.
+        Each place is looked up once, the very first time it's printed, then stored as its own small Drive file and cached by reference (shared across every user/device) so the same place is never fetched from Places twice. Without a key set here, itineraries still print fine -- the photo spread just uses a category icon instead of a real photo.
       </p>
     </div>
   `;
@@ -5386,6 +5433,18 @@ async function renderUtilitiesItineraryPhotos() {
     const ok = await Store.setPlacesApiKey(value);
     status.textContent = ok ? 'Saved.' : 'Could not save -- storage error. Please try again.';
   });
+  const clearBtn = document.getElementById('clear-photo-cache-btn');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', async () => {
+      if (!confirm(`Clear all ${cacheStats.total} cached itinerary photos? They'll simply be re-fetched (and re-cached, in the new smaller format) the next time each place's itinerary is printed or previewed.`)) return;
+      clearBtn.disabled = true;
+      const status = document.getElementById('clear-photo-cache-status');
+      status.textContent = 'Clearing…';
+      const ok = await Store.clearTripsyPlacePhotoCache();
+      status.textContent = ok ? 'Cleared.' : 'Could not clear -- storage error. Please try again.';
+      if (ok) renderUtilitiesItineraryPhotos();
+    });
+  }
 }
 
 // Populates the live "Authorized Users" card on the Users utility page --
@@ -8466,16 +8525,19 @@ async function tripsyGatherPlacePhotoCandidates(apiKey, name, address, eventTitl
   return photoNames;
 }
 
-async function tripsyFetchPlacePhotoBytesAsDataUrl(apiKey, photoName) {
+async function tripsyFetchPlacePhotoBlob(apiKey, photoName) {
   const photoRes = await fetch(`https://places.googleapis.com/v1/${photoName}/media?maxWidthPx=800&key=${encodeURIComponent(apiKey)}`);
   if (!photoRes.ok) return null;
-  const blob = await photoRes.blob();
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
+  return photoRes.blob();
+}
+
+// Downloads a cached place photo's bytes from its own small Drive file
+// (see uploadBlobToDrive) and hands back an object URL -- cheap, and never
+// touches driveData itself, unlike the old inline-data-URL approach this
+// replaced.
+async function tripsyPlacePhotoDisplayUrl(driveFileId) {
+  const blob = await downloadDriveFileBlob(driveFileId);
+  return URL.createObjectURL(blob);
 }
 
 // Google Places API (New) lookup for the itinerary print view's photo
@@ -8484,11 +8546,11 @@ async function tripsyFetchPlacePhotoBytesAsDataUrl(apiKey, photoName) {
 // ones, since v1 supports CORS for browser callers. Requires
 // driveData.placesApiKey (Utilities > Itinerary Photos); returns null
 // (caller falls back to a category icon) if unset or the lookup fails for
-// any reason. Fetched photos are converted to a data URL and cached in
-// driveData (Store.saveTripsyPlacePhoto), shared across every user/device,
-// so a given place is only ever looked up once -- both to keep Places API
-// usage/cost low and so the raw API key itself never ends up embedded in
-// shared driveData (only the resulting image bytes are).
+// any reason. Fetched photos are uploaded to their own Drive file (see
+// uploadBlobToDrive) and only that file's id is cached in driveData
+// (Store.saveTripsyPlacePhoto) -- shared across every user/device, so a
+// given place is only ever looked up once, without embedding the actual
+// image bytes in the same JSON blob every save/read has to move whole.
 const TRIPSY_PLACE_PHOTO_TTL_DAYS = 180;
 // Set whenever this writes a NEW cache entry (cacheTripsyPlacePhotoLocal,
 // not yet persisted to Drive) -- buildTripsyPrintHtml checks/clears this
@@ -8502,8 +8564,13 @@ async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
   const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle, locationHint);
   if (cacheKey === '|||') return null;
   const cached = await Store.getTripsyPlacePhoto(cacheKey);
-  if (cached && cached.photoDataUrl && (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000) {
-    return cached.photoDataUrl;
+  if (cached && cached.driveFileId && (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000) {
+    try {
+      return await tripsyPlacePhotoDisplayUrl(cached.driveFileId);
+    } catch (e) {
+      console.error('Loading cached place photo failed, refetching:', e);
+      // fall through to refetch below
+    }
   }
   const apiKey = await Store.getPlacesApiKey();
   if (!apiKey) return null;
@@ -8513,11 +8580,12 @@ async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
       console.warn(`fetchTripsyPlacePhoto: no photo found for "${name || eventTitle}"`);
       return null;
     }
-    const photoDataUrl = await tripsyFetchPlacePhotoBytesAsDataUrl(apiKey, photoName);
-    if (!photoDataUrl) return null;
-    Store.cacheTripsyPlacePhotoLocal(cacheKey, { photoDataUrl, photoName, triedPhotoNames: [photoName] });
+    const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
+    if (!blob) return null;
+    const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+    Store.cacheTripsyPlacePhotoLocal(cacheKey, { driveFileId, photoName, triedPhotoNames: [photoName] });
     tripsyPlacePhotoCacheDirty = true;
-    return photoDataUrl;
+    return URL.createObjectURL(blob);
   } catch (e) {
     console.error('fetchTripsyPlacePhoto failed:', e);
     return null;
@@ -8541,10 +8609,11 @@ async function tripsyTryAnotherPlacePhoto(name, address, eventTitle, locationHin
     const candidates = await tripsyGatherPlacePhotoCandidates(apiKey, name, address, eventTitle, locationHint);
     const nextPhotoName = candidates.find(n => !tried.has(n));
     if (!nextPhotoName) return null;
-    const photoDataUrl = await tripsyFetchPlacePhotoBytesAsDataUrl(apiKey, nextPhotoName);
-    if (!photoDataUrl) return null;
-    await Store.saveTripsyPlacePhoto(cacheKey, { photoDataUrl, photoName: nextPhotoName, triedPhotoNames: [...tried, nextPhotoName] });
-    return photoDataUrl;
+    const blob = await tripsyFetchPlacePhotoBlob(apiKey, nextPhotoName);
+    if (!blob) return null;
+    const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName: nextPhotoName, triedPhotoNames: [...tried, nextPhotoName] });
+    return URL.createObjectURL(blob);
   } catch (e) {
     console.error('tripsyTryAnotherPlacePhoto failed:', e);
     return null;
@@ -8582,10 +8651,11 @@ async function tripsyManualSearchPlacePhoto(name, address, eventTitle, locationH
     }
     const photoName = photoNames.find(n => !tried.has(n)) || photoNames[0];
     if (!photoName) return null;
-    const photoDataUrl = await tripsyFetchPlacePhotoBytesAsDataUrl(apiKey, photoName);
-    if (!photoDataUrl) return null;
-    await Store.saveTripsyPlacePhoto(cacheKey, { photoDataUrl, photoName, triedPhotoNames: [...tried, photoName] });
-    return photoDataUrl;
+    const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
+    if (!blob) return null;
+    const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName, triedPhotoNames: [...tried, photoName] });
+    return URL.createObjectURL(blob);
   } catch (e) {
     console.error('tripsyManualSearchPlacePhoto failed:', e);
     return null;
