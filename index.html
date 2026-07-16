@@ -8025,6 +8025,24 @@ function tripsyDayHeaderLabel(dayKey) {
   const [year, month, day] = dayKey.split('-').map(Number);
   return tripitPartsToUtcDate({ year, month, day }).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
+// "Day N" as a calendar-day offset from the trip's first day (day 1 =
+// the trip's own start date), NOT the position of dayKey within whatever
+// subset of days actually has events -- a trip with a free day in the
+// middle (no events at all that day, so it never appears in dayKeys)
+// should still number the day after it "Day 3", not "Day 2", since it
+// really is the third calendar day of the trip. Used by both the print
+// summary's day tiles and the Detailed Itinerary's day dividers, which
+// deliberately number the same way so the two parts never disagree with
+// each other. Returns null if either date can't be parsed, e.g. an
+// undated trip -- callers show "Undated"/'—' in that case instead.
+function tripsyDayNumberFromTripStart(dayKey, tripStartDayKey) {
+  if (!dayKey || !tripStartDayKey) return null;
+  const toDayIndex = k => {
+    const [y, m, d] = k.split('-').map(Number);
+    return Math.round(Date.UTC(y, m - 1, d) / 86400000);
+  };
+  return toDayIndex(dayKey) - toDayIndex(tripStartDayKey) + 1;
+}
 
 // Cluster heuristic for the doc-parse review page: how tightly a doc's
 // unmatched events need to fall together in time to be offered as "these
@@ -9096,7 +9114,14 @@ async function buildTripsyPrintHtml(tripKey) {
   // one has been generated (summaryBlurbByKey), falling back to a plain
   // description (tripsySummaryRowFallbackText) otherwise so Print never
   // breaks on a trip whose summaries haven't been generated yet.
-  let tripsyDayNumber = 0;
+  //
+  // dayKeys only contains days that actually have an event -- a free day
+  // in the middle of the trip with nothing on it never shows a block here
+  // at all -- but the "Day N" number still needs to count that skipped
+  // day, so it's computed from the calendar-day offset from the trip's
+  // own start date (tripsyDayNumberFromTripStart), not from position in
+  // dayKeys.
+  const tripStartDayKey = tripsyDayKey(effectiveTrip.start);
   const summaryHtml = dayKeys.map(dayKey => {
     const items = summaryByDay.get(dayKey) || [];
     const rowsHtml = items.map(item => {
@@ -9116,8 +9141,8 @@ async function buildTripsyPrintHtml(tripKey) {
       `;
     }).join('');
     const isUndated = dayKey === 'undated';
-    if (!isUndated) tripsyDayNumber++;
-    const tileNum = isUndated ? '—' : String(tripsyDayNumber).padStart(2, '0');
+    const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
+    const tileNum = dayNumber != null ? String(dayNumber).padStart(2, '0') : '—';
     const tileDate = isUndated ? '' : tripitPartsToUtcDate({ year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)) }).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
     return `
       <div class="tp-day-block">
@@ -9334,17 +9359,15 @@ async function buildTripsyPrintHtml(tripKey) {
   let part2Html = '';
   if (narrative) {
     const narrativeDayByKey = new Map((narrative.days || []).map(d => [d.day_key, d]));
-    // Captured into a per-call const (dayNumber) as the first synchronous
-    // statement of each map callback below, BEFORE any await -- reading the
-    // shared counter later (after an await) would see whatever every other
-    // day's callback had already incremented it to in the meantime, since
-    // Promise.all runs every callback's synchronous prefix immediately and
-    // only then lets them interleave across their awaits. Capturing it here
-    // gives each day a stable number matching Part 1's summary page.
-    let tripsyDetailedDayNumber = 0;
+    // Same tripsyDayNumberFromTripStart calendar-offset numbering Part 1
+    // uses (a pure function of dayKey, not a mutable counter -- earlier
+    // code incremented a shared counter here, which broke under
+    // Promise.all's concurrent callbacks; see tripsyDayNumberFromTripStart's
+    // own comment for why position-in-dayKeys was wrong in the first
+    // place), so the two parts always agree on which day is "Day N".
     const dayNarrativeHtmlParts = await Promise.all(dayKeys.map(async dayKey => {
       const isUndated = dayKey === 'undated';
-      const dayNumber = isUndated ? null : ++tripsyDetailedDayNumber;
+      const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
       const dayPlaces = placesByDay.get(dayKey) || [];
       const dividerHtml = tripsyDetailedDayDividerHtml(dayKey, dayNumber, tripsyDayCities(dayPlaces));
       const nd = narrativeDayByKey.get(dayKey);
@@ -9369,11 +9392,9 @@ async function buildTripsyPrintHtml(tripKey) {
       </div>
     `;
   } else {
-    // Same capture-before-await reasoning as the narrative branch above.
-    let tripsyDetailedDayNumber = 0;
     const dayBlocks = await Promise.all(dayKeys.map(async dayKey => {
       const isUndated = dayKey === 'undated';
-      const dayNumber = isUndated ? null : ++tripsyDetailedDayNumber;
+      const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
       const dayItems = summaryByDay.get(dayKey) || [];
       const cardsHtml = (await Promise.all(dayItems.map(item => tripsyDetailedCardHtml(item, null)))).join('');
       // No narrative text to fill the gap in this fallback layout, so a
