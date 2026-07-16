@@ -8586,6 +8586,21 @@ async function tripsyPlacePhotoDisplayUrl(driveFileId) {
   return URL.createObjectURL(blob);
 }
 
+// Google Places' photo "name" (a reference token, not a real image id) is
+// NOT a reliable way to detect two places sharing the same underlying
+// photo -- confirmed in production: two different tokens for two
+// different Royal Albert Hall events downloaded to byte-for-byte
+// identical images (same SHA-256). usedPlacePhotoNames alone (in
+// tripsyPlaceCardHtml) missed this entirely since the tokens differed.
+// This hashes the actual downloaded bytes so duplicate detection compares
+// real image content, not an opaque string Google doesn't promise is
+// stable per-image.
+async function tripsyHashBlob(blob) {
+  const buf = await blob.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // Google Places API (New) lookup for the itinerary print view's photo
 // spread (part 2 of openTripsyItineraryPrintView). Uses the modern
 // places.googleapis.com v1 endpoints, not the legacy maps.googleapis.com
@@ -8628,8 +8643,9 @@ async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
     }
     const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
     if (!blob) return null;
+    const contentHash = await tripsyHashBlob(blob);
     const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
-    Store.cacheTripsyPlacePhotoLocal(cacheKey, { driveFileId, photoName, triedPhotoNames: [photoName] });
+    Store.cacheTripsyPlacePhotoLocal(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [photoName] });
     tripsyPlacePhotoCacheDirty = true;
     return URL.createObjectURL(blob);
   } catch (e) {
@@ -8704,20 +8720,29 @@ async function fetchTripsyTransportationPhoto(company) {
 // chosen photo is already showing on an earlier card in the same
 // itinerary -- pulls the full candidate pool for THIS place (same
 // tripsyGatherPlacePhotoCandidates used by "try another") and returns the
-// first one not in usedPhotoNames, or null if every candidate found for
-// this place is already used elsewhere (caller falls back to the plain
-// category icon rather than repeat a photo).
-async function tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHint, usedPhotoNames) {
+// first one that's genuinely different, or null if every candidate found
+// for this place is already used elsewhere (caller falls back to the
+// plain category icon rather than repeat a photo). Checks BOTH the
+// candidate's name token (cheap, no download needed) AND, once
+// downloaded, its actual content hash (tripsyHashBlob) -- two different
+// Places photo tokens can resolve to byte-for-byte the same image (seen
+// in production for two Royal Albert Hall events), so a candidate isn't
+// accepted just for having an unseen token; it has to have unseen bytes.
+async function tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHint, usedPhotoNames, usedPhotoHashes) {
   const apiKey = await Store.getPlacesApiKey();
   if (!apiKey) return null;
   try {
     const candidates = await tripsyGatherPlacePhotoCandidates(apiKey, name, address, eventTitle, locationHint);
-    const nextPhotoName = candidates.find(n => !usedPhotoNames.has(n));
-    if (!nextPhotoName) return null;
-    const blob = await tripsyFetchPlacePhotoBlob(apiKey, nextPhotoName);
-    if (!blob) return null;
-    const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
-    return { photoDataUrl: URL.createObjectURL(blob), photoName: nextPhotoName, driveFileId };
+    for (const photoName of candidates) {
+      if (usedPhotoNames.has(photoName)) continue;
+      const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
+      if (!blob) continue;
+      const contentHash = await tripsyHashBlob(blob);
+      if (usedPhotoHashes.has(contentHash)) continue;
+      const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+      return { photoDataUrl: URL.createObjectURL(blob), photoName, driveFileId, contentHash };
+    }
+    return null;
   } catch (e) {
     console.error('tripsyFindUnusedPlacePhoto failed:', e);
     return null;
@@ -8787,8 +8812,9 @@ async function tripsyTryAnotherPlacePhoto(name, address, eventTitle, locationHin
     if (!nextPhotoName) return null;
     const blob = await tripsyFetchPlacePhotoBlob(apiKey, nextPhotoName);
     if (!blob) return null;
+    const contentHash = await tripsyHashBlob(blob);
     const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
-    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName: nextPhotoName, triedPhotoNames: [...tried, nextPhotoName] });
+    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName: nextPhotoName, contentHash, triedPhotoNames: [...tried, nextPhotoName] });
     return URL.createObjectURL(blob);
   } catch (e) {
     console.error('tripsyTryAnotherPlacePhoto failed:', e);
@@ -8829,8 +8855,9 @@ async function tripsyManualSearchPlacePhoto(name, address, eventTitle, locationH
     if (!photoName) return null;
     const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
     if (!blob) return null;
+    const contentHash = await tripsyHashBlob(blob);
     const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
-    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName, triedPhotoNames: [...tried, photoName] });
+    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [...tried, photoName] });
     return URL.createObjectURL(blob);
   } catch (e) {
     console.error('tripsyManualSearchPlacePhoto failed:', e);
@@ -9489,17 +9516,22 @@ async function buildTripsyPrintHtml(tripKey) {
   // name/meta/blurb text flowing around it via normal CSS float wrap
   // rather than a fixed-column layout.
   const TRIPSY_PLACE_CARD_WIDTH = 42;
-  // Every photoName actually used by a place card so far in this build --
-  // if a place's chosen photo turns out to be one already shown elsewhere
-  // in the same itinerary, tripsyPlaceCardHtml below tries to swap in a
-  // different candidate from that SAME place's own pool instead. Best-
-  // effort, not airtight: card-building runs concurrently (Promise.all
-  // across a day's items, and across days), so two cards whose FIRST
-  // choice already collides on a first-ever (fully uncached) generation
-  // could theoretically both claim it before either one's check runs.
-  // Once a pick is made it's cached, though, so every subsequent
-  // print/preview of this trip stays deduped regardless.
+  // Every photoName/contentHash actually used by a place card so far in
+  // this build -- if a place's chosen photo turns out to be one already
+  // shown elsewhere in the same itinerary, tripsyPlaceCardHtml below
+  // tries to swap in a different candidate from that SAME place's own
+  // pool instead. Checks both: two DIFFERENT Places photo tokens can
+  // resolve to byte-for-byte the same image (confirmed in production for
+  // two Royal Albert Hall events -- same SHA-256, different tokens), so
+  // name-matching alone missed real duplicates; contentHash catches those.
+  // Best-effort, not airtight: card-building runs concurrently
+  // (Promise.all across a day's items, and across days), so two cards
+  // whose FIRST choice already collides on a first-ever (fully uncached)
+  // generation could theoretically both claim it before either one's
+  // check runs. Once a pick is made it's cached, though, so every
+  // subsequent print/preview of this trip stays deduped regardless.
   const usedPlacePhotoNames = new Set();
+  const usedPlacePhotoHashes = new Set();
   const tripsyPlaceCardHtml = async (ev, blurb) => {
     const raw = ev.tripsyRaw;
     const name = raw.name || ev.summary;
@@ -9511,14 +9543,36 @@ async function buildTripsyPrintHtml(tripKey) {
     const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
     const isSkipped = !!(cachedEntry && cachedEntry.skipped);
     let photoDataUrl = isSkipped ? null : await fetchTripsyPlacePhoto(name, address, ev.summary, locationHint);
-    let photoName = isSkipped ? null : ((await Store.getTripsyPlacePhoto(cacheKey)) || {}).photoName || null;
-    if (photoDataUrl && photoName && usedPlacePhotoNames.has(photoName)) {
-      const alt = await tripsyFindUnusedPlacePhoto(name, address, ev.summary, locationHint, usedPlacePhotoNames);
+    const freshEntry = isSkipped ? null : await Store.getTripsyPlacePhoto(cacheKey);
+    let photoName = freshEntry?.photoName || null;
+    let photoHash = freshEntry?.contentHash || null;
+    // Entry predates contentHash being stored (or somehow missed it) --
+    // compute and backfill it now so this and every future print/preview
+    // can dedup by content, not just by the unreliable name token.
+    if (photoDataUrl && !photoHash) {
+      try {
+        const blob = await fetch(photoDataUrl).then(r => r.blob());
+        photoHash = await tripsyHashBlob(blob);
+        if (freshEntry) {
+          Store.cacheTripsyPlacePhotoLocal(cacheKey, { ...freshEntry, contentHash: photoHash });
+          tripsyPlacePhotoCacheDirty = true;
+        }
+      } catch (e) {
+        console.error('tripsyPlaceCardHtml: failed to hash photo for dedup:', e);
+      }
+    }
+    const isDuplicate = photoDataUrl && (
+      (photoName && usedPlacePhotoNames.has(photoName)) ||
+      (photoHash && usedPlacePhotoHashes.has(photoHash))
+    );
+    if (isDuplicate) {
+      const alt = await tripsyFindUnusedPlacePhoto(name, address, ev.summary, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
       if (alt) {
         photoDataUrl = alt.photoDataUrl;
         photoName = alt.photoName;
+        photoHash = alt.contentHash;
         Store.cacheTripsyPlacePhotoLocal(cacheKey, {
-          driveFileId: alt.driveFileId, photoName,
+          driveFileId: alt.driveFileId, photoName, contentHash: photoHash,
           triedPhotoNames: [...new Set([...(cachedEntry?.triedPhotoNames || []), photoName])],
         });
         tripsyPlacePhotoCacheDirty = true;
@@ -9527,9 +9581,11 @@ async function buildTripsyPrintHtml(tripKey) {
         // plain category icon rather than repeat a photo already shown.
         photoDataUrl = null;
         photoName = null;
+        photoHash = null;
       }
     }
     if (photoName) usedPlacePhotoNames.add(photoName);
+    if (photoHash) usedPlacePhotoHashes.add(photoHash);
     const isStay = raw.resource === 'hosting';
     const metaParts = [
       formatTripitDateRange(ev.start, ev.end),
@@ -9956,10 +10012,11 @@ async function previewTripsyItinerary(tripKey) {
           const thumbs = await galleryCandidatesCache.get(cacheKey);
           const picked = (thumbs || []).find(t => t.photoName === photoName);
           if (!picked) throw new Error('Picked thumbnail no longer available');
+          const contentHash = await tripsyHashBlob(picked.blob);
           const driveFileId = await uploadBlobToDrive(picked.blob, `tripsy-place-photo-${Date.now()}`, picked.blob.type || 'image/jpeg');
           const existing = await Store.getTripsyPlacePhoto(cacheKey);
           const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
-            driveFileId, photoName,
+            driveFileId, photoName, contentHash,
             triedPhotoNames: [...new Set([...(existing?.triedPhotoNames || []), photoName])],
           });
           if (!ok) toast('Could not save this photo choice. Please try again.', 'error');
