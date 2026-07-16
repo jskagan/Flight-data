@@ -610,21 +610,72 @@
   .tp-place-card {
     overflow: hidden; break-inside: avoid; margin: 18px 0; padding-bottom: 14px; border-bottom: 1px solid #DDE2E8;
   }
-  .tp-place-card-photo,
-  .tp-place-card-photo-fallback {
-    float: left; width: var(--tp-card-width, 42%); margin: 0 16px 8px 0; border-radius: 8px;
+  .tp-place-card-photo-wrap {
+    float: left; width: var(--tp-card-width, 42%); margin: 0 16px 8px 0; position: relative;
   }
-  .tp-place-card-float-right .tp-place-card-photo,
-  .tp-place-card-float-right .tp-place-card-photo-fallback {
+  .tp-place-card-float-right .tp-place-card-photo-wrap {
     float: right; margin: 0 0 8px 16px;
   }
-  .tp-place-card-photo { max-height: 240px; object-fit: cover; display: block; }
+  .tp-place-card-photo { width: 100%; max-height: 240px; object-fit: cover; border-radius: 8px; display: block; }
   .tp-place-card-photo-fallback {
-    height: 160px; display: flex; align-items: center; justify-content: center; font-size: 44px; background: #F0F2F5;
+    width: 100%; height: 160px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 44px; background: #F0F2F5;
   }
   .tp-place-card-name { font-family: var(--mono); font-size: 15px; font-weight: 700; }
   .tp-place-card-meta { font-size: 12px; color: #556; margin-top: 2px; }
   .tp-place-card-blurb { font-size: 13px; line-height: 1.5; margin-top: 6px; color: #333; }
+  /* Only meaningful in the on-screen Preview overlay (previewTripsyItinerary)
+     -- hidden during an actual print, since there's no interactivity once
+     paper/PDF output has been produced. .tp-photo-controls holds both the
+     🔄 refresh and 🚫 omit buttons as a pair, always in the bottom-right
+     corner of the photo (or its fallback icon) regardless of whether a
+     photo is currently showing. */
+  .tp-photo-controls {
+    position: absolute; bottom: 6px; right: 6px; display: flex; gap: 6px;
+  }
+  .tp-photo-refresh-btn {
+    width: 30px; height: 30px; border-radius: 50%; border: none;
+    background: rgba(0,0,0,0.55); color: #fff; font-size: 15px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .tp-photo-refresh-btn:hover { background: rgba(0,0,0,0.75); }
+  /* Shown inside the fallback photo area (tripsyPhotoManualSearchBoxHtml)
+     whenever no automatic photo was found, or "Try another" runs out of
+     candidates -- lets the owner enter their own search terms. Omitting a
+     photo entirely is the 🚫 button in .tp-photo-controls above, not part
+     of this box. Preview-only, same as the controls above. */
+  .tp-photo-manual-search {
+    position: absolute; inset: 0; background: rgba(255,255,255,0.94); border-radius: 8px;
+    display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 8px; padding: 10px;
+  }
+  .tp-photo-search-input {
+    font-family: var(--sans); font-size: 13px; padding: 6px 8px; border-radius: 6px; border: 1px solid #ccc;
+  }
+  .tp-photo-manual-search .btn { font-size: 12px; padding: 6px 8px; }
+  @media print {
+    .tp-photo-controls, .tp-photo-manual-search { display: none !important; }
+  }
+
+  /* On-screen preview overlay (previewTripsyItinerary) -- shows the same
+     #tripsy-print-root HTML the real print flow builds, but as a normal
+     scrollable on-screen modal, entirely separate from the
+     body.tripsy-printing / @media print machinery above, so opening it
+     never triggers the OS print dialog. Deliberately hidden from print
+     itself (display:none inside @media print) since if it were somehow
+     left open while printing, it shouldn't ever end up as a second copy
+     of the document alongside #tripsy-print-root. */
+  #tripsy-preview-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9000;
+    overflow-y: auto; padding: 32px 16px; flex-direction: column; align-items: center;
+  }
+  @media print {
+    #tripsy-preview-overlay { display: none !important; }
+  }
+  .tripsy-preview-toolbar {
+    max-width: 800px; width: 100%; display: flex; justify-content: flex-end; gap: 10px; margin-bottom: 12px;
+  }
+  .tripsy-preview-paper {
+    width: 100%; max-width: 800px; background: #fff; border-radius: 8px; padding: 40px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5); font-family: var(--sans); color: #1A222C;
+  }
 </style>
 </head>
 <body>
@@ -1645,17 +1696,23 @@ const Store = {
       return false;
     }
   },
-  // Cache of fetched Places photos, keyed by a normalized "name|address"
-  // string, shared across every user/device via driveData so the Places
-  // API is only ever called once per distinct place, not once per print.
+  // Cache of fetched Places photos, keyed by a normalized
+  // "name|address|eventTitle" string, shared across every user/device via
+  // driveData so the Places API is only ever called once per distinct
+  // place, not once per print. `fields` also carries `photoName` (the
+  // Places photo resource that produced `photoDataUrl`) and
+  // `triedPhotoNames` (every photo resource shown for this place so far,
+  // including the current one) so tripsyTryAnotherPlacePhoto can always
+  // pick a genuinely different photo next time rather than looping back
+  // to one already rejected.
   async getTripsyPlacePhoto(cacheKey) {
     const entry = (driveData.tripsyPlacePhotoCache || {})[cacheKey];
     return entry || null;
   },
-  async saveTripsyPlacePhoto(cacheKey, photoDataUrl) {
+  async saveTripsyPlacePhoto(cacheKey, fields) {
     try {
       if (!driveData.tripsyPlacePhotoCache) driveData.tripsyPlacePhotoCache = {};
-      driveData.tripsyPlacePhotoCache[cacheKey] = { photoDataUrl, fetchedAt: new Date().toISOString() };
+      driveData.tripsyPlacePhotoCache[cacheKey] = { ...fields, fetchedAt: new Date().toISOString() };
       await persistDriveData();
       return true;
     } catch (e) {
@@ -8160,9 +8217,82 @@ function tripsyPrintSummaryDetailLines(ev) {
 // cache key too, since the same address can host different experiences
 // (e.g. a resort's spa vs. its restaurant) that should get different
 // photos rather than sharing one cached result.
+function tripsyPlacePhotoCacheKey(name, address, eventTitle) {
+  return `${name || ''}|${address || ''}|${eventTitle || ''}`.trim().toLowerCase();
+}
+
+// Runs the same place through several query variants (most-specific to
+// least) and pools every distinct photo *name* found across all of them
+// (checking up to 5 results per search, and every photo on each result --
+// not just result[0]'s first photo, since the top-ranked match for a given
+// query sometimes has no photos at all even when a lower-ranked result
+// does, e.g. a chain listing vs. the specific branch). This pool is what
+// both the initial fetch (picks candidates[0]) and "try another"
+// (tripsyTryAnotherPlacePhoto, picks the next not-yet-shown one) draw
+// from, so cycling through photos in the itinerary preview always finds a
+// genuinely different one rather than re-running the same narrow search.
+async function tripsyGatherPlacePhotoCandidates(apiKey, name, address, eventTitle) {
+  const queryVariants = [
+    [name, eventTitle, address],
+    [name, address],
+    [eventTitle, address],
+    [name],
+  ]
+    .map(parts => parts.filter(Boolean).join(', '))
+    .filter((q, i, arr) => q && arr.indexOf(q) === i); // drop empties + de-dupe
+  const photoNames = [];
+  for (const query of queryVariants) {
+    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.photos' },
+      body: JSON.stringify({ textQuery: query, maxResultCount: 5 }),
+    });
+    if (!res.ok) continue;
+    const data = await res.json();
+    for (const place of data?.places || []) {
+      for (const photo of place?.photos || []) {
+        if (photo?.name && !photoNames.includes(photo.name)) photoNames.push(photo.name);
+      }
+    }
+  }
+  return photoNames;
+}
+
+async function tripsyFetchPlacePhotoBytesAsDataUrl(apiKey, photoName) {
+  const photoRes = await fetch(`https://places.googleapis.com/v1/${photoName}/media?maxWidthPx=800&key=${encodeURIComponent(apiKey)}`);
+  if (!photoRes.ok) return null;
+  const blob = await photoRes.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Google Places API (New) lookup for the itinerary print view's photo
+// spread (part 2 of openTripsyItineraryPrintView). Uses the modern
+// places.googleapis.com v1 endpoints, not the legacy maps.googleapis.com
+// ones, since v1 supports CORS for browser callers. Requires
+// driveData.placesApiKey (Utilities > Itinerary Photos); returns null
+// (caller falls back to a category icon) if unset or the lookup fails for
+// any reason. Fetched photos are converted to a data URL and cached in
+// driveData (Store.saveTripsyPlacePhoto), shared across every user/device,
+// so a given place is only ever looked up once -- both to keep Places API
+// usage/cost low and so the raw API key itself never ends up embedded in
+// shared driveData (only the resulting image bytes are).
+//
+// `eventTitle` (the event's own summary, e.g. "Couples Massage" or "Hike
+// to Waterfall") is folded into the search query alongside name/address --
+// many activities are generic/local spots that Places can't resolve from
+// name+address alone, but the title usually says what kind of experience
+// it is, which meaningfully improves the match. It's included in the
+// cache key too, since the same address can host different experiences
+// (e.g. a resort's spa vs. its restaurant) that should get different
+// photos rather than sharing one cached result.
 const TRIPSY_PLACE_PHOTO_TTL_DAYS = 180;
 async function fetchTripsyPlacePhoto(name, address, eventTitle) {
-  const cacheKey = `${name || ''}|${address || ''}|${eventTitle || ''}`.trim().toLowerCase();
+  const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle);
   if (cacheKey === '||') return null;
   const cached = await Store.getTripsyPlacePhoto(cacheKey);
   if (cached && cached.photoDataUrl && (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000) {
@@ -8171,29 +8301,117 @@ async function fetchTripsyPlacePhoto(name, address, eventTitle) {
   const apiKey = await Store.getPlacesApiKey();
   if (!apiKey) return null;
   try {
-    const searchRes = await fetch('https://places.googleapis.com/v1/places:searchText', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.photos' },
-      body: JSON.stringify({ textQuery: [name, eventTitle, address].filter(Boolean).join(', '), maxResultCount: 1 }),
-    });
-    const searchData = await searchRes.json();
-    const photoName = searchData?.places?.[0]?.photos?.[0]?.name;
-    if (!photoName) return null;
-    const photoRes = await fetch(`https://places.googleapis.com/v1/${photoName}/media?maxWidthPx=800&key=${encodeURIComponent(apiKey)}`);
-    if (!photoRes.ok) return null;
-    const blob = await photoRes.blob();
-    const photoDataUrl = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-    await Store.saveTripsyPlacePhoto(cacheKey, photoDataUrl);
+    const candidates = await tripsyGatherPlacePhotoCandidates(apiKey, name, address, eventTitle);
+    if (!candidates.length) {
+      console.warn(`fetchTripsyPlacePhoto: no photo candidates found for "${name || eventTitle}"`);
+      return null;
+    }
+    const photoName = candidates[0];
+    const photoDataUrl = await tripsyFetchPlacePhotoBytesAsDataUrl(apiKey, photoName);
+    if (!photoDataUrl) return null;
+    await Store.saveTripsyPlacePhoto(cacheKey, { photoDataUrl, photoName, triedPhotoNames: [photoName] });
     return photoDataUrl;
   } catch (e) {
     console.error('fetchTripsyPlacePhoto failed:', e);
     return null;
   }
+}
+
+// Called from the itinerary Preview overlay's per-card "Try another
+// photo" button -- picks the next candidate photo this place hasn't shown
+// yet (tracked via the cache entry's triedPhotoNames) and caches it as the
+// new pick, so both this preview session and every future print use it
+// going forward. Returns null (caller keeps the current photo displayed)
+// if there's no API key, the place has no untried candidates left, or the
+// fetch fails for any reason.
+async function tripsyTryAnotherPlacePhoto(name, address, eventTitle) {
+  const apiKey = await Store.getPlacesApiKey();
+  if (!apiKey) return null;
+  const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle);
+  try {
+    const cached = await Store.getTripsyPlacePhoto(cacheKey);
+    const tried = new Set((cached && cached.triedPhotoNames) || (cached && cached.photoName ? [cached.photoName] : []));
+    const candidates = await tripsyGatherPlacePhotoCandidates(apiKey, name, address, eventTitle);
+    const nextPhotoName = candidates.find(n => !tried.has(n));
+    if (!nextPhotoName) return null;
+    const photoDataUrl = await tripsyFetchPlacePhotoBytesAsDataUrl(apiKey, nextPhotoName);
+    if (!photoDataUrl) return null;
+    await Store.saveTripsyPlacePhoto(cacheKey, { photoDataUrl, photoName: nextPhotoName, triedPhotoNames: [...tried, nextPhotoName] });
+    return photoDataUrl;
+  } catch (e) {
+    console.error('tripsyTryAnotherPlacePhoto failed:', e);
+    return null;
+  }
+}
+
+// Called from the manual-search box that appears in the itinerary Preview
+// whenever a place's automatic search (fetchTripsyPlacePhoto /
+// tripsyTryAnotherPlacePhoto) can't find a photo -- runs the owner's own
+// free-text query instead of the fixed name/title/address variants.
+// Prefers an untried photo (same triedPhotoNames bookkeeping as
+// tripsyTryAnotherPlacePhoto) but will re-show an already-seen one rather
+// than fail outright, since a manual query is a deliberate, specific
+// request. Returns null if nothing at all comes back for that query.
+async function tripsyManualSearchPlacePhoto(name, address, eventTitle, query) {
+  const apiKey = await Store.getPlacesApiKey();
+  if (!apiKey || !query) return null;
+  const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle);
+  try {
+    const cached = await Store.getTripsyPlacePhoto(cacheKey);
+    const tried = new Set((cached && cached.triedPhotoNames) || []);
+    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.photos' },
+      body: JSON.stringify({ textQuery: query, maxResultCount: 5 }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const photoNames = [];
+    for (const place of data?.places || []) {
+      for (const photo of place?.photos || []) {
+        if (photo?.name && !photoNames.includes(photo.name)) photoNames.push(photo.name);
+      }
+    }
+    const photoName = photoNames.find(n => !tried.has(n)) || photoNames[0];
+    if (!photoName) return null;
+    const photoDataUrl = await tripsyFetchPlacePhotoBytesAsDataUrl(apiKey, photoName);
+    if (!photoDataUrl) return null;
+    await Store.saveTripsyPlacePhoto(cacheKey, { photoDataUrl, photoName, triedPhotoNames: [...tried, photoName] });
+    return photoDataUrl;
+  } catch (e) {
+    console.error('tripsyManualSearchPlacePhoto failed:', e);
+    return null;
+  }
+}
+
+// Marks a place as "no photo wanted" -- set from the manual-search box's
+// Skip button. Persists indefinitely (not a TTL'd cache entry to
+// re-attempt later): the owner made a deliberate choice, so
+// tripsyPlaceCardHtml checks this flag up front and renders a text-only
+// card, skipping the Places API entirely for this place from then on
+// (in both future Preview opens and Print, since they share the same
+// card-building code).
+async function tripsySkipPlacePhoto(name, address, eventTitle) {
+  const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle);
+  return Store.saveTripsyPlacePhoto(cacheKey, { skipped: true });
+}
+
+// Markup for the manual-search box shown inside a place card's photo area
+// whenever no automatic photo was found (tripsyPlaceCardHtml) or "Try
+// another" runs out of candidates (the Preview overlay's click handler
+// injects this same markup dynamically in that case). Only ever rendered
+// in the on-screen Preview -- hidden during an actual print, same as the
+// refresh/omit buttons (see the @media print rule for
+// .tp-photo-manual-search). No Skip button here -- the 🚫 omit button in
+// .tp-photo-controls is always present regardless of whether a photo is
+// currently showing, so this box only needs its own Search action.
+function tripsyPhotoManualSearchBoxHtml() {
+  return `
+    <div class="tp-photo-manual-search" data-tripsy-photo-manual-search>
+      <input type="text" class="tp-photo-search-input" data-tripsy-photo-search-input placeholder="Search terms…">
+      <button type="button" class="btn" data-tripsy-photo-search-btn>Search</button>
+    </div>
+  `;
 }
 
 // Shared pipeline: pendingChanges -> effective events -> visible events ->
@@ -8459,17 +8677,21 @@ async function renderTripsyNarrativePanel(panel, trip) {
   });
 }
 
-// Builds and triggers window.print() for a two-part printable/save-as-PDF
-// itinerary for one trip: a formal day-by-day summary (part 1), followed
-// by a page-break then a photo spread of each hotel/place (part 2).
+// Assembles the two-part printable itinerary's HTML for one trip -- a
+// formal day-by-day summary (part 1), followed by a page-break then either
+// the narrative/photo layout or the flat photo-grid fallback (part 2).
 // Reuses the exact same event pipeline renderTripsyEventsListImpl uses for
 // the on-screen timeline (getEffectiveTripsy*/expandMultiDayTripsyEvents/
 // insertTripsyLayovers/tripsyDayKey) so the printed order/content can never
 // drift from what's shown on screen, aside from part 1's extra
 // confirmation/phone/website fields (see tripsyPrintSummaryDetailLines).
-async function openTripsyItineraryPrintView(tripKey) {
+// Pure HTML-string builder -- no DOM writes, no window.print() -- so both
+// openTripsyItineraryPrintView (writes it into #tripsy-print-root and
+// prints) and previewTripsyItinerary (shows it on-screen in an overlay,
+// with no OS print dialog) share one code path and can never drift apart.
+async function buildTripsyPrintHtml(tripKey) {
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
-  if (!trip) return;
+  if (!trip) return null;
   const { effectiveTrip, dayKeys, byDay, placesByDay, placeEvents } = await buildTripsyPrintDayData(trip);
 
   // ---- Part 1: summary, grouped by day ----
@@ -8532,7 +8754,10 @@ async function openTripsyItineraryPrintView(tripKey) {
     const raw = ev.tripsyRaw;
     const name = raw.name || ev.summary;
     const address = raw.address || '';
-    const photoDataUrl = await fetchTripsyPlacePhoto(name, address, ev.summary);
+    const cacheKey = tripsyPlacePhotoCacheKey(name, address, ev.summary);
+    const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
+    const isSkipped = !!(cachedEntry && cachedEntry.skipped);
+    const photoDataUrl = isSkipped ? null : await fetchTripsyPlacePhoto(name, address, ev.summary);
     const isStay = raw.resource === 'hosting';
     const metaParts = [
       formatTripitDateRange(ev.start, ev.end),
@@ -8542,11 +8767,21 @@ async function openTripsyItineraryPrintView(tripKey) {
     const floatSide = tripsyPlaceCardIndex % 2 === 0 ? 'left' : 'right';
     const widthPct = TRIPSY_PLACE_CARD_WIDTHS[tripsyPlaceCardIndex % TRIPSY_PLACE_CARD_WIDTHS.length];
     tripsyPlaceCardIndex++;
-    return `
-      <div class="tp-place-card tp-place-card-float-${floatSide}" style="--tp-card-width:${widthPct}%;">
+    const photoAreaHtml = isSkipped ? '' : `
+      <div class="tp-place-card-photo-wrap">
         ${photoDataUrl
           ? `<img class="tp-place-card-photo" src="${esc(photoDataUrl)}" alt="${esc(name)}">`
           : `<div class="tp-place-card-photo-fallback">${esc(tripsyTimelineDotIcon(ev))}</div>`}
+        <div class="tp-photo-controls">
+          <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-refresh title="Try another photo">🔄</button>
+          <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-skip-btn title="Omit this photo">🚫</button>
+        </div>
+        ${!photoDataUrl ? tripsyPhotoManualSearchBoxHtml() : ''}
+      </div>
+    `;
+    return `
+      <div class="tp-place-card ${isSkipped ? 'tp-place-card-no-photo' : `tp-place-card-float-${floatSide}`}" ${isSkipped ? '' : `style="--tp-card-width:${widthPct}%;"`} data-tripsy-place-name="${esc(name)}" data-tripsy-place-address="${esc(address)}" data-tripsy-place-title="${esc(ev.summary)}">
+        ${photoAreaHtml}
         <div class="tp-place-card-name">${esc(name)}</div>
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
         ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
@@ -8588,13 +8823,7 @@ async function openTripsyItineraryPrintView(tripKey) {
     part2Html = `<div class="tp-section-break"><div class="tp-spread-title">Photos &amp; Details</div>${cards.join('')}</div>`;
   }
 
-  let printRoot = document.getElementById('tripsy-print-root');
-  if (!printRoot) {
-    printRoot = document.createElement('div');
-    printRoot.id = 'tripsy-print-root';
-    document.body.appendChild(printRoot);
-  }
-  printRoot.innerHTML = `
+  return `
     <div class="tp-summary-header">
       <div class="tp-trip-name">${esc(effectiveTrip.name)}</div>
       <div class="tp-trip-sub">${esc([formatTripitDateRange(effectiveTrip.start, effectiveTrip.end), effectiveTrip.location].filter(Boolean).join(' • '))}</div>
@@ -8602,11 +8831,182 @@ async function openTripsyItineraryPrintView(tripKey) {
     ${summaryHtml}
     ${part2Html}
   `;
+}
+
+function getOrCreateTripsyPrintRoot() {
+  let printRoot = document.getElementById('tripsy-print-root');
+  if (!printRoot) {
+    printRoot = document.createElement('div');
+    printRoot.id = 'tripsy-print-root';
+    document.body.appendChild(printRoot);
+  }
+  return printRoot;
+}
+
+async function openTripsyItineraryPrintView(tripKey) {
+  const html = await buildTripsyPrintHtml(tripKey);
+  if (html == null) return;
+  const printRoot = getOrCreateTripsyPrintRoot();
+  printRoot.innerHTML = html;
 
   document.body.classList.add('tripsy-printing');
   const cleanup = () => document.body.classList.remove('tripsy-printing');
   window.addEventListener('afterprint', cleanup, { once: true });
   window.print();
+}
+
+// On-screen preview: builds the exact same HTML as Print (same photo
+// fetches, same narrative cache reads -- nothing is generated fresh here)
+// and shows it in a scrollable overlay, entirely outside the
+// @media print / body.tripsy-printing machinery, so it never triggers the
+// OS print dialog. The overlay's own Print button hands the already-built
+// HTML to the real print flow directly (openTripsyItineraryPrintView is
+// NOT called again), so previewing then printing never re-fetches photos
+// or re-reads the narrative cache a second time.
+async function previewTripsyItinerary(tripKey) {
+  const html = await buildTripsyPrintHtml(tripKey);
+  if (html == null) return;
+
+  let overlay = document.getElementById('tripsy-preview-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'tripsy-preview-overlay';
+    overlay.innerHTML = `
+      <div class="tripsy-preview-toolbar">
+        <button class="btn" id="tripsy-preview-close-btn">Close</button>
+        <button class="btn primary" id="tripsy-preview-print-btn">Print</button>
+      </div>
+      <div class="tripsy-preview-paper" id="tripsy-preview-content"></div>
+    `;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#tripsy-preview-close-btn').addEventListener('click', () => {
+      overlay.style.display = 'none';
+    });
+    overlay.querySelector('#tripsy-preview-print-btn').addEventListener('click', () => {
+      const currentHtml = overlay.querySelector('#tripsy-preview-content').innerHTML;
+      overlay.style.display = 'none';
+      const printRoot = getOrCreateTripsyPrintRoot();
+      printRoot.innerHTML = currentHtml;
+      document.body.classList.add('tripsy-printing');
+      const cleanup = () => document.body.classList.remove('tripsy-printing');
+      window.addEventListener('afterprint', cleanup, { once: true });
+      window.print();
+    });
+    // Delegated so it keeps working across every innerHTML re-render of
+    // #tripsy-preview-content (one listener, attached once, rather than
+    // re-binding per card on every open). Lets you keep whichever photo
+    // you like on each card and only refetch the ones you don't --
+    // clicking swaps just that card's image and persists the new pick to
+    // Store, so it's also what Print uses from here on, not just this
+    // preview session.
+    const previewContent = overlay.querySelector('#tripsy-preview-content');
+
+    const swapCardPhoto = (card, name, photoDataUrl) => {
+      const wrap = card.querySelector('.tp-place-card-photo-wrap');
+      let img = wrap.querySelector('img.tp-place-card-photo');
+      const fallback = wrap.querySelector('.tp-place-card-photo-fallback');
+      if (!img) {
+        img = document.createElement('img');
+        img.className = 'tp-place-card-photo';
+        img.alt = name;
+        wrap.insertBefore(img, wrap.firstChild);
+      }
+      img.src = photoDataUrl;
+      if (fallback) fallback.remove();
+      const searchBox = wrap.querySelector('[data-tripsy-photo-manual-search]');
+      if (searchBox) searchBox.remove();
+    };
+
+    previewContent.addEventListener('click', async e => {
+      const refreshBtn = e.target.closest('[data-tripsy-photo-refresh]');
+      const searchBtn = e.target.closest('[data-tripsy-photo-search-btn]');
+      const skipBtn = e.target.closest('[data-tripsy-photo-skip-btn]');
+      if (!refreshBtn && !searchBtn && !skipBtn) return;
+
+      const card = e.target.closest('.tp-place-card');
+      if (!card) return;
+      const name = card.dataset.tripsyPlaceName;
+      const address = card.dataset.tripsyPlaceAddress;
+      const title = card.dataset.tripsyPlaceTitle;
+
+      if (refreshBtn) {
+        const originalText = refreshBtn.textContent;
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = '⏳';
+        try {
+          const photoDataUrl = await tripsyTryAnotherPlacePhoto(name, address, title);
+          if (!photoDataUrl) {
+            toast('No more automatic photos found for this place -- try a manual search below.', 'error');
+            const wrap = card.querySelector('.tp-place-card-photo-wrap');
+            if (wrap && !wrap.querySelector('[data-tripsy-photo-manual-search]')) {
+              wrap.insertAdjacentHTML('beforeend', tripsyPhotoManualSearchBoxHtml());
+            }
+            return;
+          }
+          swapCardPhoto(card, name, photoDataUrl);
+        } catch (err) {
+          console.error('tripsyTryAnotherPlacePhoto failed:', err);
+          toast('Could not fetch another photo. Please try again.', 'error');
+        } finally {
+          refreshBtn.disabled = false;
+          refreshBtn.textContent = originalText;
+        }
+        return;
+      }
+
+      if (searchBtn) {
+        const input = card.querySelector('[data-tripsy-photo-search-input]');
+        const query = (input?.value || '').trim();
+        if (!query) { toast('Enter search terms first.', 'error'); return; }
+        const originalText = searchBtn.textContent;
+        searchBtn.disabled = true;
+        searchBtn.textContent = '…';
+        try {
+          const photoDataUrl = await tripsyManualSearchPlacePhoto(name, address, title, query);
+          if (!photoDataUrl) {
+            toast('No photo found for that search -- try different terms.', 'error');
+            return;
+          }
+          swapCardPhoto(card, name, photoDataUrl);
+        } catch (err) {
+          console.error('tripsyManualSearchPlacePhoto failed:', err);
+          toast('Could not search for a photo. Please try again.', 'error');
+        } finally {
+          searchBtn.disabled = false;
+          searchBtn.textContent = originalText;
+        }
+        return;
+      }
+
+      if (skipBtn) {
+        skipBtn.disabled = true;
+        try {
+          const ok = await tripsySkipPlacePhoto(name, address, title);
+          if (!ok) { toast('Could not skip this photo. Please try again.', 'error'); return; }
+          card.querySelector('.tp-place-card-photo-wrap')?.remove();
+          card.classList.remove('tp-place-card-float-left', 'tp-place-card-float-right');
+          card.classList.add('tp-place-card-no-photo');
+        } catch (err) {
+          console.error('tripsySkipPlacePhoto failed:', err);
+          toast('Could not skip this photo. Please try again.', 'error');
+        } finally {
+          skipBtn.disabled = false;
+        }
+      }
+    });
+
+    // Enter in the manual-search input triggers the same search as
+    // clicking its Search button, without submitting any surrounding form
+    // (there isn't one -- this just simulates the button click).
+    previewContent.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      if (!e.target.closest('[data-tripsy-photo-search-input]')) return;
+      e.preventDefault();
+      e.target.closest('.tp-place-card')?.querySelector('[data-tripsy-photo-search-btn]')?.click();
+    });
+  }
+  overlay.querySelector('#tripsy-preview-content').innerHTML = html;
+  overlay.style.display = 'flex';
 }
 
 // Positions each trip's connecting line as one segment PER GAP between
@@ -9114,6 +9514,12 @@ async function renderTripsyEventsListImpl() {
       `<button class="btn" data-tripsy-print-itinerary data-key="${esc(trip.key)}" title="Print Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🖨️</button>`,
       'Print'
     );
+    // Available to every viewer, same as Print -- builds the exact same
+    // HTML without ever calling window.print(). See previewTripsyItinerary.
+    const previewButtonHtml = iconLabelButton(
+      `<button class="btn" data-tripsy-preview-itinerary data-key="${esc(trip.key)}" title="Preview Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:18px; display:flex; align-items:center; justify-content:center;">👁️</button>`,
+      'Preview'
+    );
     // Owner-only, since it's the only thing that spends the Anthropic key
     // (see generateTripsyItineraryNarrative). Non-owners never see this and
     // Print just uses whatever the owner has already generated/cached.
@@ -9271,6 +9677,7 @@ async function renderTripsyEventsListImpl() {
             ${addButtonHtml}
             ${docStatusButtonHtml}
             ${offlineMenuButtonHtml}
+            ${previewButtonHtml}
             ${printButtonHtml}
             ${narrativeButtonHtml}
             ${editButtonHtml}
@@ -9324,6 +9731,24 @@ async function renderTripsyEventsListImpl() {
       } catch (err) {
         console.error('openTripsyItineraryPrintView failed:', err);
         toast("Could not build the printable itinerary. Please try again.", "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-preview-itinerary]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '⏳';
+      try {
+        await previewTripsyItinerary(btn.dataset.key);
+      } catch (err) {
+        console.error('previewTripsyItinerary failed:', err);
+        toast("Could not build the itinerary preview. Please try again.", "error");
       } finally {
         btn.disabled = false;
         btn.textContent = originalText;
