@@ -1661,6 +1661,28 @@ const Store = {
       return false;
     }
   },
+  // Cache of AI-generated itinerary narrative sections (see
+  // generateTripsyItineraryNarrative / renderTripsyNarrativePanel), keyed
+  // by "<tripKey>::intro" or "<tripKey>::day::<dayKey>" -- one entry per
+  // trip-intro or per-day section, each with a content fingerprint so a
+  // later data edit can be flagged stale without silently regenerating or
+  // discarding text the owner chose to keep. The print view reads this
+  // cache directly and never calls Claude itself -- generation only
+  // happens from the owner-only Edit Narrative panel.
+  async getTripsyNarrativeCache() {
+    return { ...(driveData.tripsyNarrativeCache || {}) };
+  },
+  async saveTripsyNarrativeSections(sectionsMap) {
+    try {
+      if (!driveData.tripsyNarrativeCache) driveData.tripsyNarrativeCache = {};
+      Object.assign(driveData.tripsyNarrativeCache, sectionsMap);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.saveTripsyNarrativeSections failed:', e);
+      return false;
+    }
+  },
 };
 
 // ---- PS Reservations (Gmail-sourced) ----
@@ -8163,36 +8185,106 @@ async function fetchTripsyPlacePhoto(name, address) {
   }
 }
 
+// Shared pipeline: pendingChanges -> effective events -> visible events ->
+// expand/sort/layover -> day buckets. Used by both openTripsyItineraryPrintView
+// (Part 1 summary + Part 2 narrative/photos) and renderTripsyNarrativePanel,
+// so "what Print shows" and "what the Edit Narrative panel lets you
+// regenerate" can never drift out of sync with each other.
+async function buildTripsyPrintDayData(trip) {
+  const pendingChanges = isOwner ? await Store.listTripsyPendingChanges() : [];
+  const effectiveTrip = getEffectiveTripsyTrip(trip, pendingChanges);
+  const effectiveEvents = trip.events.map(ev => getEffectiveTripsyEvent(ev, pendingChanges));
+  const visibleEvents = effectiveEvents.filter(ev => !isTripsyEventEffectivelyHidden(ev));
+  const chronologicalEvents = expandMultiDayTripsyEvents(visibleEvents).sort((a, b) => {
+    const special = tripsyMultiDayEventOrder(a, b);
+    if (special != null) return special;
+    return new Date(a.start || 0) - new Date(b.start || 0);
+  });
+  const sortedEvents = insertTripsyLayovers(chronologicalEvents);
+
+  const dayKeys = [];
+  const byDay = new Map();
+  for (const ev of sortedEvents) {
+    const dayKey = tripsyDayKey(ev.start) || 'undated';
+    if (!byDay.has(dayKey)) { byDay.set(dayKey, []); dayKeys.push(dayKey); }
+    byDay.get(dayKey).push(ev);
+  }
+
+  const placeEvents = visibleEvents.filter(ev => ev.tripsyRaw && (ev.tripsyRaw.resource === 'hosting' || ev.tripsyRaw.resource === 'activity'));
+  const placesByDay = new Map();
+  for (const ev of placeEvents) {
+    const dayKey = tripsyDayKey(ev.start) || 'undated';
+    if (!placesByDay.has(dayKey)) placesByDay.set(dayKey, []);
+    placesByDay.get(dayKey).push(ev);
+  }
+
+  return { effectiveTrip, dayKeys, byDay, placesByDay, placeEvents };
+}
+
+// The subset of a day's event data that's relevant to narrative generation
+// (and, via tripsyContentFingerprint, to detecting when that data has
+// changed since a cached narrative section was generated). Shared between
+// generateTripsyItineraryNarrative's prompt payload and
+// renderTripsyNarrativePanel's staleness check, so they always fingerprint
+// the exact same fields.
+function tripsyNarrativeDayPromptData(dayKey, events) {
+  return {
+    day_key: dayKey,
+    date: dayKey === 'undated' ? 'Undated' : tripsyDayHeaderLabel(dayKey),
+    events: events.filter(ev => !ev._layover).map(ev => ({
+      type: ev.tripsyRaw ? ev.tripsyRaw.resource : 'other',
+      title: ev.summary,
+      time: formatTripitTime(ev.start) || null,
+      place_name: ev.tripsyRaw ? (ev.tripsyRaw.name || null) : null,
+      address: ev.tripsyRaw ? (ev.tripsyRaw.address || null) : null,
+      notes: ev.tripsyRaw ? (ev.tripsyRaw.notes || null) : null,
+    })),
+  };
+}
+
+// Small non-cryptographic string hash (FNV-1a) used to detect whether the
+// event data behind a cached narrative section has changed since it was
+// generated -- not a security boundary, just change-detection so
+// renderTripsyNarrativePanel can flag a section stale without forcing a
+// regenerate or silently discarding text the owner chose to keep.
+function tripsyContentFingerprint(obj) {
+  const str = JSON.stringify(obj);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16);
+}
+
 // Calls the Claude API directly from the browser (anthropic-dangerous-
 // direct-browser-access) to write the itinerary print view's magazine-
 // style narrative section -- a short trip overview plus one titled,
 // prose-narrated section per day, referencing the trip's real places by
-// name so tripsyBuildNarrativePart2Html (below) can attach each place's
-// blurb to its own photo/address card. Owner-only (see
-// fetchAnthropicApiKeyFromDrive's own comment for why) and entirely
-// optional -- any failure (no key file, network error, malformed
-// response) is caught by the caller, which falls back to the plain photo-
-// grid layout with no narrative text. Claude is instructed to only use
-// facts present in dayData, since its blurbs are rendered right next to
-// the real address/confirmation info -- it must not invent details.
-async function generateTripsyItineraryNarrative(effectiveTrip, dayData) {
+// name so the caller can attach each place's blurb to its own photo/
+// address card. Owner-only (see fetchAnthropicApiKeyFromDrive's own
+// comment for why) and entirely optional -- any failure (no key file,
+// network error, malformed response) is caught by the caller. Claude is
+// instructed to only use facts present in dayPromptDataList, since its
+// blurbs are rendered right next to the real address/confirmation info --
+// it must not invent details.
+//
+// `{ includeIntro, dayKeysToGenerate }` scopes generation to only the
+// sections the caller actually wants regenerated (see
+// renderTripsyNarrativePanel) -- full day data for every day is still sent
+// as context for tone/continuity, but the response's trip_intro is only
+// meaningful when includeIntro is true, and only days[] entries whose
+// day_key is in dayKeysToGenerate should be treated as fresh -- the caller
+// (never this function) decides which parts of the response to merge into
+// the cache, so a run that generates 1 day never touches any other day's
+// already-cached text.
+async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList, { includeIntro, dayKeysToGenerate }) {
   const apiKey = await fetchAnthropicApiKeyFromDrive();
   const tripSummaryForPrompt = {
     name: effectiveTrip.name,
     location: effectiveTrip.location,
     dateRange: formatTripitDateRange(effectiveTrip.start, effectiveTrip.end),
-    days: dayData.map(d => ({
-      day_key: d.dayKey,
-      date: d.heading,
-      events: d.events.filter(ev => !ev._layover).map(ev => ({
-        type: ev.tripsyRaw ? ev.tripsyRaw.resource : 'other',
-        title: ev.summary,
-        time: formatTripitTime(ev.start) || null,
-        place_name: ev.tripsyRaw ? (ev.tripsyRaw.name || null) : null,
-        address: ev.tripsyRaw ? (ev.tripsyRaw.address || null) : null,
-        notes: ev.tripsyRaw ? (ev.tripsyRaw.notes || null) : null,
-      })),
-    })),
+    days: dayPromptDataList,
   };
   const schema = {
     type: 'object',
@@ -8238,7 +8330,7 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayData) {
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{
         role: 'user',
-        content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. Write a short trip_intro paragraph, then for each day: a short evocative title (e.g. "Day 1 -- Travel Day: First Taste of Palma"), 1-3 short narrative paragraphs weaving the day's events together, and one place_blurbs entry (place_name + a short blurb) per named place (hotel/activity) in that day's events, with place_name exactly matching the place_name given in the data. Only state facts present in the data below -- do not invent hours, prices, history, or amenities. If a day has no named places, place_blurbs can be an empty array.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
+        content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. ${includeIntro ? 'Write a short trip_intro paragraph for the whole trip.' : 'Set trip_intro to an empty string -- it is not being regenerated right now.'} For each day: a short evocative title (e.g. "Day 1 -- Travel Day: First Taste of Palma"), 1-3 short narrative paragraphs weaving the day's events together, and one place_blurbs entry (place_name + a short blurb) per named place (hotel/activity) in that day's events, with place_name exactly matching the place_name given in the data. Only include a days[] entry for these day_key values, in this exact set -- do not write entries for any other day: ${JSON.stringify(dayKeysToGenerate)}. Only state facts present in the data below -- do not invent hours, prices, history, or amenities. If a day has no named places, place_blurbs can be an empty array.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
       }],
     }),
   });
@@ -8252,6 +8344,110 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayData) {
   return JSON.parse(textBlock.text);
 }
 
+// Owner-only panel (opened from the trip card's 📝 Narrative button) for
+// reviewing and selectively (re)generating the itinerary print view's
+// narrative sections -- Print itself never calls Claude (see
+// openTripsyItineraryPrintView), so this is the only place generation
+// happens. Shows the trip intro plus one row per day, each with a
+// checkbox (unchecked by default) and a status derived by comparing a
+// fresh tripsyContentFingerprint of that section's current underlying
+// data against the fingerprint stored alongside its cached text: no cache
+// entry at all is "Not yet generated"; a matching fingerprint is
+// "Current"; a mismatched one is "Stale -- data changed" (the owner
+// decides whether to regenerate, never automatic). Generating only sends
+// the checked sections to Claude and only overwrites those sections'
+// cache entries -- everything else the owner has already generated stays
+// exactly as it was.
+async function renderTripsyNarrativePanel(panel, trip) {
+  const { effectiveTrip, dayKeys, byDay } = await buildTripsyPrintDayData(trip);
+  const cache = await Store.getTripsyNarrativeCache();
+
+  const introFingerprintData = { name: effectiveTrip.name, location: effectiveTrip.location, dateRange: formatTripitDateRange(effectiveTrip.start, effectiveTrip.end) };
+  const introFingerprint = tripsyContentFingerprint(introFingerprintData);
+  const introEntry = cache[`${trip.key}::intro`];
+  const introStatus = !introEntry ? 'new' : (introEntry.fingerprint === introFingerprint ? 'current' : 'stale');
+
+  const dayRows = dayKeys.map(dayKey => {
+    const promptData = tripsyNarrativeDayPromptData(dayKey, byDay.get(dayKey));
+    const fingerprint = tripsyContentFingerprint(promptData);
+    const entry = cache[`${trip.key}::day::${dayKey}`];
+    const status = !entry ? 'new' : (entry.fingerprint === fingerprint ? 'current' : 'stale');
+    const heading = dayKey === 'undated' ? 'Undated' : tripsyDayHeaderLabel(dayKey);
+    return { dayKey, heading, promptData, fingerprint, entry, status };
+  });
+
+  const statusLabel = status => status === 'new' ? 'Not yet generated' : status === 'current' ? 'Current' : 'Stale — data changed';
+  const statusColor = status => status === 'new' ? 'var(--muted)' : status === 'current' ? 'var(--home-green)' : 'var(--red, #c0392b)';
+
+  const rowHtml = (section, heading, status, previewTitle, previewText) => `
+    <div style="display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-top:1px solid var(--line);">
+      <input type="checkbox" data-tripsy-narrative-checkbox data-section="${esc(section)}" style="margin-top:3px;">
+      <div style="flex:1; min-width:0;">
+        <div style="display:flex; justify-content:space-between; gap:8px;">
+          <span style="font-size:13px; font-weight:700;">${esc(heading)}</span>
+          <span style="font-size:11px; color:${statusColor(status)};">${esc(statusLabel(status))}</span>
+        </div>
+        ${previewTitle ? `<div style="font-size:12px; color:var(--text); margin-top:2px;">${esc(previewTitle)}</div>` : ''}
+        ${previewText ? `<div style="font-size:12px; color:var(--muted); margin-top:2px;">${esc(previewText)}</div>` : ''}
+      </div>
+    </div>
+  `;
+
+  panel.innerHTML = `
+    <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700; margin-bottom:8px;">Edit Narrative</div>
+    <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Check the sections you want to (re)generate, then click Generate Selected. Unchecked sections keep their current text.</div>
+    ${rowHtml('intro', 'Trip Intro', introStatus, null, introEntry ? introEntry.content.trip_intro : null)}
+    ${dayRows.map(d => rowHtml(`day::${d.dayKey}`, d.heading, d.status, d.entry ? d.entry.content.title : null, d.entry ? d.entry.content.narrative : null)).join('')}
+    <div data-tripsy-narrative-status style="margin-top:10px; font-size:12px; color:var(--muted);"></div>
+    <div style="display:flex; gap:10px; margin-top:10px;">
+      <button class="btn primary" data-tripsy-narrative-generate>Generate Selected</button>
+      <button class="btn" data-tripsy-narrative-close>Close</button>
+    </div>
+  `;
+
+  panel.querySelector('[data-tripsy-narrative-generate]').addEventListener('click', async () => {
+    const genBtn = panel.querySelector('[data-tripsy-narrative-generate]');
+    const statusEl = panel.querySelector('[data-tripsy-narrative-status]');
+    const checked = [...panel.querySelectorAll('[data-tripsy-narrative-checkbox]:checked')].map(cb => cb.dataset.section);
+    if (!checked.length) return;
+    const includeIntro = checked.includes('intro');
+    const dayKeysToGenerate = checked.filter(s => s.startsWith('day::')).map(s => s.slice(5));
+    genBtn.disabled = true;
+    statusEl.textContent = 'Generating…';
+    try {
+      const result = await generateTripsyItineraryNarrative(effectiveTrip, dayRows.map(d => d.promptData), { includeIntro, dayKeysToGenerate });
+      const sectionsToSave = {};
+      if (includeIntro) {
+        sectionsToSave[`${trip.key}::intro`] = { content: { trip_intro: result.trip_intro || '' }, fingerprint: introFingerprint, generatedAt: new Date().toISOString() };
+      }
+      const resultDaysByKey = new Map((result.days || []).map(d => [d.day_key, d]));
+      for (const dayKey of dayKeysToGenerate) {
+        const rd = resultDaysByKey.get(dayKey);
+        if (!rd) continue;
+        const dayRow = dayRows.find(d => d.dayKey === dayKey);
+        sectionsToSave[`${trip.key}::day::${dayKey}`] = {
+          content: { title: rd.title, narrative: rd.narrative, place_blurbs: rd.place_blurbs || [] },
+          fingerprint: dayRow.fingerprint,
+          generatedAt: new Date().toISOString(),
+        };
+      }
+      const ok = await Store.saveTripsyNarrativeSections(sectionsToSave);
+      if (!ok) throw new Error('Failed to save narrative to storage');
+      await renderTripsyNarrativePanel(panel, trip);
+    } catch (e) {
+      console.error('generateTripsyItineraryNarrative failed:', e);
+      toast('Could not generate narrative — see console for details.', 'error');
+      genBtn.disabled = false;
+      statusEl.textContent = '';
+    }
+  });
+
+  panel.querySelector('[data-tripsy-narrative-close]').addEventListener('click', () => {
+    panel.style.display = 'none';
+    panel.innerHTML = '';
+  });
+}
+
 // Builds and triggers window.print() for a two-part printable/save-as-PDF
 // itinerary for one trip: a formal day-by-day summary (part 1), followed
 // by a page-break then a photo spread of each hotel/place (part 2).
@@ -8263,25 +8459,9 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayData) {
 async function openTripsyItineraryPrintView(tripKey) {
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return;
-  const pendingChanges = isOwner ? await Store.listTripsyPendingChanges() : [];
-  const effectiveTrip = getEffectiveTripsyTrip(trip, pendingChanges);
-  const effectiveEvents = trip.events.map(ev => getEffectiveTripsyEvent(ev, pendingChanges));
-  const visibleEvents = effectiveEvents.filter(ev => !isTripsyEventEffectivelyHidden(ev));
-  const chronologicalEvents = expandMultiDayTripsyEvents(visibleEvents).sort((a, b) => {
-    const special = tripsyMultiDayEventOrder(a, b);
-    if (special != null) return special;
-    return new Date(a.start || 0) - new Date(b.start || 0);
-  });
-  const sortedEvents = insertTripsyLayovers(chronologicalEvents);
+  const { effectiveTrip, dayKeys, byDay, placesByDay, placeEvents } = await buildTripsyPrintDayData(trip);
 
   // ---- Part 1: summary, grouped by day ----
-  const dayKeys = [];
-  const byDay = new Map();
-  for (const ev of sortedEvents) {
-    const dayKey = tripsyDayKey(ev.start) || 'undated';
-    if (!byDay.has(dayKey)) { byDay.set(dayKey, []); dayKeys.push(dayKey); }
-    byDay.get(dayKey).push(ev);
-  }
   const summaryHtml = dayKeys.map(dayKey => {
     const rowsHtml = byDay.get(dayKey).map(ev => {
       if (ev._layover) {
@@ -8305,35 +8485,29 @@ async function openTripsyItineraryPrintView(tripKey) {
   }).join('');
 
   // ---- Part 2: one "place" (hotel stay / named activity) per hotel/
-  // activity event. Flights and generic ground transportation are skipped
-  // -- there's no single photographable "place" for a flight leg, and
-  // that content is already fully covered in the summary above. Grouped
-  // by day (via the same tripsyDayKey used for Part 1) so the narrative
-  // path below can attach each place's card to the day it happened on.
-  const placeEvents = visibleEvents.filter(ev => ev.tripsyRaw && (ev.tripsyRaw.resource === 'hosting' || ev.tripsyRaw.resource === 'activity'));
-  const placesByDay = new Map();
-  for (const ev of placeEvents) {
-    const dayKey = tripsyDayKey(ev.start) || 'undated';
-    if (!placesByDay.has(dayKey)) placesByDay.set(dayKey, []);
-    placesByDay.get(dayKey).push(ev);
-  }
+  // activity event, grouped by day (placesByDay, from buildTripsyPrintDayData)
+  // so the narrative path below can attach each place's card to the day it
+  // happened on. Flights and generic ground transportation are skipped --
+  // there's no single photographable "place" for a flight leg, and that
+  // content is already fully covered in the summary above.
 
-  // Owner-only, best-effort: if it fails for any reason (no key file,
-  // network error, malformed response) narrative stays null and Part 2
-  // below falls back to the plain photo-grid layout -- never blocks
-  // printing.
-  let narrative = null;
-  if (isOwner) {
-    try {
-      narrative = await generateTripsyItineraryNarrative(effectiveTrip, dayKeys.map(dayKey => ({
-        dayKey,
-        heading: dayKey === 'undated' ? 'Undated' : tripsyDayHeaderLabel(dayKey),
-        events: byDay.get(dayKey),
-      })));
-    } catch (e) {
-      console.error('generateTripsyItineraryNarrative failed:', e);
-    }
-  }
+  // Narrative text is never generated at print time -- Print only reads
+  // whatever's already cached from the owner-only Edit Narrative panel
+  // (renderTripsyNarrativePanel), so printing is instant/free and works
+  // the same for owner and non-owner alike. If nothing at all is cached
+  // for this trip, narrative stays null and Part 2 falls back to the
+  // plain photo-grid layout below.
+  const narrativeCache = await Store.getTripsyNarrativeCache();
+  const introEntry = narrativeCache[`${tripKey}::intro`];
+  const cachedDays = dayKeys
+    .map(dayKey => {
+      const entry = narrativeCache[`${tripKey}::day::${dayKey}`];
+      return entry ? { day_key: dayKey, ...entry.content } : null;
+    })
+    .filter(Boolean);
+  const narrative = (introEntry || cachedDays.length)
+    ? { trip_intro: introEntry ? introEntry.content.trip_intro : '', days: cachedDays }
+    : null;
 
   let part2Html = '';
   if (narrative) {
@@ -8584,6 +8758,7 @@ const TRIPSY_TRIP_PANEL_SELECTORS = [
   '[data-tripsy-add-item-panel]',
   '[data-tripsy-edit-trip-panel]',
   '[data-tripsy-attach-panel]',
+  '[data-tripsy-narrative-panel]',
   '[data-tripsy-attachments-menu]',
   '[data-tripsy-offline-menu]',
   '[data-tripsy-sort-menu]',
@@ -8597,6 +8772,7 @@ const TRIPSY_TRIP_PANEL_SELECTORS = [
 const TRIPSY_TRIP_PANEL_TRIGGER_SELECTORS = [
   '[data-tripsy-add-item-toggle]',
   '[data-tripsy-edit-trip-toggle]',
+  '[data-tripsy-narrative-toggle]',
   '[data-tripsy-attachments-toggle]',
   '[data-tripsy-offline-menu-toggle]',
   '[data-tripsy-add-doc-menu-item]',
@@ -8934,6 +9110,13 @@ async function renderTripsyEventsListImpl() {
       `<button class="btn" data-tripsy-print-itinerary data-key="${esc(trip.key)}" title="Print Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🖨️</button>`,
       'Print'
     );
+    // Owner-only, since it's the only thing that spends the Anthropic key
+    // (see generateTripsyItineraryNarrative). Non-owners never see this and
+    // Print just uses whatever the owner has already generated/cached.
+    const narrativeButtonHtml = isOwner ? iconLabelButton(
+      `<button class="btn" data-tripsy-narrative-toggle data-key="${esc(trip.key)}" title="Edit Narrative" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:18px; display:flex; align-items:center; justify-content:center;">📝</button>`,
+      'Narrative'
+    ) : '';
     const deleteButtonHtml = isOwner ? iconLabelButton(
       `<button class="btn" data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}" title="Delete Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">🗑️</button>`,
       'Delete'
@@ -9085,6 +9268,7 @@ async function renderTripsyEventsListImpl() {
             ${docStatusButtonHtml}
             ${offlineMenuButtonHtml}
             ${printButtonHtml}
+            ${narrativeButtonHtml}
             ${editButtonHtml}
             ${sortButtonHtml}
             ${hideButtonHtml}
@@ -9095,6 +9279,7 @@ async function renderTripsyEventsListImpl() {
         ${showAddButton ? `<div data-tripsy-add-item-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${isOwner ? `<div data-tripsy-edit-trip-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${isOwner ? `<div data-tripsy-attach-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
+        ${isOwner ? `<div data-tripsy-narrative-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${timelineHtml}
       </div>
     `;
@@ -9299,6 +9484,26 @@ async function renderTripsyEventsListImpl() {
       if (!trip) return;
       renderTripsyEditTripPanel(panel, trip, getEffectiveTripsyTrip(trip, pendingChanges));
       panel.style.display = "block";
+      panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  });
+
+  // Same toggle shape as Edit Trip above, for the narrative regeneration
+  // panel (renderTripsyNarrativePanel).
+  container.querySelectorAll("[data-tripsy-narrative-toggle]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const key = btn.dataset.key;
+      const panel = container.querySelector(`[data-tripsy-narrative-panel="${key}"]`);
+      if (!panel) return;
+      const wasOpen = panel.style.display !== "none" && !!panel.innerHTML;
+      closeAllTripsyTripPanels();
+      if (wasOpen) return;
+      const trip = tripsyDecryptedTrips.find(t => t.key === key);
+      if (!trip) return;
+      panel.style.display = "block";
+      panel.innerHTML = `<div style="color:var(--muted); font-size:13px;">Loading…</div>`;
+      await renderTripsyNarrativePanel(panel, trip);
       panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
   });
