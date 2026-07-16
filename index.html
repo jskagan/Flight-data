@@ -592,17 +592,6 @@
   .tp-row-detail { font-size: 12px; color: #556; margin-top: 2px; }
   .tp-section-break { break-before: page; }
   .tp-spread-title { font-family: var(--mono); font-size: 20px; font-weight: 700; color: #8A5A12; margin: 0 0 16px; }
-  .tp-spread {
-    break-inside: avoid; margin-bottom: 28px; padding-bottom: 20px; border-bottom: 1px solid #DDE2E8;
-  }
-  .tp-spread-photo { width: 100%; max-height: 320px; object-fit: cover; border-radius: 8px; display: block; }
-  .tp-spread-photo-fallback {
-    width: 100%; height: 180px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
-    font-size: 56px; background: #F0F2F5;
-  }
-  .tp-spread-name { font-family: var(--mono); font-size: 16px; font-weight: 700; margin-top: 10px; }
-  .tp-spread-meta { font-size: 12.5px; color: #556; margin-top: 3px; }
-  .tp-spread-notes { font-size: 13px; line-height: 1.5; margin-top: 8px; }
 
   .tp-trip-intro { font-size: 16px; line-height: 1.6; color: #333; margin: 0 0 24px; }
   .tp-narrative-day { break-before: avoid; margin-bottom: 24px; }
@@ -611,15 +600,28 @@
     break-after: avoid;
   }
   .tp-narrative-day-text { font-size: 13.5px; line-height: 1.65; color: #333; margin: 0 0 12px; }
+  /* Magazine-style photo card: the image floats left or right (per
+     .tp-place-card-float-left/-right, alternated by tripsyPlaceCardIndex
+     in tripsyPlaceCardHtml) at a varied width (--tp-card-width) with the
+     name/meta/blurb text wrapping around it via normal CSS float flow.
+     overflow:hidden on the card itself establishes a block formatting
+     context so the float is contained within THIS card and never bleeds
+     into the next place card below it. */
   .tp-place-card {
-    display: flex; gap: 16px; align-items: flex-start; break-inside: avoid; margin: 14px 0;
+    overflow: hidden; break-inside: avoid; margin: 18px 0; padding-bottom: 14px; border-bottom: 1px solid #DDE2E8;
   }
-  .tp-place-card-photo { width: 40%; flex-shrink: 0; max-height: 200px; object-fit: cover; border-radius: 8px; display: block; }
+  .tp-place-card-photo,
   .tp-place-card-photo-fallback {
-    width: 40%; flex-shrink: 0; height: 140px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
-    font-size: 40px; background: #F0F2F5;
+    float: left; width: var(--tp-card-width, 42%); margin: 0 16px 8px 0; border-radius: 8px;
   }
-  .tp-place-card-body { flex: 1; min-width: 0; }
+  .tp-place-card-float-right .tp-place-card-photo,
+  .tp-place-card-float-right .tp-place-card-photo-fallback {
+    float: right; margin: 0 0 8px 16px;
+  }
+  .tp-place-card-photo { max-height: 240px; object-fit: cover; display: block; }
+  .tp-place-card-photo-fallback {
+    height: 160px; display: flex; align-items: center; justify-content: center; font-size: 44px; background: #F0F2F5;
+  }
   .tp-place-card-name { font-family: var(--mono); font-size: 15px; font-weight: 700; }
   .tp-place-card-meta { font-size: 12px; color: #556; margin-top: 2px; }
   .tp-place-card-blurb { font-size: 13px; line-height: 1.5; margin-top: 6px; color: #333; }
@@ -8149,10 +8151,19 @@ function tripsyPrintSummaryDetailLines(ev) {
 // so a given place is only ever looked up once -- both to keep Places API
 // usage/cost low and so the raw API key itself never ends up embedded in
 // shared driveData (only the resulting image bytes are).
+//
+// `eventTitle` (the event's own summary, e.g. "Couples Massage" or "Hike
+// to Waterfall") is folded into the search query alongside name/address --
+// many activities are generic/local spots that Places can't resolve from
+// name+address alone, but the title usually says what kind of experience
+// it is, which meaningfully improves the match. It's included in the
+// cache key too, since the same address can host different experiences
+// (e.g. a resort's spa vs. its restaurant) that should get different
+// photos rather than sharing one cached result.
 const TRIPSY_PLACE_PHOTO_TTL_DAYS = 180;
-async function fetchTripsyPlacePhoto(name, address) {
-  const cacheKey = `${name || ''}|${address || ''}`.trim().toLowerCase();
-  if (cacheKey === '|') return null;
+async function fetchTripsyPlacePhoto(name, address, eventTitle) {
+  const cacheKey = `${name || ''}|${address || ''}|${eventTitle || ''}`.trim().toLowerCase();
+  if (cacheKey === '||') return null;
   const cached = await Store.getTripsyPlacePhoto(cacheKey);
   if (cached && cached.photoDataUrl && (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000) {
     return cached.photoDataUrl;
@@ -8163,7 +8174,7 @@ async function fetchTripsyPlacePhoto(name, address) {
     const searchRes = await fetch('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.photos' },
-      body: JSON.stringify({ textQuery: [name, address].filter(Boolean).join(', '), maxResultCount: 1 }),
+      body: JSON.stringify({ textQuery: [name, eventTitle, address].filter(Boolean).join(', '), maxResultCount: 1 }),
     });
     const searchData = await searchRes.json();
     const photoName = searchData?.places?.[0]?.photos?.[0]?.name;
@@ -8509,6 +8520,40 @@ async function openTripsyItineraryPrintView(tripKey) {
     ? { trip_intro: introEntry ? introEntry.content.trip_intro : '', days: cachedDays }
     : null;
 
+  // Shared by both the narrative and flat-fallback branches below: one
+  // magazine-style card per place, its photo floated left/right
+  // (alternating, via a counter shared across the whole print run so
+  // consecutive cards never float the same side) at a varied width, with
+  // the name/meta/blurb text flowing around it via normal CSS float wrap
+  // rather than a fixed-column layout.
+  const TRIPSY_PLACE_CARD_WIDTHS = [38, 48, 42, 52];
+  let tripsyPlaceCardIndex = 0;
+  const tripsyPlaceCardHtml = async (ev, blurb) => {
+    const raw = ev.tripsyRaw;
+    const name = raw.name || ev.summary;
+    const address = raw.address || '';
+    const photoDataUrl = await fetchTripsyPlacePhoto(name, address, ev.summary);
+    const isStay = raw.resource === 'hosting';
+    const metaParts = [
+      formatTripitDateRange(ev.start, ev.end),
+      address,
+      isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
+    ].filter(Boolean);
+    const floatSide = tripsyPlaceCardIndex % 2 === 0 ? 'left' : 'right';
+    const widthPct = TRIPSY_PLACE_CARD_WIDTHS[tripsyPlaceCardIndex % TRIPSY_PLACE_CARD_WIDTHS.length];
+    tripsyPlaceCardIndex++;
+    return `
+      <div class="tp-place-card tp-place-card-float-${floatSide}" style="--tp-card-width:${widthPct}%;">
+        ${photoDataUrl
+          ? `<img class="tp-place-card-photo" src="${esc(photoDataUrl)}" alt="${esc(name)}">`
+          : `<div class="tp-place-card-photo-fallback">${esc(tripsyTimelineDotIcon(ev))}</div>`}
+        <div class="tp-place-card-name">${esc(name)}</div>
+        ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
+        ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
+      </div>
+    `;
+  };
+
   let part2Html = '';
   if (narrative) {
     const narrativeDayByKey = new Map((narrative.days || []).map(d => [d.day_key, d]));
@@ -8518,30 +8563,10 @@ async function openTripsyItineraryPrintView(tripKey) {
       const narrativeParagraphs = ((nd && nd.narrative) || '').split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
       const placeBlurbsByName = new Map(((nd && nd.place_blurbs) || []).map(pb => [pb.place_name, pb.blurb]));
       const dayPlaces = placesByDay.get(dayKey) || [];
-      const cardsHtml = (await Promise.all(dayPlaces.map(async ev => {
-        const raw = ev.tripsyRaw;
-        const name = raw.name || ev.summary;
-        const address = raw.address || '';
-        const photoDataUrl = await fetchTripsyPlacePhoto(name, address);
-        const isStay = raw.resource === 'hosting';
-        const metaParts = [
-          formatTripitDateRange(ev.start, ev.end),
-          address,
-          isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
-        ].filter(Boolean);
-        const blurb = placeBlurbsByName.get(name) || raw.notes || '';
-        return `
-          <div class="tp-place-card">
-            ${photoDataUrl
-              ? `<img class="tp-place-card-photo" src="${esc(photoDataUrl)}" alt="${esc(name)}">`
-              : `<div class="tp-place-card-photo-fallback">${esc(tripsyTimelineDotIcon(ev))}</div>`}
-            <div class="tp-place-card-body">
-              <div class="tp-place-card-name">${esc(name)}</div>
-              ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
-              ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
-            </div>
-          </div>
-        `;
+      const cardsHtml = (await Promise.all(dayPlaces.map(ev => {
+        const name = ev.tripsyRaw.name || ev.summary;
+        const blurb = placeBlurbsByName.get(name) || ev.tripsyRaw.notes || '';
+        return tripsyPlaceCardHtml(ev, blurb);
       }))).join('');
       return `
         <div class="tp-narrative-day">
@@ -8559,29 +8584,8 @@ async function openTripsyItineraryPrintView(tripKey) {
       </div>
     `;
   } else if (placeEvents.length) {
-    const spreads = await Promise.all(placeEvents.map(async ev => {
-      const raw = ev.tripsyRaw;
-      const name = raw.name || ev.summary;
-      const address = raw.address || '';
-      const photoDataUrl = await fetchTripsyPlacePhoto(name, address);
-      const isStay = raw.resource === 'hosting';
-      const metaParts = [
-        formatTripitDateRange(ev.start, ev.end),
-        address,
-        isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
-      ].filter(Boolean);
-      return `
-        <div class="tp-spread">
-          ${photoDataUrl
-            ? `<img class="tp-spread-photo" src="${esc(photoDataUrl)}" alt="${esc(name)}">`
-            : `<div class="tp-spread-photo-fallback">${esc(tripsyTimelineDotIcon(ev))}</div>`}
-          <div class="tp-spread-name">${esc(name)}</div>
-          ${metaParts.map(m => `<div class="tp-spread-meta">${esc(m)}</div>`).join('')}
-          ${raw.notes ? `<div class="tp-spread-notes">${esc(raw.notes)}</div>` : ''}
-        </div>
-      `;
-    }));
-    part2Html = `<div class="tp-section-break"><div class="tp-spread-title">Photos &amp; Details</div>${spreads.join('')}</div>`;
+    const cards = await Promise.all(placeEvents.map(ev => tripsyPlaceCardHtml(ev, ev.tripsyRaw.notes || '')));
+    part2Html = `<div class="tp-section-break"><div class="tp-spread-title">Photos &amp; Details</div>${cards.join('')}</div>`;
   }
 
   let printRoot = document.getElementById('tripsy-print-root');
