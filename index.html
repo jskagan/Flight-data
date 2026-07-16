@@ -931,9 +931,26 @@ async function createDriveDataFile(data) {
   return json.id;
 }
 
+// Drive's "simple" upload (uploadType=media, a single PATCH with the whole
+// body) only reliably works under ~5MB -- driveData long ago grew past
+// that (mainly accumulated base64 Tripsy place photos, tripsyPlacePhotoCache,
+// across every trip), which was silently turning every write (including
+// Tripsy Trips delete/edit, which route through here via persistDriveData)
+// into a failed "storage error" once the file crossed that threshold. A
+// resumable upload has no such limit: first request a session URL (an
+// empty-bodied PATCH/POST to uploadType=resumable), then PUT the actual
+// JSON to that URL. Both requests need the same Authorization header, so
+// both still go through driveApiFetch.
 async function updateDriveDataFile(fileId, data) {
-  await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+  const startRes = await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable`, {
     method: 'PATCH',
+    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+    body: JSON.stringify({}),
+  });
+  const uploadUrl = startRes.headers.get('Location');
+  if (!uploadUrl) throw new Error('Drive resumable upload did not return a session URL');
+  await driveApiFetch(uploadUrl, {
+    method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
