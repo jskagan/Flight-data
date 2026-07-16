@@ -8206,7 +8206,15 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayData) {
             day_key: { type: 'string' },
             title: { type: 'string' },
             narrative: { type: 'string' },
-            place_blurbs: { type: 'object', additionalProperties: { type: 'string' } },
+            place_blurbs: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: { place_name: { type: 'string' }, blurb: { type: 'string' } },
+                required: ['place_name', 'blurb'],
+                additionalProperties: false,
+              },
+            },
           },
           required: ['day_key', 'title', 'narrative', 'place_blurbs'],
           additionalProperties: false,
@@ -8230,11 +8238,14 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayData) {
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{
         role: 'user',
-        content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. Write a short trip_intro paragraph, then for each day: a short evocative title (e.g. "Day 1 -- Travel Day: First Taste of Palma"), 1-3 short narrative paragraphs weaving the day's events together, and one short blurb per named place (hotel/activity) in that day's events, keyed by place_name exactly as given. Only state facts present in the data below -- do not invent hours, prices, history, or amenities. If a day has no named places, place_blurbs can be empty.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
+        content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. Write a short trip_intro paragraph, then for each day: a short evocative title (e.g. "Day 1 -- Travel Day: First Taste of Palma"), 1-3 short narrative paragraphs weaving the day's events together, and one place_blurbs entry (place_name + a short blurb) per named place (hotel/activity) in that day's events, with place_name exactly matching the place_name given in the data. Only state facts present in the data below -- do not invent hours, prices, history, or amenities. If a day has no named places, place_blurbs can be an empty array.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
       }],
     }),
   });
-  if (!res.ok) throw new Error(`Claude API error ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`Claude API error ${res.status}: ${errBody.slice(0, 500)}`);
+  }
   const data = await res.json();
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude API returned no text block');
@@ -8331,6 +8342,7 @@ async function openTripsyItineraryPrintView(tripKey) {
       const nd = narrativeDayByKey.get(dayKey);
       const heading = (nd && nd.title) || (dayKey === 'undated' ? 'Undated' : tripsyDayHeaderLabel(dayKey));
       const narrativeParagraphs = ((nd && nd.narrative) || '').split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+      const placeBlurbsByName = new Map(((nd && nd.place_blurbs) || []).map(pb => [pb.place_name, pb.blurb]));
       const dayPlaces = placesByDay.get(dayKey) || [];
       const cardsHtml = (await Promise.all(dayPlaces.map(async ev => {
         const raw = ev.tripsyRaw;
@@ -8343,7 +8355,7 @@ async function openTripsyItineraryPrintView(tripKey) {
           address,
           isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
         ].filter(Boolean);
-        const blurb = (nd && nd.place_blurbs && nd.place_blurbs[name]) || raw.notes || '';
+        const blurb = placeBlurbsByName.get(name) || raw.notes || '';
         return `
           <div class="tp-place-card">
             ${photoDataUrl
