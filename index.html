@@ -9068,13 +9068,29 @@ async function tripsyFetchPlacePhotoBlob(apiKey, photoName) {
   return photoRes.blob();
 }
 
+// Session-only (this page load) memo of driveFileId -> object URL, so a
+// photo's bytes are pulled from Drive at most ONCE per page load instead of
+// re-downloaded on every Preview/Print open and every narrative-edit
+// re-render (each of which rebuilds the whole document). This was the main
+// cause of Preview's open latency: a trip with N cached place photos did N
+// Drive downloads every single time it was opened. Keyed by driveFileId,
+// which is immutable per uploaded photo (picking a different photo uploads
+// a new file with a new id), so a hit is never stale. Also removes a prior
+// leak -- every open used to mint a fresh object URL per photo and drop the
+// old one without revoking it; reusing one URL per file avoids that.
+const tripsyPhotoObjectUrlCache = new Map();
+
 // Downloads a cached place photo's bytes from its own small Drive file
 // (see uploadBlobToDrive) and hands back an object URL -- cheap, and never
 // touches driveData itself, unlike the old inline-data-URL approach this
 // replaced.
 async function tripsyPlacePhotoDisplayUrl(driveFileId) {
+  const memo = tripsyPhotoObjectUrlCache.get(driveFileId);
+  if (memo) return memo;
   const blob = await downloadDriveFileBlob(driveFileId);
-  return URL.createObjectURL(blob);
+  const url = URL.createObjectURL(blob);
+  tripsyPhotoObjectUrlCache.set(driveFileId, url);
+  return url;
 }
 
 // Google Places' photo "name" (a reference token, not a real image id) is
@@ -11298,11 +11314,23 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
   }
 
   const printBtn = overlay.querySelector('#tripsy-preview-print-btn');
-  if (printBtn) printBtn.style.display = '';
+  const content = overlay.querySelector('#tripsy-preview-content');
+  // Show the overlay (and a loading note) IMMEDIATELY rather than only after
+  // buildTripsyPrintHtml resolves -- that build downloads every place photo
+  // before returning, so waiting on it left the user staring at the plain
+  // page for the whole download with no sign the click registered. On an
+  // in-place re-render (a narrative edit, overlay already open) skip the
+  // note so the existing content doesn't flash away and back.
+  const wasOpen = overlay.style.display === 'flex';
+  if (!wasOpen) {
+    if (printBtn) printBtn.style.display = 'none';
+    content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Preparing your itinerary…</div>`;
+    overlay.style.display = 'flex';
+  }
   const html = await buildTripsyPrintHtml(tripKey);
-  if (html == null) return;
-  overlay.querySelector('#tripsy-preview-content').innerHTML = html;
-  overlay.style.display = 'flex';
+  if (html == null) { if (!wasOpen) overlay.style.display = 'none'; return; }
+  content.innerHTML = html;
+  if (printBtn) printBtn.style.display = '';
 }
 
 // First-time Preview flow (owner only): shown instead of the (as yet
@@ -11963,7 +11991,7 @@ async function renderTripsyEventsListImpl() {
       <div style="position:relative;">
         <button class="btn" data-tripsy-itinerary-menu-toggle data-key="${esc(trip.key)}" title="Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🧭</button>
         <div data-tripsy-itinerary-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-          ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '👁️', 'Preview')}
+          ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '👀', 'Preview')}
           ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
           ${menuListButtonHtml(`data-tripsy-create-pdf-itinerary data-key="${esc(trip.key)}"`, '📄', 'Create PDF')}
         </div>
