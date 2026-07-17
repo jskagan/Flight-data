@@ -9725,6 +9725,44 @@ function tripsyNarrativeDayControlsHtml(dayKey, nd) {
   `;
 }
 
+// Same idea as tripsyNarrativeDayControlsHtml above, but scoped to a single
+// event instead of a whole day -- lets the owner add/replace a one-line
+// blurb for one specific Part-1 row / Part-2 card without regenerating
+// (or having ever generated) the bulk "Event Summaries" pass or any day
+// narrative. Uses distinct data-tripsy-event-narrative-* attributes (not
+// data-tripsy-narrative-*) and data-row-key (not data-day-key) so its
+// delegated listener in previewTripsyItinerary never collides with the
+// day-level one. wantsGenerate is false for P/S Reservations, flights, and
+// car transportation (tripsySummaryRowWantsBlurb) -- those never get
+// Generate/Regenerate, only Custom Narrative, since a manually-typed note is
+// real user content rather than AI narrative and the exclusion only ever
+// applied to generation. No title field (unlike the day version): an event
+// already has its own name/title shown right next to these controls.
+function tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsGenerate) {
+  if (!isOwner || !rowKey) return '';
+  const hasBlurb = !!eventEntry;
+  return `
+    <div class="tp-narrative-section" data-tripsy-event-narrative-section data-row-key="${esc(rowKey)}">
+      <div class="tp-narrative-controls">
+        ${wantsGenerate
+          ? (hasBlurb
+              ? `<button type="button" class="btn" data-tripsy-event-narrative-regenerate>Regenerate</button>
+                 <button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>`
+              : `<button type="button" class="btn" data-tripsy-event-narrative-generate>Generate</button>`)
+          : (hasBlurb ? `<button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>` : '')}
+        <button type="button" class="btn" data-tripsy-event-narrative-custom-toggle>Custom Note</button>
+      </div>
+      <div class="tp-narrative-custom-box" data-tripsy-event-narrative-custom-box style="display:none;">
+        <textarea data-tripsy-event-narrative-custom-input rows="3" placeholder="Write your own note for this event…">${esc((eventEntry && eventEntry.content.blurb) || '')}</textarea>
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="btn primary" data-tripsy-event-narrative-custom-save>Save</button>
+          <button type="button" class="btn" data-tripsy-event-narrative-custom-cancel>Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 // The subset of a day's event data that's relevant to narrative generation
 // (and, via tripsyContentFingerprint, to detecting when that data has
 // changed since a cached narrative section was generated). Shared by
@@ -10023,17 +10061,25 @@ async function buildTripsyPrintHtml(tripKey) {
     const items = summaryByDay.get(dayKey) || [];
     const rowsHtml = items.map(item => {
       const rowKey = tripsySummaryRowKey(item);
-      // tripsySummaryRowWantsBlurb gate applies here too, not just at
-      // generation time, so a blurb cached before this rule existed (e.g.
-      // from an earlier "Generate Selected" run) never surfaces for a P/S
-      // Reservation, flight, or car transportation row either.
-      const text = (rowKey && tripsySummaryRowWantsBlurb(item) && summaryBlurbByKey.get(rowKey)) || tripsySummaryRowFallbackText(item);
+      // A per-event override (tripsyEventNarrativeControlsHtml, generated or
+      // custom) always wins over the old bulk "Generate Selected" pass --
+      // tripsySummaryRowWantsBlurb gate still applies to that bulk blurb (so
+      // a blurb cached before this rule existed never surfaces for a P/S
+      // Reservation, flight, or car transportation row either), but a
+      // per-event override is allowed on ANY row, including those.
+      const eventEntry = rowKey ? narrativeCache[`${tripKey}::eventblurb::${rowKey}`] : null;
+      const text = (eventEntry && eventEntry.content.blurb)
+        || (rowKey && tripsySummaryRowWantsBlurb(item) && summaryBlurbByKey.get(rowKey))
+        || tripsySummaryRowFallbackText(item);
       const timeLabel = tripsySummaryRowTime(item);
       return `
-        <div class="tp-row">
-          <div class="tp-row-star">★</div>
-          <div class="tp-row-time">${esc(timeLabel)}</div>
-          <div class="tp-row-text">${esc(text)}</div>
+        <div class="tp-row-block">
+          <div class="tp-row">
+            <div class="tp-row-star">★</div>
+            <div class="tp-row-time">${esc(timeLabel)}</div>
+            <div class="tp-row-text">${esc(text)}</div>
+          </div>
+          ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, rowKey ? tripsySummaryRowWantsBlurb(item) : false)}
         </div>
       `;
     }).join('');
@@ -10188,7 +10234,7 @@ async function buildTripsyPrintHtml(tripKey) {
   // subsequent print/preview of this trip stays deduped regardless.
   const usedPlacePhotoNames = new Set();
   const usedPlacePhotoHashes = new Set();
-  const tripsyPlaceCardHtml = async (ev, blurb) => {
+  const tripsyPlaceCardHtml = async (ev, blurb, rowKey, eventEntry) => {
     const raw = ev.tripsyRaw;
     const name = raw.name || ev.summary;
     const address = raw.address || '';
@@ -10269,6 +10315,7 @@ async function buildTripsyPrintHtml(tripKey) {
         <div class="tp-place-card-name">${esc(name)}</div>
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
         ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
+        ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, true)}
       </div>
     `;
   };
@@ -10282,15 +10329,19 @@ async function buildTripsyPrintHtml(tripKey) {
   // "Event Summaries" generated for this same reservation
   // (summaryBlurbByKey, keyed the same way tripsySummaryRowKey keys a
   // P/S row) rather than generating separate narrative copy for it.
-  const tripsyPsReservationCardHtml = (res) => {
+  const tripsyPsReservationCardHtml = (res, rowKey, eventEntry) => {
     const title = `P/S Reservation${res.experience ? ' • ' + res.experience : ''}`;
     const timeLabel = res.arriveByTime || res.arrivalTime || '';
     const metaParts = [
       timeLabel ? `Arrive by ${timeLabel}` : null,
       res.reservationNumber ? `Reservation #: ${res.reservationNumber}` : null,
     ].filter(Boolean);
-    // Never a generated blurb, even from a cache entry created before this
-    // rule existed -- see tripsySummaryRowWantsBlurb.
+    // Never an AI-generated blurb, even from a cache entry created before
+    // this rule existed -- see tripsySummaryRowWantsBlurb. A manually-typed
+    // per-event Custom Note is real user content, not AI narrative, so it
+    // still shows (tripsyEventNarrativeControlsHtml never offers Generate
+    // for a P/S card, only Custom/Delete).
+    const blurb = (eventEntry && eventEntry.content.blurb) || '';
     return `
       <div class="tp-place-card tp-place-card-float-left" style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;">
         <div class="tp-place-card-photo-wrap">
@@ -10298,6 +10349,8 @@ async function buildTripsyPrintHtml(tripKey) {
         </div>
         <div class="tp-place-card-name">${esc(title)}</div>
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
+        ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
+        ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, false)}
       </div>
     `;
   };
@@ -10316,7 +10369,7 @@ async function buildTripsyPrintHtml(tripKey) {
   // wired to the transportation-specific fetch/cache functions above.
   // Reuses Part 1's per-row blurb the same way P/S cards do
   // (summaryBlurbByKey, keyed by tripsySummaryRowKey's `ev:${id}` convention).
-  const tripsyTransportationCardHtml = async (ev) => {
+  const tripsyTransportationCardHtml = async (ev, rowKey, eventEntry) => {
     const raw = ev.tripsyRaw;
     const company = raw.company || '';
     const category = raw.category || '';
@@ -10337,7 +10390,9 @@ async function buildTripsyPrintHtml(tripKey) {
     // generated before this rule existed) -- but a manually-typed note is
     // real user content, not generated narrative, so it still shows.
     const wantsBlurb = !(raw.category === 'airplane' || raw.category === 'car');
-    const blurb = (wantsBlurb && summaryBlurbByKey.get(`ev:${ev.id}`)) || raw.notes || '';
+    const blurb = (eventEntry && eventEntry.content.blurb)
+      || (wantsBlurb && summaryBlurbByKey.get(`ev:${ev.id}`))
+      || raw.notes || '';
     const photoAreaHtml = isSkipped ? '' : `
       <div class="tp-place-card-photo-wrap">
         ${photoDataUrl
@@ -10359,6 +10414,7 @@ async function buildTripsyPrintHtml(tripKey) {
         <div class="tp-place-card-name">${esc(ev.summary)}</div>
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
         ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
+        ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsBlurb)}
       </div>
     `;
   };
@@ -10374,11 +10430,19 @@ async function buildTripsyPrintHtml(tripKey) {
   // of which day it belonged to.
   const tripsyDetailedCardHtml = async (item, placeBlurbsByName) => {
     if (item.isLayover) return '';
-    if (item.psReservation) return tripsyPsReservationCardHtml(item.psReservation);
+    // Same rowKey convention as Part 1 (tripsySummaryRowKey) -- item is the
+    // exact same summaryByDay entry Part 1 renders from, so this is the one
+    // place Part 2 gains a real per-event identity for its per-place
+    // controls (tripsyEventNarrativeControlsHtml), rather than the
+    // name-string matching placeBlurbsByName below still uses for the
+    // AI-generated (bulk, day-narrative) blurb.
+    const rowKey = tripsySummaryRowKey(item);
+    const eventEntry = rowKey ? narrativeCache[`${tripKey}::eventblurb::${rowKey}`] : null;
+    if (item.psReservation) return tripsyPsReservationCardHtml(item.psReservation, rowKey, eventEntry);
     const ev = item.ev;
     const raw = ev && ev.tripsyRaw;
     if (!raw) return '';
-    if (raw.resource === 'transportation') return tripsyTransportationCardHtml(ev);
+    if (raw.resource === 'transportation') return tripsyTransportationCardHtml(ev, rowKey, eventEntry);
     if (raw.resource === 'hosting' || raw.resource === 'activity') {
       // A multi-day stay/activity is split into separate Check-in/Check-out
       // (or Begins/Ends) rows by expandMultiDayTripsyEvents so Part 1's
@@ -10391,8 +10455,8 @@ async function buildTripsyPrintHtml(tripKey) {
       // photos, but a duplicate card for what's really one reservation.
       if (ev._splitHalf === 'end') return '';
       const name = raw.name || ev.summary;
-      const blurb = (placeBlurbsByName && placeBlurbsByName.get(name)) || raw.notes || '';
-      return tripsyPlaceCardHtml(ev, blurb);
+      const blurb = (eventEntry && eventEntry.content.blurb) || (placeBlurbsByName && placeBlurbsByName.get(name)) || raw.notes || '';
+      return tripsyPlaceCardHtml(ev, blurb, rowKey, eventEntry);
     }
     return '';
   };
@@ -10513,6 +10577,109 @@ async function buildTripsyPrintHtml(tripKey) {
     ${summaryHtml}
     ${part2Html}
   `;
+}
+
+// Simpler sibling to buildTripsyPrintHtml above, for the "Create PDF" menu
+// item -- a plain day-by-day list (same .tp-day-block/.tp-row markup and
+// styling as that function's own Part 1 "Summary" section, so it looks
+// consistent with the richer Print output) with NO cover photo, AI
+// narrative, or place-photo cards (Part 2). Deliberately re-derives its own
+// day-block HTML rather than sharing buildTripsyPrintHtml's local closures
+// (which capture several variables private to that function) -- a little
+// duplication here is safer than reaching into a large, actively-evolving
+// function to extract shared internals. Every row uses
+// tripsySummaryRowFallbackText only (never an AI-generated blurb) and skips
+// the header photo fetch entirely, so this never makes a network call --
+// "simple" means fast and dependency-free, not just fewer visual sections.
+async function buildTripsySimplePrintHtml(tripKey) {
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return null;
+  const { effectiveTrip, dayKeys, placeEvents, summaryByDay } = await buildTripsyPrintDayData(trip);
+
+  const headerDestination = tripsyTripGeographySummary(placeEvents, effectiveTrip.location);
+  const headerHtml = tripsyCoverHeaderHtml(headerDestination, formatTripitDateRange(effectiveTrip.start, effectiveTrip.end), 'Itinerary', null);
+
+  const tripStartDayKey = tripsyDayKey(effectiveTrip.start);
+  const eventDayKeySet = new Set(dayKeys.filter(k => k !== 'undated'));
+  const fullDayKeys = tripsyDayKeyRange(tripStartDayKey, tripsyDayKey(effectiveTrip.end));
+
+  const dayTileDate = dayKey => tripitPartsToUtcDate({
+    year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)),
+  }).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+  const dayBlockHtml = dayKey => {
+    const items = summaryByDay.get(dayKey) || [];
+    const rowsHtml = items.map(item => `
+      <div class="tp-row">
+        <div class="tp-row-star">★</div>
+        <div class="tp-row-time">${esc(tripsySummaryRowTime(item))}</div>
+        <div class="tp-row-text">${esc(tripsySummaryRowFallbackText(item))}</div>
+      </div>
+    `).join('') || `<div class="tp-row-empty">No events scheduled</div>`;
+    const isUndated = dayKey === 'undated';
+    const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
+    const tileNum = dayNumber != null ? String(dayNumber).padStart(2, '0') : '—';
+    const tileDate = isUndated ? '' : dayTileDate(dayKey);
+    return `
+      <div class="tp-day-block">
+        <div class="tp-day-tile">
+          <div class="tp-day-tile-label">Day</div>
+          <div class="tp-day-tile-num">${esc(tileNum)}</div>
+          ${tileDate ? `<div class="tp-day-tile-date">${esc(tileDate)}</div>` : ''}
+        </div>
+        <div class="tp-day-rows">${rowsHtml}</div>
+      </div>
+    `;
+  };
+
+  const emptyRangeBlockHtml = rangeDayKeys => {
+    const firstKey = rangeDayKeys[0];
+    const lastKey = rangeDayKeys[rangeDayKeys.length - 1];
+    const firstNum = String(tripsyDayNumberFromTripStart(firstKey, tripStartDayKey)).padStart(2, '0');
+    const isSingleDay = rangeDayKeys.length === 1;
+    const numHtml = isSingleDay
+      ? `<div class="tp-day-tile-num">${esc(firstNum)}</div>`
+      : `<div class="tp-day-tile-range">
+          <span class="tp-day-tile-num">${esc(firstNum)}</span>
+          <span class="tp-day-tile-range-divider"></span>
+          <span class="tp-day-tile-num">${esc(String(tripsyDayNumberFromTripStart(lastKey, tripStartDayKey)).padStart(2, '0'))}</span>
+        </div>`;
+    const dateHtml = isSingleDay ? dayTileDate(firstKey) : `${dayTileDate(firstKey)} – ${dayTileDate(lastKey)}`;
+    return `
+      <div class="tp-day-block tp-day-block-empty">
+        <div class="tp-day-tile">
+          <div class="tp-day-tile-label">Day</div>
+          ${numHtml}
+          <div class="tp-day-tile-date">${esc(dateHtml)}</div>
+        </div>
+        <div class="tp-day-rows"><div class="tp-row-empty">No events scheduled</div></div>
+      </div>
+    `;
+  };
+
+  const blockParts = [];
+  for (let i = 0; i < fullDayKeys.length; i++) {
+    const dayKey = fullDayKeys[i];
+    if (eventDayKeySet.has(dayKey)) {
+      blockParts.push(dayBlockHtml(dayKey));
+      continue;
+    }
+    let j = i;
+    while (j < fullDayKeys.length && !eventDayKeySet.has(fullDayKeys[j])) j++;
+    blockParts.push(emptyRangeBlockHtml(fullDayKeys.slice(i, j)));
+    i = j - 1;
+  }
+  if (dayKeys.includes('undated')) blockParts.push(dayBlockHtml('undated'));
+
+  return `${headerHtml}${blockParts.join('')}`;
+}
+
+async function openTripsySimpleItineraryPrintView(tripKey) {
+  const html = await buildTripsySimplePrintHtml(tripKey);
+  if (html == null) return;
+  const printRoot = getOrCreateTripsyPrintRoot();
+  printRoot.innerHTML = html;
+  await triggerTripsyPrint(printRoot);
 }
 
 function getOrCreateTripsyPrintRoot() {
@@ -10934,6 +11101,113 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
         } catch (err) {
           console.error('Failed to save custom narrative:', err);
           toast('Could not save narrative — see console for details.', 'error');
+          customSaveBtn.disabled = false;
+          customSaveBtn.textContent = originalText;
+        }
+        return;
+      }
+    });
+
+    // Per-event Generate/Regenerate/Delete/Custom Note controls
+    // (tripsyEventNarrativeControlsHtml) -- a third, separate delegated
+    // listener rather than folding these buttons into the day-narrative one
+    // above, since they live under their own
+    // [data-tripsy-event-narrative-section] wrapper (row-scoped, keyed by
+    // section.dataset.rowKey) rather than [data-tripsy-narrative-section]
+    // (day-scoped). The same rowKey/section can appear twice on the page
+    // (once next to the Part 1 row, once on the Part 2 card for the same
+    // event) -- every mutating branch below re-renders the whole preview,
+    // so both copies always end up showing the same state.
+    previewContent.addEventListener('click', async e => {
+      const generateBtn = e.target.closest('[data-tripsy-event-narrative-generate]');
+      const regenerateBtn = e.target.closest('[data-tripsy-event-narrative-regenerate]');
+      const deleteBtn = e.target.closest('[data-tripsy-event-narrative-delete]');
+      const customToggleBtn = e.target.closest('[data-tripsy-event-narrative-custom-toggle]');
+      const customSaveBtn = e.target.closest('[data-tripsy-event-narrative-custom-save]');
+      const customCancelBtn = e.target.closest('[data-tripsy-event-narrative-custom-cancel]');
+      if (!generateBtn && !regenerateBtn && !deleteBtn && !customToggleBtn && !customSaveBtn && !customCancelBtn) return;
+
+      const section = e.target.closest('[data-tripsy-event-narrative-section]');
+      if (!section) return;
+      const rowKey = section.dataset.rowKey;
+      const tripKey = overlay.dataset.tripKey;
+      const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+      if (!trip) return;
+      const cacheKey = `${tripKey}::eventblurb::${rowKey}`;
+
+      if (customToggleBtn) {
+        const box = section.querySelector('[data-tripsy-event-narrative-custom-box]');
+        if (box) box.style.display = box.style.display === 'none' ? 'block' : 'none';
+        return;
+      }
+
+      if (customCancelBtn) {
+        const box = e.target.closest('.tp-narrative-custom-box');
+        if (box) box.style.display = 'none';
+        return;
+      }
+
+      if (generateBtn || regenerateBtn) {
+        const btn = generateBtn || regenerateBtn;
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Generating…';
+        try {
+          const { effectiveTrip, summaryByDay } = await buildTripsyPrintDayData(trip);
+          const allItems = [...summaryByDay.values()].flat();
+          const item = allItems.find(it => tripsySummaryRowKey(it) === rowKey);
+          if (!item) throw new Error(`No event found for row key ${rowKey}`);
+          const promptData = tripsySummaryRowPromptData(item);
+          const result = await generateTripsySummaryBlurbs(effectiveTrip, [promptData]);
+          const blurb = (result.rows && result.rows[0] && result.rows[0].blurb) || '';
+          const ok = await Store.saveTripsyNarrativeSections({
+            [cacheKey]: { content: { blurb }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString() },
+          });
+          if (!ok) throw new Error('Failed to save narrative to storage');
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to generate event note:', err);
+          toast('Could not generate note — see console for details.', 'error');
+          btn.disabled = false;
+          btn.textContent = originalText;
+        }
+        return;
+      }
+
+      if (deleteBtn) {
+        deleteBtn.disabled = true;
+        try {
+          const ok = await Store.deleteTripsyNarrativeSection(cacheKey);
+          if (!ok) { toast('Could not delete note. Please try again.', 'error'); return; }
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to delete event note:', err);
+          toast('Could not delete note. Please try again.', 'error');
+        } finally {
+          deleteBtn.disabled = false;
+        }
+        return;
+      }
+
+      if (customSaveBtn) {
+        const box = e.target.closest('.tp-narrative-custom-box');
+        const textInput = box.querySelector('[data-tripsy-event-narrative-custom-input]');
+        const originalText = customSaveBtn.textContent;
+        customSaveBtn.disabled = true;
+        customSaveBtn.textContent = 'Saving…';
+        try {
+          const { summaryByDay } = await buildTripsyPrintDayData(trip);
+          const allItems = [...summaryByDay.values()].flat();
+          const item = allItems.find(it => tripsySummaryRowKey(it) === rowKey);
+          const promptData = item ? tripsySummaryRowPromptData(item) : { row_key: rowKey };
+          const ok = await Store.saveTripsyNarrativeSections({
+            [cacheKey]: { content: { blurb: textInput.value.trim() }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString() },
+          });
+          if (!ok) throw new Error('Failed to save narrative to storage');
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to save custom event note:', err);
+          toast('Could not save note — see console for details.', 'error');
           customSaveBtn.disabled = false;
           customSaveBtn.textContent = originalText;
         }
@@ -11613,7 +11887,7 @@ async function renderTripsyEventsListImpl() {
     // into this dropdown.
     const menuListButtonHtml = (attrs, icon, label) => `
       <button class="btn" ${attrs} style="display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px;">
-        <span style="font-size:16px; flex-shrink:0;">${icon}</span>${esc(label)}
+        <span style="font-size:16px; flex-shrink:0;">${icon}</span><span>${esc(label)}</span>
       </button>
     `;
     // Preview/Print merged into one "Itinerary" dropdown -- available to
@@ -11627,6 +11901,7 @@ async function renderTripsyEventsListImpl() {
         <div data-tripsy-itinerary-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '👁️', 'Preview')}
           ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
+          ${menuListButtonHtml(`data-tripsy-create-pdf-itinerary data-key="${esc(trip.key)}"`, '📄', 'Create PDF')}
         </div>
       </div>
     `, 'Itinerary') : '';
@@ -11801,6 +12076,25 @@ async function renderTripsyEventsListImpl() {
       } catch (err) {
         console.error('openTripsyItineraryPrintView failed:', err);
         toast("Could not build the printable itinerary. Please try again.", "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-create-pdf-itinerary]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      closeAllTripsyTripPanels();
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '⏳';
+      try {
+        await openTripsySimpleItineraryPrintView(btn.dataset.key);
+      } catch (err) {
+        console.error('openTripsySimpleItineraryPrintView failed:', err);
+        toast("Could not build the PDF. Please try again.", "error");
       } finally {
         btn.disabled = false;
         btn.textContent = originalText;
