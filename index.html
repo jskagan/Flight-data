@@ -7109,7 +7109,11 @@ function tripsyFlightNumberDigits(str) {
 // reservation says "LAX" tells us whether it's for the departing leg
 // (insert the PS card before the flight) or the arriving leg (insert
 // after) -- reservations don't self-describe a direction otherwise.
-function matchPsReservationToTripsyFlight(res, ev) {
+// `maxDayDrift` lets a caller relax the "same calendar day" requirement --
+// see findMatchingTripsyPsReservation for why (a rescheduled flight whose
+// PS reservation record hasn't caught up yet). 0 (the default) is an exact
+// match, same as before this param existed.
+function matchPsReservationToTripsyFlight(res, ev, maxDayDrift = 0) {
   if (ev.type !== 'flight' || !res.flightNumber) return null;
   const resDigits = tripsyFlightNumberDigits(res.flightNumber);
   const evDigits = tripsyFlightNumberDigits(ev.summary);
@@ -7121,30 +7125,133 @@ function matchPsReservationToTripsyFlight(res, ev) {
   const resMonth = monthNames.indexOf(monthName) + 1;
   const resDay = Number(dayStr);
   if (!inferredYear || !resMonth || !resDay) return null;
+  const resDayIndex = Math.round(Date.UTC(inferredYear, resMonth - 1, resDay) / 86400000);
 
   const startParts = parseTripitLocalParts(ev.start);
   const endParts = parseTripitLocalParts(ev.end);
-  const sameDate = parts => parts && parts.year === inferredYear && parts.month === resMonth && parts.day === resDay;
+  const withinDrift = parts => {
+    if (!parts) return false;
+    const partsDayIndex = Math.round(Date.UTC(parts.year, parts.month - 1, parts.day) / 86400000);
+    return Math.abs(partsDayIndex - resDayIndex) <= maxDayDrift;
+  };
 
   const isDeparture = res.origin === 'LAX' || res.departureAirport === 'LAX';
   const isArrival = res.destination === 'LAX' || res.arrivalAirport === 'LAX';
 
-  if (isDeparture && sameDate(startParts)) return 'before';
-  if (isArrival && sameDate(endParts)) return 'after';
+  if (isDeparture && withinDrift(startParts)) return 'before';
+  if (isArrival && withinDrift(endParts)) return 'after';
   if (!isDeparture && !isArrival) {
-    if (sameDate(startParts)) return 'before';
-    if (sameDate(endParts)) return 'after';
+    if (withinDrift(startParts)) return 'before';
+    if (withinDrift(endParts)) return 'after';
   }
   return null;
 }
 
-function findMatchingTripsyPsReservation(ev) {
+// A PS reservation record is parsed once from the "Confirmed:" email and
+// never updates itself -- if the airline later reschedules the flight
+// (same flight number, different date/time) without a new PS email
+// arriving to re-sync, an exact-date match stops finding it, and the
+// reservation silently vanishes from the trip timeline even though it's
+// still there and still applies. Exact-date matches are always tried
+// first across every reservation (and preferred if more than one shares a
+// flight number, e.g. a recurring daily flight across different trips);
+// only if NOTHING matches exactly does a second pass allow the date to
+// drift by a few days, so a rescheduled flight still finds its own
+// reservation instead of losing it entirely.
+//
+// `driftCollector`, if given, gets a `{reservation, ev, direction}` entry
+// pushed onto it whenever a match is only found via the drift-allowed
+// second pass -- renderTripsyEventsListImpl passes one so it can alert the
+// owner that a reservation is now attached to a flight whose date no
+// longer matches what P/S was told (see showTripsyPsDriftAlertIfNeeded).
+// buildTripsyPrintDayData (Print/Preview) doesn't pass one -- popping a
+// confirmation dialog mid-export would be out of place there, and a
+// non-owner viewer has no P/S account to go verify anything with anyway.
+const TRIPSY_PS_MATCH_DAY_DRIFT = 3;
+function findMatchingTripsyPsReservation(ev, driftCollector) {
   if (!tripsyPsReservations || ev.type !== 'flight') return null;
   for (const res of tripsyPsReservations) {
-    const direction = matchPsReservationToTripsyFlight(res, ev);
+    const direction = matchPsReservationToTripsyFlight(res, ev, 0);
     if (direction) return { reservation: res, direction };
   }
+  for (const res of tripsyPsReservations) {
+    const direction = matchPsReservationToTripsyFlight(res, ev, TRIPSY_PS_MATCH_DAY_DRIFT);
+    if (direction) {
+      if (driftCollector) driftCollector.push({ reservation: res, ev, direction });
+      return { reservation: res, direction };
+    }
+  }
   return null;
+}
+
+// Per-device (not synced via Drive -- this is just "have I dismissed this
+// specific alert," not real trip data), so acknowledging on one device
+// doesn't silently dismiss it on another. Keyed by reservation + the
+// flight's OWN date (not the reservation's original date), so if the
+// flight moves again to a new date later, that's treated as a fresh drift
+// needing its own acknowledgment rather than staying silently dismissed.
+const TRIPSY_PS_DRIFT_ACK_PREFIX = 'tripsy-ps-drift-ack:';
+function tripsyPsDriftAckKey(res, ev) {
+  const dayKey = tripsyDayKey(ev.start) || tripsyDayKey(ev.end) || '';
+  return `${TRIPSY_PS_DRIFT_ACK_PREFIX}${res.reservationNumber || res.flightNumber || ''}:${dayKey}`;
+}
+function isTripsyPsDriftAcknowledged(res, ev) {
+  try {
+    return localStorage.getItem(tripsyPsDriftAckKey(res, ev)) === '1';
+  } catch (e) {
+    return false;
+  }
+}
+function setTripsyPsDriftAcknowledged(res, ev) {
+  try {
+    localStorage.setItem(tripsyPsDriftAckKey(res, ev), '1');
+  } catch (e) {
+    console.error('setTripsyPsDriftAcknowledged failed:', e);
+  }
+}
+
+// Called once after every full Trips-page render with whatever
+// findMatchingTripsyPsReservation collected this pass (see its own
+// driftCollector param) -- shows a modal the owner must explicitly
+// dismiss with a button press per explicit request, rather than a toast
+// that could go unnoticed or a native alert() that would block re-renders.
+// Filters out anything already acknowledged first, so this is a no-op on
+// every render after the first time a given drift is seen and dismissed.
+// If the modal's already showing (from an earlier render pass this
+// session that hasn't been dismissed yet), leaves it alone rather than
+// tearing it down and rebuilding it out from under the owner.
+function showTripsyPsDriftAlertIfNeeded(driftMatches) {
+  const pending = driftMatches.filter(m => !isTripsyPsDriftAcknowledged(m.reservation, m.ev));
+  if (!pending.length) return;
+  if (document.getElementById('tripsy-ps-drift-alert-overlay')) return;
+
+  const itemHtml = m => `
+    <div style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--line);">
+      <div style="font-weight:700; margin-bottom:4px;">${esc(m.ev.summary)}</div>
+      <div style="font-size:13px; color:var(--muted); line-height:1.5;">
+        Your P/S reservation${m.reservation.reservationNumber ? ` (#${esc(m.reservation.reservationNumber)})` : ''}
+        was booked for ${esc(m.reservation.date || 'an earlier date')}, but this flight now shows
+        ${esc(formatTripitDateRange(m.ev.start, m.ev.end))}. The reservation is still linked to this
+        flight by number -- please verify with P/S Member Services that your terminal time is still
+        correct for the new date.
+      </div>
+    </div>
+  `;
+  const overlay = document.createElement('div');
+  overlay.id = 'tripsy-ps-drift-alert-overlay';
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9500; display:flex; align-items:center; justify-content:center; padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; max-width:480px; width:100%; max-height:80vh; overflow-y:auto; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+      <div style="font-family:var(--mono); font-size:16px; font-weight:700; color:var(--amber); margin-bottom:14px;">⚠️ Flight Date Changed</div>
+      ${pending.map(itemHtml).join('')}
+      <button class="btn primary" data-tripsy-ps-drift-ack style="width:100%;">OK, Got It</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector('[data-tripsy-ps-drift-ack]').addEventListener('click', () => {
+    pending.forEach(m => setTripsyPsDriftAcknowledged(m.reservation, m.ev));
+    overlay.remove();
+  });
 }
 
 // Splits ANY event whose start and end fall on different local calendar
@@ -10918,6 +11025,9 @@ function renderTripsyEventsList() {
 async function renderTripsyEventsListImpl() {
   const container = document.getElementById("tripsy-card");
   const allTrips = tripsyDecryptedTrips || [];
+  // Collected by findMatchingTripsyPsReservation below as it goes -- see
+  // showTripsyPsDriftAlertIfNeeded, called once this whole render is done.
+  const psDriftMatches = [];
 
   if (!allTrips.length) {
     container.innerHTML = `<div class="card"><div class="empty-state">No Tripsy trips in range.</div></div>`;
@@ -11079,7 +11189,7 @@ async function renderTripsyEventsListImpl() {
           },
         };
       }
-      const psMatch = findMatchingTripsyPsReservation(ev);
+      const psMatch = findMatchingTripsyPsReservation(ev, psDriftMatches);
       const eventKey = tripsyEventKey(ev.tripsyRaw);
       const canEditDelete = isOwner && !!eventKey;
       const isPendingDelete = !!ev._pendingDeleteId;
@@ -11373,6 +11483,10 @@ async function renderTripsyEventsListImpl() {
   }).join("");
 
   positionTripsyTimelineConnectors();
+  // Owner-only -- P/S Member Services is who'd need contacting to verify a
+  // reservation after its flight moved, not something a view-only viewer
+  // could act on.
+  if (isOwner) showTripsyPsDriftAlertIfNeeded(psDriftMatches);
 
   const toggleTripsyCollapse = key => {
     setTripsyTripCollapsed(key, !isTripsyTripCollapsed(key));
