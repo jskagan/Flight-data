@@ -7271,23 +7271,44 @@ function findMatchingTripsyPsReservation(ev, driftCollector) {
   if (!tripsyPsReservations || ev.type !== 'flight') return null;
   for (const res of tripsyPsReservations) {
     const direction = matchPsReservationToTripsyFlight(res, ev, 0, false);
-    if (direction) return { reservation: res, direction };
+    if (direction) return { reservation: res, direction, driftReason: null };
   }
   for (const res of tripsyPsReservations) {
     const direction = matchPsReservationToTripsyFlight(res, ev, TRIPSY_PS_MATCH_DAY_DRIFT, false);
     if (direction) {
       if (driftCollector) driftCollector.push({ reservation: res, ev, direction, reason: 'date' });
-      return { reservation: res, direction };
+      return { reservation: res, direction, driftReason: 'date' };
     }
   }
   for (const res of tripsyPsReservations) {
     const direction = matchPsReservationToTripsyFlight(res, ev, 0, true);
     if (direction) {
       if (driftCollector) driftCollector.push({ reservation: res, ev, direction, reason: 'flightNumber' });
-      return { reservation: res, direction };
+      return { reservation: res, direction, driftReason: 'flightNumber' };
     }
   }
   return null;
+}
+
+// Shared by tripsyTimelinePsReservationSpec (live Trips page) and
+// tripsySummaryRowTime (Print/Preview Part 1) so both surfaces resolve a
+// P/S reservation's displayed time the same way. Normally prefers the
+// reservation's own on-file time (what P/S was actually told), falling
+// back to the matched flight's own time (in whichever direction this
+// reservation applies to) if the reservation has neither arriveByTime nor
+// arrivalTime at all -- confirmed in production: a reservation missing
+// both showed no time whatsoever even though the matched flight's own
+// time was right there. If the match only succeeded via a drift fallback
+// (see findMatchingTripsyPsReservation's driftReason), the reservation's
+// own on-file time may itself be stale, so the flight's actual time is
+// PREFERRED over it instead of just filling a gap.
+function tripsyPsReservationTimeLabel(res, ev, direction, driftReason) {
+  const flightIso = ev ? (direction === 'before' ? ev.start : ev.end) : null;
+  const flightTimeLabel = flightIso ? formatTripitTime(flightIso) : null;
+  const resTimeLabel = res.arriveByTime || res.arrivalTime || null;
+  const timeLabel = driftReason ? (flightTimeLabel || resTimeLabel) : (resTimeLabel || flightTimeLabel);
+  const usingFlightTime = !!timeLabel && timeLabel === flightTimeLabel && timeLabel !== resTimeLabel;
+  return { timeLabel, usingFlightTime };
 }
 
 // Per-device (not synced via Drive -- this is just "have I dismissed this
@@ -7316,6 +7337,71 @@ function setTripsyPsDriftAcknowledged(res, ev) {
   }
 }
 
+// A loose string-equality check for two human-readable time-of-day labels
+// coming from different sources ("4:55 pm" from the reservation's own
+// parsed text vs. "4:55 PM" from formatTripitTime) -- normalizes case and
+// whitespace so a pure formatting difference never reads as a "change."
+function tripsyLooseLabelsDiffer(a, b) {
+  const norm = s => (s || '').toLowerCase().replace(/\s+/g, '');
+  return norm(a) !== norm(b);
+}
+
+// Field-by-field diff between what P/S was actually told (the reservation
+// record, parsed once from its confirmation email) and the Tripsy flight
+// it's now matched to -- only rows that actually differ are returned, so
+// an exact match on everything but (say) the flight number doesn't
+// clutter the alert with rows that read identically on both sides. Used
+// by showTripsyPsDriftAlertIfNeeded to explain exactly what changed,
+// regardless of which fallback tier (date drift, or flight number ignored
+// entirely) is what found the match in the first place.
+function tripsyPsReservationChangeSummary(res, ev) {
+  const raw = ev.tripsyRaw || {};
+  const rows = [];
+
+  const resFlightLabel = [res.airline, res.flightNumber].filter(Boolean).join(' ') || null;
+  const evFlightLabel = ev.summary || null;
+  if (tripsyFlightNumberDigits(res.flightNumber) !== tripsyFlightNumberDigits(ev.summary)) {
+    rows.push({ label: 'Flight', from: resFlightLabel, to: evFlightLabel });
+  }
+
+  // Compares actual calendar dates, not fuzzy label text -- "August 19"
+  // and "Aug 19, 2026" read as different strings but are the same day,
+  // and a naive text compare flagged that as a false "change" in testing.
+  // Checked against whichever side of the flight this reservation is
+  // actually for (arrival vs. departure), same as matchPsReservationToTripsyFlight.
+  {
+    const inferredYear = inferReservationYear(res.date, res.emailInternalDate);
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const [monthName, dayStr] = (res.date || '').split(' ');
+    const resMonth = monthNames.indexOf(monthName) + 1;
+    const resDay = Number(dayStr);
+    const isArrival = res.destination === 'LAX' || res.arrivalAirport === 'LAX';
+    const relevantIso = isArrival ? ev.end : ev.start;
+    const relevantParts = parseTripitLocalParts(relevantIso);
+    const resDateValid = inferredYear && resMonth && resDay;
+    const sameDate = resDateValid && relevantParts
+      && relevantParts.year === inferredYear && relevantParts.month === resMonth && relevantParts.day === resDay;
+    if (!sameDate) {
+      rows.push({ label: 'Date', from: res.date || null, to: relevantIso ? formatTripitDateRange(relevantIso, relevantIso) : null });
+    }
+  }
+
+  if (tripsyLooseLabelsDiffer(res.departureTime, formatTripitTime(ev.start))) {
+    rows.push({ label: 'Departure time', from: res.departureTime, to: formatTripitTime(ev.start) });
+  }
+  if (tripsyLooseLabelsDiffer(res.arrivalTime, formatTripitTime(ev.end))) {
+    rows.push({ label: 'Arrival time', from: res.arrivalTime, to: formatTripitTime(ev.end) });
+  }
+
+  const resRoute = [res.departureAirport || res.origin, res.arrivalAirport || res.destination].filter(Boolean).join(' → ') || null;
+  const evRoute = [raw.departureDescription, raw.arrivalDescription].filter(Boolean).join(' → ') || null;
+  if (resRoute && evRoute && tripsyLooseLabelsDiffer(resRoute, evRoute)) {
+    rows.push({ label: 'Route', from: resRoute, to: evRoute });
+  }
+
+  return rows;
+}
+
 // Called once after every full Trips-page render with whatever
 // findMatchingTripsyPsReservation collected this pass (see its own
 // driftCollector param) -- shows a modal the owner must explicitly
@@ -7332,22 +7418,38 @@ function showTripsyPsDriftAlertIfNeeded(driftMatches) {
   if (document.getElementById('tripsy-ps-drift-alert-overlay')) return;
 
   const itemHtml = m => {
-    const resFlightNumber = m.reservation.flightNumber ? `#${esc(m.reservation.flightNumber)}` : '';
-    const detail = m.reason === 'flightNumber'
-      ? `Your P/S reservation${m.reservation.reservationNumber ? ` (#${esc(m.reservation.reservationNumber)})` : ''}
-         was booked against flight ${resFlightNumber || 'a different flight number'} on ${esc(m.reservation.date || 'the same date')},
-         but this trip's actual flight is now ${esc(m.ev.summary)} -- same date and route, different flight
-         number (the airline likely re-issued it). The reservation is matched here by date and airport only,
-         not by flight number -- please verify with P/S Member Services that this reservation still applies.`
-      : `Your P/S reservation${m.reservation.reservationNumber ? ` (#${esc(m.reservation.reservationNumber)})` : ''}
-         was booked for ${esc(m.reservation.date || 'an earlier date')}, but this flight now shows
-         ${esc(formatTripitDateRange(m.ev.start, m.ev.end))}. The reservation is still linked to this
-         flight by number -- please verify with P/S Member Services that your terminal time is still
-         correct for the new date.`;
+    const changes = tripsyPsReservationChangeSummary(m.reservation, m.ev);
+    const changesHtml = changes.length ? `
+      <table style="width:100%; border-collapse:collapse; margin:8px 0; font-size:12px;">
+        <thead>
+          <tr>
+            <th style="text-align:left; padding:2px 8px 4px 0; color:var(--muted); font-weight:600;">Field</th>
+            <th style="text-align:left; padding:2px 8px 4px; color:var(--muted); font-weight:600;">On file with P/S</th>
+            <th style="text-align:left; padding:2px 0 4px; color:var(--muted); font-weight:600;">Now</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${changes.map(c => `
+            <tr>
+              <td style="padding:2px 8px 2px 0; color:var(--text); vertical-align:top;">${esc(c.label)}</td>
+              <td style="padding:2px 8px; color:var(--text); vertical-align:top;">${esc(c.from || '—')}</td>
+              <td style="padding:2px 0; color:var(--amber); font-weight:600; vertical-align:top;">${esc(c.to || '—')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    ` : '';
     return `
       <div style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--line);">
         <div style="font-weight:700; margin-bottom:4px;">${esc(m.ev.summary)}</div>
-        <div style="font-size:13px; color:var(--muted); line-height:1.5;">${detail}</div>
+        <div style="font-size:13px; color:var(--muted); line-height:1.5;">
+          Your P/S reservation${m.reservation.reservationNumber ? ` (#${esc(m.reservation.reservationNumber)})` : ''}
+          no longer exactly matches what P/S was told${changes.length ? ' -- here’s what changed:' : '.'}
+        </div>
+        ${changesHtml}
+        <div style="font-size:12px; color:var(--muted); line-height:1.5; margin-top:6px;">
+          Please verify with P/S Member Services that this reservation still applies correctly.
+        </div>
       </div>
     `;
   };
@@ -7355,7 +7457,7 @@ function showTripsyPsDriftAlertIfNeeded(driftMatches) {
   overlay.id = 'tripsy-ps-drift-alert-overlay';
   overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9500; display:flex; align-items:center; justify-content:center; padding:20px;';
   overlay.innerHTML = `
-    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; max-width:480px; width:100%; max-height:80vh; overflow-y:auto; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; max-width:520px; width:100%; max-height:80vh; overflow-y:auto; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
       <div style="font-family:var(--mono); font-size:16px; font-weight:700; color:var(--amber); margin-bottom:14px;">⚠️ Flight Changed</div>
       ${pending.map(itemHtml).join('')}
       <button class="btn primary" data-tripsy-ps-drift-ack style="width:100%;">OK, Got It</button>
@@ -9463,7 +9565,7 @@ async function buildTripsyPrintDayData(trip) {
     }
     const dayKey = tripsyDayKey(ev.start) || 'undated';
     const psMatch = findMatchingTripsyPsReservation(ev);
-    const psItem = psMatch ? { dayKey, psReservation: psMatch.reservation } : null;
+    const psItem = psMatch ? { dayKey, psReservation: psMatch.reservation, psEv: ev, psDirection: psMatch.direction, psDriftReason: psMatch.driftReason } : null;
     if (psItem && psMatch.direction === 'before') summaryFlatItems.push(psItem);
     summaryFlatItems.push({ dayKey, ev });
     if (psItem && psMatch.direction === 'after') summaryFlatItems.push(psItem);
@@ -9507,7 +9609,7 @@ function tripsySummaryRowWantsBlurb(item) {
 }
 function tripsySummaryRowTime(item) {
   if (item.isLayover) return '';
-  if (item.psReservation) return item.psReservation.arriveByTime || item.psReservation.arrivalTime || '';
+  if (item.psReservation) return tripsyPsReservationTimeLabel(item.psReservation, item.psEv, item.psDirection, item.psDriftReason).timeLabel || '';
   return formatTripitTime(item.ev.start) || '';
 }
 // What the row shows before an AI blurb has ever been generated (or if
@@ -11000,14 +11102,17 @@ function positionTripsyTimelineConnectors() {
 // data-tripsy-view-ps-reservation wiring in renderTripsyEventsList),
 // replacing the old click-straight-through-to-the-reservation-page
 // behavior (still offered as a link inside the expanded panel).
-function tripsyTimelinePsReservationSpec(res) {
+function tripsyTimelinePsReservationSpec(res, ev, direction, driftReason) {
   // The "Arrive by" time (or, lacking that, the plane's own arrival time)
   // becomes this row's own left-side time instead of a duplicated line in
   // the details -- same "don't repeat the time on the right" rule every
-  // other row now follows.
-  const timeLabel = res.arriveByTime || res.arrivalTime || null;
+  // other row now follows. See tripsyPsReservationTimeLabel for the
+  // fallback/preference rules.
+  const { timeLabel, usingFlightTime } = tripsyPsReservationTimeLabel(res, ev, direction, driftReason);
+
   const detailLines = [];
   if (!res.arriveByTime && res.arrivalAirport) detailLines.push(`Plane Arrives: ${res.arrivalAirport}`);
+  if (usingFlightTime) detailLines.push(`Time shown is from the flight's current schedule, not the original P/S reservation.`);
   const travelers = (res.travelers || []).map(t => t.name).join(', ');
   if (travelers) detailLines.push(`Travelers: ${travelers}`);
   // No confirmation/reservation number shown here either, matching every
@@ -11374,6 +11479,11 @@ async function renderTripsyEventsListImpl() {
       return {
         dayKey: tripsyDayKey(ev.start),
         psMatch,
+        // Only needed so a matched P/S reservation's own timeline row
+        // (built below, tripsyTimelinePsReservationSpec) can fall back to
+        // -- or, for a drift match, prefer -- this flight's actual time
+        // over the reservation's own possibly-stale on-file time.
+        ev,
         spec: {
           dotColor: tripsyTimelineDotColor(ev),
           dotGlyph: tripsyTimelineDotIcon(ev),
@@ -11402,7 +11512,7 @@ async function renderTripsyEventsListImpl() {
     const flatItems = [];
     timelineItems.forEach(item => {
       if (item.psMatch) {
-        const psEntry = { dayKey: item.dayKey, spec: tripsyTimelinePsReservationSpec(item.psMatch.reservation) };
+        const psEntry = { dayKey: item.dayKey, spec: tripsyTimelinePsReservationSpec(item.psMatch.reservation, item.ev, item.psMatch.direction, item.psMatch.driftReason) };
         if (item.psMatch.direction === 'before') flatItems.push(psEntry, item);
         else flatItems.push(item, psEntry);
       } else {
