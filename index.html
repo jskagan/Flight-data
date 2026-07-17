@@ -7193,12 +7193,20 @@ function tripsyFlightNumberDigits(str) {
 // `maxDayDrift` lets a caller relax the "same calendar day" requirement --
 // see findMatchingTripsyPsReservation for why (a rescheduled flight whose
 // PS reservation record hasn't caught up yet). 0 (the default) is an exact
-// match, same as before this param existed.
-function matchPsReservationToTripsyFlight(res, ev, maxDayDrift = 0) {
-  if (ev.type !== 'flight' || !res.flightNumber) return null;
-  const resDigits = tripsyFlightNumberDigits(res.flightNumber);
-  const evDigits = tripsyFlightNumberDigits(ev.summary);
-  if (!resDigits || resDigits !== evDigits) return null;
+// match, same as before this param existed. `ignoreFlightNumber` drops the
+// flight-number check entirely -- confirmed in production: a PS
+// reservation booked against "135" while the airline had, by then, re-
+// issued the same LHR-LAX leg as "AA137" (same date, same route) never
+// matches on flight number at all, no matter how much date drift is
+// allowed, since the numbers are just different.
+function matchPsReservationToTripsyFlight(res, ev, maxDayDrift = 0, ignoreFlightNumber = false) {
+  if (ev.type !== 'flight') return null;
+  if (!ignoreFlightNumber) {
+    if (!res.flightNumber) return null;
+    const resDigits = tripsyFlightNumberDigits(res.flightNumber);
+    const evDigits = tripsyFlightNumberDigits(ev.summary);
+    if (!resDigits || resDigits !== evDigits) return null;
+  }
 
   const inferredYear = inferReservationYear(res.date, res.emailInternalDate);
   const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -7229,36 +7237,53 @@ function matchPsReservationToTripsyFlight(res, ev, maxDayDrift = 0) {
 }
 
 // A PS reservation record is parsed once from the "Confirmed:" email and
-// never updates itself -- if the airline later reschedules the flight
-// (same flight number, different date/time) without a new PS email
-// arriving to re-sync, an exact-date match stops finding it, and the
-// reservation silently vanishes from the trip timeline even though it's
-// still there and still applies. Exact-date matches are always tried
-// first across every reservation (and preferred if more than one shares a
-// flight number, e.g. a recurring daily flight across different trips);
-// only if NOTHING matches exactly does a second pass allow the date to
-// drift by a few days, so a rescheduled flight still finds its own
-// reservation instead of losing it entirely.
+// never updates itself -- if the airline later changes the flight (same
+// flight number but a different date/time, OR -- confirmed in production,
+// the LHR-LAX return leg re-issued as "AA137" against a reservation still
+// reading "135" -- an entirely different flight NUMBER on the exact same
+// date) without a new PS email arriving to re-sync, an exact match stops
+// finding it, and the reservation silently vanishes from the trip
+// timeline even though it's still there and still applies.
+//
+// Three passes, tried in order, across every reservation each time (so an
+// exact match anywhere is always preferred over a fuzzy one, e.g. two
+// reservations sharing a flight number across different trips):
+//   1. exact flight number, exact date -- unchanged original behavior.
+//   2. exact flight number, date within TRIPSY_PS_MATCH_DAY_DRIFT days --
+//      a schedule change that only moved the time/date.
+//   3. flight number ignored entirely, exact date + airport direction --
+//      the airline re-issued the flight under a new number altogether.
+// Tier 3 requires an exact date specifically (no drift combined with it)
+// since dropping the flight-number check already trades away one
+// constraint; stacking date drift on top too would make a coincidental
+// wrong match too easy.
 //
 // `driftCollector`, if given, gets a `{reservation, ev, direction}` entry
-// pushed onto it whenever a match is only found via the drift-allowed
-// second pass -- renderTripsyEventsListImpl passes one so it can alert the
-// owner that a reservation is now attached to a flight whose date no
-// longer matches what P/S was told (see showTripsyPsDriftAlertIfNeeded).
-// buildTripsyPrintDayData (Print/Preview) doesn't pass one -- popping a
-// confirmation dialog mid-export would be out of place there, and a
-// non-owner viewer has no P/S account to go verify anything with anyway.
+// pushed onto it whenever a match is only found via tier 2 or 3 --
+// renderTripsyEventsListImpl passes one so it can alert the owner that a
+// reservation is now attached to a flight that no longer matches what P/S
+// was told (see showTripsyPsDriftAlertIfNeeded). buildTripsyPrintDayData
+// (Print/Preview) doesn't pass one -- popping a confirmation dialog mid-
+// export would be out of place there, and a non-owner viewer has no P/S
+// account to go verify anything with anyway.
 const TRIPSY_PS_MATCH_DAY_DRIFT = 3;
 function findMatchingTripsyPsReservation(ev, driftCollector) {
   if (!tripsyPsReservations || ev.type !== 'flight') return null;
   for (const res of tripsyPsReservations) {
-    const direction = matchPsReservationToTripsyFlight(res, ev, 0);
+    const direction = matchPsReservationToTripsyFlight(res, ev, 0, false);
     if (direction) return { reservation: res, direction };
   }
   for (const res of tripsyPsReservations) {
-    const direction = matchPsReservationToTripsyFlight(res, ev, TRIPSY_PS_MATCH_DAY_DRIFT);
+    const direction = matchPsReservationToTripsyFlight(res, ev, TRIPSY_PS_MATCH_DAY_DRIFT, false);
     if (direction) {
-      if (driftCollector) driftCollector.push({ reservation: res, ev, direction });
+      if (driftCollector) driftCollector.push({ reservation: res, ev, direction, reason: 'date' });
+      return { reservation: res, direction };
+    }
+  }
+  for (const res of tripsyPsReservations) {
+    const direction = matchPsReservationToTripsyFlight(res, ev, 0, true);
+    if (direction) {
+      if (driftCollector) driftCollector.push({ reservation: res, ev, direction, reason: 'flightNumber' });
       return { reservation: res, direction };
     }
   }
@@ -7306,24 +7331,32 @@ function showTripsyPsDriftAlertIfNeeded(driftMatches) {
   if (!pending.length) return;
   if (document.getElementById('tripsy-ps-drift-alert-overlay')) return;
 
-  const itemHtml = m => `
-    <div style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--line);">
-      <div style="font-weight:700; margin-bottom:4px;">${esc(m.ev.summary)}</div>
-      <div style="font-size:13px; color:var(--muted); line-height:1.5;">
-        Your P/S reservation${m.reservation.reservationNumber ? ` (#${esc(m.reservation.reservationNumber)})` : ''}
-        was booked for ${esc(m.reservation.date || 'an earlier date')}, but this flight now shows
-        ${esc(formatTripitDateRange(m.ev.start, m.ev.end))}. The reservation is still linked to this
-        flight by number -- please verify with P/S Member Services that your terminal time is still
-        correct for the new date.
+  const itemHtml = m => {
+    const resFlightNumber = m.reservation.flightNumber ? `#${esc(m.reservation.flightNumber)}` : '';
+    const detail = m.reason === 'flightNumber'
+      ? `Your P/S reservation${m.reservation.reservationNumber ? ` (#${esc(m.reservation.reservationNumber)})` : ''}
+         was booked against flight ${resFlightNumber || 'a different flight number'} on ${esc(m.reservation.date || 'the same date')},
+         but this trip's actual flight is now ${esc(m.ev.summary)} -- same date and route, different flight
+         number (the airline likely re-issued it). The reservation is matched here by date and airport only,
+         not by flight number -- please verify with P/S Member Services that this reservation still applies.`
+      : `Your P/S reservation${m.reservation.reservationNumber ? ` (#${esc(m.reservation.reservationNumber)})` : ''}
+         was booked for ${esc(m.reservation.date || 'an earlier date')}, but this flight now shows
+         ${esc(formatTripitDateRange(m.ev.start, m.ev.end))}. The reservation is still linked to this
+         flight by number -- please verify with P/S Member Services that your terminal time is still
+         correct for the new date.`;
+    return `
+      <div style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--line);">
+        <div style="font-weight:700; margin-bottom:4px;">${esc(m.ev.summary)}</div>
+        <div style="font-size:13px; color:var(--muted); line-height:1.5;">${detail}</div>
       </div>
-    </div>
-  `;
+    `;
+  };
   const overlay = document.createElement('div');
   overlay.id = 'tripsy-ps-drift-alert-overlay';
   overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9500; display:flex; align-items:center; justify-content:center; padding:20px;';
   overlay.innerHTML = `
     <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; max-width:480px; width:100%; max-height:80vh; overflow-y:auto; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
-      <div style="font-family:var(--mono); font-size:16px; font-weight:700; color:var(--amber); margin-bottom:14px;">⚠️ Flight Date Changed</div>
+      <div style="font-family:var(--mono); font-size:16px; font-weight:700; color:var(--amber); margin-bottom:14px;">⚠️ Flight Changed</div>
       ${pending.map(itemHtml).join('')}
       <button class="btn primary" data-tripsy-ps-drift-ack style="width:100%;">OK, Got It</button>
     </div>
