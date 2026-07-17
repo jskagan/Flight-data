@@ -41,6 +41,11 @@ exception also covers the `tripsy-trips-refresh-retry` and `tripsy-trips-refresh
 tasks (9:00am/9:30am conditional retries of that same task's pending-changes step) — same scope,
 same diff restriction, no separate authorization needed for them.
 
+Every refresh summary must say whether the top-right Tripsy pending-changes badge is now green
+(i.e. whether `tripsyChangesReadyToClear` is true for `driveData.tripsyPendingChanges` given the
+just-refreshed `TRIPSY_SNAPSHOT_GENERATED_AT`) — not just what changed. If it's green, say so
+explicitly and remind the user they can clear it from the Tripsy Refresh page.
+
 The user runs multiple sessions against this repo (different devices, sometimes in parallel), so
 `main` can move without this session knowing. **Every session should start with `git fetch origin`
 and a look at `git log main..origin/main`**, before making any local edits — catching divergence
