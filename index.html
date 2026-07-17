@@ -662,6 +662,12 @@
   }
   .tp-day-divider-date { font-family: var(--mono); font-size: 13px; font-weight: 700; flex: 1; text-align: center; }
   .tp-day-divider-cities { font-size: 12px; opacity: 0.85; flex: 1; text-align: right; letter-spacing: 0.02em; }
+  /* Part 2's free-day placeholder (tripsyDetailedEmptyDayBlockHtml) --
+     lighter charcoal than a normal day divider, same distinction Part 1's
+     .tp-day-block-empty tile makes, so a free day still reads as
+     deliberate rather than a lower-contrast version of a real one. */
+  .tp-day-divider-empty { background: #4A5568; }
+  .tp-detailed-row-empty { margin: 0 0 20px; }
 
   .tp-trip-intro { font-size: 16px; line-height: 1.6; color: #333; margin: 0 0 24px; }
   .tp-narrative-day { break-before: avoid; margin-bottom: 24px; }
@@ -7117,9 +7123,12 @@ function findMatchingTripsyPsReservation(ev) {
 // arrival date (when different from its departure date) and time instead
 // appear as its own last detail line (see tripsyTimelineDetailLines).
 // Hotels (a real Tripsy stay always has a real end date, so it always
-// splits) and every other type alike put the event's own name FIRST, then
-// the "Check-in"/"Check-out" or "Begins"/"Ends" label, so the two halves
-// read distinctly under their different day headers. Both halves keep the
+// splits) put the event's own name FIRST, then the "Check-in"/"Check-out"
+// label; non-flight transportation (a train/bus/ferry/car ride crossing
+// midnight) uses "Departs"/"Arrives" instead, since "Begins"/"Ends" reads
+// oddly for a journey; everything else (activities) keeps "Begins"/"Ends".
+// Either way the two halves read distinctly under their different day
+// headers. Both halves keep the
 // SAME tripsyRaw
 // (same resource+id), so the existing panelKey dedup in
 // renderTripsyEventsList (keyed by tripsyEventKey, not ev.id) still shares
@@ -7139,9 +7148,12 @@ function expandMultiDayTripsyEvents(events) {
         { ...ev, id: `${ev.id}-checkout`, summary: `${ev.summary} Check-out`, start: ev.end, end: null, notes: null, tripsyExtra: null, _splitHalf: 'end' },
       ];
     }
+    const isTransportation = ev.tripsyRaw && ev.tripsyRaw.resource === 'transportation';
+    const beginLabel = isTransportation ? 'Departs' : 'Begins';
+    const endLabel = isTransportation ? 'Arrives' : 'Ends';
     return [
-      { ...ev, id: `${ev.id}-begin`, summary: `${ev.summary} Begins`, end: null, _splitHalf: 'begin' },
-      { ...ev, id: `${ev.id}-end`, summary: `${ev.summary} Ends`, start: ev.end, end: null, notes: null, tripsyExtra: null, _splitHalf: 'end' },
+      { ...ev, id: `${ev.id}-begin`, summary: `${ev.summary} ${beginLabel}`, end: null, _splitHalf: 'begin' },
+      { ...ev, id: `${ev.id}-end`, summary: `${ev.summary} ${endLabel}`, start: ev.end, end: null, notes: null, tripsyExtra: null, _splitHalf: 'end' },
     ];
   });
 }
@@ -10000,6 +10012,46 @@ async function buildTripsyPrintHtml(tripKey) {
     return '';
   };
 
+  // Part 2 (Detailed Itinerary) equivalent of Part 1's tripsyFullDayKeys
+  // loop above -- walks every calendar day of the trip, not just the ones
+  // with events, so a free day gets its own "No events scheduled" divider
+  // instead of silently vanishing between two day dividers. One segment
+  // per RUN of consecutive event-less days (merged, same as Part 1),
+  // reused by both the narrative and flat-fallback branches below.
+  const tripsyDetailedDaySegments = [];
+  for (let i = 0; i < tripsyFullDayKeys.length; i++) {
+    const dayKey = tripsyFullDayKeys[i];
+    if (eventDayKeySet.has(dayKey)) {
+      tripsyDetailedDaySegments.push({ type: 'day', dayKey });
+      continue;
+    }
+    let j = i;
+    while (j < tripsyFullDayKeys.length && !eventDayKeySet.has(tripsyFullDayKeys[j])) j++;
+    tripsyDetailedDaySegments.push({ type: 'empty', rangeDayKeys: tripsyFullDayKeys.slice(i, j) });
+    i = j - 1;
+  }
+  if (dayKeys.includes('undated')) tripsyDetailedDaySegments.push({ type: 'day', dayKey: 'undated' });
+
+  // Same merged-range day label/date text as tripsySummaryEmptyRangeBlockHtml
+  // (e.g. "Day 3–4" / "Aug 13 – Aug 14"), just laid out as a divider bar
+  // instead of a day tile since Part 2 has no per-day box to merge into.
+  const tripsyDetailedEmptyDayBlockHtml = rangeDayKeys => {
+    const firstKey = rangeDayKeys[0];
+    const lastKey = rangeDayKeys[rangeDayKeys.length - 1];
+    const isSingleDay = rangeDayKeys.length === 1;
+    const firstNum = tripsyDayNumberFromTripStart(firstKey, tripStartDayKey);
+    const dayLabel = isSingleDay ? `Day ${firstNum}` : `Day ${firstNum}–${tripsyDayNumberFromTripStart(lastKey, tripStartDayKey)}`;
+    const dateLabel = isSingleDay ? tripsySummaryDayTileDate(firstKey) : `${tripsySummaryDayTileDate(firstKey)} – ${tripsySummaryDayTileDate(lastKey)}`;
+    return `
+      <div class="tp-day-divider tp-day-divider-empty">
+        <span class="tp-day-divider-num">${esc(dayLabel)}</span>
+        <span class="tp-day-divider-date">${esc(dateLabel)}</span>
+        <span class="tp-day-divider-cities"></span>
+      </div>
+      <div class="tp-row-empty tp-detailed-row-empty">No events scheduled</div>
+    `;
+  };
+
   let part2Html = '';
   if (narrative) {
     const narrativeDayByKey = new Map((narrative.days || []).map(d => [d.day_key, d]));
@@ -10009,7 +10061,9 @@ async function buildTripsyPrintHtml(tripKey) {
     // Promise.all's concurrent callbacks; see tripsyDayNumberFromTripStart's
     // own comment for why position-in-dayKeys was wrong in the first
     // place), so the two parts always agree on which day is "Day N".
-    const dayNarrativeHtmlParts = await Promise.all(dayKeys.map(async dayKey => {
+    const dayNarrativeHtmlParts = await Promise.all(tripsyDetailedDaySegments.map(async seg => {
+      if (seg.type === 'empty') return `<div class="tp-narrative-day">${tripsyDetailedEmptyDayBlockHtml(seg.rangeDayKeys)}</div>`;
+      const dayKey = seg.dayKey;
       const isUndated = dayKey === 'undated';
       const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
       const dayPlaces = placesByDay.get(dayKey) || [];
@@ -10036,7 +10090,9 @@ async function buildTripsyPrintHtml(tripKey) {
       </div>
     `;
   } else {
-    const dayBlocks = await Promise.all(dayKeys.map(async dayKey => {
+    const dayBlocks = await Promise.all(tripsyDetailedDaySegments.map(async seg => {
+      if (seg.type === 'empty') return tripsyDetailedEmptyDayBlockHtml(seg.rangeDayKeys);
+      const dayKey = seg.dayKey;
       const isUndated = dayKey === 'undated';
       const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
       const dayItems = summaryByDay.get(dayKey) || [];
