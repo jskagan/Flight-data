@@ -9812,10 +9812,16 @@ function tripsyContentFingerprint(obj) {
 // name so the caller can attach each place's blurb to its own photo/
 // address card. Owner-only (see fetchAnthropicApiKeyFromDrive's own
 // comment for why) and entirely optional -- any failure (no key file,
-// network error, malformed response) is caught by the caller. Claude is
-// instructed to only use facts present in dayPromptDataList, since its
-// blurbs are rendered right next to the real address/confirmation info --
-// it must not invent details.
+// network error, malformed response) is caught by the caller. Unlike the
+// terse Part 1 summary generator (generateTripsySummaryBlurbs), and like
+// the per-event generator (generateTripsyEventNarrative), this is
+// deliberately allowed to draw on Claude's own knowledge of the specific
+// named places/venues/experiences -- their history, significance, and
+// character -- so the day narrative and each place blurb read as a real
+// guide rather than a restatement of the itinerary. Same anti-fabrication
+// guardrails as generateTripsyEventNarrative: no invented prices, exact
+// dates/years, statistics, or made-up review quotes; stay evocative-but-
+// honest for anything it doesn't actually recognize.
 //
 // `{ includeIntro, dayKeysToGenerate }` scopes generation to only the
 // sections the caller actually wants regenerated (see
@@ -9878,7 +9884,7 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{
         role: 'user',
-        content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. ${includeIntro ? 'Write a short trip_intro paragraph for the whole trip.' : 'Set trip_intro to an empty string -- it is not being regenerated right now.'} For each day: a short evocative title (e.g. "Travel Day: First Taste of Palma" -- do NOT prefix it with "Day N" or the date, since the printed page already shows that on its own divider bar directly above the title), 1-3 short narrative paragraphs weaving the day's events together, and one place_blurbs entry (place_name + a short blurb) per named place (hotel/activity) in that day's events, with place_name exactly matching the place_name given in the data. Only include a days[] entry for these day_key values, in this exact set -- do not write entries for any other day: ${JSON.stringify(dayKeysToGenerate)}. Only state facts present in the data below -- do not invent hours, prices, history, or amenities. If a day has no named places, place_blurbs can be an empty array.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
+        content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. ${includeIntro ? 'Write a short, evocative trip_intro paragraph for the whole trip that sets the scene for the destinations involved.' : 'Set trip_intro to an empty string -- it is not being regenerated right now.'} For each day: a short evocative title (e.g. "Travel Day: First Taste of Palma" -- do NOT prefix it with "Day N" or the date, since the printed page already shows that on its own divider bar directly above the title), 1-3 narrative paragraphs that weave the day's events together AND bring in genuinely interesting, accurate background about the specific places and experiences involved -- a hotel's history or standing, what a landmark, museum, or show actually is and why it's notable, the character of a neighborhood -- so the day reads as a rich guide rather than a list. Also return one place_blurbs entry per named place (hotel/activity) in that day's events -- place_name (exactly matching the place_name given in the data) plus a 2-3 sentence blurb sharing real, interesting background about that specific place (its story, significance, what to expect). Draw on what you actually know about these specific named places, venues, and experiences. Do NOT fabricate specifics you're unsure of -- no invented hours, prices, exact founding years or dates, statistics, or made-up review quotes; speak to reputation only in honest, general terms ("long regarded as", "widely praised") and only when genuinely warranted. For anything you don't actually recognize, or a generic/private event, stay warm and evocative without inventing facts. Only include a days[] entry for these day_key values, in this exact set -- do not write entries for any other day: ${JSON.stringify(dayKeysToGenerate)}. If a day has no named places, place_blurbs can be an empty array.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
       }],
     }),
   });
@@ -9941,6 +9947,61 @@ async function generateTripsySummaryBlurbs(effectiveTrip, rowPromptDataList) {
       messages: [{
         role: 'user',
         content: `Write the one-line event descriptions for page 1 (a formal day-by-day summary) of a printed travel itinerary, in the warm but concise voice of a boutique travel magazine -- one short, vivid sentence per row (roughly 4-12 words), NOT a data dump. Return exactly one rows[] entry per row_key given below, in the same order, with row_key copied through unchanged. Only state facts present in the row's own data (title/place_name/address/notes) -- do not invent hours, prices, history, or amenities, and do not repeat the time (it is already shown separately). A P/S Reservation row is airport private-terminal service, not a destination -- describe it as such.\n\nRows:\n${JSON.stringify(tripSummaryForPrompt)}`,
+      }],
+    }),
+  });
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`Claude API error ${res.status}: ${errBody.slice(0, 500)}`);
+  }
+  const data = await res.json();
+  const textBlock = (data.content || []).find(b => b.type === 'text');
+  if (!textBlock) throw new Error('Claude API returned no text block');
+  return JSON.parse(textBlock.text);
+}
+
+// Backs the per-event "Generate" button on a Detailed Itinerary card
+// (tripsyEventNarrativeControlsHtml) -- deliberately a SEPARATE prompt from
+// generateTripsySummaryBlurbs above. That one writes Part 1's terse
+// one-liners and is locked to only-facts-in-the-data; this one is meant to
+// tell the traveler something genuinely interesting about a specific place
+// or experience (a historic hotel's story, what a show actually is and how
+// it's regarded), so it's explicitly allowed to draw on general knowledge
+// about well-known venues/landmarks/productions -- the whole point the
+// summary prompt's "do not invent history" rule was preventing. Returns a
+// single flowing paragraph (no line breaks, so it renders cleanly inside
+// one .tp-place-card-blurb) of 2-4 sentences. Owner-only via
+// fetchAnthropicApiKeyFromDrive, same as the other two generators. Guarded
+// against fabrication of specifics (prices, exact dates, invented review
+// quotes) and told to stay evocative-but-honest when it doesn't actually
+// recognize the place.
+async function generateTripsyEventNarrative(effectiveTrip, eventPromptData) {
+  const apiKey = await fetchAnthropicApiKeyFromDrive();
+  const context = {
+    trip: { name: effectiveTrip.name, location: effectiveTrip.location, dateRange: formatTripitDateRange(effectiveTrip.start, effectiveTrip.end) },
+    event: eventPromptData,
+  };
+  const schema = {
+    type: 'object',
+    properties: { blurb: { type: 'string' } },
+    required: ['blurb'],
+    additionalProperties: false,
+  };
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-4-8',
+      max_tokens: 1024,
+      output_config: { format: { type: 'json_schema', schema } },
+      messages: [{
+        role: 'user',
+        content: `Write an engaging background note about ONE event on the detailed page of a printed travel itinerary, to give the traveler something genuinely interesting to know about it. Voice: warm, informed, and concrete -- like a boutique travel magazine or a well-read concierge. Length: 2 to 4 sentences, as a SINGLE flowing paragraph with no line breaks.\n\nDraw on what you actually know about this specific place, venue, show, or experience -- its history, why it's notable or worth visiting, what the experience is like, its significance or how it's regarded. If it is a well-known hotel, landmark, museum, restaurant, performance, or attraction, share real, interesting, accurate context about it (for example, for a famous production, what it is and its reputation; for a historic hotel, its story and standing).\n\nRules: Ground everything in the event data below (name, address, type). Do NOT fabricate specifics you're unsure of -- no invented prices, exact founding years or dates, statistics, or made-up review quotes. Speak to reputation only in honest, general terms ("long regarded as", "widely praised") and only when it's genuinely warranted. If you do NOT recognize the specific place, or it's a generic or private event (an unnamed dinner, a private gathering), simply write a warm, evocative sentence or two anticipating it without inventing facts. Do not repeat the date or time -- they're shown separately on the card. Return only the paragraph text in the "blurb" field.\n\nEvent data:\n${JSON.stringify(context)}`,
       }],
     }),
   });
@@ -10067,17 +10128,15 @@ async function buildTripsyPrintHtml(tripKey) {
     const items = summaryByDay.get(dayKey) || [];
     const rowsHtml = items.map(item => {
       const rowKey = tripsySummaryRowKey(item);
-      // A per-event override (set via the Part 2 card's own Generate/Custom
-      // controls -- the Summary section itself deliberately has no
-      // narrative-generation buttons of its own) always wins over the old
-      // bulk "Generate Selected" pass -- tripsySummaryRowWantsBlurb gate
-      // still applies to that bulk blurb (so a blurb cached before this
-      // rule existed never surfaces for a P/S Reservation, flight, or car
-      // transportation row either), but a per-event override is allowed on
-      // ANY row, including those.
-      const eventEntry = rowKey ? narrativeCache[`${tripKey}::eventblurb::${rowKey}`] : null;
-      const text = (eventEntry && eventEntry.content.blurb)
-        || (rowKey && tripsySummaryRowWantsBlurb(item) && summaryBlurbByKey.get(rowKey))
+      // The Summary stays deliberately terse: its one-line rows show the
+      // bulk "Event Summaries" blurb (tripsySummaryRowWantsBlurb-gated, so
+      // never for a P/S Reservation, flight, or car transportation row)
+      // when one's been generated, else the plain fallback. The per-event
+      // controls' richer, multi-sentence content
+      // (<tripKey>::eventblurb::<rowKey>) lives ONLY on the Detailed
+      // Itinerary card -- it would blow out a one-line summary row -- so
+      // it's intentionally NOT consulted here.
+      const text = (rowKey && tripsySummaryRowWantsBlurb(item) && summaryBlurbByKey.get(rowKey))
         || tripsySummaryRowFallbackText(item);
       const timeLabel = tripsySummaryRowTime(item);
       return `
@@ -11163,8 +11222,8 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
           const item = allItems.find(it => tripsySummaryRowKey(it) === rowKey);
           if (!item) throw new Error(`No event found for row key ${rowKey}`);
           const promptData = tripsySummaryRowPromptData(item);
-          const result = await generateTripsySummaryBlurbs(effectiveTrip, [promptData]);
-          const blurb = (result.rows && result.rows[0] && result.rows[0].blurb) || '';
+          const result = await generateTripsyEventNarrative(effectiveTrip, promptData);
+          const blurb = (result && result.blurb) || '';
           const ok = await Store.saveTripsyNarrativeSections({
             [cacheKey]: { content: { blurb }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString() },
           });
