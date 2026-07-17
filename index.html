@@ -11111,7 +11111,13 @@ function tripsyTimelinePsReservationSpec(res, ev, direction, driftReason) {
   const { timeLabel, usingFlightTime } = tripsyPsReservationTimeLabel(res, ev, direction, driftReason);
 
   const detailLines = [];
-  if (!res.arriveByTime && res.arrivalAirport) detailLines.push(`Plane Arrives: ${res.arrivalAirport}`);
+  // Explicitly includes the resolved time (not just the airport) -- this
+  // line used to leave the time out on the assumption the row's own
+  // left-side time already covered it, but that read as "no arrival time
+  // shown at all" if this line is what someone's actually looking at.
+  if (!res.arriveByTime && res.arrivalAirport) {
+    detailLines.push(`Plane Arrives: ${res.arrivalAirport}${timeLabel ? ` at ${timeLabel}` : ''}`);
+  }
   if (usingFlightTime) detailLines.push(`Time shown is from the flight's current schedule, not the original P/S reservation.`);
   const travelers = (res.travelers || []).map(t => t.name).join(', ');
   if (travelers) detailLines.push(`Travelers: ${travelers}`);
@@ -11143,12 +11149,19 @@ function tripsyTimelinePsReservationSpec(res, ev, direction, driftReason) {
 // a Tripsy-sourced event, so it can't reuse that function directly. Only
 // ever one section, and only ever shows fields that actually have a value
 // -- same "no empty cards" rule as the Tripsy view panel.
-function renderTripsyPsReservationViewPanel(panel, res) {
+function renderTripsyPsReservationViewPanel(panel, res, match) {
+  // If this reservation matched a flight on the arrival side (see
+  // psReservationMatchByNumber in renderTripsyEventsListImpl), resolve
+  // "Plane Arrives" the same way the timeline row does rather than always
+  // showing the reservation's own possibly-stale on-file arrivalTime.
+  const planeArrivesTime = (match && match.direction === 'after')
+    ? tripsyPsReservationTimeLabel(res, match.ev, match.direction, match.driftReason).timeLabel
+    : (res.arrivalTime || null);
   const rows = [
     ['Date', res.date],
     ['Experience', res.experience],
     ['Arrive By', res.arriveByTime],
-    ['Plane Arrives', res.arrivalAirport ? `${res.arrivalAirport}${res.arrivalTime ? ' ' + res.arrivalTime : ''}` : null],
+    ['Plane Arrives', res.arrivalAirport ? `${res.arrivalAirport}${planeArrivesTime ? ' ' + planeArrivesTime : ''}` : null],
     ['Travelers', (res.travelers || []).map(t => t.name).join(', ') || null],
     ['Reservation #', res.reservationNumber],
     ['Status', res.status],
@@ -11263,6 +11276,14 @@ async function renderTripsyEventsListImpl() {
   // Collected by findMatchingTripsyPsReservation below as it goes -- see
   // showTripsyPsDriftAlertIfNeeded, called once this whole render is done.
   const psDriftMatches = [];
+  // reservationNumber -> { ev, direction, driftReason } for whichever
+  // flight each P/S reservation matched this render -- populated below
+  // alongside the timeline rows, then reused by the "view details" panel
+  // click handler (renderTripsyPsReservationViewPanel) so the arrival time
+  // shown there resolves the exact same way tripsyTimelinePsReservationSpec's
+  // row does, rather than showing the reservation's own possibly-stale
+  // on-file time.
+  const psReservationMatchByNumber = new Map();
 
   if (!allTrips.length) {
     container.innerHTML = `<div class="card"><div class="empty-state">No Tripsy trips in range.</div></div>`;
@@ -11513,6 +11534,8 @@ async function renderTripsyEventsListImpl() {
     timelineItems.forEach(item => {
       if (item.psMatch) {
         const psEntry = { dayKey: item.dayKey, spec: tripsyTimelinePsReservationSpec(item.psMatch.reservation, item.ev, item.psMatch.direction, item.psMatch.driftReason) };
+        const resNum = item.psMatch.reservation.reservationNumber;
+        if (resNum) psReservationMatchByNumber.set(resNum, { ev: item.ev, direction: item.psMatch.direction, driftReason: item.psMatch.driftReason });
         if (item.psMatch.direction === 'before') flatItems.push(psEntry, item);
         else flatItems.push(item, psEntry);
       } else {
@@ -11913,7 +11936,7 @@ async function renderTripsyEventsListImpl() {
       }
       const res = (tripsyPsReservations || []).find(r => r.reservationNumber === reservationNumber);
       if (!res) return;
-      renderTripsyPsReservationViewPanel(panel, res);
+      renderTripsyPsReservationViewPanel(panel, res, psReservationMatchByNumber.get(reservationNumber));
       panel.dataset.mode = "view";
       panel.style.display = "block";
       panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
