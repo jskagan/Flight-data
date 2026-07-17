@@ -7807,7 +7807,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
       <div style="font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:var(--amber); margin-bottom:12px;">${esc(TRIPSY_EDIT_GROUP_LABEL[group] || group)}</div>
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px;">
         ${byGroup[group].map(f => `
-          <label style="font-size:13px; font-weight:600; color:var(--text); ${f.kind === 'textarea' ? 'grid-column:1 / -1;' : ''}">
+          <label style="font-size:13px; font-weight:600; color:var(--text); min-width:0; ${f.kind === 'textarea' ? 'grid-column:1 / -1;' : ''}">
             <span style="display:block; margin-bottom:6px;">${esc(f.label)}</span>
             ${inputHtml(f)}
           </label>
@@ -8052,31 +8052,58 @@ function tripsyAttachmentMenuRowHtml(a) {
   `;
 }
 
-// Dedicated row for the trip header's separate "Offline" dropdown (see
-// offlineMenuButtonHtml) -- offline availability is now controlled purely
-// per-document here, one combined status+action icon per row: ⬇️ (not
-// offline yet -- click to save), ✅ (offline and cached on THIS device --
-// click to remove), ⏳ (marked offline but not yet downloaded to this
-// device -- click cancels the same as remove). `a.keepOffline` is the
-// shared cross-device marker (driveData.tripsyAttachments);
-// `isCachedLocally` is just this device's own IndexedDB state, which can
-// lag behind it until reconcileTripsyOfflineDocs next runs (or this
-// button's own click, which updates both immediately for the device that
-// clicked it).
-function tripsyOfflineMenuRowHtml(a, isCachedLocally) {
-  const icon = a.keepOffline ? (isCachedLocally ? '✅' : '⏳') : '⬇️';
-  const title = a.keepOffline
+// A down-arrow with a red "no" circle-slash through it, for the "remove
+// from offline" state in tripsyDocumentMenuRowHtml below -- plain inline
+// SVG (same reasoning as TRIPSY_GALLERY_ICON_SVG) since there's no single
+// emoji that reads as "cancel this download."
+const TRIPSY_OFFLINE_REMOVE_ICON_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+  <path d="M12 4v10m0 0l-4-4m4 4l4-4" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="12" cy="12" r="9.5" stroke="#e05252" stroke-width="2" fill="none"/>
+  <line x1="5.3" y1="18.7" x2="18.7" y2="5.3" stroke="#e05252" stroke-width="2"/>
+</svg>`;
+
+// Row for the trip header's single "Document" dropdown (documentButtonHtml)
+// -- merges what used to be two separate dropdowns (Docs, and Offline)
+// into one: filename (click to open), the parse-flag badge/rename/copy/
+// delete controls the old Docs dropdown had, plus an offline toggle. Used
+// uniformly for BOTH trip- and event-scoped attachments, so an event doc
+// now gets the same full set of controls a trip doc always had (the old
+// Docs dropdown only gave event-scoped docs a plain "click through to the
+// event" summary line). The offline icon is deliberately just two states,
+// not three -- a plain ⬇️ to save, or TRIPSY_OFFLINE_REMOVE_ICON_SVG to
+// remove -- regardless of whether it's actually finished downloading to
+// THIS device yet (isCachedLocally still drives the tooltip wording, just
+// not a third icon).
+function tripsyDocumentMenuRowHtml(a, isCachedLocally) {
+  const badge = a.purpose === 'parse'
+    ? (a.parseStatus === 'done' && isOwner
+        ? `<div data-tripsy-clear-parse-flag data-attachment-id="${esc(a.id)}" style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Review complete -- click to clear this flag (the file stays attached as a reference)">🏷️ Flagged for parsing (done)</div>`
+        : a.parseStatus === 'staged'
+        ? `<div data-tripsy-goto-parse-review style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Parsed, awaiting your review -- click to open Review Parsed Docs">🏷️ Flagged for parsing (staged)</div>`
+        : `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for a future Claude Code session to read and extract trip data from">🏷️ Flagged for parsing</div>`)
+    : '';
+  const isOffline = !!a.keepOffline;
+  const offlineIcon = isOffline ? TRIPSY_OFFLINE_REMOVE_ICON_SVG : '⬇️';
+  const offlineTitle = isOffline
     ? (isCachedLocally
         ? 'Available offline on this device -- click to remove (on every device)'
         : 'Marked for offline viewing -- will download to this device soon (click to cancel)')
     : 'Save for offline viewing (syncs to every device)';
-  const controlHtml = isOwner
-    ? `<button class="btn" data-tripsy-offline-item-toggle data-attachment-id="${esc(a.id)}" data-drive-file-id="${esc(a.driveFileId)}" data-trip-key="${esc(a.tripKey)}" data-file-name="${esc(a.fileName)}" data-mime-type="${esc(a.mimeType || 'application/octet-stream')}" data-currently-offline="${a.keepOffline ? 'true' : 'false'}" style="font-size:18px; padding:4px 9px;" title="${esc(title)}">${icon}</button>`
-    : `<span style="font-size:14px;" title="${esc(title)}">${icon}</span>`;
+  const offlineControlHtml = isOwner
+    ? `<button class="btn" data-tripsy-offline-item-toggle data-attachment-id="${esc(a.id)}" data-drive-file-id="${esc(a.driveFileId)}" data-trip-key="${esc(a.tripKey)}" data-file-name="${esc(a.fileName)}" data-mime-type="${esc(a.mimeType || 'application/octet-stream')}" data-currently-offline="${isOffline ? 'true' : 'false'}" style="font-size:18px; padding:4px 9px; display:flex; align-items:center;" title="${esc(offlineTitle)}">${offlineIcon}</button>`
+    : `<span style="font-size:14px; display:flex; align-items:center;" title="${esc(offlineTitle)}">${offlineIcon}</span>`;
   return `
     <div style="display:flex; align-items:center; gap:8px; padding:6px 4px; border-top:1px solid var(--line);">
-      <div data-tripsy-open-attachment data-drive-file-id="${esc(a.driveFileId)}" style="min-width:0; flex:1; font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" title="${esc(a.fileName)}">📄 ${esc(a.fileName)}</div>
-      ${controlHtml}
+      <div style="min-width:0; flex:1;">
+        <div data-tripsy-open-attachment data-drive-file-id="${esc(a.driveFileId)}" style="font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" title="${esc(a.fileName)}">📄 ${esc(a.fileName)}</div>
+        ${badge}
+      </div>
+      <div style="display:flex; gap:4px; flex-shrink:0; align-items:center;">
+        ${isOwner ? `<button class="btn" data-tripsy-rename-attachment data-attachment-id="${esc(a.id)}" data-current-name="${esc(a.fileName)}" style="font-size:18px; padding:4px 9px;" title="Edit name">✏️</button>` : ''}
+        <button class="btn" data-tripsy-copy-attachment data-drive-file-id="${esc(a.driveFileId)}" style="font-size:18px; padding:4px 9px;" title="Copy link">📋</button>
+        ${isOwner ? `<button class="btn" data-tripsy-delete-attachment data-attachment-id="${esc(a.id)}" data-drive-file-id="${esc(a.driveFileId)}" style="font-size:18px; padding:4px 9px;" title="Delete">🗑️</button>` : ''}
+        ${offlineControlHtml}
+      </div>
     </div>
   `;
 }
@@ -10841,7 +10868,9 @@ const TRIPSY_TRIP_PANEL_SELECTORS = [
   '[data-tripsy-edit-trip-panel]',
   '[data-tripsy-attach-panel]',
   '[data-tripsy-attachments-menu]',
-  '[data-tripsy-offline-menu]',
+  '[data-tripsy-document-menu]',
+  '[data-tripsy-itinerary-menu]',
+  '[data-tripsy-trip-menu]',
   '[data-tripsy-sort-menu]',
 ];
 // The buttons that open one of the panels above -- a click on one of these
@@ -10854,21 +10883,25 @@ const TRIPSY_TRIP_PANEL_TRIGGER_SELECTORS = [
   '[data-tripsy-add-item-toggle]',
   '[data-tripsy-edit-trip-toggle]',
   '[data-tripsy-attachments-toggle]',
-  '[data-tripsy-offline-menu-toggle]',
+  '[data-tripsy-document-menu-toggle]',
+  '[data-tripsy-itinerary-menu-toggle]',
+  '[data-tripsy-trip-menu-toggle]',
   '[data-tripsy-add-doc-menu-item]',
   '[data-tripsy-sort-toggle]',
 ];
 function closeAllTripsyTripPanels() {
   const card = document.getElementById("tripsy-card");
   if (!card) return;
+  // Menus (vs. rendered-content panels) have no innerHTML to clear --
+  // clearing it would just delete the same static menu markup the next
+  // render would recreate anyway, so only panels that get their innerHTML
+  // freshly rendered on open (add-item menu, edit-trip panel, attach
+  // panel) need clearing here.
+  const freshlyRenderedEachTime = new Set(['[data-tripsy-attachments-menu]', '[data-tripsy-document-menu]', '[data-tripsy-itinerary-menu]', '[data-tripsy-trip-menu]', '[data-tripsy-sort-menu]']);
   TRIPSY_TRIP_PANEL_SELECTORS.forEach(sel => {
     card.querySelectorAll(sel).forEach(el => {
       el.style.display = "none";
-      // Menus (vs. rendered-content panels) have no innerHTML to clear --
-      // clearing it would just delete the same static menu markup the next
-      // render would recreate anyway, so only panels that get their
-      // innerHTML freshly rendered on open need clearing here.
-      if (sel !== '[data-tripsy-add-item-menu]' && sel !== '[data-tripsy-attachments-menu]' && sel !== '[data-tripsy-offline-menu]' && sel !== '[data-tripsy-sort-menu]') el.innerHTML = "";
+      if (sel !== '[data-tripsy-add-item-menu]' && !freshlyRenderedEachTime.has(sel)) el.innerHTML = "";
     });
   });
 }
@@ -10904,7 +10937,8 @@ async function renderTripsyEventsListImpl() {
   // themselves are owner-gated below.
   const attachments = await Store.listTripsyAttachments();
   // Which of those attachments already have a local offline copy on THIS
-  // device -- drives the ⬇️/✅ toggle in tripsyAttachmentMenuRowHtml.
+  // device -- drives the offline toggle's tooltip wording in
+  // tripsyDocumentMenuRowHtml.
   const offlineDriveFileIds = new Set((await listTripsyOfflineDocsMeta()).map(d => d.driveFileId));
   // Trips that don't exist in Tripsy yet (queued via the doc-parse review
   // page's "create a new trip" option) render as their own cards, stubbed
@@ -11059,8 +11093,8 @@ async function renderTripsyEventsListImpl() {
       // Check-out split doesn't get two separate Doc icons for the same
       // underlying attachments.
       const eventAttachments = panelKey ? attachments.filter(a => a.scope === 'event' && a.eventKey === eventKey) : [];
-      // Same icon-toggles-a-dropdown pattern as the trip header's Docs
-      // button (docStatusButtonHtml above) -- data-tripsy-attachments-toggle/
+      // Same icon-toggles-a-dropdown pattern as the trip header's Document
+      // button (documentButtonHtml below) -- data-tripsy-attachments-toggle/
       // -menu are keyed generically by whatever data-key they're given, so
       // reusing them here with eventKey (rather than trip.key) needs no
       // wiring changes; eventKey's own "resource:id" shape never collides
@@ -11180,37 +11214,48 @@ async function renderTripsyEventsListImpl() {
         </div>
       </div>
     `, 'Add') : '';
-    const hideButtonHtml = iconLabelButton(
-      `<button class="btn" data-tripsy-hide-trip data-key="${esc(trip.key)}" title="Hide Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">🙈</button>`,
-      'Hide'
-    );
-    // Available to every viewer, not just isOwner -- it only formats data
-    // already visible on screen. See openTripsyItineraryPrintView.
-    const printButtonHtml = iconLabelButton(
-      `<button class="btn" data-tripsy-print-itinerary data-key="${esc(trip.key)}" title="Print Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🖨️</button>`,
-      'Print'
-    );
-    // Available to every viewer, same as Print -- builds the exact same
-    // HTML without ever calling window.print(). See previewTripsyItinerary.
-    // For the owner, this is also where narrative generation/editing now
-    // lives (the first-time section picker, or per-day Generate/Regenerate/
-    // Custom/Delete controls once something's been generated) -- there's no
-    // separate "Edit Narrative" panel/button anymore.
-    const previewButtonHtml = iconLabelButton(
-      `<button class="btn" data-tripsy-preview-itinerary data-key="${esc(trip.key)}" title="Preview Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:18px; display:flex; align-items:center; justify-content:center;">👁️</button>`,
-      'Preview'
-    );
-    const deleteButtonHtml = isOwner ? iconLabelButton(
-      `<button class="btn" data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}" title="Delete Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">🗑️</button>`,
-      'Delete'
-    ) : '';
-    // Edits a trip's own name/dates (a real change queued for the next
-    // Tripsy sync, unlike Hide which is a purely local view override) --
-    // owner-gated the same as Delete Trip, since both mutate real data.
-    const editButtonHtml = isOwner ? iconLabelButton(
-      `<button class="btn" data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}" title="Edit Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">✏️</button>`,
-      'Edit'
-    ) : '';
+    // Plain-text menu-list row, shared by the Itinerary and Trip dropdowns
+    // below -- same shape tripsyAddMenuButtonsHtml already uses for the Add
+    // dropdown's own items, just with a leading icon glyph for a quicker
+    // visual scan. `attrs` carries whatever data-* attributes the existing
+    // (unchanged) click handler for that action expects -- e.g.
+    // data-tripsy-preview-itinerary -- so none of those handlers needed to
+    // change when their trigger moved from a standalone circular button
+    // into this dropdown.
+    const menuListButtonHtml = (attrs, icon, label) => `
+      <button class="btn" ${attrs} style="display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px;">
+        <span style="font-size:16px; flex-shrink:0;">${icon}</span>${esc(label)}
+      </button>
+    `;
+    // Preview/Print merged into one "Itinerary" dropdown -- available to
+    // every viewer, same as before. For the owner, Preview is also where
+    // narrative generation/editing lives (the first-time section picker, or
+    // per-day Generate/Regenerate/Custom/Delete controls once something's
+    // been generated) -- there's no separate "Edit Narrative" panel/button.
+    const itineraryButtonHtml = !collapsed ? iconLabelButton(`
+      <div style="position:relative;">
+        <button class="btn" data-tripsy-itinerary-menu-toggle data-key="${esc(trip.key)}" title="Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🧭</button>
+        <div data-tripsy-itinerary-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+          ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '👁️', 'Preview')}
+          ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
+        </div>
+      </div>
+    `, 'Itinerary') : '';
+    // Edit/Hide/Delete merged into one "Trip" dropdown. Hide is available
+    // to every viewer (a purely local view override, unlike Edit/Delete
+    // which mutate real Tripsy data and stay owner-gated) -- so the button
+    // itself only needs !collapsed, with Edit/Delete conditionally included
+    // inside.
+    const tripActionsMenuButtonHtml = !collapsed ? iconLabelButton(`
+      <div style="position:relative;">
+        <button class="btn" data-tripsy-trip-menu-toggle data-key="${esc(trip.key)}" title="Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">⚙️</button>
+        <div data-tripsy-trip-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+          ${isOwner ? menuListButtonHtml(`data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}"`, '✏️', 'Edit') : ''}
+          ${menuListButtonHtml(`data-tripsy-hide-trip data-key="${esc(trip.key)}"`, '🙈', 'Hide')}
+          ${isOwner ? menuListButtonHtml(`data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete') : ''}
+        </div>
+      </div>
+    `, 'Trip') : '';
     // Filters the trip's timeline down to only the checked event types.
     // Reset (no dropdown, just clears the filter directly) replaces Sort
     // in this same slot once a filter is active -- availableSortTypes is
@@ -11234,21 +11279,17 @@ async function renderTripsyEventsListImpl() {
           </div>`,
       activeSortFilter ? 'Reset' : 'Filter'
     ) : '';
-    // A visible-even-when-collapsed indicator + dropdown, only shown once
-    // the trip has ANY attachment (trip- or event-scoped) -- sits directly
-    // left of Edit, rather than always occupying a slot the way Add/Edit/
-    // Hide/Delete do. Adding a doc itself now happens from inside the Edit
-    // panel (see renderTripsyEditTripPanel's "Add Doc" button) rather than
-    // its own top-level icon.
+    // Only shown once the trip has ANY attachment (trip- or event-scoped).
+    // Adding a doc itself still happens from inside the Edit panel (see
+    // renderTripsyEditTripPanel's "Add Doc" button) rather than its own
+    // top-level icon.
     const tripAttachments = attachments.filter(a => a.scope === 'trip' && a.tripKey === trip.key);
-    // A consolidated view of every OTHER doc in the trip, grouped by the
-    // owning event's date -- one row per event (not per file), even if
-    // that event has several attachments, since clicking through opens
-    // that event's own Doc dropdown (built earlier via docIconHtml) where
-    // the individual files live. Looked up against timelineItems (already
-    // built above) rather than re-deriving date/title from the raw event,
-    // since a Check-in/Check-out split's two rows share one eventKey and
-    // the first match's date/title is a fine representative either way.
+    // Every OTHER doc in the trip, grouped by the owning event's date --
+    // one entry per event (not per file), even if that event has several
+    // attachments. Looked up against timelineItems (already built above)
+    // rather than re-deriving date/title from the raw event, since a
+    // Check-in/Check-out split's two rows share one eventKey and the first
+    // match's date/title is a fine representative either way.
     const eventAttachmentsByKey = new Map();
     attachments.filter(a => a.scope === 'event' && a.tripKey === trip.key).forEach(a => {
       if (!eventAttachmentsByKey.has(a.eventKey)) eventAttachmentsByKey.set(a.eventKey, []);
@@ -11261,71 +11302,39 @@ async function renderTripsyEventsListImpl() {
       })
       .filter(Boolean)
       .sort((a, b) => (a.dayKey || '').localeCompare(b.dayKey || ''));
-    let lastEventDocDayKey = null;
-    const otherEventDocsHtml = eventAttachmentEntries.length ? `
+    // Single "Document" dropdown (formerly two separate dropdowns, Docs and
+    // Offline) -- trip-scoped docs first, then event-scoped ones grouped by
+    // day, each row built by tripsyDocumentMenuRowHtml (filename/open, the
+    // parse-flag badge, rename/copy/delete, and the offline toggle, all in
+    // one place). The event's own title is still shown above its files as
+    // a clickable jump to that event's own Doc dropdown in the timeline,
+    // same as the old Docs dropdown offered.
+    let lastDocEventDayKey = null;
+    const documentEventDocsHtml = eventAttachmentEntries.length ? `
       ${tripAttachments.length ? `<div style="height:1px; background:var(--line); margin:8px 0;"></div>` : ''}
       ${eventAttachmentEntries.map(entry => {
-        const dayHtml = entry.dayKey !== lastEventDocDayKey
-          ? `<div style="font-family:var(--mono); font-size:13px; color:var(--muted); margin:${lastEventDocDayKey === null ? '0' : '8px'} 0 4px;">${esc(entry.dayKey ? tripsyDayHeaderLabel(entry.dayKey) : 'Undated')}</div>`
+        const dayHtml = entry.dayKey !== lastDocEventDayKey
+          ? `<div style="font-family:var(--mono); font-size:13px; color:var(--muted); margin:${lastDocEventDayKey === null ? '0' : '8px'} 0 4px;">${esc(entry.dayKey ? tripsyDayHeaderLabel(entry.dayKey) : 'Undated')}</div>`
           : '';
-        lastEventDocDayKey = entry.dayKey;
+        lastDocEventDayKey = entry.dayKey;
         return `
           ${dayHtml}
-          <div data-tripsy-open-event-attachments data-key="${esc(entry.eventKey)}" data-trip-key="${esc(trip.key)}" style="padding:4px 0; cursor:pointer;">
-            <div style="font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-              ${esc(entry.title)}
-            </div>
-            ${entry.files.map(f => `
-              <div style="display:flex; align-items:center; gap:6px; padding:2px 0 0 20px; font-size:12px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-                📄 ${esc(f.fileName)}
-              </div>
-            `).join('')}
+          <div data-tripsy-open-event-attachments data-key="${esc(entry.eventKey)}" data-trip-key="${esc(trip.key)}" style="font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:4px; cursor:pointer;">
+            ${esc(entry.title)}
           </div>
+          ${entry.files.map(f => tripsyDocumentMenuRowHtml(f, offlineDriveFileIds.has(f.driveFileId))).join('')}
         `;
       }).join('')}
     ` : '';
-    const docStatusButtonHtml = (tripAttachments.length || eventAttachmentEntries.length) ? iconLabelButton(`
+    const documentButtonHtml = (!collapsed && (tripAttachments.length || eventAttachmentEntries.length)) ? iconLabelButton(`
       <div style="position:relative;">
-        <button class="btn" data-tripsy-attachments-toggle data-key="${esc(trip.key)}" title="Attached Docs" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">📄</button>
-        <div data-tripsy-attachments-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:360px; max-width:440px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-          ${tripAttachments.map(tripsyAttachmentMenuRowHtml).join('')}
-          ${otherEventDocsHtml}
+        <button class="btn" data-tripsy-document-menu-toggle data-key="${esc(trip.key)}" title="Documents" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">📄</button>
+        <div data-tripsy-document-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:360px; max-width:440px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+          ${tripAttachments.map(a => tripsyDocumentMenuRowHtml(a, offlineDriveFileIds.has(a.driveFileId))).join('')}
+          ${documentEventDocsHtml}
         </div>
       </div>
-    `, 'Docs') : '';
-    // Separate "Offline" dropdown, own trigger/menu pair
-    // (data-tripsy-offline-menu-toggle/-menu, not the Docs button's
-    // data-tripsy-attachments-toggle/-menu -- reusing that would collide,
-    // since both would be keyed by the same trip.key). Organized exactly
-    // like the Docs dropdown above (trip-scoped docs, then a divider, then
-    // event-scoped docs grouped by day) but every doc -- including event-
-    // scoped ones -- gets its own inline offline status+toggle row
-    // (tripsyOfflineMenuRowHtml) instead of Docs' click-through summary,
-    // since offline availability is controlled per-document here.
-    let lastOfflineEventDocDayKey = null;
-    const offlineEventDocsHtml = eventAttachmentEntries.length ? `
-      ${tripAttachments.length ? `<div style="height:1px; background:var(--line); margin:8px 0;"></div>` : ''}
-      ${eventAttachmentEntries.map(entry => {
-        const dayHtml = entry.dayKey !== lastOfflineEventDocDayKey
-          ? `<div style="font-family:var(--mono); font-size:13px; color:var(--muted); margin:${lastOfflineEventDocDayKey === null ? '0' : '8px'} 0 4px;">${esc(entry.dayKey ? tripsyDayHeaderLabel(entry.dayKey) : 'Undated')}</div>`
-          : '';
-        lastOfflineEventDocDayKey = entry.dayKey;
-        return `
-          ${dayHtml}
-          <div style="font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:4px;">${esc(entry.title)}</div>
-          ${entry.files.map(f => tripsyOfflineMenuRowHtml(f, offlineDriveFileIds.has(f.driveFileId))).join('')}
-        `;
-      }).join('')}
-    ` : '';
-    const offlineMenuButtonHtml = (tripAttachments.length || eventAttachmentEntries.length) ? iconLabelButton(`
-      <div style="position:relative;">
-        <button class="btn" data-tripsy-offline-menu-toggle data-key="${esc(trip.key)}" title="Offline Docs" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">📥</button>
-        <div data-tripsy-offline-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:360px; max-width:440px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-          ${tripAttachments.map(a => tripsyOfflineMenuRowHtml(a, offlineDriveFileIds.has(a.driveFileId))).join('')}
-          ${offlineEventDocsHtml}
-        </div>
-      </div>
-    `, 'Offline') : '';
+    `, 'Document') : '';
     // A trip queued via the doc-parse review page's "create a new trip"
     // option but not yet real in Tripsy -- Cancel is its only trip-level
     // action (no Edit/Hide/Docs/Sort/Delete: there's nothing real yet to
@@ -11348,14 +11357,10 @@ async function renderTripsyEventsListImpl() {
           <div style="display:flex; align-items:flex-start; gap:16px; flex-shrink:0;">
             ${isPendingCreateTrip ? cancelPendingTripButtonHtml : `
             ${addButtonHtml}
-            ${docStatusButtonHtml}
-            ${offlineMenuButtonHtml}
-            ${previewButtonHtml}
-            ${printButtonHtml}
-            ${editButtonHtml}
+            ${documentButtonHtml}
+            ${itineraryButtonHtml}
+            ${tripActionsMenuButtonHtml}
             ${sortButtonHtml}
-            ${hideButtonHtml}
-            ${deleteButtonHtml}
             `}
           </div>
         </div>
@@ -11386,7 +11391,7 @@ async function renderTripsyEventsListImpl() {
   // down the still-open dropdown out from under the user.
   container.querySelectorAll("[data-tripsy-header-toggle]").forEach(el => {
     el.addEventListener("click", e => {
-      if (e.target.closest('button, a, [data-tripsy-add-item-menu], [data-tripsy-attachments-menu], [data-tripsy-offline-menu], [data-tripsy-sort-menu]')) return;
+      if (e.target.closest('button, a, [data-tripsy-add-item-menu], [data-tripsy-attachments-menu], [data-tripsy-document-menu], [data-tripsy-itinerary-menu], [data-tripsy-trip-menu], [data-tripsy-sort-menu]')) return;
       toggleTripsyCollapse(el.dataset.tripsyHeaderToggle);
     });
   });
@@ -11394,6 +11399,7 @@ async function renderTripsyEventsListImpl() {
   container.querySelectorAll("[data-tripsy-print-itinerary]").forEach(btn => {
     btn.addEventListener("click", async e => {
       e.stopPropagation();
+      closeAllTripsyTripPanels(); // now lives inside the Itinerary dropdown
       const originalText = btn.textContent;
       btn.disabled = true;
       btn.textContent = '⏳';
@@ -11412,6 +11418,7 @@ async function renderTripsyEventsListImpl() {
   container.querySelectorAll("[data-tripsy-preview-itinerary]").forEach(btn => {
     btn.addEventListener("click", async e => {
       e.stopPropagation();
+      closeAllTripsyTripPanels(); // now lives inside the Itinerary dropdown
       const originalText = btn.textContent;
       btn.disabled = true;
       btn.textContent = '⏳';
@@ -11438,59 +11445,97 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
-  // Toggles the trip-header Offline dropdown -- same fixed-position
-  // pattern as the Docs dropdown just below (own trigger/menu attribute
-  // pair so the two don't collide despite sharing the same trip.key).
-  container.querySelectorAll("[data-tripsy-offline-menu-toggle]").forEach(btn => {
-    btn.addEventListener("click", e => {
-      e.stopPropagation();
-      const tripKey = btn.dataset.key;
-      const menu = container.querySelector(`[data-tripsy-offline-menu="${tripKey}"]`);
-      if (!menu) return;
-      const wasOpen = menu.style.display !== "none";
-      closeAllTripsyTripPanels();
-      if (!wasOpen) {
-        const rect = btn.getBoundingClientRect();
-        menu.style.top = `${rect.bottom + 6}px`;
-        menu.style.left = `${rect.right - menu.offsetWidth}px`;
-        menu.style.display = "block";
-        menu.style.left = `${rect.right - menu.offsetWidth}px`;
-      }
+  // Wires a header-icon-toggles-a-fixed-position-dropdown trigger -- shared
+  // by the Document, Itinerary, and Trip dropdowns below, each with its own
+  // trigger/menu attribute pair so they don't collide despite all three
+  // sharing the same trip.key.
+  const wireTripsyHeaderMenuToggle = (toggleSelector, menuAttr) => {
+    container.querySelectorAll(toggleSelector).forEach(btn => {
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
+        const tripKey = btn.dataset.key;
+        const menu = container.querySelector(`[${menuAttr}="${tripKey}"]`);
+        if (!menu) return;
+        const wasOpen = menu.style.display !== "none";
+        closeAllTripsyTripPanels();
+        if (!wasOpen) {
+          const rect = btn.getBoundingClientRect();
+          menu.style.top = `${rect.bottom + 6}px`;
+          menu.style.left = `${rect.right - menu.offsetWidth}px`;
+          menu.style.display = "block";
+          // offsetWidth is 0 before the first paint at display:block -- redo
+          // the left calc now that the menu actually has a real width, so
+          // it stays right-aligned to the button instead of drifting left.
+          menu.style.left = `${rect.right - menu.offsetWidth}px`;
+        }
+      });
     });
-  });
+  };
+  wireTripsyHeaderMenuToggle("[data-tripsy-document-menu-toggle]", "data-tripsy-document-menu");
+  wireTripsyHeaderMenuToggle("[data-tripsy-itinerary-menu-toggle]", "data-tripsy-itinerary-menu");
+  wireTripsyHeaderMenuToggle("[data-tripsy-trip-menu-toggle]", "data-tripsy-trip-menu");
 
-  // Per-doc offline toggle inside that dropdown (tripsyOfflineMenuRowHtml)
+  // Per-doc offline toggle inside the Document dropdown (tripsyDocumentMenuRowHtml)
   // -- sets/clears the shared keepOffline flag for just this one doc, then
   // immediately downloads/drops ITS local copy on this device rather than
-  // waiting for the next sign-in's reconcileTripsyOfflineDocs pass. If the
-  // immediate download/removal fails (e.g. offline right now), the
-  // keepOffline flag itself has already been saved either way, so the next
-  // reconcile pass on any device will pick it up.
+  // waiting for the next sign-in's reconcileTripsyOfflineDocs pass.
+  // Optimistic, same treatment as every other Tripsy mutation (delete/hide/
+  // edit): the flag flips and the icon re-renders immediately rather than
+  // waiting on the Drive PATCH (and, when turning on, a second full file
+  // download) first -- this used to await both, in sequence, before the
+  // icon ever changed, which read as a multi-second hang for no reason
+  // those two background writes actually need to serialize on each other.
+  // They now run in parallel. The flag save is the one that matters (it's
+  // the cross-device source of truth -- see Store.setTripsyAttachmentKeepOffline);
+  // if IT fails, the flag and icon revert and the real error message is
+  // shown directly (bypassing that Store method's own swallow-and-log,
+  // which otherwise only ever surfaced a generic "storage error" with no
+  // way to tell what actually went wrong from the console). If only the
+  // local copy fails, the flag itself is still correct, so a softer toast
+  // says it'll finish next time this device is back online.
   container.querySelectorAll("[data-tripsy-offline-item-toggle]").forEach(btn => {
     btn.addEventListener("click", async e => {
       e.stopPropagation();
       const { attachmentId, driveFileId, tripKey, fileName, mimeType } = btn.dataset;
       const turningOn = btn.dataset.currentlyOffline !== "true";
-      btn.disabled = true;
-      const ok = await Store.setTripsyAttachmentKeepOffline(attachmentId, turningOn);
-      if (!ok) {
-        toast("Could not update — storage error. Please try again.", "error");
-        btn.disabled = false;
-        return;
-      }
-      try {
-        if (turningOn) {
-          const blob = await downloadDriveFileBlob(driveFileId);
-          await saveTripsyOfflineDoc({ driveFileId, blob, mimeType, fileName, tripKey, cachedAt: new Date().toISOString() });
-          toast("Saved for offline viewing.");
-        } else {
-          await deleteTripsyOfflineDoc(driveFileId);
-          toast("Removed from offline availability.");
-        }
-      } catch (err) {
-        toast(turningOn ? "Marked for offline — will download once this device is back online." : "Removed from offline availability.");
-      }
+      const a = (driveData.tripsyAttachments || []).find(x => x.id === attachmentId);
+      if (!a) return;
+
+      a.keepOffline = turningOn;
       renderTripsyEventsList();
+
+      const flagPersisted = persistDriveData().then(() => true).catch(err => {
+        console.error('Failed to persist keepOffline flag:', err);
+        a.keepOffline = !turningOn;
+        renderTripsyEventsList();
+        const detail = (err.message || 'storage error').replace(/\.+$/, '');
+        toast(`Could not update — ${detail}. Please try again.`, "error");
+        return false;
+      });
+      const localCacheDone = (async () => {
+        try {
+          if (turningOn) {
+            const blob = await downloadDriveFileBlob(driveFileId);
+            return await saveTripsyOfflineDoc({ driveFileId, blob, mimeType, fileName, tripKey, cachedAt: new Date().toISOString() });
+          }
+          return await deleteTripsyOfflineDoc(driveFileId);
+        } catch (err) {
+          console.error('Failed to update local offline cache:', err);
+          return false;
+        }
+      })();
+
+      const [flagOk, cacheOk] = await Promise.all([flagPersisted, localCacheDone]);
+      if (!flagOk) return; // error toast already shown above
+      // The tooltip (see tripsyDocumentMenuRowHtml) also reflects
+      // isCachedLocally, not just the flag, so it needs a second render
+      // once the local download/delete above actually finishes -- the
+      // first render right after setting a.keepOffline only ever shows the
+      // flag-only intermediate state (⏳ while turning on).
+      renderTripsyEventsList();
+      toast(cacheOk
+        ? (turningOn ? "Saved for offline viewing." : "Removed from offline availability.")
+        : (turningOn ? "Marked for offline — will download once this device is back online." : "Removed from offline availability."));
     });
   });
 
@@ -11588,8 +11633,10 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
-  // Toggles the trip-header Doc dropdown (only rendered when the trip has
-  // at least one attachment -- see docStatusButtonHtml above). Positioned
+  // Toggles a per-event Doc dropdown (the trip header's own Document
+  // dropdown is data-tripsy-document-menu-toggle now, wired separately
+  // below -- this data-tripsy-attachments-toggle/-menu pair is only used
+  // for the per-event 📄 icon inside the timeline these days). Positioned
   // via position:fixed with its top/left computed here from the button's
   // own rect, rather than position:absolute -- .card sets overflow-x:auto,
   // which per the CSS spec also forces overflow-y to non-visible, so a
