@@ -2847,6 +2847,19 @@ function parsePage2(rows, invoiceId) {
   return { legs, subtotals, autoResolveChanges };
 }
 
+// Lazy-loaded the same way loadPdfJs below is -- only fetched the first
+// time a real PDF actually needs generating (Create PDF on the My Trips
+// page), not on every app load. jsdelivr's `+esm` endpoint wraps jsPDF's
+// UMD build into a real ES module; jsPDF exports the constructor as a
+// named export (not default).
+let _jsPdfCtorPromise = null;
+function loadJsPdf() {
+  if (!_jsPdfCtorPromise) {
+    _jsPdfCtorPromise = import('https://cdn.jsdelivr.net/npm/jspdf@2.5.2/+esm').then(m => m.jsPDF);
+  }
+  return _jsPdfCtorPromise;
+}
+
 let _pdfjsLibPromise = null;
 function loadPdfJs() {
   if (!_pdfjsLibPromise) {
@@ -9893,107 +9906,610 @@ async function buildTripsyPrintHtml(tripKey) {
   `;
 }
 
-// Simpler sibling to buildTripsyPrintHtml above, for the "Create PDF" menu
-// item -- a plain day-by-day list (same .tp-day-block/.tp-row markup and
-// styling as that function's own Part 1 "Summary" section, so it looks
-// consistent with the richer Print output) with NO cover photo, AI
-// narrative, or place-photo cards (Part 2). Deliberately re-derives its own
-// day-block HTML rather than sharing buildTripsyPrintHtml's local closures
-// (which capture several variables private to that function) -- a little
-// duplication here is safer than reaching into a large, actively-evolving
-// function to extract shared internals. Every row uses
-// tripsySummaryRowFallbackText only (never an AI-generated blurb) and skips
-// the header photo fetch entirely, so this never makes a network call --
-// "simple" means fast and dependency-free, not just fewer visual sections.
-async function buildTripsySimplePrintHtml(tripKey) {
-  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
-  if (!trip) return null;
-  const { effectiveTrip, dayKeys, placeEvents, summaryByDay } = await buildTripsyPrintDayData(trip);
+// Shared color/layout constants for every Tripsy PDF export (both the plain
+// buildTripsySimplePdf and the richer buildTripsyItineraryPdf below) --
+// a hand-tuned approximation of the .tp-cover-*/.tp-day-*/.tp-row-*/
+// .tp-place-card-* CSS (index.html ~602-720) used by the HTML/print
+// version, not a literal px-to-pt conversion -- jsPDF renders in an
+// entirely different unit system, so these were picked to look
+// proportionally similar rather than to match pixel-for-pixel.
+const TRIPSY_PDF_MARGIN = 40;
+const TRIPSY_PDF_NAVY = '#1A222C', TRIPSY_PDF_AMBER = '#8A5A12', TRIPSY_PDF_MUTED_TILE = '#4A5568',
+  TRIPSY_PDF_BORDER = '#DDE2E8', TRIPSY_PDF_EMPTY_TEXT = '#777788', TRIPSY_PDF_META_TEXT = '#556677';
 
-  const headerDestination = tripsyTripGeographySummary(placeEvents, effectiveTrip.location);
-  const headerHtml = tripsyCoverHeaderHtml(headerDestination, formatTripDateRange(effectiveTrip.start, effectiveTrip.end), 'Itinerary', null);
+// Draws the "KAGAN TRIP TO / <destination> / ITINERARY / <dates>" header
+// text block (mirrors tripsyCoverHeaderHtml, minus its optional background
+// photo -- a caller that has a cover photo draws it itself immediately
+// before calling this; only it knows whether one was found). Returns the Y
+// position after the header's divider line, i.e. where content below it
+// should start.
+function drawTripsyPdfHeaderText(doc, headerDestination, dateRangeText, startY) {
+  const PAGE_W = doc.internal.pageSize.getWidth();
+  const centerX = PAGE_W / 2;
+  let y = startY;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(14);
+  doc.setTextColor(TRIPSY_PDF_AMBER);
+  doc.text('KAGAN TRIP TO', centerX, y, { align: 'center' });
+  y += 24;
+  doc.setFontSize(20);
+  doc.setTextColor(TRIPSY_PDF_NAVY);
+  doc.text(headerDestination || 'Trip', centerX, y, { align: 'center' });
+  y += 20;
+  doc.setFontSize(11);
+  doc.setTextColor(TRIPSY_PDF_AMBER);
+  doc.text('ITINERARY', centerX, y, { align: 'center' });
+  y += 16;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(TRIPSY_PDF_META_TEXT);
+  doc.text(dateRangeText || '', centerX, y, { align: 'center' });
+  y += 14;
+  doc.setDrawColor(TRIPSY_PDF_AMBER);
+  doc.setLineWidth(1.5);
+  doc.line(TRIPSY_PDF_MARGIN, y, PAGE_W - TRIPSY_PDF_MARGIN, y);
+  return y + 16;
+}
 
-  const tripStartDayKey = tripsyDayKey(effectiveTrip.start);
-  const eventDayKeySet = new Set(dayKeys.filter(k => k !== 'undated'));
-  const fullDayKeys = tripsyDayKeyRange(tripStartDayKey, tripsyDayKey(effectiveTrip.end));
+// Draws one "DAY NN" tile + bordered rows box per day (or collapsed
+// empty-day range), starting at startY -- shared by buildTripsySimplePdf's
+// plain fallback (fallback text only, via rowTextForItem) and
+// buildTripsyItineraryPdf's Part 1 (blurb-aware text, same rowTextForItem
+// hook). Returns the Y position after the last block.
+function drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, startY, rowTextForItem) {
+  const PAGE_W = doc.internal.pageSize.getWidth();
+  const PAGE_H = doc.internal.pageSize.getHeight();
+  const MARGIN = TRIPSY_PDF_MARGIN;
+  const CONTENT_W = PAGE_W - MARGIN * 2;
+  const TILE_W = 72;
+  const TILE_GAP = 14;
+  const ROWS_X = MARGIN + TILE_W + TILE_GAP;
+  const ROWS_W = CONTENT_W - TILE_W - TILE_GAP;
+  const ROW_PAD_X = 12, ROW_PAD_Y = 10;
+  const STAR_W = 12, TIME_W = 46, ROW_GAP = 6;
+  const TEXT_X = ROWS_X + ROW_PAD_X + STAR_W + TIME_W;
+  const TEXT_W = ROWS_W - ROW_PAD_X * 2 - STAR_W - TIME_W;
+  const LINE_H = 12;
+  const TILE_MIN_H = 64;
+  const BLOCK_GAP = 16;
+
+  let y = startY;
 
   const dayTileDate = dayKey => tripPartsToUtcDate({
     year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)),
   }).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 
-  const dayBlockHtml = dayKey => {
+  // Measures a block's rows first (line-wrapping every row's text) so its
+  // exact height is known BEFORE drawing -- needed both to decide whether
+  // it fits on the current page and to size the tile/border box precisely.
+  // A single day with an unusually large number of events could in theory
+  // still exceed one page; that's a known, accepted limitation rather than
+  // something this handles by splitting a block mid-render.
+  doc.setFontSize(9);
+  const measureRows = items => {
+    if (!items.length) return [{ lines: ['No events scheduled'], isEmpty: true, time: '' }];
+    return items.map(item => ({
+      lines: doc.splitTextToSize(rowTextForItem(item) || '', TEXT_W),
+      isEmpty: false,
+      time: tripsySummaryRowTime(item),
+    }));
+  };
+  const rowsHeight = rows => ROW_PAD_Y * 2 + rows.reduce((sum, r) => sum + r.lines.length * LINE_H + ROW_GAP, 0);
+
+  const drawBlock = (tileNumLines, tileDate, rows) => {
+    const boxH = Math.max(TILE_MIN_H, rowsHeight(rows));
+    if (y + boxH > PAGE_H - MARGIN) {
+      doc.addPage();
+      y = MARGIN;
+    }
+    const tileX = MARGIN, tileY = y;
+    // Tile
+    doc.setFillColor(tileNumLines.muted ? TRIPSY_PDF_MUTED_TILE : TRIPSY_PDF_NAVY);
+    doc.roundedRect(tileX, tileY, TILE_W, boxH, 6, 6, 'F');
+    doc.setTextColor('#FFFFFF');
+    doc.setFont('helvetica', 'bold');
+    const tileCenterX = tileX + TILE_W / 2;
+    doc.setFontSize(7);
+    doc.text('DAY', tileCenterX, tileY + 16, { align: 'center' });
+    doc.setFontSize(tileNumLines.length > 1 ? 14 : 18);
+    const numY = tileNumLines.length > 1 ? tileY + boxH / 2 : tileY + boxH / 2 + 2;
+    if (tileNumLines.length > 1) {
+      doc.text(tileNumLines[0], tileCenterX - 12, numY, { align: 'center' });
+      doc.setDrawColor('#FFFFFF');
+      doc.setLineWidth(0.75);
+      doc.line(tileCenterX, numY - 8, tileCenterX, numY + 4);
+      doc.text(tileNumLines[1], tileCenterX + 12, numY, { align: 'center' });
+    } else {
+      doc.text(tileNumLines[0], tileCenterX, numY, { align: 'center' });
+    }
+    if (tileDate) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.text(tileDate, tileCenterX, tileY + boxH - 10, { align: 'center' });
+    }
+    // Rows box border
+    doc.setDrawColor(TRIPSY_PDF_BORDER);
+    doc.setLineWidth(1);
+    doc.roundedRect(ROWS_X, tileY, ROWS_W, boxH, 6, 6, 'S');
+    // Rows
+    let rowY = tileY + ROW_PAD_Y + LINE_H * 0.8;
+    for (const row of rows) {
+      if (row.isEmpty) {
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(9);
+        doc.setTextColor(TRIPSY_PDF_EMPTY_TEXT);
+        doc.text(row.lines[0], ROWS_X + ROW_PAD_X, rowY);
+        rowY += LINE_H + ROW_GAP;
+        continue;
+      }
+      // A drawn dot, not a '★' text glyph -- jsPDF's built-in core-14 fonts
+      // (Helvetica/Times/Courier) only cover the WinAnsi/Latin-1 glyph
+      // range, which doesn't include the star character (confirmed via a
+      // pdf.js text-extraction round-trip: it came out as a garbled
+      // substitute glyph, not an actual star). A vector shape renders
+      // correctly regardless of font/encoding.
+      doc.setFillColor(TRIPSY_PDF_AMBER);
+      doc.circle(ROWS_X + ROW_PAD_X + STAR_W / 2 - 2, rowY - 3, 2, 'F');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text(row.time || '', ROWS_X + ROW_PAD_X + STAR_W, rowY);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(TRIPSY_PDF_NAVY);
+      doc.text(row.lines, TEXT_X, rowY);
+      rowY += row.lines.length * LINE_H + ROW_GAP;
+    }
+    y = tileY + boxH + BLOCK_GAP;
+  };
+
+  const tripStartDayKey = tripsyDayKey(effectiveTrip.start);
+  const eventDayKeySet = new Set(dayKeys.filter(k => k !== 'undated'));
+  const fullDayKeys = tripsyDayKeyRange(tripStartDayKey, tripsyDayKey(effectiveTrip.end));
+
+  const drawDayBlock = dayKey => {
     const items = summaryByDay.get(dayKey) || [];
-    const rowsHtml = items.map(item => `
-      <div class="tp-row">
-        <div class="tp-row-star">★</div>
-        <div class="tp-row-time">${esc(tripsySummaryRowTime(item))}</div>
-        <div class="tp-row-text">${esc(tripsySummaryRowFallbackText(item))}</div>
-      </div>
-    `).join('') || `<div class="tp-row-empty">No events scheduled</div>`;
     const isUndated = dayKey === 'undated';
     const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
     const tileNum = dayNumber != null ? String(dayNumber).padStart(2, '0') : '—';
     const tileDate = isUndated ? '' : dayTileDate(dayKey);
-    return `
-      <div class="tp-day-block">
-        <div class="tp-day-tile">
-          <div class="tp-day-tile-label">Day</div>
-          <div class="tp-day-tile-num">${esc(tileNum)}</div>
-          ${tileDate ? `<div class="tp-day-tile-date">${esc(tileDate)}</div>` : ''}
-        </div>
-        <div class="tp-day-rows">${rowsHtml}</div>
-      </div>
-    `;
+    drawBlock([tileNum], tileDate, measureRows(items));
   };
 
-  const emptyRangeBlockHtml = rangeDayKeys => {
+  const drawEmptyRangeBlock = rangeDayKeys => {
     const firstKey = rangeDayKeys[0];
     const lastKey = rangeDayKeys[rangeDayKeys.length - 1];
     const firstNum = String(tripsyDayNumberFromTripStart(firstKey, tripStartDayKey)).padStart(2, '0');
     const isSingleDay = rangeDayKeys.length === 1;
-    const numHtml = isSingleDay
-      ? `<div class="tp-day-tile-num">${esc(firstNum)}</div>`
-      : `<div class="tp-day-tile-range">
-          <span class="tp-day-tile-num">${esc(firstNum)}</span>
-          <span class="tp-day-tile-range-divider"></span>
-          <span class="tp-day-tile-num">${esc(String(tripsyDayNumberFromTripStart(lastKey, tripStartDayKey)).padStart(2, '0'))}</span>
-        </div>`;
-    const dateHtml = isSingleDay ? dayTileDate(firstKey) : `${dayTileDate(firstKey)} – ${dayTileDate(lastKey)}`;
-    return `
-      <div class="tp-day-block tp-day-block-empty">
-        <div class="tp-day-tile">
-          <div class="tp-day-tile-label">Day</div>
-          ${numHtml}
-          <div class="tp-day-tile-date">${esc(dateHtml)}</div>
-        </div>
-        <div class="tp-day-rows"><div class="tp-row-empty">No events scheduled</div></div>
-      </div>
-    `;
+    const tileNumLines = isSingleDay ? [firstNum] : [firstNum, String(tripsyDayNumberFromTripStart(lastKey, tripStartDayKey)).padStart(2, '0')];
+    tileNumLines.muted = true;
+    const tileDate = isSingleDay ? dayTileDate(firstKey) : `${dayTileDate(firstKey)} – ${dayTileDate(lastKey)}`;
+    drawBlock(tileNumLines, tileDate, measureRows([]));
   };
 
-  const blockParts = [];
   for (let i = 0; i < fullDayKeys.length; i++) {
     const dayKey = fullDayKeys[i];
     if (eventDayKeySet.has(dayKey)) {
-      blockParts.push(dayBlockHtml(dayKey));
+      drawDayBlock(dayKey);
       continue;
     }
     let j = i;
     while (j < fullDayKeys.length && !eventDayKeySet.has(fullDayKeys[j])) j++;
-    blockParts.push(emptyRangeBlockHtml(fullDayKeys.slice(i, j)));
+    drawEmptyRangeBlock(fullDayKeys.slice(i, j));
     i = j - 1;
   }
-  if (dayKeys.includes('undated')) blockParts.push(dayBlockHtml('undated'));
+  if (dayKeys.includes('undated')) drawDayBlock('undated');
 
-  return `${headerHtml}${blockParts.join('')}`;
+  return y;
 }
 
-async function openTripsySimpleItineraryPrintView(tripKey) {
-  const html = await buildTripsySimplePrintHtml(tripKey);
-  if (html == null) return;
-  const printRoot = getOrCreateTripsyPrintRoot();
-  printRoot.innerHTML = html;
-  await triggerTripsyPrint(printRoot);
+// Real vector-text PDF for the "Create PDF" menu item when a trip has no
+// generated narrative yet -- a plain day-by-day list (same content/shape as
+// buildTripsyPrintHtml's own Part 1 "Summary" section) with NO cover photo,
+// AI narrative, or place-photo cards. Every row uses
+// tripsySummaryRowFallbackText only (never an AI-generated blurb) and skips
+// the header photo fetch entirely, so this never makes a network call --
+// "simple" means fast and dependency-free, not just fewer visual sections.
+// Also used directly by buildTripsyItineraryPdf below as its own fallback
+// for a trip with nothing generated.
+async function buildTripsySimplePdf(tripKey) {
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return null;
+  const { effectiveTrip, dayKeys, placeEvents, summaryByDay } = await buildTripsyPrintDayData(trip);
+
+  const jsPDF = await loadJsPdf();
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+
+  const headerDestination = tripsyTripGeographySummary(placeEvents, effectiveTrip.location);
+  const dateRangeText = formatTripDateRange(effectiveTrip.start, effectiveTrip.end);
+  const y = drawTripsyPdfHeaderText(doc, headerDestination, dateRangeText, TRIPSY_PDF_MARGIN);
+  drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, y, item => tripsySummaryRowFallbackText(item));
+
+  const safeName = (trip.name || 'Itinerary').replace(/[/\\:*?"<>|]/g, '-').trim();
+  doc.save(`${safeName} - ${dateRangeText || 'Itinerary'}.pdf`);
+  return true;
+}
+
+// fetchTripsyPlacePhoto/fetchTripsyTransportationPhoto return a `blob:`
+// object URL (fine for an <img src>, which is all the HTML/print version
+// ever needed) -- jsPDF's addImage() needs an actual data URL, raw bytes,
+// or an HTMLImageElement instead, so every photo bound for a PDF gets
+// piped through this first. Returns null (never throws) on any failure --
+// callers fall back to drawing no image rather than breaking the whole
+// export over one bad photo.
+async function tripsyBlobUrlToDataUrl(objectUrl) {
+  if (!objectUrl) return null;
+  try {
+    const blob = await fetch(objectUrl).then(r => r.blob());
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  } catch (e) {
+    console.error('tripsyBlobUrlToDataUrl failed:', e);
+    return null;
+  }
+}
+
+// Real vector-text PDF for the "Create PDF" menu item -- the richer sibling
+// of buildTripsySimplePdf above, rendering the SAME two-part content Print
+// (buildTripsyPrintHtml) does when a trip has a generated narrative: Part 1
+// Summary (day/time/blurb-or-fallback, reusing drawTripsyDaySummaryBlocksPdf
+// above) plus a page break into Part 2 Detailed Itinerary (day dividers,
+// narrative paragraphs, one photo+name+meta+blurb card per event). Falls
+// straight back to buildTripsySimplePdf's plain list when nothing's been
+// generated yet, so a trip nobody has run Preview's Generate on still
+// exports instantly with no narrative/photo work attempted.
+//
+// Deliberately simpler than Print in a few ways (see the plan this was
+// built from): no interactive photo controls (meaningless in a static
+// export), no photo dedup-swap-on-collision (an occasional repeated photo
+// is accepted rather than re-implementing that search-for-an-alternate
+// logic), and the cover photo draws as a plain banner image above the
+// header text rather than a gradient-tinted background behind it.
+async function buildTripsyItineraryPdf(tripKey) {
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return null;
+  const { effectiveTrip, dayKeys, byDay, placesByDay, placeEvents, summaryByDay } = await buildTripsyPrintDayData(trip);
+
+  const narrativeCache = await Store.getTripsyNarrativeCache();
+  const introEntry = narrativeCache[`${tripKey}::intro`];
+  const cachedDays = dayKeys
+    .map(dayKey => {
+      const entry = narrativeCache[`${tripKey}::day::${dayKey}`];
+      return entry ? { day_key: dayKey, ...entry.content } : null;
+    })
+    .filter(Boolean);
+  const narrative = (introEntry || cachedDays.length)
+    ? { trip_intro: introEntry ? introEntry.content.trip_intro : '', days: cachedDays }
+    : null;
+
+  // Nothing generated for this trip yet -- same plain list Create PDF has
+  // always produced, no photos/narrative attempted.
+  if (!narrative) return buildTripsySimplePdf(tripKey);
+
+  const summaryEntry = narrativeCache[`${tripKey}::summary`];
+  const summaryBlurbByKey = new Map((summaryEntry ? summaryEntry.content.rows : []).map(r => [r.row_key, r.blurb]));
+
+  const jsPDF = await loadJsPdf();
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+  const PAGE_W = doc.internal.pageSize.getWidth();
+  const PAGE_H = doc.internal.pageSize.getHeight();
+  const MARGIN = TRIPSY_PDF_MARGIN;
+  const CONTENT_W = PAGE_W - MARGIN * 2;
+
+  const headerDestination = tripsyTripGeographySummary(placeEvents, effectiveTrip.location);
+  const dateRangeText = formatTripDateRange(effectiveTrip.start, effectiveTrip.end);
+
+  // ---- Cover (page 1): banner photo (if one's found), then header text ----
+  let y = MARGIN;
+  const coverPhotoUrl = await tripsyHeaderBackgroundPhotoUrl(placeEvents);
+  const coverRawDataUrl = await tripsyBlobUrlToDataUrl(coverPhotoUrl);
+  // Routed through the same crop/re-encode step card photos use (not just
+  // for the aspect-ratio crop to the banner box -- addImage's own PNG
+  // parser turned out to be considerably stricter than a browser's normal
+  // image decoder, so re-encoding through canvas also sidesteps any source
+  // image jsPDF itself can't parse).
+  const coverDataUrl = coverRawDataUrl ? await tripsyCoverCropDataUrl(coverRawDataUrl, CONTENT_W, 160) : null;
+  if (coverDataUrl) {
+    const bannerH = 160;
+    try {
+      doc.addImage(coverDataUrl, MARGIN, y, CONTENT_W, bannerH, undefined, 'MEDIUM');
+      y += bannerH + 16;
+    } catch (e) {
+      console.error('buildTripsyItineraryPdf: cover photo embed failed:', e);
+    }
+  }
+  y = drawTripsyPdfHeaderText(doc, headerDestination, dateRangeText, y);
+
+  // ---- Part 1: Summary (blurb-aware) ----
+  const rowText = item => {
+    const rowKey = tripsySummaryRowKey(item);
+    return (rowKey && tripsySummaryRowWantsBlurb(item) && summaryBlurbByKey.get(rowKey))
+      || tripsySummaryRowFallbackText(item);
+  };
+  drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, y, rowText);
+
+  // ---- Part 2: Detailed Itinerary (day dividers, narrative, photo cards) ----
+  doc.addPage();
+  y = MARGIN;
+  await drawTripsyDetailedItineraryPdf(doc, {
+    effectiveTrip, dayKeys, placesByDay, summaryByDay, narrative, narrativeCache, tripKey, summaryBlurbByKey,
+  }, y);
+
+  const safeName = (trip.name || 'Itinerary').replace(/[/\\:*?"<>|]/g, '-').trim();
+  doc.save(`${safeName} - ${dateRangeText || 'Itinerary'}.pdf`);
+  return true;
+}
+
+// Crops a data URL to the given target box's aspect ratio via an offscreen
+// canvas (like CSS object-fit:cover, which .tp-place-card-photo relies on
+// on the web page) -- jsPDF's addImage always STRETCHES to the given w/h,
+// which would visibly distort any photo whose native aspect ratio doesn't
+// already match the card's photo box. Resolves null (never rejects) on any
+// failure, so one bad photo just draws no image rather than breaking the
+// whole export.
+async function tripsyCoverCropDataUrl(dataUrl, targetW, targetH) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const targetRatio = targetW / targetH;
+        const srcRatio = img.width / img.height;
+        let sx = 0, sy = 0, sw = img.width, sh = img.height;
+        if (srcRatio > targetRatio) {
+          sw = img.height * targetRatio;
+          sx = (img.width - sw) / 2;
+        } else {
+          sh = img.width / targetRatio;
+          sy = (img.height - sh) / 2;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(targetW * 2);
+        canvas.height = Math.round(targetH * 2);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      } catch (e) {
+        console.error('tripsyCoverCropDataUrl failed:', e);
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+// Part 2 (Detailed Itinerary) of buildTripsyItineraryPdf -- day dividers,
+// each day's generated narrative paragraph(s), and one photo+name+meta+
+// blurb card per event, drawn onto whatever page doc is already on
+// (buildTripsyItineraryPdf calls doc.addPage() immediately before this).
+// Mirrors buildTripsyPrintHtml's Part 2 (index.html ~9477-9900) but skips
+// its interactive photo controls/manual-search/gallery (meaningless in a
+// static export) and its photo dedup-swap-on-collision (v1 accepts an
+// occasional repeated photo). Also simplifies the day divider: the web
+// version's right-aligned "which cities today touches" list
+// (tripsyDayCities, driven by lodging-period address guessing) is left off
+// here as a minor decorative detail, not core content.
+async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, placesByDay, summaryByDay, narrative, narrativeCache, tripKey, summaryBlurbByKey }, startY) {
+  const PAGE_W = doc.internal.pageSize.getWidth();
+  const PAGE_H = doc.internal.pageSize.getHeight();
+  const MARGIN = TRIPSY_PDF_MARGIN;
+  const CONTENT_W = PAGE_W - MARGIN * 2;
+  const PHOTO_W = 160, PHOTO_H = 110, PHOTO_GAP = 14;
+  const TEXT_X = MARGIN + PHOTO_W + PHOTO_GAP;
+  const TEXT_W = CONTENT_W - PHOTO_W - PHOTO_GAP;
+  const LINE_H = 12;
+  const CARD_GAP = 18;
+
+  let y = startY;
+  const ensureSpace = h => {
+    if (y + h > PAGE_H - MARGIN) {
+      doc.addPage();
+      y = MARGIN;
+    }
+  };
+
+  // ---- Trip intro paragraph (once, at the very top of Part 2) ----
+  if (narrative.trip_intro) {
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(11);
+    doc.setTextColor(TRIPSY_PDF_NAVY);
+    const introLines = doc.splitTextToSize(narrative.trip_intro, CONTENT_W);
+    ensureSpace(introLines.length * (LINE_H + 2));
+    doc.text(introLines, MARGIN, y);
+    y += introLines.length * (LINE_H + 2) + CARD_GAP;
+  }
+
+  const dayTileDate = dayKey => tripPartsToUtcDate({
+    year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)),
+  }).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+
+  const drawDayDivider = (label, dateLabel, muted) => {
+    const barH = 22;
+    ensureSpace(barH + 10);
+    doc.setFillColor(muted ? TRIPSY_PDF_MUTED_TILE : TRIPSY_PDF_NAVY);
+    doc.rect(MARGIN, y, CONTENT_W, barH, 'F');
+    doc.setTextColor('#FFFFFF');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.text(label, MARGIN + 10, y + barH / 2 + 4);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.text(dateLabel || '', PAGE_W / 2, y + barH / 2 + 4, { align: 'center' });
+    y += barH + 10;
+  };
+
+  const drawParagraphs = text => {
+    if (!text) return;
+    const paragraphs = text.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(TRIPSY_PDF_NAVY);
+    for (const p of paragraphs) {
+      const lines = doc.splitTextToSize(p, CONTENT_W);
+      ensureSpace(lines.length * LINE_H);
+      doc.text(lines, MARGIN, y);
+      y += lines.length * LINE_H + 8;
+    }
+  };
+
+  // One photo+name+meta+blurb card. photoDataUrl may be null (no photo
+  // found, or its fetch/crop failed) -- the text column still draws either
+  // way, just without an image to its left.
+  const drawCard = async (title, metaParts, blurb, photoObjectUrl) => {
+    doc.setFontSize(10);
+    const metaLines = metaParts.filter(Boolean);
+    const blurbLines = blurb ? doc.splitTextToSize(blurb, TEXT_W) : [];
+    const textH = 16 + metaLines.length * LINE_H + (blurbLines.length ? blurbLines.length * LINE_H + 6 : 0);
+    const cardH = Math.max(PHOTO_H, textH);
+    ensureSpace(cardH);
+    const cardY = y;
+
+    const rawDataUrl = await tripsyBlobUrlToDataUrl(photoObjectUrl);
+    const croppedDataUrl = rawDataUrl ? await tripsyCoverCropDataUrl(rawDataUrl, PHOTO_W, PHOTO_H) : null;
+    if (croppedDataUrl) {
+      try {
+        doc.addImage(croppedDataUrl, MARGIN, cardY, PHOTO_W, PHOTO_H, undefined, 'MEDIUM');
+      } catch (e) {
+        console.error('drawCard: photo embed failed:', e);
+      }
+    } else {
+      doc.setDrawColor(TRIPSY_PDF_BORDER);
+      doc.setFillColor('#F0EEE8');
+      doc.roundedRect(MARGIN, cardY, PHOTO_W, PHOTO_H, 6, 6, 'FD');
+    }
+
+    let textY = cardY + 14;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(TRIPSY_PDF_NAVY);
+    doc.text(title || '', TEXT_X, textY);
+    textY += 16;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(TRIPSY_PDF_META_TEXT);
+    for (const m of metaLines) {
+      doc.text(m, TEXT_X, textY);
+      textY += LINE_H;
+    }
+    if (blurbLines.length) {
+      textY += 4;
+      doc.setFontSize(9.5);
+      doc.setTextColor('#333333');
+      doc.text(blurbLines, TEXT_X, textY);
+      textY += blurbLines.length * LINE_H;
+    }
+    y = cardY + cardH + CARD_GAP;
+  };
+
+  // Same per-item -> card dispatch as tripsyDetailedCardHtml (index.html
+  // ~9758), minus interactive controls: P/S reservation (fixed photo, no
+  // AI blurb), transportation (company/category photo), hosting/activity
+  // (Places-searched photo, one card only -- skips the "end" half of a
+  // multi-day stay split by expandMultiDayTripsyEvents), everything else
+  // (layovers) skipped entirely, same as Part 1's summary-only treatment.
+  const drawItemCard = async (item, placeBlurbsByName) => {
+    if (item.isLayover) return;
+    const rowKey = tripsySummaryRowKey(item);
+    const eventEntry = rowKey ? narrativeCache[`${tripKey}::eventblurb::${rowKey}`] : null;
+    if (item.psReservation) {
+      const res = item.psReservation;
+      const title = `P/S Reservation${res.experience ? ' • ' + res.experience : ''}`;
+      const timeLabel = res.arriveByTime || res.arrivalTime || '';
+      const meta = [timeLabel ? `Arrive by ${timeLabel}` : null, res.reservationNumber ? `Reservation #: ${res.reservationNumber}` : null];
+      const blurb = (eventEntry && eventEntry.content.blurb) || '';
+      await drawCard(title, meta, blurb, `data:image/jpeg;base64,${PS_RESERVATION_PHOTO_B64}`);
+      return;
+    }
+    const ev = item.ev;
+    const raw = ev && ev.tripsyRaw;
+    if (!raw) return;
+    if (raw.resource === 'transportation') {
+      const company = raw.company || '';
+      const category = raw.category || '';
+      const meta = [
+        formatTripDateRange(ev.start, ev.end), ev.location,
+        raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
+        tripsySeatLabel(raw), raw.vehicleDescription || null,
+        raw.departureTerminal ? `Terminal ${raw.departureTerminal}` : null,
+      ];
+      const wantsBlurb = !(category === 'airplane' || category === 'car');
+      const blurb = (eventEntry && eventEntry.content.blurb)
+        || (wantsBlurb && summaryBlurbByKey.get(`ev:${ev.id}`))
+        || raw.notes || '';
+      const photoUrl = await fetchTripsyTransportationPhoto(company, category);
+      await drawCard(ev.summary, meta, blurb, photoUrl);
+      return;
+    }
+    if (raw.resource === 'hosting' || raw.resource === 'activity') {
+      if (ev._splitHalf === 'end') return;
+      const name = raw.name || ev.summary;
+      const address = raw.address || '';
+      const isStay = raw.resource === 'hosting';
+      const meta = [
+        formatTripDateRange(ev.start, ev.end), address,
+        isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
+      ];
+      const blurb = (eventEntry && eventEntry.content.blurb) || (placeBlurbsByName && placeBlurbsByName.get(name)) || raw.notes || '';
+      const photoUrl = await fetchTripsyPlacePhoto(name, address, ev.summary, '');
+      await drawCard(name, meta, blurb, photoUrl);
+    }
+  };
+
+  const tripStartDayKey = tripsyDayKey(effectiveTrip.start);
+  const eventDayKeySet = new Set(dayKeys.filter(k => k !== 'undated'));
+  const fullDayKeys = tripsyDayKeyRange(tripStartDayKey, tripsyDayKey(effectiveTrip.end));
+  const narrativeDayByKey = new Map((narrative.days || []).map(d => [d.day_key, d]));
+
+  const segments = [];
+  for (let i = 0; i < fullDayKeys.length; i++) {
+    const dayKey = fullDayKeys[i];
+    if (eventDayKeySet.has(dayKey)) { segments.push({ type: 'day', dayKey }); continue; }
+    let j = i;
+    while (j < fullDayKeys.length && !eventDayKeySet.has(fullDayKeys[j])) j++;
+    segments.push({ type: 'empty', rangeDayKeys: fullDayKeys.slice(i, j) });
+    i = j - 1;
+  }
+  if (dayKeys.includes('undated')) segments.push({ type: 'day', dayKey: 'undated' });
+
+  for (const seg of segments) {
+    if (seg.type === 'empty') {
+      const firstKey = seg.rangeDayKeys[0];
+      const lastKey = seg.rangeDayKeys[seg.rangeDayKeys.length - 1];
+      const isSingleDay = seg.rangeDayKeys.length === 1;
+      const firstNum = tripsyDayNumberFromTripStart(firstKey, tripStartDayKey);
+      const label = isSingleDay ? `Day ${firstNum}` : `Day ${firstNum}–${tripsyDayNumberFromTripStart(lastKey, tripStartDayKey)}`;
+      const dateLabel = isSingleDay ? dayTileDate(firstKey) : `${dayTileDate(firstKey)} – ${dayTileDate(lastKey)}`;
+      drawDayDivider(label, dateLabel, true);
+      doc.setFont('helvetica', 'italic');
+      doc.setFontSize(10);
+      doc.setTextColor(TRIPSY_PDF_EMPTY_TEXT);
+      doc.text('No events scheduled', MARGIN, y);
+      y += LINE_H + CARD_GAP;
+      continue;
+    }
+    const dayKey = seg.dayKey;
+    const isUndated = dayKey === 'undated';
+    const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
+    drawDayDivider(isUndated ? 'Undated' : `Day ${dayNumber}`, isUndated ? '' : dayTileDate(dayKey), false);
+
+    const nd = narrativeDayByKey.get(dayKey);
+    if (nd && nd.title) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(13);
+      doc.setTextColor(TRIPSY_PDF_NAVY);
+      ensureSpace(18);
+      doc.text(tripsyStripDayLabelFromTitle(nd.title), MARGIN, y);
+      y += 20;
+    }
+    if (nd && nd.narrative) drawParagraphs(nd.narrative);
+
+    const placeBlurbsByName = new Map(((nd && nd.place_blurbs) || []).map(pb => [pb.place_name, pb.blurb]));
+    const dayItems = summaryByDay.get(dayKey) || [];
+    for (const item of dayItems) await drawItemCard(item, placeBlurbsByName);
+  }
 }
 
 function getOrCreateTripsyPrintRoot() {
@@ -11432,9 +11948,9 @@ async function renderTripsyEventsListImpl() {
       btn.disabled = true;
       iconSpan.textContent = '⏳';
       try {
-        await openTripsySimpleItineraryPrintView(btn.dataset.key);
+        await buildTripsyItineraryPdf(btn.dataset.key);
       } catch (err) {
-        console.error('openTripsySimpleItineraryPrintView failed:', err);
+        console.error('buildTripsyItineraryPdf failed:', err);
         toast("Could not build the PDF. Please try again.", "error");
       } finally {
         btn.disabled = false;
