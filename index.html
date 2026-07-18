@@ -8893,6 +8893,23 @@ function tripsySummaryRowTime(item) {
   if (item.psReservation) return tripsyPsReservationTimeLabel(item.psReservation, item.psEv, item.psDirection, item.psDriftReason).timeLabel || '';
   return formatTripTime(item.ev.start) || '';
 }
+// Pulls a 12-hour clock time with an explicit AM/PM marker (e.g. "9:45am",
+// "9:45 AM", "9:45AM") out of free text -- used as a FALLBACK by
+// buildTripsyItineraryPdf's Part 1 when tripsySummaryRowTime finds no time
+// on the event itself, so a time mentioned in a manually-typed Custom Note
+// can still show in the summary instead of leaving that column blank.
+// Deliberately requires an AM/PM marker (unlike formatTripTime, which never
+// needs one since it always knows which 12 hours it's in from a real
+// timestamp) -- a bare "9:45" in free text is genuinely ambiguous, and a
+// wrong guess would be worse than just leaving the column empty. Returns
+// the FIRST match, formatted the same way formatTripTime already does
+// elsewhere ("9:45 AM"), or null if nothing matches.
+function tripsyExtractTimeFromText(text) {
+  if (!text) return null;
+  const m = text.match(/\b(1[0-2]|0?[1-9]):([0-5][0-9])\s*([AaPp])\.?[Mm]\.?\b/);
+  if (!m) return null;
+  return `${m[1]}:${m[2]} ${m[3].toUpperCase()}M`;
+}
 // What the row shows before an AI blurb has ever been generated (or if
 // generation fails) -- plain but always available, so Print never breaks
 // on a trip whose summary blurbs haven't been generated yet.
@@ -9955,8 +9972,11 @@ function drawTripsyPdfHeaderText(doc, headerDestination, dateRangeText, startY) 
 // empty-day range), starting at startY -- shared by buildTripsySimplePdf's
 // plain fallback (fallback text only, via rowTextForItem) and
 // buildTripsyItineraryPdf's Part 1 (blurb-aware text, same rowTextForItem
-// hook). Returns the Y position after the last block.
-function drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, startY, rowTextForItem) {
+// hook). rowTimeForItem defaults to tripsySummaryRowTime but can be
+// overridden (see buildTripsyItineraryPdf) to fall back to a time
+// mentioned in the row's own note text when the event has none of its
+// own. Returns the Y position after the last block.
+function drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, startY, rowTextForItem, rowTimeForItem = tripsySummaryRowTime) {
   const PAGE_W = doc.internal.pageSize.getWidth();
   const PAGE_H = doc.internal.pageSize.getHeight();
   const MARGIN = TRIPSY_PDF_MARGIN;
@@ -9991,7 +10011,7 @@ function drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay
     return items.map(item => ({
       lines: doc.splitTextToSize(rowTextForItem(item) || '', TEXT_W),
       isEmpty: false,
-      time: tripsySummaryRowTime(item),
+      time: rowTimeForItem(item),
     }));
   };
   const rowsHeight = rows => ROW_PAD_Y * 2 + rows.reduce((sum, r) => sum + r.lines.length * LINE_H + ROW_GAP, 0);
@@ -10229,13 +10249,27 @@ async function buildTripsyItineraryPdf(tripKey) {
     return (rowKey && tripsySummaryRowWantsBlurb(item) && summaryBlurbByKey.get(rowKey))
       || tripsySummaryRowFallbackText(item);
   };
-  drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, y, rowText);
+  // FALLBACK only, never an override: an event with a real time on file
+  // (tripsySummaryRowTime returns non-empty) always wins. Only when there's
+  // no time at all does this check the event's own note text (a manually-
+  // typed Custom Note, most likely -- AI-generated blurbs are explicitly
+  // told not to mention times, see generateTripsyEventNarrative's prompt)
+  // for one to show instead of leaving the time column blank.
+  const rowTime = item => {
+    const baseTime = tripsySummaryRowTime(item);
+    if (baseTime) return baseTime;
+    const rowKey = tripsySummaryRowKey(item);
+    const eventEntry = rowKey ? narrativeCache[`${tripKey}::eventblurb::${rowKey}`] : null;
+    const noteText = eventEntry && eventEntry.content.blurb;
+    return tripsyExtractTimeFromText(noteText) || baseTime;
+  };
+  drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, y, rowText, rowTime);
 
   // ---- Part 2: Detailed Itinerary (day dividers, narrative, photo cards) ----
   doc.addPage();
   y = MARGIN;
   await drawTripsyDetailedItineraryPdf(doc, {
-    effectiveTrip, dayKeys, placesByDay, summaryByDay, narrative, narrativeCache, tripKey, summaryBlurbByKey,
+    effectiveTrip, dayKeys, placesByDay, placeEvents, summaryByDay, narrative, narrativeCache, tripKey, summaryBlurbByKey,
   }, y);
 
   const safeName = (trip.name || 'Itinerary').replace(/[/\\:*?"<>|]/g, '-').trim();
@@ -10292,7 +10326,7 @@ async function tripsyCoverCropDataUrl(dataUrl, targetW, targetH) {
 // version's right-aligned "which cities today touches" list
 // (tripsyDayCities, driven by lodging-period address guessing) is left off
 // here as a minor decorative detail, not core content.
-async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, placesByDay, summaryByDay, narrative, narrativeCache, tripKey, summaryBlurbByKey }, startY) {
+async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, placesByDay, placeEvents, summaryByDay, narrative, narrativeCache, tripKey, summaryBlurbByKey }, startY) {
   const PAGE_W = doc.internal.pageSize.getWidth();
   const PAGE_H = doc.internal.pageSize.getHeight();
   const MARGIN = TRIPSY_PDF_MARGIN;
@@ -10309,6 +10343,28 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
       doc.addPage();
       y = MARGIN;
     }
+  };
+
+  // Same tripsyLodgingPeriods/tripsyLodgingCityAt pattern buildTripsyPrintHtml
+  // uses (index.html ~9512-9521): every hosting (hotel) stay's date range
+  // plus a rough "city" guess from its address, so an ACTIVITY card's photo
+  // search (below) can be biased toward wherever the trip's lodging puts
+  // you at that event's time, even when the activity's own address is
+  // vague, missing, or just a venue name (e.g. "Uffizi Gallery"). Omitting
+  // this hint was a real gap in the first version of this function -- it
+  // silently made Places searches for exactly those vague-address
+  // activities less likely to find a match, showing the fallback
+  // placeholder box even though Print/Preview (which does pass this hint)
+  // would have found a photo for the same event.
+  const tripsyLodgingPeriods = (placeEvents || [])
+    .filter(ev => ev.tripsyRaw && ev.tripsyRaw.resource === 'hosting')
+    .map(ev => ({ start: new Date(ev.start).getTime(), end: new Date(ev.end).getTime(), city: tripsyGuessCityFromAddress(ev.tripsyRaw.address) }))
+    .filter(p => p.city && !isNaN(p.start) && !isNaN(p.end));
+  const tripsyLodgingCityAt = eventStart => {
+    const t = new Date(eventStart).getTime();
+    if (isNaN(t)) return '';
+    const period = tripsyLodgingPeriods.find(p => t >= p.start && t <= p.end);
+    return period ? period.city : '';
   };
 
   // ---- Trip intro paragraph (once, at the very top of Part 2) ----
@@ -10476,7 +10532,10 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
         isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
       ];
       const blurb = (eventEntry && eventEntry.content.blurb) || (placeBlurbsByName && placeBlurbsByName.get(name)) || raw.notes || '';
-      const photoUrl = await fetchTripsyPlacePhoto(name, address, ev.summary, '');
+      // Lodging city only makes sense as a hint for activities, not for a
+      // hosting event's own card -- a hotel already has its own address.
+      const locationHint = isStay ? '' : tripsyLodgingCityAt(ev.start);
+      const photoUrl = await fetchTripsyPlacePhoto(name, address, ev.summary, locationHint);
       await drawCard(name, meta, blurb, photoUrl);
     }
   };
@@ -11976,6 +12035,13 @@ async function renderTripsyEventsListImpl() {
       const originalIcon = iconSpan.textContent;
       btn.disabled = true;
       iconSpan.textContent = '⏳';
+      // closeAllTripsyTripPanels above just hid the dropdown (and this
+      // button along with it), so the ⏳ swap above is invisible for the
+      // whole generation delay -- a photo-heavy trip's Places lookups can
+      // take a few real seconds, with nothing else on screen to say
+      // anything is happening. This toast is the only feedback the user
+      // actually sees during that wait.
+      toast("Generating PDF…", "success");
       try {
         await buildTripsyItineraryPdf(btn.dataset.key);
       } catch (err) {
