@@ -8646,6 +8646,72 @@ async function tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHin
   }
 }
 
+// Fetches a place's photo the same way fetchTripsyPlacePhoto does, but
+// additionally avoids repeating a photo already shown elsewhere in the
+// SAME document -- extracted from tripsyPlaceCardHtml's own inline dedup
+// logic (index.html, the "isDuplicate" block a bit above where that
+// function builds each place card) so a caller with its own
+// usedPlacePhotoNames/usedPlacePhotoHashes Sets (currently: that function's
+// per-print-run Sets, and buildTripsyItineraryPdf's per-PDF Sets) gets the
+// exact same "no duplicate photo" guarantee without duplicating the logic
+// itself. Checks both the candidate's name token (cheap) and its actual
+// downloaded content hash (tripsyHashBlob), since two different Places
+// photo tokens can resolve to byte-for-byte the same image (confirmed in
+// production for two Royal Albert Hall events). Falls back to null (the
+// caller's own placeholder/fallback) if every candidate found for this
+// place is already used. Mutates usedPlacePhotoNames/usedPlacePhotoHashes
+// in place, same as the original inline version did.
+async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes) {
+  const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle, locationHint);
+  const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
+  if (cachedEntry && cachedEntry.skipped) return null;
+  let photoUrl = await fetchTripsyPlacePhoto(name, address, eventTitle, locationHint);
+  const freshEntry = await Store.getTripsyPlacePhoto(cacheKey);
+  let photoName = freshEntry?.photoName || null;
+  let photoHash = freshEntry?.contentHash || null;
+  // Entry predates contentHash being stored (or somehow missed it) --
+  // compute and backfill it now so this and every future dedup check can
+  // compare by content, not just by the unreliable name token.
+  if (photoUrl && !photoHash) {
+    try {
+      const blob = await fetch(photoUrl).then(r => r.blob());
+      photoHash = await tripsyHashBlob(blob);
+      if (freshEntry) {
+        Store.cacheTripsyPlacePhotoLocal(cacheKey, { ...freshEntry, contentHash: photoHash });
+        tripsyPlacePhotoCacheDirty = true;
+      }
+    } catch (e) {
+      console.error('tripsyDedupedPlacePhotoUrl: failed to hash photo for dedup:', e);
+    }
+  }
+  const isDuplicate = photoUrl && (
+    (photoName && usedPlacePhotoNames.has(photoName)) ||
+    (photoHash && usedPlacePhotoHashes.has(photoHash))
+  );
+  if (isDuplicate) {
+    const alt = await tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
+    if (alt) {
+      photoUrl = alt.photoDataUrl;
+      photoName = alt.photoName;
+      photoHash = alt.contentHash;
+      Store.cacheTripsyPlacePhotoLocal(cacheKey, {
+        driveFileId: alt.driveFileId, photoName, contentHash: photoHash,
+        triedPhotoNames: [...new Set([...(cachedEntry?.triedPhotoNames || []), photoName])],
+      });
+      tripsyPlacePhotoCacheDirty = true;
+    } else {
+      // No unused candidate left for this place -- caller falls back to
+      // its own placeholder rather than repeat a photo already shown.
+      photoUrl = null;
+      photoName = null;
+      photoHash = null;
+    }
+  }
+  if (photoName) usedPlacePhotoNames.add(photoName);
+  if (photoHash) usedPlacePhotoHashes.add(photoHash);
+  return photoUrl;
+}
+
 // Three overlapping squares, increasing opacity toward the front -- the
 // "stack of photos" glyph for the Preview overlay's gallery-picker button
 // (data-tripsy-photo-gallery-btn), matching the visual style requested
@@ -10345,6 +10411,16 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
     }
   };
 
+  // Tracks every place photo actually used in THIS document so far --
+  // passed to tripsyDedupedPlacePhotoUrl below (per-event/hosting cards
+  // only; transportation photos deliberately DO repeat across every leg of
+  // the same company/category, same as Print/Preview) so two different
+  // places never end up showing the same photo. Scoped to the whole PDF,
+  // same as tripsyPlaceCardHtml's own Sets are scoped to one Print/Preview
+  // run.
+  const usedPlacePhotoNames = new Set();
+  const usedPlacePhotoHashes = new Set();
+
   // Same tripsyLodgingPeriods/tripsyLodgingCityAt pattern buildTripsyPrintHtml
   // uses (index.html ~9512-9521): every hosting (hotel) stay's date range
   // plus a rough "city" guess from its address, so an ACTIVITY card's photo
@@ -10535,7 +10611,7 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
       // Lodging city only makes sense as a hint for activities, not for a
       // hosting event's own card -- a hotel already has its own address.
       const locationHint = isStay ? '' : tripsyLodgingCityAt(ev.start);
-      const photoUrl = await fetchTripsyPlacePhoto(name, address, ev.summary, locationHint);
+      const photoUrl = await tripsyDedupedPlacePhotoUrl(name, address, ev.summary, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
       await drawCard(name, meta, blurb, photoUrl);
     }
   };
