@@ -644,6 +644,31 @@
      changing the block's normal look. */
   .tp-day-block-linkable { cursor: pointer; transition: box-shadow 0.15s; }
   .tp-day-block-linkable:hover { box-shadow: 0 0 0 2px var(--amber, #8A5A12); }
+  /* Itinerary dropdown's Generate panel (tripsyGeneratePanelRowHtml) -- a
+     day/event's title, when it has a matching Detailed Itinerary section
+     to jump to (data-tripsy-generate-panel-jump). */
+  .tp-generate-panel-label {
+    font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; flex: 1; min-width: 0;
+  }
+  .tp-generate-panel-label-bold { font-weight: 700; }
+  .tp-generate-panel-label-link { cursor: pointer; text-decoration: underline; text-decoration-color: transparent; transition: text-decoration-color 0.15s; }
+  .tp-generate-panel-label-link:hover { text-decoration-color: currentColor; }
+  /* Custom "has narrative" indicator (tripsyGeneratePanelRowHtml) -- a
+     plain <input type="checkbox"> renders too faintly in most browsers
+     (esp. dark themes) to tell checked from unchecked at a glance, which
+     was the original complaint; a filled box + bold checkmark reads
+     clearly either way without relying on native checkbox styling. Also
+     doubles as the actual toggle for the Update flow
+     (data-tripsy-generate-panel-checkbox) when -interactive is present. */
+  .tp-generate-panel-check {
+    display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+    width: 18px; height: 18px; border-radius: 4px; border: 2px solid var(--muted, #778);
+    color: #fff; font-size: 13px; font-weight: 700; line-height: 1; box-sizing: border-box;
+  }
+  .tp-generate-panel-check-on { background: #1A222C; border-color: #1A222C; }
+  .tp-generate-panel-check-interactive { cursor: pointer; transition: box-shadow 0.15s; }
+  .tp-generate-panel-check-interactive:hover { box-shadow: 0 0 0 2px var(--amber, #8A5A12); }
   @media print {
     .tp-day-block-linkable { cursor: auto; }
     .tp-day-block-linkable:hover { box-shadow: none; }
@@ -9100,7 +9125,13 @@ function tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByD
   const summaryEntry = narrativeCache[`${tripKey}::summary`];
   const summaryBlurbByKey = new Map((summaryEntry ? summaryEntry.content.rows : []).map(r => [r.row_key, r.blurb]));
 
-  return dayKeys.map(dayKey => {
+  // The trip-wide intro paragraph at the very top of Part 2
+  // (tripsyNarrativeIntroControlsHtml) -- its own row, not indented under
+  // any day since it isn't part of one.
+  const introEntry = narrativeCache[`${tripKey}::intro`];
+  const overview = { label: 'Overview', hasNarrative: !!introEntry, approved: !!(introEntry && introEntry.approved) };
+
+  const days = dayKeys.map(dayKey => {
     const isUndated = dayKey === 'undated';
     const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
     const dayEntry = narrativeCache[`${tripKey}::day::${dayKey}`];
@@ -9117,6 +9148,7 @@ function tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByD
       if (item.psReservation) {
         const res = item.psReservation;
         events.push({
+          rowKey,
           label: `P/S Reservation${res.experience ? ' • ' + res.experience : ''}`,
           hasNarrative: !!(eventEntry && eventEntry.content.blurb),
           approved: !!(eventEntry && eventEntry.approved),
@@ -9143,39 +9175,177 @@ function tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByD
       } else {
         continue;
       }
-      events.push({ label: evLabel, hasNarrative, approved: !!(eventEntry && eventEntry.approved) });
+      events.push({ rowKey, label: evLabel, hasNarrative, approved: !!(eventEntry && eventEntry.approved) });
     }
 
     return { dayKey, label, hasNarrative: !!dayEntry, approved: !!(dayEntry && dayEntry.approved), events };
   });
+
+  return { overview, days };
 }
 
-// One row of the Generate panel -- a truncated label on the left, a
-// read-only checkbox (checked when hasNarrative) plus a small green
-// checkmark badge (only when approved) on the right. Disabled/read-only on
-// purpose: this panel is a status overview, not a section picker -- ticking
-// a box here doesn't do anything (yet), so it shouldn't look clickable.
-function tripsyGeneratePanelRowHtml(label, hasNarrative, approved, indented) {
+// One row of the Generate panel -- a clickable label on the left (jumps to
+// this section in Preview, see the data-tripsy-generate-panel-jump
+// listener in renderTripsyEventsListImpl), an interactive checkbox
+// (checked when hasNarrative, toggleable -- see the
+// data-tripsy-generate-panel-checkbox listener) plus a small green
+// checkmark badge (only when approved) on the right. sectionKey is
+// "overview", "day:<dayKey>", or "event:<rowKey>" -- matches the id scheme
+// tripsyDetailedDayDividerHtml/tripsyDetailedEmptyDayBlockHtml and the
+// place/PS/transportation card wrappers use in Part 2, and doubles as both
+// the label's jump target AND the checkbox's identity, so ticking a box
+// and clicking Update (see tripsyRunGeneratePanelUpdate) can act on the
+// exact same section a title click would jump to. data-tripsy-generate-
+// panel-was-generated freezes the ORIGINAL hasNarrative state at render
+// time -- Update diffs against that (not the live DOM class) to know
+// which rows actually changed, since toggling back to the original state
+// should mean "no action," not "delete then regenerate."
+function tripsyGeneratePanelRowHtml(label, hasNarrative, approved, indented, sectionKey) {
+  const labelClass = ['tp-generate-panel-label', indented ? '' : 'tp-generate-panel-label-bold', sectionKey ? 'tp-generate-panel-label-link' : ''].filter(Boolean).join(' ');
+  const checkClass = ['tp-generate-panel-check', hasNarrative ? 'tp-generate-panel-check-on' : '', sectionKey ? 'tp-generate-panel-check-interactive' : ''].filter(Boolean).join(' ');
   return `
     <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:5px 4px; ${indented ? 'padding-left:22px;' : ''}">
-      <span style="font-size:13px; ${indented ? '' : 'font-weight:700;'} color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0;" title="${esc(label)}">${esc(label)}</span>
+      <span class="${labelClass}" ${sectionKey ? `data-tripsy-generate-panel-jump="${esc(sectionKey)}"` : ''} title="${esc(label)}">${esc(label)}</span>
       <span style="display:flex; align-items:center; gap:6px; flex-shrink:0;">
-        <input type="checkbox" disabled ${hasNarrative ? 'checked' : ''} style="margin:0;">
+        <span
+          class="${checkClass}"
+          ${sectionKey ? `data-tripsy-generate-panel-checkbox="${esc(sectionKey)}" data-tripsy-generate-panel-was-generated="${hasNarrative}" role="checkbox" aria-checked="${hasNarrative}" tabindex="0"` : ''}
+          title="${sectionKey ? `Click to ${hasNarrative ? 'mark for deletion' : 'mark for generation'}` : (hasNarrative ? 'Narrative generated' : 'Not yet generated')}"
+        >${hasNarrative ? '✓' : ''}</span>
         ${approved
-          ? `<span style="display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:50%; background:#1A7A3C; color:#fff; font-size:11px; line-height:1;" title="Approved">✓</span>`
+          ? `<span style="display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:50%; background:#1A7A3C; color:#fff; font-size:11px; font-weight:700; line-height:1;" title="Approved">✓</span>`
           : `<span style="display:inline-block; width:18px;"></span>`}
       </span>
     </div>
   `;
 }
-function tripsyGeneratePanelSectionsHtml(sections) {
-  if (!sections.length) {
-    return `<div style="padding:10px; font-size:12px; color:var(--muted); font-style:italic;">No events in this itinerary yet.</div>`;
+// Shared by both the top and bottom Update button (per explicit request --
+// a long itinerary shouldn't force scrolling back up just to submit).
+const TRIPSY_GENERATE_PANEL_UPDATE_BTN_HTML = `
+  <div style="padding:6px 4px 10px;">
+    <button type="button" class="btn primary" data-tripsy-generate-panel-update style="width:100%;">Update</button>
+  </div>
+`;
+function tripsyGeneratePanelSectionsHtml({ overview, days }) {
+  const overviewHtml = tripsyGeneratePanelRowHtml(overview.label, overview.hasNarrative, overview.approved, false, 'overview');
+  const daysHtml = days.length
+    ? days.map(day => `
+        ${tripsyGeneratePanelRowHtml(day.label, day.hasNarrative, day.approved, false, `day:${day.dayKey}`)}
+        ${day.events.map(ev => tripsyGeneratePanelRowHtml(ev.label, ev.hasNarrative, ev.approved, true, ev.rowKey ? `event:${ev.rowKey}` : null)).join('')}
+      `).join('')
+    : `<div style="padding:10px; font-size:12px; color:var(--muted); font-style:italic;">No events in this itinerary yet.</div>`;
+  return TRIPSY_GENERATE_PANEL_UPDATE_BTN_HTML + overviewHtml + daysHtml + TRIPSY_GENERATE_PANEL_UPDATE_BTN_HTML;
+}
+
+// Backs the Generate panel's Update button (top and bottom, same handler)
+// -- diffs every checkbox's current toggled state against the
+// data-tripsy-generate-panel-was-generated baseline captured when the
+// panel was last rendered, generates a narrative for every section newly
+// checked, and deletes narrative from every section newly unchecked.
+// Sections whose checkbox never changed are left alone entirely (no
+// regenerate-in-place from here -- that's still what the per-section
+// Regenerate button inside Preview is for). Day and Overview generation
+// share ONE Claude call when both are checked together
+// (tripsyGenerateNarrativeSections already supports that); per-event
+// generation has no batch API, so those run one at a time, sequentially --
+// same "don't overlap Drive writes" reasoning the app's background sync
+// pipelines already follow.
+async function tripsyRunGeneratePanelUpdate(panel, tripKey) {
+  const checkboxes = [...panel.querySelectorAll('[data-tripsy-generate-panel-checkbox]')];
+  const toGenerate = [];
+  const toDelete = [];
+  for (const cb of checkboxes) {
+    const wasGenerated = cb.dataset.tripsyGeneratePanelWasGenerated === 'true';
+    const isChecked = cb.classList.contains('tp-generate-panel-check-on');
+    if (isChecked && !wasGenerated) toGenerate.push(cb.dataset.tripsyGeneratePanelCheckbox);
+    else if (!isChecked && wasGenerated) toDelete.push(cb.dataset.tripsyGeneratePanelCheckbox);
   }
-  return sections.map(day => `
-    ${tripsyGeneratePanelRowHtml(day.label, day.hasNarrative, day.approved, false)}
-    ${day.events.map(ev => tripsyGeneratePanelRowHtml(ev.label, ev.hasNarrative, ev.approved, true)).join('')}
-  `).join('');
+  if (!toGenerate.length && !toDelete.length) {
+    toast('No changes to update.', 'success');
+    return;
+  }
+
+  const updateButtons = [...panel.querySelectorAll('[data-tripsy-generate-panel-update]')];
+  updateButtons.forEach(btn => { btn.disabled = true; btn.textContent = 'Updating…'; });
+
+  let hadError = false;
+  try {
+    const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+    if (!trip) throw new Error('Trip not found');
+    const { effectiveTrip, dayKeys, byDay, summaryByDay } = await buildTripsyPrintDayData(trip);
+    const allItems = [...summaryByDay.values()].flat();
+    const findItem = rowKey => allItems.find(it => tripsySummaryRowKey(it) === rowKey);
+
+    for (const key of toDelete) {
+      const [kind, id] = key.split(/:(.*)/s);
+      try {
+        if (kind === 'overview') {
+          await Store.deleteTripsyNarrativeSection(`${tripKey}::intro`);
+        } else if (kind === 'day') {
+          await Store.deleteTripsyNarrativeSection(`${tripKey}::day::${id}`);
+        } else if (kind === 'event') {
+          // Same empty-override move the individual event Delete button
+          // makes inside Preview -- the blurb currently showing might be
+          // inherited from its day rather than its own cache entry, so an
+          // outright delete of a key that never existed would be a no-op.
+          // Saving an explicit empty blurb suppresses it either way.
+          const item = findItem(id);
+          const promptData = item ? tripsySummaryRowPromptData(item) : { row_key: id };
+          await Store.saveTripsyNarrativeSections({
+            [`${tripKey}::eventblurb::${id}`]: { content: { blurb: '' }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString() },
+          });
+        }
+      } catch (err) {
+        console.error(`Failed to delete narrative for ${key}:`, err);
+        hadError = true;
+      }
+    }
+
+    let includeIntro = false;
+    const dayKeysToGenerate = [];
+    const eventRowKeysToGenerate = [];
+    for (const key of toGenerate) {
+      const [kind, id] = key.split(/:(.*)/s);
+      if (kind === 'overview') includeIntro = true;
+      else if (kind === 'day') dayKeysToGenerate.push(id);
+      else if (kind === 'event') eventRowKeysToGenerate.push(id);
+    }
+
+    if (includeIntro || dayKeysToGenerate.length) {
+      try {
+        await tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, { includeIntro, includeSummary: false, dayKeysToGenerate });
+      } catch (err) {
+        console.error('Failed to generate overview/day narrative from Generate panel:', err);
+        hadError = true;
+      }
+    }
+
+    for (const rowKey of eventRowKeysToGenerate) {
+      const item = findItem(rowKey);
+      if (!item) continue;
+      try {
+        const promptData = tripsySummaryRowPromptData(item);
+        const result = await generateTripsyEventNarrative(effectiveTrip, promptData);
+        const blurb = (result && result.blurb) || '';
+        await Store.saveTripsyNarrativeSections({
+          [`${tripKey}::eventblurb::${rowKey}`]: { content: { blurb }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString() },
+        });
+      } catch (err) {
+        console.error(`Failed to generate narrative for event ${rowKey}:`, err);
+        hadError = true;
+      }
+    }
+
+    toast(hadError ? 'Some sections could not be updated — see console for details.' : 'Itinerary sections updated.', hadError ? 'error' : 'success');
+
+    const narrativeCache = await Store.getTripsyNarrativeCache();
+    const sections = tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByDay, narrativeCache);
+    panel.innerHTML = tripsyGeneratePanelSectionsHtml(sections);
+  } catch (err) {
+    console.error('Generate panel update failed:', err);
+    toast('Could not update itinerary sections. Please try again.', 'error');
+    updateButtons.forEach(btn => { btn.disabled = false; btn.textContent = 'Update'; });
+  }
 }
 
 // Owner-only Generate/Regenerate/Delete/Custom controls under each day's
@@ -9193,6 +9363,43 @@ function tripsyGeneratePanelSectionsHtml(sections) {
 // both the controls row and the custom box share it (rather than putting
 // it only on the controls row) since Save/Cancel live inside the box,
 // which is a SIBLING of the controls row, not a descendant of it.
+// Same idea as tripsyNarrativeDayControlsHtml below, but scoped to the
+// single trip-wide intro paragraph (`${tripKey}::intro`) at the very top
+// of Part 2, rather than one section per day -- no dayKey/data-day-key
+// needed since there's only ever one of these per trip, and no title
+// field (the intro's content shape is just { trip_intro }, not
+// { title, narrative, place_blurbs }). Same Generate/Regenerate/Delete/
+// Custom/Approved button set and same approval lock-in behavior as every
+// other narrative section.
+function tripsyNarrativeIntroControlsHtml(introEntry) {
+  if (!isOwner) return '';
+  const hasIntro = !!introEntry;
+  const isApproved = hasIntro && !!introEntry.approved;
+  return `
+    <div class="tp-narrative-section" data-tripsy-intro-narrative-section>
+      <div class="tp-narrative-controls">
+        ${isApproved
+          ? `<span class="tp-narrative-approved-badge" data-tripsy-intro-narrative-unapprove title="Approved — click to un-approve">✅ Approved</span>`
+          : `
+            ${hasIntro
+              ? `<button type="button" class="btn" data-tripsy-intro-narrative-regenerate>Regenerate Overview</button>
+                 <button type="button" class="btn" data-tripsy-intro-narrative-delete>Delete Overview</button>`
+              : `<button type="button" class="btn" data-tripsy-intro-narrative-generate>Generate Overview</button>`}
+            <button type="button" class="btn" data-tripsy-intro-narrative-custom-toggle>Custom Overview</button>
+            ${hasIntro ? `<button type="button" class="btn" data-tripsy-intro-narrative-approve>Approved</button>` : ''}
+          `}
+      </div>
+      <div class="tp-narrative-custom-box" data-tripsy-intro-narrative-custom-box style="display:none;">
+        <textarea data-tripsy-intro-narrative-custom-input rows="4" placeholder="Write your own trip overview…">${esc((introEntry && introEntry.content.trip_intro) || '')}</textarea>
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="btn primary" data-tripsy-intro-narrative-custom-save>Save</button>
+          <button type="button" class="btn" data-tripsy-intro-narrative-custom-cancel>Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function tripsyNarrativeDayControlsHtml(dayKey, nd) {
   if (!isOwner) return '';
   const hasNarrative = !!nd;
@@ -9964,7 +10171,7 @@ async function buildTripsyPrintHtml(tripKey) {
       </div>
     `;
     return `
-      <div class="tp-place-card ${isSkipped ? 'tp-place-card-no-photo' : 'tp-place-card-float-left'}" ${isSkipped ? '' : `style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;"`} data-tripsy-place-name="${esc(name)}" data-tripsy-place-address="${esc(address)}" data-tripsy-place-title="${esc(ev.summary)}" data-tripsy-place-location-hint="${esc(locationHint)}">
+      <div class="tp-place-card ${isSkipped ? 'tp-place-card-no-photo' : 'tp-place-card-float-left'}" ${rowKey ? `id="tp-detail-event-${esc(rowKey)}"` : ''} ${isSkipped ? '' : `style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;"`} data-tripsy-place-name="${esc(name)}" data-tripsy-place-address="${esc(address)}" data-tripsy-place-title="${esc(ev.summary)}" data-tripsy-place-location-hint="${esc(locationHint)}">
         ${photoAreaHtml}
         <div class="tp-place-card-name">${esc(name)}</div>
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
@@ -9998,7 +10205,7 @@ async function buildTripsyPrintHtml(tripKey) {
     const blurb = (eventEntry && eventEntry.content.blurb) || '';
     const hasAnyBlurb = !!blurb;
     return `
-      <div class="tp-place-card tp-place-card-float-left" style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;">
+      <div class="tp-place-card tp-place-card-float-left" ${rowKey ? `id="tp-detail-event-${esc(rowKey)}"` : ''} style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;">
         <div class="tp-place-card-photo-wrap">
           <img class="tp-place-card-photo" src="data:image/jpeg;base64,${PS_RESERVATION_PHOTO_B64}" alt="P/S Reservation">
         </div>
@@ -10064,7 +10271,7 @@ async function buildTripsyPrintHtml(tripKey) {
       </div>
     `;
     return `
-      <div class="tp-place-card ${isSkipped ? 'tp-place-card-no-photo' : 'tp-place-card-float-left'}" ${isSkipped ? '' : `style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;"`} data-tripsy-photo-kind="transportation" data-tripsy-transport-company="${esc(company)}" data-tripsy-transport-category="${esc(category)}" data-tripsy-place-name="${esc(company || ev.summary)}">
+      <div class="tp-place-card ${isSkipped ? 'tp-place-card-no-photo' : 'tp-place-card-float-left'}" ${rowKey ? `id="tp-detail-event-${esc(rowKey)}"` : ''} ${isSkipped ? '' : `style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;"`} data-tripsy-photo-kind="transportation" data-tripsy-transport-company="${esc(company)}" data-tripsy-transport-category="${esc(category)}" data-tripsy-place-name="${esc(company || ev.summary)}">
         ${photoAreaHtml}
         <div class="tp-place-card-name">${esc(ev.summary)}</div>
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
@@ -10191,8 +10398,11 @@ async function buildTripsyPrintHtml(tripKey) {
     }));
     part2Html = `
       <div class="tp-section-break">
-        ${tripsyCoverHeaderHtml(headerDestination, headerDateRange, 'Detailed Itinerary', headerBackgroundPhotoUrl)}
-        ${narrative.trip_intro ? `<p class="tp-trip-intro">${esc(narrative.trip_intro)}</p>` : ''}
+        <div id="tp-detail-overview">
+          ${tripsyCoverHeaderHtml(headerDestination, headerDateRange, 'Detailed Itinerary', headerBackgroundPhotoUrl)}
+          ${narrative.trip_intro ? `<p class="tp-trip-intro">${esc(narrative.trip_intro)}</p>` : ''}
+          ${tripsyNarrativeIntroControlsHtml(introEntry)}
+        </div>
         ${dayNarrativeHtmlParts.join('')}
       </div>
     `;
@@ -10212,8 +10422,13 @@ async function buildTripsyPrintHtml(tripKey) {
       const dividerHtml = tripsyDetailedDayDividerHtml(dayKey, dayNumber, tripsyDayCities(dayPlaces));
       return `${dividerHtml}${cardsHtml}`;
     }));
-    if (dayBlocks.some(Boolean)) {
-      part2Html = `<div class="tp-section-break">${tripsyCoverHeaderHtml(headerDestination, headerDateRange, 'Detailed Itinerary', headerBackgroundPhotoUrl)}${dayBlocks.join('')}</div>`;
+    // Owner-only intro controls (tripsyNarrativeIntroControlsHtml) show
+    // even in this flat-fallback layout, and even on a trip with nothing
+    // card-worthy anywhere -- Generate Overview is the ONE thing an owner
+    // can still do here, and without this, a fully event-less trip (or one
+    // where nothing's been generated yet) had no Part 2 at all to hold it.
+    if (dayBlocks.some(Boolean) || isOwner) {
+      part2Html = `<div class="tp-section-break"><div id="tp-detail-overview">${tripsyCoverHeaderHtml(headerDestination, headerDateRange, 'Detailed Itinerary', headerBackgroundPhotoUrl)}${tripsyNarrativeIntroControlsHtml(introEntry)}</div>${dayBlocks.join('')}</div>`;
     }
   }
 
@@ -11028,6 +11243,15 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
     overlay.querySelector('#tripsy-preview-close-btn').addEventListener('click', () => {
       overlay.style.display = 'none';
     });
+    // Click-outside-to-close: the overlay itself is the fixed, full-screen
+    // flex container (dark backdrop + padding around the toolbar/paper),
+    // so a click landing directly on IT (not on the toolbar or the paper,
+    // both of which are descendants and never the event target here)
+    // means the click was in that surrounding backdrop/padding area, i.e.
+    // outside the actual document.
+    overlay.addEventListener('click', e => {
+      if (e.target === overlay) overlay.style.display = 'none';
+    });
     overlay.querySelector('#tripsy-preview-print-btn').addEventListener('click', async () => {
       const currentHtml = overlay.querySelector('#tripsy-preview-content').innerHTML;
       overlay.style.display = 'none';
@@ -11418,6 +11642,126 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
         } catch (err) {
           console.error('Failed to save custom narrative:', err);
           toast('Could not save narrative — see console for details.', 'error');
+          customSaveBtn.disabled = false;
+          customSaveBtn.textContent = originalText;
+        }
+        return;
+      }
+    });
+
+    // Generate/Regenerate/Delete/Custom/Approved controls for the trip
+    // intro paragraph (tripsyNarrativeIntroControlsHtml) -- a fourth,
+    // separate delegated listener since these buttons live under their own
+    // [data-tripsy-intro-narrative-section] wrapper, one per trip rather
+    // than one per day/event, so there's no data-day-key/data-row-key to
+    // key off of at all -- the cache key is always just `${tripKey}::intro`.
+    previewContent.addEventListener('click', async e => {
+      const generateBtn = e.target.closest('[data-tripsy-intro-narrative-generate]');
+      const regenerateBtn = e.target.closest('[data-tripsy-intro-narrative-regenerate]');
+      const deleteBtn = e.target.closest('[data-tripsy-intro-narrative-delete]');
+      const customToggleBtn = e.target.closest('[data-tripsy-intro-narrative-custom-toggle]');
+      const customSaveBtn = e.target.closest('[data-tripsy-intro-narrative-custom-save]');
+      const customCancelBtn = e.target.closest('[data-tripsy-intro-narrative-custom-cancel]');
+      const approveBtn = e.target.closest('[data-tripsy-intro-narrative-approve]');
+      const unapproveBtn = e.target.closest('[data-tripsy-intro-narrative-unapprove]');
+      if (!generateBtn && !regenerateBtn && !deleteBtn && !customToggleBtn && !customSaveBtn && !customCancelBtn && !approveBtn && !unapproveBtn) return;
+
+      const section = e.target.closest('[data-tripsy-intro-narrative-section]');
+      if (!section) return;
+      const tripKey = overlay.dataset.tripKey;
+      const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+      if (!trip) return;
+      const cacheKey = `${tripKey}::intro`;
+
+      if (customToggleBtn) {
+        const box = section.querySelector('[data-tripsy-intro-narrative-custom-box]');
+        if (box) box.style.display = box.style.display === 'none' ? 'block' : 'none';
+        return;
+      }
+
+      if (customCancelBtn) {
+        const box = e.target.closest('.tp-narrative-custom-box');
+        if (box) box.style.display = 'none';
+        return;
+      }
+
+      if (approveBtn) {
+        approveBtn.disabled = true;
+        try {
+          const ok = await Store.setTripsyNarrativeApproved(cacheKey, true);
+          if (!ok) { toast('Could not mark as approved. Please try again.', 'error'); return; }
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to approve trip overview:', err);
+          toast('Could not mark as approved. Please try again.', 'error');
+        } finally {
+          approveBtn.disabled = false;
+        }
+        return;
+      }
+
+      if (unapproveBtn) {
+        try {
+          const ok = await Store.setTripsyNarrativeApproved(cacheKey, false);
+          if (!ok) { toast('Could not un-approve. Please try again.', 'error'); return; }
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to un-approve trip overview:', err);
+          toast('Could not un-approve. Please try again.', 'error');
+        }
+        return;
+      }
+
+      if (generateBtn || regenerateBtn) {
+        const btn = generateBtn || regenerateBtn;
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Generating…';
+        try {
+          const { effectiveTrip, dayKeys, byDay, summaryByDay } = await buildTripsyPrintDayData(trip);
+          await tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, { includeIntro: true, includeSummary: false, dayKeysToGenerate: [] });
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to generate trip overview:', err);
+          toast('Could not generate overview — see console for details.', 'error');
+          btn.disabled = false;
+          btn.textContent = originalText;
+        }
+        return;
+      }
+
+      if (deleteBtn) {
+        deleteBtn.disabled = true;
+        try {
+          const ok = await Store.deleteTripsyNarrativeSection(cacheKey);
+          if (!ok) { toast('Could not delete overview. Please try again.', 'error'); return; }
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to delete trip overview:', err);
+          toast('Could not delete overview. Please try again.', 'error');
+        } finally {
+          deleteBtn.disabled = false;
+        }
+        return;
+      }
+
+      if (customSaveBtn) {
+        const box = e.target.closest('.tp-narrative-custom-box');
+        const textInput = box.querySelector('[data-tripsy-intro-narrative-custom-input]');
+        const originalText = customSaveBtn.textContent;
+        customSaveBtn.disabled = true;
+        customSaveBtn.textContent = 'Saving…';
+        try {
+          const { effectiveTrip } = await buildTripsyPrintDayData(trip);
+          const introFingerprintData = { name: effectiveTrip.name, location: effectiveTrip.location, dateRange: formatTripDateRange(effectiveTrip.start, effectiveTrip.end) };
+          const ok = await Store.saveTripsyNarrativeSections({
+            [cacheKey]: { content: { trip_intro: textInput.value.trim() }, fingerprint: tripsyContentFingerprint(introFingerprintData), generatedAt: new Date().toISOString() },
+          });
+          if (!ok) throw new Error('Failed to save overview to storage');
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to save custom trip overview:', err);
+          toast('Could not save overview — see console for details.', 'error');
           customSaveBtn.disabled = false;
           customSaveBtn.textContent = originalText;
         }
@@ -12516,6 +12860,66 @@ async function renderTripsyEventsListImpl() {
       }
     });
   });
+
+  // Three delegated listeners for the Generate panel, all bound once
+  // (guarded below) on `container` itself rather than per-element like the
+  // other trigger buttons above, since the panel's rows/buttons only exist
+  // inside panel.innerHTML after an async fetch, not at the time this
+  // function does its per-render querySelectorAll wiring. `container` is
+  // the same persistent #tripsy-card node across every re-render (only its
+  // innerHTML changes), so without the guard these would rebind -- and
+  // re-fire -- once per render.
+  if (!container.dataset.tripsyGeneratePanelWired) {
+    container.dataset.tripsyGeneratePanelWired = '1';
+
+    // Clicking a day/event/Overview title jumps straight to that section
+    // in Preview.
+    container.addEventListener('click', async e => {
+      const label = e.target.closest('[data-tripsy-generate-panel-jump]');
+      if (!label) return;
+      const panel = e.target.closest('[data-tripsy-generate-panel]');
+      const tripKey = panel && panel.getAttribute('data-tripsy-generate-panel');
+      if (!tripKey) return;
+      const [kind, id] = label.dataset.tripsyGeneratePanelJump.split(/:(.*)/s);
+      closeAllTripsyTripPanels();
+      try {
+        await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+      } catch (err) {
+        console.error('Failed to open Preview from Generate panel:', err);
+        toast("Could not open Preview. Please try again.", "error");
+        return;
+      }
+      const anchorId = kind === 'overview' ? 'tp-detail-overview' : kind === 'day' ? `tp-detail-day-${id}` : `tp-detail-event-${id}`;
+      const target = document.querySelector(`#tripsy-preview-content #${CSS.escape(anchorId)}`);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+
+    // Clicking a checkbox just flips its own visual state -- no narrative
+    // is generated or deleted until Update is pressed (see below), so this
+    // never touches Store/driveData at all. data-tripsy-generate-panel-
+    // was-generated (the ORIGINAL state, set once per render) is left
+    // untouched here on purpose -- Update needs to diff against it.
+    container.addEventListener('click', e => {
+      const box = e.target.closest('[data-tripsy-generate-panel-checkbox]');
+      if (!box) return;
+      const nowChecked = !box.classList.contains('tp-generate-panel-check-on');
+      box.classList.toggle('tp-generate-panel-check-on', nowChecked);
+      box.textContent = nowChecked ? '✓' : '';
+      box.setAttribute('aria-checked', String(nowChecked));
+    });
+
+    // Update (top and bottom button, same handler) -- generates a
+    // narrative for every newly-checked section and deletes narrative from
+    // every newly-unchecked one (tripsyRunGeneratePanelUpdate).
+    container.addEventListener('click', async e => {
+      const btn = e.target.closest('[data-tripsy-generate-panel-update]');
+      if (!btn) return;
+      const panel = e.target.closest('[data-tripsy-generate-panel]');
+      const tripKey = panel && panel.getAttribute('data-tripsy-generate-panel');
+      if (!tripKey) return;
+      await tripsyRunGeneratePanelUpdate(panel, tripKey);
+    });
+  }
 
   container.querySelectorAll("[data-tripsy-print-itinerary]").forEach(btn => {
     btn.addEventListener("click", async e => {
