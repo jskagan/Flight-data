@@ -638,6 +638,16 @@
   .tp-day-tile-range .tp-day-tile-num { font-size: 22px; margin: 0; }
   .tp-day-tile-range-divider { width: 1px; align-self: stretch; background: rgba(255, 255, 255, 0.35); }
   .tp-row-empty { font-size: 13px; font-style: italic; color: #778; padding: 4px 0; }
+  /* Clicking a day in the Summary jumps Part 2 to that same day's start
+     (data-tripsy-summary-day-link, see previewTripsyItinerary's delegated
+     listener) -- a subtle hover cue so it reads as clickable without
+     changing the block's normal look. */
+  .tp-day-block-linkable { cursor: pointer; transition: box-shadow 0.15s; }
+  .tp-day-block-linkable:hover { box-shadow: 0 0 0 2px var(--amber, #8A5A12); }
+  @media print {
+    .tp-day-block-linkable { cursor: auto; }
+    .tp-day-block-linkable:hover { box-shadow: none; }
+  }
   .tp-day-rows { flex: 1; min-width: 0; padding: 14px 18px; }
   .tp-row {
     display: flex; align-items: baseline; gap: 10px; padding: 4px 0;
@@ -680,8 +690,17 @@
      narrative text (tripsyNarrativeDayControlsHtml) -- Preview-only, hidden
      from actual print/PDF output by the @media print rule below alongside
      .tp-photo-controls. */
-  .tp-narrative-controls { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
+  .tp-narrative-controls { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; align-items: center; }
   .tp-narrative-controls .btn { font-size: 12px; padding: 6px 10px; }
+  /* Replaces the whole controls row once a narrative section is approved
+     (tripsyNarrativeDayControlsHtml / tripsyEventNarrativeControlsHtml) --
+     clicking it un-approves and brings the buttons back. */
+  .tp-narrative-approved-badge {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600;
+    color: #1A7A3C; background: #E4F5EA; border: 1px solid #B7E4C7; border-radius: 6px;
+    padding: 6px 10px; cursor: pointer; user-select: none;
+  }
+  .tp-narrative-approved-badge:hover { background: #D3EEDC; }
   .tp-narrative-custom-box {
     margin: 0 0 16px; padding: 12px; background: #F7F4EE; border: 1px solid #DDE2E8; border-radius: 8px;
   }
@@ -1945,6 +1964,24 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.deleteTripsyNarrativeSection failed:', e);
+      return false;
+    }
+  },
+  // Backs the "Approved" button/badge toggle on a day or event narrative
+  // section -- a sibling flag on the cache entry (not inside content), so
+  // approving never touches the actual generated/custom text. Only ever
+  // flips a flag on an entry that already exists; the caller is
+  // responsible for creating one first (see the event-narrative Approve
+  // handler, which snapshots an inherited day-level blurb into its own
+  // entry before approving it, same as Delete already does).
+  async setTripsyNarrativeApproved(sectionKey, approved) {
+    try {
+      if (!driveData.tripsyNarrativeCache || !driveData.tripsyNarrativeCache[sectionKey]) return false;
+      driveData.tripsyNarrativeCache[sectionKey] = { ...driveData.tripsyNarrativeCache[sectionKey], approved };
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.setTripsyNarrativeApproved failed:', e);
       return false;
     }
   },
@@ -9018,8 +9055,13 @@ function tripsyDetailedDayDividerHtml(dayKey, dayNumber, cities) {
   const dateLabel = isUndated ? '' : tripPartsToUtcDate({
     year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)),
   }).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+  // id is the jump target for Part 1's clickable day tiles (see
+  // tripsySummaryDayBlockHtml's data-tripsy-summary-day-link and the
+  // delegated click listener in previewTripsyItinerary) -- one stable
+  // anchor per real day, shared by both the narrative and flat-fallback
+  // Part 2 layouts since both call this same function.
   return `
-    <div class="tp-day-divider">
+    <div class="tp-day-divider" id="tp-detail-day-${esc(dayKey)}">
       <span class="tp-day-divider-num">${esc(dayLabel)}</span>
       <span class="tp-day-divider-date">${esc(dateLabel)}</span>
       <span class="tp-day-divider-cities">${esc((cities || []).join(' / '))}</span>
@@ -9036,6 +9078,104 @@ function tripsyDetailedDayDividerHtml(dayKey, dayNumber, cities) {
 // redundant.
 function tripsyStripDayLabelFromTitle(title) {
   return (title || '').replace(/^\s*day\s+\d+\s*[-:–—]+\s*/i, '').trim();
+}
+
+// Backs the Itinerary dropdown's "Generate" panel (see the
+// data-tripsy-generate-panel-toggle wiring in renderTripsyEventsListImpl) --
+// a day-by-day, event-by-event status list showing which sections of the
+// Detailed Itinerary currently have narrative text and which of those are
+// approved, WITHOUT doing any of the photo-fetch/card-building work Part 2
+// itself does (this only needs text + two booleans per row). Deliberately
+// mirrors the exact same eventEntry-then-day-blurb precedence the real
+// cards use (tripsyDetailedCardHtml/tripsyTransportationCardHtml/
+// tripsyPsReservationCardHtml) so a checked box here always means "this
+// card currently shows narrative text," not just "someone clicked Generate
+// on it once" -- if that logic ever changes there, it needs to change here
+// too. Only days that actually have events are included (dayKeys from
+// buildTripsyPrintDayData already excludes empty calendar days), since a
+// day with nothing scheduled has no narrative to generate in the first
+// place.
+function tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByDay, narrativeCache) {
+  const tripStartDayKey = tripsyDayKey(effectiveTrip.start);
+  const summaryEntry = narrativeCache[`${tripKey}::summary`];
+  const summaryBlurbByKey = new Map((summaryEntry ? summaryEntry.content.rows : []).map(r => [r.row_key, r.blurb]));
+
+  return dayKeys.map(dayKey => {
+    const isUndated = dayKey === 'undated';
+    const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
+    const dayEntry = narrativeCache[`${tripKey}::day::${dayKey}`];
+    const dayTitle = dayEntry && dayEntry.content.title ? tripsyStripDayLabelFromTitle(dayEntry.content.title) : '';
+    const dayLabelPrefix = isUndated ? 'Undated' : `Day ${dayNumber}`;
+    const label = dayTitle ? `${dayLabelPrefix}: ${dayTitle}` : dayLabelPrefix;
+    const placeBlurbsByName = new Map(((dayEntry && dayEntry.content.place_blurbs) || []).map(pb => [pb.place_name, pb.blurb]));
+
+    const events = [];
+    for (const item of summaryByDay.get(dayKey) || []) {
+      if (item.isLayover) continue;
+      const rowKey = tripsySummaryRowKey(item);
+      const eventEntry = rowKey ? narrativeCache[`${tripKey}::eventblurb::${rowKey}`] : null;
+      if (item.psReservation) {
+        const res = item.psReservation;
+        events.push({
+          label: `P/S Reservation${res.experience ? ' • ' + res.experience : ''}`,
+          hasNarrative: !!(eventEntry && eventEntry.content.blurb),
+          approved: !!(eventEntry && eventEntry.approved),
+        });
+        continue;
+      }
+      const ev = item.ev;
+      const raw = ev && ev.tripsyRaw;
+      // Same "no card at all" cases tripsyDetailedCardHtml skips: no
+      // resource data, an unsupported resource type, or the tail half of a
+      // multi-day stay (which shares its one card with the head half).
+      if (!raw || ev._splitHalf === 'end') continue;
+      let hasNarrative, evLabel;
+      if (raw.resource === 'transportation') {
+        const wantsBlurb = !(raw.category === 'airplane' || raw.category === 'car');
+        const dayBlurb = wantsBlurb ? summaryBlurbByKey.get(`ev:${ev.id}`) : null;
+        hasNarrative = eventEntry ? !!eventEntry.content.blurb : !!dayBlurb;
+        evLabel = ev.summary;
+      } else if (raw.resource === 'hosting' || raw.resource === 'activity') {
+        const name = raw.name || ev.summary;
+        const dayBlurb = placeBlurbsByName.get(name);
+        hasNarrative = eventEntry ? !!eventEntry.content.blurb : !!dayBlurb;
+        evLabel = name;
+      } else {
+        continue;
+      }
+      events.push({ label: evLabel, hasNarrative, approved: !!(eventEntry && eventEntry.approved) });
+    }
+
+    return { dayKey, label, hasNarrative: !!dayEntry, approved: !!(dayEntry && dayEntry.approved), events };
+  });
+}
+
+// One row of the Generate panel -- a truncated label on the left, a
+// read-only checkbox (checked when hasNarrative) plus a small green
+// checkmark badge (only when approved) on the right. Disabled/read-only on
+// purpose: this panel is a status overview, not a section picker -- ticking
+// a box here doesn't do anything (yet), so it shouldn't look clickable.
+function tripsyGeneratePanelRowHtml(label, hasNarrative, approved, indented) {
+  return `
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:5px 4px; ${indented ? 'padding-left:22px;' : ''}">
+      <span style="font-size:13px; ${indented ? '' : 'font-weight:700;'} color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0;" title="${esc(label)}">${esc(label)}</span>
+      <span style="display:flex; align-items:center; gap:6px; flex-shrink:0;">
+        <input type="checkbox" disabled ${hasNarrative ? 'checked' : ''} style="margin:0;">
+        ${approved
+          ? `<span style="display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:50%; background:#1A7A3C; color:#fff; font-size:11px; line-height:1;" title="Approved">✓</span>`
+          : `<span style="display:inline-block; width:18px;"></span>`}
+      </span>
+    </div>
+  `;
+}
+function tripsyGeneratePanelSectionsHtml(sections) {
+  if (!sections.length) {
+    return `<div style="padding:10px; font-size:12px; color:var(--muted); font-style:italic;">No events in this itinerary yet.</div>`;
+  }
+  return sections.map(day => `
+    ${tripsyGeneratePanelRowHtml(day.label, day.hasNarrative, day.approved, false)}
+    ${day.events.map(ev => tripsyGeneratePanelRowHtml(ev.label, ev.hasNarrative, ev.approved, true)).join('')}
+  `).join('');
 }
 
 // Owner-only Generate/Regenerate/Delete/Custom controls under each day's
@@ -9056,14 +9196,25 @@ function tripsyStripDayLabelFromTitle(title) {
 function tripsyNarrativeDayControlsHtml(dayKey, nd) {
   if (!isOwner) return '';
   const hasNarrative = !!nd;
+  // Approving replaces the whole controls row with a single badge -- there
+  // is nothing left to Regenerate/Delete/Custom-edit until the owner
+  // un-approves (clicking the badge) first, which is the point: approved
+  // text is meant to be locked in, not one accidental click away from
+  // being overwritten.
+  const isApproved = hasNarrative && !!nd.approved;
   return `
     <div class="tp-narrative-section" data-tripsy-narrative-section data-day-key="${esc(dayKey)}">
       <div class="tp-narrative-controls">
-        ${hasNarrative
-          ? `<button type="button" class="btn" data-tripsy-narrative-regenerate>Regenerate Narrative</button>
-             <button type="button" class="btn" data-tripsy-narrative-delete>Delete Narrative</button>`
-          : `<button type="button" class="btn" data-tripsy-narrative-generate-day>Generate Narrative</button>`}
-        <button type="button" class="btn" data-tripsy-narrative-custom-toggle>Custom Narrative</button>
+        ${isApproved
+          ? `<span class="tp-narrative-approved-badge" data-tripsy-narrative-unapprove title="Approved — click to un-approve">✅ Approved</span>`
+          : `
+            ${hasNarrative
+              ? `<button type="button" class="btn" data-tripsy-narrative-regenerate>Regenerate Narrative</button>
+                 <button type="button" class="btn" data-tripsy-narrative-delete>Delete Narrative</button>`
+              : `<button type="button" class="btn" data-tripsy-narrative-generate-day>Generate Narrative</button>`}
+            <button type="button" class="btn" data-tripsy-narrative-custom-toggle>Custom Narrative</button>
+            ${hasNarrative ? `<button type="button" class="btn" data-tripsy-narrative-approve>Approved</button>` : ''}
+          `}
       </div>
       <div class="tp-narrative-custom-box" data-tripsy-narrative-custom-box style="display:none;">
         <input type="text" data-tripsy-narrative-custom-title placeholder="Title" value="${esc((nd && nd.title) || '')}">
@@ -9090,22 +9241,43 @@ function tripsyNarrativeDayControlsHtml(dayKey, nd) {
 // real user content rather than AI narrative and the exclusion only ever
 // applied to generation. No title field (unlike the day version): an event
 // already has its own name/title shown right next to these controls.
-function tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsGenerate) {
+function tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsGenerate, hasAnyBlurb, displayedBlurb) {
   if (!isOwner || !rowKey) return '';
-  const hasBlurb = !!eventEntry;
+  // hasAnyBlurb reflects whatever text is actually showing on the card --
+  // an individual override (eventEntry) OR a whole-day-generated blurb
+  // this event never got its own override for -- not just whether an
+  // individual override exists. That's what lets Regenerate/Delete appear
+  // for a card whose blurb only ever came from generating the whole day at
+  // once. Deliberately excludes a pre-existing manual Tripsy note
+  // (raw.notes): that's not narrative this feature generated or replaced,
+  // so it still only offers Generate/Custom Note, same as before.
+  const hasBlurb = !!hasAnyBlurb;
+  // Same lock-in behavior as the day-level version: once approved, the
+  // whole controls row collapses to a single badge, whether the blurb
+  // being approved came from an individual generation/custom note or was
+  // just inherited from a whole-day narrative -- eventEntry.approved only
+  // means anything once an individual entry exists at all, which the
+  // Approve click handler guarantees by snapshotting an inherited blurb
+  // into one first (same "freeze the text" move Delete already makes).
+  const isApproved = hasBlurb && !!(eventEntry && eventEntry.approved);
   return `
-    <div class="tp-narrative-section" data-tripsy-event-narrative-section data-row-key="${esc(rowKey)}">
+    <div class="tp-narrative-section" data-tripsy-event-narrative-section data-row-key="${esc(rowKey)}" data-displayed-blurb="${esc(displayedBlurb || '')}">
       <div class="tp-narrative-controls">
-        ${wantsGenerate
-          ? (hasBlurb
-              ? `<button type="button" class="btn" data-tripsy-event-narrative-regenerate>Regenerate</button>
-                 <button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>`
-              : `<button type="button" class="btn" data-tripsy-event-narrative-generate>Generate</button>`)
-          : (hasBlurb ? `<button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>` : '')}
-        <button type="button" class="btn" data-tripsy-event-narrative-custom-toggle>Custom Note</button>
+        ${isApproved
+          ? `<span class="tp-narrative-approved-badge" data-tripsy-event-narrative-unapprove title="Approved — click to un-approve">✅ Approved</span>`
+          : `
+            ${wantsGenerate
+              ? (hasBlurb
+                  ? `<button type="button" class="btn" data-tripsy-event-narrative-regenerate>Regenerate</button>
+                     <button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>`
+                  : `<button type="button" class="btn" data-tripsy-event-narrative-generate>Generate</button>`)
+              : (hasBlurb ? `<button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>` : '')}
+            <button type="button" class="btn" data-tripsy-event-narrative-custom-toggle>Custom Note</button>
+            ${hasBlurb ? `<button type="button" class="btn" data-tripsy-event-narrative-approve>Approved</button>` : ''}
+          `}
       </div>
       <div class="tp-narrative-custom-box" data-tripsy-event-narrative-custom-box style="display:none;">
-        <textarea data-tripsy-event-narrative-custom-input rows="3" placeholder="Write your own note for this event…">${esc((eventEntry && eventEntry.content.blurb) || '')}</textarea>
+        <textarea data-tripsy-event-narrative-custom-input rows="3" placeholder="Write your own note for this event…">${esc(displayedBlurb || '')}</textarea>
         <div style="display:flex; gap:8px;">
           <button type="button" class="btn primary" data-tripsy-event-narrative-custom-save>Save</button>
           <button type="button" class="btn" data-tripsy-event-narrative-custom-cancel>Cancel</button>
@@ -9178,7 +9350,59 @@ function tripsyContentFingerprint(obj) {
 // (never this function) decides which parts of the response to merge into
 // the cache, so a run that generates 1 day never touches any other day's
 // already-cached text.
-async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList, { includeIntro, dayKeysToGenerate }) {
+// The json_schema-constrained narrative generators below occasionally emit
+// a literal double-escaped unicode sequence inside a string value -- e.g.
+// the six literal characters \, u, 2, 0, 1, 4 instead of an actual em dash
+// character. That's still valid JSON (\\u2014 is a legal "escaped
+// backslash, then the text u2014" sequence), so JSON.parse doesn't error,
+// it just leaves those literal characters exactly as written instead of
+// decoding them the way an unescaped — would be. Confirmed in
+// production (an August day's generated narrative literally read
+// "—" mid-sentence instead of showing an em dash). Recursively
+// unescapes any leftover \uXXXX-looking substring in every string value of
+// the parsed response.
+function tripsyFixDoubleEscapedUnicodeDeep(value) {
+  if (typeof value === 'string') {
+    return value.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+  }
+  if (Array.isArray(value)) return value.map(tripsyFixDoubleEscapedUnicodeDeep);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = tripsyFixDoubleEscapedUnicodeDeep(v);
+    return out;
+  }
+  return value;
+}
+
+// Self-healing pass for narrative text that was cached BEFORE
+// tripsyFixDoubleEscapedUnicodeDeep started being applied at generation
+// time -- every already-cached section for this trip gets the same fix
+// re-run against it here, on every Preview/Print/PDF build, rather than
+// requiring a separate one-off cleanup button. Cheap (a handful of string
+// compares against whatever's already cached) and self-limiting: once a
+// section's text has been fixed and persisted, it never differs from its
+// already-fixed form again, so this becomes a no-op for it on every
+// subsequent build. Mutates narrativeCache in place so the caller's
+// existing reads of it see the corrected text immediately, without a
+// second round-trip to Drive.
+async function tripsyFixCachedNarrativeUnicodeForTrip(tripKey, narrativeCache) {
+  const prefix = `${tripKey}::`;
+  const changed = {};
+  for (const [key, entry] of Object.entries(narrativeCache)) {
+    if (!key.startsWith(prefix) || !entry || !entry.content) continue;
+    const fixedContent = tripsyFixDoubleEscapedUnicodeDeep(entry.content);
+    if (JSON.stringify(fixedContent) !== JSON.stringify(entry.content)) {
+      const fixedEntry = { ...entry, content: fixedContent };
+      narrativeCache[key] = fixedEntry;
+      changed[key] = fixedEntry;
+    }
+  }
+  if (Object.keys(changed).length) {
+    await Store.saveTripsyNarrativeSections(changed);
+  }
+}
+
+async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList, { includeIntro, dayKeysToGenerate, existingPlaceBlurbs }) {
   const apiKey = await fetchAnthropicApiKeyFromDrive();
   const tripSummaryForPrompt = {
     name: effectiveTrip.name,
@@ -9230,7 +9454,7 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{
         role: 'user',
-        content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. ${includeIntro ? 'Write a short, evocative trip_intro paragraph for the whole trip that sets the scene for the destinations involved.' : 'Set trip_intro to an empty string -- it is not being regenerated right now.'} For each day: a short evocative title (e.g. "Travel Day: First Taste of Palma" -- do NOT prefix it with "Day N" or the date, since the printed page already shows that on its own divider bar directly above the title), 1-3 narrative paragraphs that weave the day's events together AND bring in genuinely interesting, accurate background about the specific places and experiences involved -- a hotel's history or standing, what a landmark, museum, or show actually is and why it's notable, the character of a neighborhood -- so the day reads as a rich guide rather than a list. Also return one place_blurbs entry per named place (hotel/activity) in that day's events -- place_name (exactly matching the place_name given in the data) plus a 2-3 sentence blurb sharing real, interesting background about that specific place (its story, significance, what to expect). Draw on what you actually know about these specific named places, venues, and experiences. Do NOT fabricate specifics you're unsure of -- no invented hours, prices, exact founding years or dates, statistics, or made-up review quotes; speak to reputation only in honest, general terms ("long regarded as", "widely praised") and only when genuinely warranted. For anything you don't actually recognize, or a generic/private event, stay warm and evocative without inventing facts. Only include a days[] entry for these day_key values, in this exact set -- do not write entries for any other day: ${JSON.stringify(dayKeysToGenerate)}. If a day has no named places, place_blurbs can be an empty array.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
+        content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. ${includeIntro ? 'Write a short, evocative trip_intro paragraph for the whole trip that sets the scene for the destinations involved.' : 'Set trip_intro to an empty string -- it is not being regenerated right now.'} For each day: a short evocative title (e.g. "Travel Day: First Taste of Palma" -- do NOT prefix it with "Day N" or the date, since the printed page already shows that on its own divider bar directly above the title), 1-3 narrative paragraphs that weave the day's events together AND bring in genuinely interesting, accurate background about the specific places and experiences involved -- a hotel's history or standing, what a landmark, museum, or show actually is and why it's notable, the character of a neighborhood -- so the day reads as a rich guide rather than a list. Also return one place_blurbs entry per named place (hotel/activity) in that day's events -- place_name (exactly matching the place_name given in the data) plus a 2-3 sentence blurb sharing real, interesting background about that specific place (its story, significance, what to expect). Draw on what you actually know about these specific named places, venues, and experiences. Do NOT fabricate specifics you're unsure of -- no invented hours, prices, exact founding years or dates, statistics, or made-up review quotes; speak to reputation only in honest, general terms ("long regarded as", "widely praised") and only when genuinely warranted. For anything you don't actually recognize, or a generic/private event, stay warm and evocative without inventing facts. If the SAME place/location appears more than once across this trip's days (e.g. a venue visited twice, a restaurant repeated, a landmark passed on two different days), do NOT write the same descriptive content for it each time -- vary what you say by drawing on that specific occurrence's own details (what's actually happening there that visit, the occasion, time of day, who's around, what's different about it) rather than re-describing the place itself identically twice. This applies both within the days you're writing now and against any already-written content for other days shown below -- never repeat text that already exists for the same place.${existingPlaceBlurbs && existingPlaceBlurbs.length ? `\n\nText already written for these places on OTHER days of this same trip (already generated, not being rewritten now) -- if any of these same places come up again in the day(s) you're writing, give it a genuinely different angle, not a rehash of this:\n${JSON.stringify(existingPlaceBlurbs)}` : ''} Only include a days[] entry for these day_key values, in this exact set -- do not write entries for any other day: ${JSON.stringify(dayKeysToGenerate)}. If a day has no named places, place_blurbs can be an empty array.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
       }],
     }),
   });
@@ -9241,7 +9465,7 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList
   const data = await res.json();
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude API returned no text block');
-  return JSON.parse(textBlock.text);
+  return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
 }
 
 // Generates the print view's Part 1 one-line-per-event summary blurbs --
@@ -9292,7 +9516,7 @@ async function generateTripsySummaryBlurbs(effectiveTrip, rowPromptDataList) {
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{
         role: 'user',
-        content: `Write the one-line event descriptions for page 1 (a formal day-by-day summary) of a printed travel itinerary, in the warm but concise voice of a boutique travel magazine -- one short, vivid sentence per row (roughly 4-12 words), NOT a data dump. Return exactly one rows[] entry per row_key given below, in the same order, with row_key copied through unchanged. Only state facts present in the row's own data (title/place_name/address/notes) -- do not invent hours, prices, history, or amenities, and do not repeat the time (it is already shown separately). A P/S Reservation row is airport private-terminal service, not a destination -- describe it as such.\n\nRows:\n${JSON.stringify(tripSummaryForPrompt)}`,
+        content: `Write the one-line event descriptions for page 1 (a formal day-by-day summary) of a printed travel itinerary, in the warm but concise voice of a boutique travel magazine -- one short, vivid sentence per row (roughly 4-12 words), NOT a data dump. Return exactly one rows[] entry per row_key given below, in the same order, with row_key copied through unchanged. Only state facts present in the row's own data (title/place_name/address/notes) -- do not invent hours, prices, history, or amenities, and do not repeat the time (it is already shown separately). A P/S Reservation row is airport private-terminal service, not a destination -- describe it as such. If the same place_name appears in more than one row (e.g. the same restaurant or venue visited on different days), do NOT write the same sentence for each -- differentiate using whatever's different about that specific row (its title, notes, or time of day), not the place description itself.\n\nRows:\n${JSON.stringify(tripSummaryForPrompt)}`,
       }],
     }),
   });
@@ -9303,7 +9527,7 @@ async function generateTripsySummaryBlurbs(effectiveTrip, rowPromptDataList) {
   const data = await res.json();
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude API returned no text block');
-  return JSON.parse(textBlock.text);
+  return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
 }
 
 // Backs the per-event "Generate" button on a Detailed Itinerary card
@@ -9358,7 +9582,7 @@ async function generateTripsyEventNarrative(effectiveTrip, eventPromptData) {
   const data = await res.json();
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude API returned no text block');
-  return JSON.parse(textBlock.text);
+  return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
 }
 
 // Owner-only, shared by every place narrative generation can be triggered
@@ -9386,7 +9610,20 @@ async function tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, 
 
   if (includeIntro || dayKeysToGenerate.length) {
     const dayPromptDataAll = dayKeys.map(dayKey => tripsyNarrativeDayPromptData(dayKey, byDay.get(dayKey) || []));
-    const result = await generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataAll, { includeIntro, dayKeysToGenerate });
+    // Days NOT being (re)generated in this call may already have cached
+    // place_blurbs from an earlier, separate generation -- the model has
+    // no memory of that text (each API call is stateless), so without this
+    // it could easily write the same description for a recurring place
+    // (e.g. a venue visited on both Day 2 and Day 5) without knowing Day
+    // 2's version already exists. Passing that already-written text in
+    // lets the prompt explicitly tell it to differentiate instead.
+    const existingCache = await Store.getTripsyNarrativeCache();
+    const existingPlaceBlurbs = dayKeys
+      .filter(dayKey => !dayKeysToGenerate.includes(dayKey))
+      .map(dayKey => existingCache[`${tripKey}::day::${dayKey}`])
+      .filter(Boolean)
+      .flatMap(entry => (entry.content.place_blurbs || []).map(pb => ({ place_name: pb.place_name, blurb: pb.blurb })));
+    const result = await generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataAll, { includeIntro, dayKeysToGenerate, existingPlaceBlurbs });
     if (includeIntro) {
       const introFingerprintData = { name: effectiveTrip.name, location: effectiveTrip.location, dateRange: formatTripDateRange(effectiveTrip.start, effectiveTrip.end) };
       sectionsToSave[`${tripKey}::intro`] = { content: { trip_intro: result.trip_intro || '' }, fingerprint: tripsyContentFingerprint(introFingerprintData), generatedAt: new Date().toISOString() };
@@ -9433,6 +9670,7 @@ async function buildTripsyPrintHtml(tripKey) {
   // for where any of this actually gets generated; Print itself only ever
   // reads whatever's already cached, never calls Claude.
   const narrativeCache = await Store.getTripsyNarrativeCache();
+  await tripsyFixCachedNarrativeUnicodeForTrip(tripKey, narrativeCache);
   const summaryEntry = narrativeCache[`${tripKey}::summary`];
   const summaryBlurbByKey = new Map((summaryEntry ? summaryEntry.content.rows : []).map(r => [r.row_key, r.blurb]));
 
@@ -9497,8 +9735,14 @@ async function buildTripsyPrintHtml(tripKey) {
     const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
     const tileNum = dayNumber != null ? String(dayNumber).padStart(2, '0') : '—';
     const tileDate = isUndated ? '' : tripsySummaryDayTileDate(dayKey);
+    // data-tripsy-summary-day-link is the click target for jumping to this
+    // same day's start in Part 2 -- see the delegated listener in
+    // previewTripsyItinerary, which scrolls #tp-detail-day-<dayKey>
+    // (tripsyDetailedDayDividerHtml) into view. Works whether or not a
+    // narrative was ever generated, since Part 2's flat photo-grid
+    // fallback still draws the same day dividers.
     return `
-      <div class="tp-day-block">
+      <div class="tp-day-block tp-day-block-linkable" data-tripsy-summary-day-link="${esc(dayKey)}">
         <div class="tp-day-tile">
           <div class="tp-day-tile-label">Day</div>
           <div class="tp-day-tile-num">${esc(tileNum)}</div>
@@ -9529,7 +9773,7 @@ async function buildTripsyPrintHtml(tripKey) {
       ? tripsySummaryDayTileDate(firstKey)
       : `${tripsySummaryDayTileDate(firstKey)} – ${tripsySummaryDayTileDate(lastKey)}`;
     return `
-      <div class="tp-day-block tp-day-block-empty">
+      <div class="tp-day-block tp-day-block-empty tp-day-block-linkable" data-tripsy-summary-day-link="${esc(firstKey)}">
         <div class="tp-day-tile">
           <div class="tp-day-tile-label">Day</div>
           ${numHtml}
@@ -9578,7 +9822,7 @@ async function buildTripsyPrintHtml(tripKey) {
   const cachedDays = dayKeys
     .map(dayKey => {
       const entry = narrativeCache[`${tripKey}::day::${dayKey}`];
-      return entry ? { day_key: dayKey, ...entry.content } : null;
+      return entry ? { day_key: dayKey, ...entry.content, approved: !!entry.approved } : null;
     })
     .filter(Boolean);
   const narrative = (introEntry || cachedDays.length)
@@ -9644,7 +9888,7 @@ async function buildTripsyPrintHtml(tripKey) {
   // subsequent print/preview of this trip stays deduped regardless.
   const usedPlacePhotoNames = new Set();
   const usedPlacePhotoHashes = new Set();
-  const tripsyPlaceCardHtml = async (ev, blurb, rowKey, eventEntry) => {
+  const tripsyPlaceCardHtml = async (ev, blurb, rowKey, eventEntry, hasAnyBlurb) => {
     const raw = ev.tripsyRaw;
     const name = raw.name || ev.summary;
     const address = raw.address || '';
@@ -9725,7 +9969,7 @@ async function buildTripsyPrintHtml(tripKey) {
         <div class="tp-place-card-name">${esc(name)}</div>
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
         ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
-        ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, true)}
+        ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, true, hasAnyBlurb, blurb)}
       </div>
     `;
   };
@@ -9752,6 +9996,7 @@ async function buildTripsyPrintHtml(tripKey) {
     // still shows (tripsyEventNarrativeControlsHtml never offers Generate
     // for a P/S card, only Custom/Delete).
     const blurb = (eventEntry && eventEntry.content.blurb) || '';
+    const hasAnyBlurb = !!blurb;
     return `
       <div class="tp-place-card tp-place-card-float-left" style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;">
         <div class="tp-place-card-photo-wrap">
@@ -9760,7 +10005,7 @@ async function buildTripsyPrintHtml(tripKey) {
         <div class="tp-place-card-name">${esc(title)}</div>
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
         ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
-        ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, false)}
+        ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, false, hasAnyBlurb, blurb)}
       </div>
     `;
   };
@@ -9800,9 +10045,9 @@ async function buildTripsyPrintHtml(tripKey) {
     // generated before this rule existed) -- but a manually-typed note is
     // real user content, not generated narrative, so it still shows.
     const wantsBlurb = !(raw.category === 'airplane' || raw.category === 'car');
-    const blurb = (eventEntry && eventEntry.content.blurb)
-      || (wantsBlurb && summaryBlurbByKey.get(`ev:${ev.id}`))
-      || raw.notes || '';
+    const dayBlurb = wantsBlurb ? summaryBlurbByKey.get(`ev:${ev.id}`) : null;
+    const blurb = eventEntry ? eventEntry.content.blurb : (dayBlurb || raw.notes || '');
+    const hasAnyBlurb = eventEntry ? !!eventEntry.content.blurb : !!dayBlurb;
     const photoAreaHtml = isSkipped ? '' : `
       <div class="tp-place-card-photo-wrap">
         ${photoDataUrl
@@ -9824,7 +10069,7 @@ async function buildTripsyPrintHtml(tripKey) {
         <div class="tp-place-card-name">${esc(ev.summary)}</div>
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
         ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
-        ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsBlurb)}
+        ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsBlurb, hasAnyBlurb, blurb)}
       </div>
     `;
   };
@@ -9865,8 +10110,10 @@ async function buildTripsyPrintHtml(tripKey) {
       // photos, but a duplicate card for what's really one reservation.
       if (ev._splitHalf === 'end') return '';
       const name = raw.name || ev.summary;
-      const blurb = (eventEntry && eventEntry.content.blurb) || (placeBlurbsByName && placeBlurbsByName.get(name)) || raw.notes || '';
-      return tripsyPlaceCardHtml(ev, blurb, rowKey, eventEntry);
+      const dayBlurb = placeBlurbsByName && placeBlurbsByName.get(name);
+      const blurb = eventEntry ? eventEntry.content.blurb : (dayBlurb || raw.notes || '');
+      const hasAnyBlurb = eventEntry ? !!eventEntry.content.blurb : !!dayBlurb;
+      return tripsyPlaceCardHtml(ev, blurb, rowKey, eventEntry, hasAnyBlurb);
     }
     return '';
   };
@@ -9902,7 +10149,7 @@ async function buildTripsyPrintHtml(tripKey) {
     const dayLabel = isSingleDay ? `Day ${firstNum}` : `Day ${firstNum}–${tripsyDayNumberFromTripStart(lastKey, tripStartDayKey)}`;
     const dateLabel = isSingleDay ? tripsySummaryDayTileDate(firstKey) : `${tripsySummaryDayTileDate(firstKey)} – ${tripsySummaryDayTileDate(lastKey)}`;
     return `
-      <div class="tp-day-divider tp-day-divider-empty">
+      <div class="tp-day-divider tp-day-divider-empty" id="tp-detail-day-${esc(firstKey)}">
         <span class="tp-day-divider-num">${esc(dayLabel)}</span>
         <span class="tp-day-divider-date">${esc(dateLabel)}</span>
         <span class="tp-day-divider-cities"></span>
@@ -10041,8 +10288,13 @@ function drawTripsyPdfHeaderText(doc, headerDestination, dateRangeText, startY) 
 // hook). rowTimeForItem defaults to tripsySummaryRowTime but can be
 // overridden (see buildTripsyItineraryPdf) to fall back to a time
 // mentioned in the row's own note text when the event has none of its
-// own. Returns the Y position after the last block.
-function drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, startY, rowTextForItem, rowTimeForItem = tripsySummaryRowTime) {
+// own. Returns the Y position after the last block. dayRectsOut, if
+// given, gets populated with { [dayKey]: {page, x, y, w, h} } for every
+// block's clickable area -- buildTripsyItineraryPdf uses this to wire up
+// internal PDF links from each day here to that same day's divider in
+// Part 2 (see drawTripsyDetailedItineraryPdf's matching dayTargetsOut).
+// buildTripsySimplePdf has no Part 2 to link to, so it just omits this arg.
+function drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, startY, rowTextForItem, rowTimeForItem = tripsySummaryRowTime, dayRectsOut = null) {
   const PAGE_W = doc.internal.pageSize.getWidth();
   const PAGE_H = doc.internal.pageSize.getHeight();
   const MARGIN = TRIPSY_PDF_MARGIN;
@@ -10082,13 +10334,16 @@ function drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay
   };
   const rowsHeight = rows => ROW_PAD_Y * 2 + rows.reduce((sum, r) => sum + r.lines.length * LINE_H + ROW_GAP, 0);
 
-  const drawBlock = (tileNumLines, tileDate, rows) => {
+  const drawBlock = (tileNumLines, tileDate, rows, recordDayKey) => {
     const boxH = Math.max(TILE_MIN_H, rowsHeight(rows));
     if (y + boxH > PAGE_H - MARGIN) {
       doc.addPage();
       y = MARGIN;
     }
     const tileX = MARGIN, tileY = y;
+    if (dayRectsOut && recordDayKey) {
+      dayRectsOut[recordDayKey] = { page: doc.internal.getCurrentPageInfo().pageNumber, x: tileX, y: tileY, w: ROWS_X + ROWS_W - tileX, h: boxH };
+    }
     // Tile
     doc.setFillColor(tileNumLines.muted ? TRIPSY_PDF_MUTED_TILE : TRIPSY_PDF_NAVY);
     doc.roundedRect(tileX, tileY, TILE_W, boxH, 6, 6, 'F');
@@ -10158,7 +10413,7 @@ function drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay
     const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
     const tileNum = dayNumber != null ? String(dayNumber).padStart(2, '0') : '—';
     const tileDate = isUndated ? '' : dayTileDate(dayKey);
-    drawBlock([tileNum], tileDate, measureRows(items));
+    drawBlock([tileNum], tileDate, measureRows(items), dayKey);
   };
 
   const drawEmptyRangeBlock = rangeDayKeys => {
@@ -10169,7 +10424,7 @@ function drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay
     const tileNumLines = isSingleDay ? [firstNum] : [firstNum, String(tripsyDayNumberFromTripStart(lastKey, tripStartDayKey)).padStart(2, '0')];
     tileNumLines.muted = true;
     const tileDate = isSingleDay ? dayTileDate(firstKey) : `${dayTileDate(firstKey)} – ${dayTileDate(lastKey)}`;
-    drawBlock(tileNumLines, tileDate, measureRows([]));
+    drawBlock(tileNumLines, tileDate, measureRows([]), firstKey);
   };
 
   for (let i = 0; i < fullDayKeys.length; i++) {
@@ -10260,11 +10515,12 @@ async function buildTripsyItineraryPdf(tripKey) {
   const { effectiveTrip, dayKeys, byDay, placesByDay, placeEvents, summaryByDay } = await buildTripsyPrintDayData(trip);
 
   const narrativeCache = await Store.getTripsyNarrativeCache();
+  await tripsyFixCachedNarrativeUnicodeForTrip(tripKey, narrativeCache);
   const introEntry = narrativeCache[`${tripKey}::intro`];
   const cachedDays = dayKeys
     .map(dayKey => {
       const entry = narrativeCache[`${tripKey}::day::${dayKey}`];
-      return entry ? { day_key: dayKey, ...entry.content } : null;
+      return entry ? { day_key: dayKey, ...entry.content, approved: !!entry.approved } : null;
     })
     .filter(Boolean);
   const narrative = (introEntry || cachedDays.length)
@@ -10329,14 +10585,30 @@ async function buildTripsyItineraryPdf(tripKey) {
     const noteText = eventEntry && eventEntry.content.blurb;
     return tripsyExtractTimeFromText(noteText) || baseTime;
   };
-  drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, y, rowText, rowTime);
+  const part1DayRects = {};
+  drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, y, rowText, rowTime, part1DayRects);
 
   // ---- Part 2: Detailed Itinerary (day dividers, narrative, photo cards) ----
   doc.addPage();
   y = MARGIN;
+  const part2DayTargets = {};
   await drawTripsyDetailedItineraryPdf(doc, {
     effectiveTrip, dayKeys, placesByDay, placeEvents, summaryByDay, narrative, narrativeCache, tripKey, summaryBlurbByKey,
-  }, y);
+  }, y, part2DayTargets);
+
+  // Wire up each Part 1 day block as an internal PDF link jumping straight
+  // to that same day's divider in Part 2 -- has to happen after both parts
+  // are fully drawn, since Part 1's blocks are drawn before Part 2's page/Y
+  // positions are even known. Switching to an earlier page to add a link
+  // annotation doesn't disturb anything already drawn there (jsPDF just
+  // appends an annotation object, same either way regardless of when it's
+  // added), so going back after the fact is safe.
+  for (const [dayKey, rect] of Object.entries(part1DayRects)) {
+    const target = part2DayTargets[dayKey];
+    if (!target) continue;
+    doc.setPage(rect.page);
+    doc.link(rect.x, rect.y, rect.w, rect.h, { pageNumber: target.page, top: target.y });
+  }
 
   const safeName = (trip.name || 'Itinerary').replace(/[/\\:*?"<>|]/g, '-').trim();
   doc.save(`${safeName} - ${dateRangeText || 'Itinerary'}.pdf`);
@@ -10392,7 +10664,11 @@ async function tripsyCoverCropDataUrl(dataUrl, targetW, targetH) {
 // version's right-aligned "which cities today touches" list
 // (tripsyDayCities, driven by lodging-period address guessing) is left off
 // here as a minor decorative detail, not core content.
-async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, placesByDay, placeEvents, summaryByDay, narrative, narrativeCache, tripKey, summaryBlurbByKey }, startY) {
+// dayTargetsOut, if given, gets populated with { [dayKey]: {page, y} } for
+// every day divider's bar position -- the counterpart to
+// drawTripsyDaySummaryBlocksPdf's dayRectsOut, letting buildTripsyItineraryPdf
+// wire up internal PDF links from Part 1's day blocks to this exact spot.
+async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, placesByDay, placeEvents, summaryByDay, narrative, narrativeCache, tripKey, summaryBlurbByKey }, startY, dayTargetsOut = null) {
   const PAGE_W = doc.internal.pageSize.getWidth();
   const PAGE_H = doc.internal.pageSize.getHeight();
   const MARGIN = TRIPSY_PDF_MARGIN;
@@ -10466,7 +10742,7 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
   // content (title/day copy) stranded at the top of the next one. Classic
   // heading orphan/widow protection: a section marker with nothing visibly
   // under it reads as broken regardless of how the page break landed.
-  const drawDayDivider = (label, dateLabel, muted, followingH = 0) => {
+  const drawDayDivider = (label, dateLabel, muted, followingH = 0, recordDayKey = null) => {
     const barH = 22;
     // Gap after the bar, before whatever follows -- text below draws at
     // its BASELINE, not its visual top, so this needs to clear not just
@@ -10475,6 +10751,9 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
     // like they're touching.
     const barGap = 18;
     ensureSpace(barH + barGap + followingH);
+    if (dayTargetsOut && recordDayKey) {
+      dayTargetsOut[recordDayKey] = { page: doc.internal.getCurrentPageInfo().pageNumber, y };
+    }
     doc.setFillColor(muted ? TRIPSY_PDF_MUTED_TILE : TRIPSY_PDF_NAVY);
     doc.rect(MARGIN, y, CONTENT_W, barH, 'F');
     doc.setTextColor('#FFFFFF');
@@ -10640,7 +10919,7 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
       const firstNum = tripsyDayNumberFromTripStart(firstKey, tripStartDayKey);
       const label = isSingleDay ? `Day ${firstNum}` : `Day ${firstNum}–${tripsyDayNumberFromTripStart(lastKey, tripStartDayKey)}`;
       const dateLabel = isSingleDay ? dayTileDate(firstKey) : `${dayTileDate(firstKey)} – ${dayTileDate(lastKey)}`;
-      drawDayDivider(label, dateLabel, true, LINE_H);
+      drawDayDivider(label, dateLabel, true, LINE_H, firstKey);
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(10);
       doc.setTextColor(TRIPSY_PDF_EMPTY_TEXT);
@@ -10659,7 +10938,7 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
     // atomic keep-together unit (ensureSpace inside drawCard), so this only
     // needs to cover the gap up to wherever that unit's own check picks up.
     const followingH = (nd && nd.title) ? 20 : (nd && nd.narrative) ? LINE_H : (dayItems.length ? 20 : LINE_H);
-    drawDayDivider(isUndated ? 'Undated' : `Day ${dayNumber}`, isUndated ? '' : dayTileDate(dayKey), false, followingH);
+    drawDayDivider(isUndated ? 'Undated' : `Day ${dayNumber}`, isUndated ? '' : dayTileDate(dayKey), false, followingH, dayKey);
 
     if (nd && nd.title) {
       doc.setFont('helvetica', 'bold');
@@ -10764,6 +11043,21 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
     // Store, so it's also what Print uses from here on, not just this
     // preview session.
     const previewContent = overlay.querySelector('#tripsy-preview-content');
+
+    // Clicking a day in Part 1 (Summary) jumps to that same day's start in
+    // Part 2 (Detailed Itinerary) -- data-tripsy-summary-day-link carries
+    // the dayKey (tripsySummaryDayBlockHtml/tripsySummaryEmptyRangeBlockHtml),
+    // #tp-detail-day-<dayKey> is the matching Part 2 divider's id
+    // (tripsyDetailedDayDividerHtml/tripsyDetailedEmptyDayBlockHtml). A
+    // trip with no Part 2 at all (nothing card-worthy anywhere) has no
+    // matching id to find, so this is just a no-op rather than an error in
+    // that edge case.
+    previewContent.addEventListener('click', e => {
+      const link = e.target.closest('[data-tripsy-summary-day-link]');
+      if (!link) return;
+      const target = previewContent.querySelector(`#tp-detail-day-${CSS.escape(link.dataset.tripsySummaryDayLink)}`);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
 
     const swapCardPhoto = (card, name, photoDataUrl) => {
       const wrap = card.querySelector('.tp-place-card-photo-wrap');
@@ -11012,7 +11306,9 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
       const customToggleBtn = e.target.closest('[data-tripsy-narrative-custom-toggle]');
       const customSaveBtn = e.target.closest('[data-tripsy-narrative-custom-save]');
       const customCancelBtn = e.target.closest('[data-tripsy-narrative-custom-cancel]');
-      if (!generateDayBtn && !regenerateBtn && !deleteBtn && !customToggleBtn && !customSaveBtn && !customCancelBtn) return;
+      const approveBtn = e.target.closest('[data-tripsy-narrative-approve]');
+      const unapproveBtn = e.target.closest('[data-tripsy-narrative-unapprove]');
+      if (!generateDayBtn && !regenerateBtn && !deleteBtn && !customToggleBtn && !customSaveBtn && !customCancelBtn && !approveBtn && !unapproveBtn) return;
 
       const section = e.target.closest('[data-tripsy-narrative-section]');
       if (!section) return;
@@ -11030,6 +11326,33 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
       if (customCancelBtn) {
         const box = e.target.closest('.tp-narrative-custom-box');
         if (box) box.style.display = 'none';
+        return;
+      }
+
+      if (approveBtn) {
+        approveBtn.disabled = true;
+        try {
+          const ok = await Store.setTripsyNarrativeApproved(`${tripKey}::day::${dayKey}`, true);
+          if (!ok) { toast('Could not mark as approved. Please try again.', 'error'); return; }
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to approve day narrative:', err);
+          toast('Could not mark as approved. Please try again.', 'error');
+        } finally {
+          approveBtn.disabled = false;
+        }
+        return;
+      }
+
+      if (unapproveBtn) {
+        try {
+          const ok = await Store.setTripsyNarrativeApproved(`${tripKey}::day::${dayKey}`, false);
+          if (!ok) { toast('Could not un-approve. Please try again.', 'error'); return; }
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to un-approve day narrative:', err);
+          toast('Could not un-approve. Please try again.', 'error');
+        }
         return;
       }
 
@@ -11119,7 +11442,9 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
       const customToggleBtn = e.target.closest('[data-tripsy-event-narrative-custom-toggle]');
       const customSaveBtn = e.target.closest('[data-tripsy-event-narrative-custom-save]');
       const customCancelBtn = e.target.closest('[data-tripsy-event-narrative-custom-cancel]');
-      if (!generateBtn && !regenerateBtn && !deleteBtn && !customToggleBtn && !customSaveBtn && !customCancelBtn) return;
+      const approveBtn = e.target.closest('[data-tripsy-event-narrative-approve]');
+      const unapproveBtn = e.target.closest('[data-tripsy-event-narrative-unapprove]');
+      if (!generateBtn && !regenerateBtn && !deleteBtn && !customToggleBtn && !customSaveBtn && !customCancelBtn && !approveBtn && !unapproveBtn) return;
 
       const section = e.target.closest('[data-tripsy-event-narrative-section]');
       if (!section) return;
@@ -11138,6 +11463,52 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
       if (customCancelBtn) {
         const box = e.target.closest('.tp-narrative-custom-box');
         if (box) box.style.display = 'none';
+        return;
+      }
+
+      if (approveBtn) {
+        approveBtn.disabled = true;
+        try {
+          const cache = await Store.getTripsyNarrativeCache();
+          const existingEntry = cache[cacheKey];
+          let ok;
+          if (existingEntry) {
+            ok = await Store.setTripsyNarrativeApproved(cacheKey, true);
+          } else {
+            // No individual override yet -- the blurb showing on this card
+            // is inherited from the whole-day narrative. Approving
+            // snapshots exactly what's currently displayed into its own
+            // override (same "freeze the text" move Delete already makes
+            // for this case), marked approved from the start.
+            const displayedBlurb = section.dataset.displayedBlurb || '';
+            const { summaryByDay } = await buildTripsyPrintDayData(trip);
+            const allItems = [...summaryByDay.values()].flat();
+            const item = allItems.find(it => tripsySummaryRowKey(it) === rowKey);
+            const promptData = item ? tripsySummaryRowPromptData(item) : { row_key: rowKey };
+            ok = await Store.saveTripsyNarrativeSections({
+              [cacheKey]: { content: { blurb: displayedBlurb }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString(), approved: true },
+            });
+          }
+          if (!ok) { toast('Could not mark as approved. Please try again.', 'error'); return; }
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to approve event note:', err);
+          toast('Could not mark as approved. Please try again.', 'error');
+        } finally {
+          approveBtn.disabled = false;
+        }
+        return;
+      }
+
+      if (unapproveBtn) {
+        try {
+          const ok = await Store.setTripsyNarrativeApproved(cacheKey, false);
+          if (!ok) { toast('Could not un-approve. Please try again.', 'error'); return; }
+          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+        } catch (err) {
+          console.error('Failed to un-approve event note:', err);
+          toast('Could not un-approve. Please try again.', 'error');
+        }
         return;
       }
 
@@ -11171,7 +11542,22 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
       if (deleteBtn) {
         deleteBtn.disabled = true;
         try {
-          const ok = await Store.deleteTripsyNarrativeSection(cacheKey);
+          // An empty-blurb override, not an outright delete of the cache
+          // key: the visible blurb might not be an individual override at
+          // all (it could be this event's slice of a whole-day-generated
+          // narrative), in which case there's no per-event key to delete
+          // and deleteTripsyNarrativeSection would be a silent no-op --
+          // the day-level blurb would just keep showing. Saving an
+          // explicit empty override suppresses it either way and sticks
+          // (the day-level fallback only ever applies when no override
+          // exists at all).
+          const { summaryByDay } = await buildTripsyPrintDayData(trip);
+          const allItems = [...summaryByDay.values()].flat();
+          const item = allItems.find(it => tripsySummaryRowKey(it) === rowKey);
+          const promptData = item ? tripsySummaryRowPromptData(item) : { row_key: rowKey };
+          const ok = await Store.saveTripsyNarrativeSections({
+            [cacheKey]: { content: { blurb: '' }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString() },
+          });
           if (!ok) { toast('Could not delete note. Please try again.', 'error'); return; }
           await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
         } catch (err) {
@@ -11521,6 +11907,7 @@ const TRIPSY_TRIP_PANEL_SELECTORS = [
   '[data-tripsy-attachments-menu]',
   '[data-tripsy-document-menu]',
   '[data-tripsy-itinerary-menu]',
+  '[data-tripsy-generate-panel]',
   '[data-tripsy-trip-menu]',
   '[data-tripsy-sort-menu]',
 ];
@@ -11536,6 +11923,7 @@ const TRIPSY_TRIP_PANEL_TRIGGER_SELECTORS = [
   '[data-tripsy-attachments-toggle]',
   '[data-tripsy-document-menu-toggle]',
   '[data-tripsy-itinerary-menu-toggle]',
+  '[data-tripsy-generate-panel-toggle]',
   '[data-tripsy-trip-menu-toggle]',
   '[data-tripsy-add-doc-menu-item]',
   '[data-tripsy-sort-toggle]',
@@ -11548,7 +11936,7 @@ function closeAllTripsyTripPanels() {
   // render would recreate anyway, so only panels that get their innerHTML
   // freshly rendered on open (add-item menu, edit-trip panel, attach
   // panel) need clearing here.
-  const freshlyRenderedEachTime = new Set(['[data-tripsy-attachments-menu]', '[data-tripsy-document-menu]', '[data-tripsy-itinerary-menu]', '[data-tripsy-trip-menu]', '[data-tripsy-sort-menu]']);
+  const freshlyRenderedEachTime = new Set(['[data-tripsy-attachments-menu]', '[data-tripsy-document-menu]', '[data-tripsy-itinerary-menu]', '[data-tripsy-generate-panel]', '[data-tripsy-trip-menu]', '[data-tripsy-sort-menu]']);
   TRIPSY_TRIP_PANEL_SELECTORS.forEach(sel => {
     card.querySelectorAll(sel).forEach(el => {
       el.style.display = "none";
@@ -11908,14 +12296,22 @@ async function renderTripsyEventsListImpl() {
     // narrative generation/editing lives (the first-time section picker, or
     // per-day Generate/Regenerate/Custom/Delete controls once something's
     // been generated) -- there's no separate "Edit Narrative" panel/button.
+    // Generate (owner-only, first in the list) opens a status panel of
+    // its own -- data-tripsy-generate-panel below -- rather than
+    // navigating anywhere itself, so it's wired separately in
+    // renderTripsyEventsListImpl (async: it has to fetch the narrative
+    // cache before it has anything to show) instead of alongside the
+    // synchronous Preview/Print/PDF handlers.
     const itineraryButtonHtml = !collapsed ? iconLabelButton(`
       <div style="position:relative;">
         <button class="btn" data-tripsy-itinerary-menu-toggle data-key="${esc(trip.key)}" title="Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🧭</button>
         <div data-tripsy-itinerary-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+          ${isOwner ? menuListButtonHtml(`data-tripsy-generate-panel-toggle data-key="${esc(trip.key)}"`, '📝', 'Generate') : ''}
           ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '👀', 'Preview')}
           ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
           ${menuListButtonHtml(`data-tripsy-create-pdf-itinerary data-key="${esc(trip.key)}"`, '📄', 'Create PDF')}
         </div>
+        <div data-tripsy-generate-panel="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:280px; max-width:380px; max-height:70vh; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.4);"></div>
       </div>
     `, 'Itinerary') : '';
     // Edit/Hide/Delete merged into one "Trip" dropdown. Hide is available
@@ -12073,8 +12469,51 @@ async function renderTripsyEventsListImpl() {
   // down the still-open dropdown out from under the user.
   container.querySelectorAll("[data-tripsy-header-toggle]").forEach(el => {
     el.addEventListener("click", e => {
-      if (e.target.closest('button, a, [data-tripsy-add-item-menu], [data-tripsy-attachments-menu], [data-tripsy-document-menu], [data-tripsy-itinerary-menu], [data-tripsy-trip-menu], [data-tripsy-sort-menu]')) return;
+      if (e.target.closest('button, a, [data-tripsy-add-item-menu], [data-tripsy-attachments-menu], [data-tripsy-document-menu], [data-tripsy-itinerary-menu], [data-tripsy-generate-panel], [data-tripsy-trip-menu], [data-tripsy-sort-menu]')) return;
       toggleTripsyCollapse(el.dataset.tripsyHeaderToggle);
+    });
+  });
+
+  // Generate (owner-only, first row of the Itinerary dropdown) -- opens a
+  // read-only status panel listing every Detailed Itinerary section (day
+  // headers, indented events under each) with a checkbox showing whether
+  // that section currently has narrative text and a green checkmark badge
+  // if it's been approved. Wired separately from the synchronous Preview/
+  // Print/PDF handlers above/below since building its content means
+  // fetching the narrative cache first -- there's nothing to show until
+  // that resolves, unlike those, which just navigate immediately.
+  container.querySelectorAll("[data-tripsy-generate-panel-toggle]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const tripKey = btn.dataset.key;
+      const panel = container.querySelector(`[data-tripsy-generate-panel="${tripKey}"]`);
+      if (!panel) return;
+      const wasOpen = panel.style.display !== "none";
+      // Rect must be captured BEFORE closing the panels -- closing hides
+      // the Itinerary dropdown this button lives inside, which would
+      // collapse its layout (and this button's own rect) to nothing.
+      const rect = btn.getBoundingClientRect();
+      closeAllTripsyTripPanels();
+      if (wasOpen) return;
+      const trip = allTrips.find(t => t.key === tripKey);
+      if (!trip) return;
+      panel.innerHTML = `<div style="padding:8px; font-size:12px; color:var(--muted);">Loading…</div>`;
+      panel.style.top = `${rect.bottom + 6}px`;
+      panel.style.left = `${Math.max(8, rect.right - 320)}px`;
+      panel.style.display = "block";
+      try {
+        const { effectiveTrip, dayKeys, summaryByDay } = await buildTripsyPrintDayData(trip);
+        const narrativeCache = await Store.getTripsyNarrativeCache();
+        const sections = tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByDay, narrativeCache);
+        panel.innerHTML = tripsyGeneratePanelSectionsHtml(sections);
+        // offsetWidth is 0 before the first paint at display:block, same as
+        // wireTripsyHeaderMenuToggle's own re-calc below -- redo the left
+        // position now that the panel has real (post-content) width.
+        panel.style.left = `${Math.max(8, rect.right - panel.offsetWidth)}px`;
+      } catch (err) {
+        console.error('Failed to load itinerary sections for Generate panel:', err);
+        panel.innerHTML = `<div style="padding:8px; font-size:12px; color:#B33;">Could not load itinerary sections. Please try again.</div>`;
+      }
     });
   });
 
