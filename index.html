@@ -10326,9 +10326,23 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
     year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)),
   }).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
 
-  const drawDayDivider = (label, dateLabel, muted) => {
+  // followingH is the height of whatever draws immediately after the bar
+  // (the day title, the "No events scheduled" line, or a small lookahead
+  // when neither applies) -- folded into the SAME ensureSpace check as the
+  // bar itself so the two move to a new page together rather than ever
+  // leaving the bar alone as the last thing on a page with its actual
+  // content (title/day copy) stranded at the top of the next one. Classic
+  // heading orphan/widow protection: a section marker with nothing visibly
+  // under it reads as broken regardless of how the page break landed.
+  const drawDayDivider = (label, dateLabel, muted, followingH = 0) => {
     const barH = 22;
-    ensureSpace(barH + 10);
+    // Gap after the bar, before whatever follows -- text below draws at
+    // its BASELINE, not its visual top, so this needs to clear not just
+    // the bar itself but also the following text's own cap-height to
+    // actually read as a gap rather than the bar and the title looking
+    // like they're touching.
+    const barGap = 18;
+    ensureSpace(barH + barGap + followingH);
     doc.setFillColor(muted ? TRIPSY_PDF_MUTED_TILE : TRIPSY_PDF_NAVY);
     doc.rect(MARGIN, y, CONTENT_W, barH, 'F');
     doc.setTextColor('#FFFFFF');
@@ -10338,7 +10352,7 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(10);
     doc.text(dateLabel || '', PAGE_W / 2, y + barH / 2 + 4, { align: 'center' });
-    y += barH + 10;
+    y += barH + barGap;
   };
 
   const drawParagraphs = text => {
@@ -10369,13 +10383,22 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
 
     const rawDataUrl = await tripsyBlobUrlToDataUrl(photoObjectUrl);
     const croppedDataUrl = rawDataUrl ? await tripsyCoverCropDataUrl(rawDataUrl, PHOTO_W, PHOTO_H) : null;
+    // Every failure path here (no photo found, blob fetch failed, canvas
+    // crop failed, OR addImage itself throwing on an otherwise-successfully-
+    // cropped image) falls through to the SAME placeholder box -- a card
+    // with neither a real photo nor this box was a real bug: addImage's own
+    // try/catch used to just log and leave a blank gap instead of drawing
+    // anything, which is what "some pictures didn't come through" reported.
+    let imageDrawn = false;
     if (croppedDataUrl) {
       try {
         doc.addImage(croppedDataUrl, MARGIN, cardY, PHOTO_W, PHOTO_H, undefined, 'MEDIUM');
+        imageDrawn = true;
       } catch (e) {
         console.error('drawCard: photo embed failed:', e);
       }
-    } else {
+    }
+    if (!imageDrawn) {
       doc.setDrawColor(TRIPSY_PDF_BORDER);
       doc.setFillColor('#F0EEE8');
       doc.roundedRect(MARGIN, cardY, PHOTO_W, PHOTO_H, 6, 6, 'FD');
@@ -10482,7 +10505,7 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
       const firstNum = tripsyDayNumberFromTripStart(firstKey, tripStartDayKey);
       const label = isSingleDay ? `Day ${firstNum}` : `Day ${firstNum}–${tripsyDayNumberFromTripStart(lastKey, tripStartDayKey)}`;
       const dateLabel = isSingleDay ? dayTileDate(firstKey) : `${dayTileDate(firstKey)} – ${dayTileDate(lastKey)}`;
-      drawDayDivider(label, dateLabel, true);
+      drawDayDivider(label, dateLabel, true, LINE_H);
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(10);
       doc.setTextColor(TRIPSY_PDF_EMPTY_TEXT);
@@ -10493,9 +10516,16 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
     const dayKey = seg.dayKey;
     const isUndated = dayKey === 'undated';
     const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
-    drawDayDivider(isUndated ? 'Undated' : `Day ${dayNumber}`, isUndated ? '' : dayTileDate(dayKey), false);
-
     const nd = narrativeDayByKey.get(dayKey);
+    const dayItems = summaryByDay.get(dayKey) || [];
+    // What immediately follows the bar: its title, else the first line of
+    // its narrative, else a small lookahead so the bar isn't left with
+    // literally nothing visibly under it -- a full card is its own
+    // atomic keep-together unit (ensureSpace inside drawCard), so this only
+    // needs to cover the gap up to wherever that unit's own check picks up.
+    const followingH = (nd && nd.title) ? 20 : (nd && nd.narrative) ? LINE_H : (dayItems.length ? 20 : LINE_H);
+    drawDayDivider(isUndated ? 'Undated' : `Day ${dayNumber}`, isUndated ? '' : dayTileDate(dayKey), false, followingH);
+
     if (nd && nd.title) {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(13);
@@ -10507,7 +10537,6 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
     if (nd && nd.narrative) drawParagraphs(nd.narrative);
 
     const placeBlurbsByName = new Map(((nd && nd.place_blurbs) || []).map(pb => [pb.place_name, pb.blurb]));
-    const dayItems = summaryByDay.get(dayKey) || [];
     for (const item of dayItems) await drawItemCard(item, placeBlurbsByName);
   }
 }
@@ -13705,7 +13734,7 @@ async function renderHome() {
     </div>
     <div style="display:flex; flex-direction:column; gap:20px; align-items:stretch;">
       <div class="card">
-        <div style="display:flex; justify-content:center; margin-bottom:12px;">
+        <div id="home-upcoming-trips-icon" title="Open My Trips" style="display:flex; justify-content:center; margin-bottom:12px; cursor:pointer;">
           <img src="data:image/png;base64,${TRIPS_NAV_ICON_B64}" style="max-width:220px; max-height:150px; width:auto; height:auto; display:block;" alt="Trips">
         </div>
         <div id="home-upcoming-trips-header" title="Open My Trips" style="font-family:var(--mono); font-size:20px; font-weight:700; color:var(--amber); margin-bottom:8px; cursor:pointer;">Upcoming Trips</div>
@@ -13767,6 +13796,7 @@ async function renderHome() {
     window.open("https://fly.netjets.com/home", "_blank", "noopener");
   });
   wireFopBpLogoClick(document.getElementById("fopbp-logo-home"), showFopBpPhoto);
+  document.getElementById("home-upcoming-trips-icon").addEventListener("click", () => navigate("tripsytrips"));
   document.getElementById("home-upcoming-trips-header").addEventListener("click", () => navigate("tripsytrips"));
   document.getElementById("home-ps-reservations").addEventListener("click", () => navigate("reservations"));
   document.getElementById("home-ps-balance").addEventListener("click", () => navigate("psbalance"));
