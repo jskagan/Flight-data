@@ -187,10 +187,12 @@ back / 1095 forward, i.e. 3 years).
   own — a separate, on-demand-only Claude Code runbook
   (`~/.claude/scheduled-tasks/tripsy-pdf-parse/RUN_NOW.md`, triggered by asking to "process flagged
   Tripsy docs"; deliberately not scheduled) reads the flagged file and extracts event fields.
-  Independently, there's an **email-intake pipeline** for confirmations the owner forwards to a "+"
-  alias of their own address (`jskagan+kaganworldtravel@gmail.com` — lands in the same inbox, just
-  filterable via `to:`). It's split so no browser is ever needed: the **app** (on any device, owner
-  only, in `runTripsyEmailIntake`/`scanTripsyEmailIntake`, `index.html:2515` area) searches Gmail
+  Independently, there's an **email-intake pipeline** for confirmations the owner forwards to
+  `kaganworldtravel@gmail.com`. The scan (`scanTripsyEmailIntake`) searches the *owner's own* Sent
+  folder for `to:` that address, so it works whether or not that address is actually a separate
+  mailbox anyone reads — Gmail always keeps a Sent copy regardless of recipient. It's split so no
+  browser is ever needed: the **app** (on any device, owner only, in
+  `runTripsyEmailIntake`/`scanTripsyEmailIntake`, `index.html:2515` area) searches Gmail
   for those forwards and appends each one's plain-text body to `driveData.tripsyEmailIntake`; the
   **`tripsy-trips-refresh` task** (step 1b, headless — it reads `flight-log-data.json` directly via
   its Drive connector, which *can* see that file despite older task-doc claims) parses each into
