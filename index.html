@@ -1823,6 +1823,66 @@ const Store = {
       return false;
     }
   },
+  // Raw forwarded-email intake for the Tripsy email pipeline. The app appends
+  // emails it finds in the Sent folder (scanTripsyEmailIntake); a
+  // tripsy-trips-refresh run reads them by reading flight-log-data.json
+  // directly via its Drive connector (which -- verified -- CAN see this file,
+  // despite older task-doc claims to the contrary), parses each into
+  // proposal(s), and returns them in a separate Drive file the app then drains
+  // (drainTripsyEmailProposals). An entry is { id (gmail message id),
+  // rfc822MessageId, subject, body, foundAt, parsedAt (null until drained),
+  // noProposals?, parseError? }. `!parsedAt` entries drive the badge's yellow
+  // "emails waiting to be parsed" count (tripsyEmailsAwaitingParseCount).
+  async listTripsyEmailIntake() {
+    return [...(driveData.tripsyEmailIntake || [])];
+  },
+  async addTripsyEmailIntakeEntries(entries) {
+    try {
+      if (!driveData.tripsyEmailIntake) driveData.tripsyEmailIntake = [];
+      const known = new Set(driveData.tripsyEmailIntake.map(e => e.id));
+      const fresh = (entries || []).filter(e => e && e.id && !known.has(e.id));
+      if (!fresh.length) return { ok: true, added: 0 };
+      driveData.tripsyEmailIntake.push(...fresh);
+      await persistDriveData();
+      return { ok: true, added: fresh.length };
+    } catch (e) {
+      console.error('Store.addTripsyEmailIntakeEntries failed:', e);
+      return { ok: false, added: 0, error: e.message || String(e) };
+    }
+  },
+  // Applies a drained proposals relay file in one write: stages each email's
+  // proposals into tripsyParseProposals (deduped by sourceEmailId, and skipping
+  // any source email already marked parsed on a prior drain) and marks the
+  // matching intake entry parsed. `parsedEmails` is [{ sourceEmailId, status:
+  // 'parsed'|'empty'|'error', errorReason?, proposals:[...] }].
+  async applyDrainedEmailProposals(parsedEmails) {
+    try {
+      if (!driveData.tripsyEmailIntake) driveData.tripsyEmailIntake = [];
+      if (!driveData.tripsyParseProposals) driveData.tripsyParseProposals = [];
+      let staged = 0, marked = 0;
+      const now = new Date().toISOString();
+      for (const pe of (parsedEmails || [])) {
+        if (!pe || !pe.sourceEmailId) continue;
+        const intake = driveData.tripsyEmailIntake.find(e => e.id === pe.sourceEmailId);
+        if (intake && intake.parsedAt) continue; // already drained in a prior pass
+        const already = driveData.tripsyParseProposals.some(p => p.sourceEmailId === pe.sourceEmailId);
+        if (!already && Array.isArray(pe.proposals)) {
+          for (const proposal of pe.proposals) { driveData.tripsyParseProposals.push(proposal); staged++; }
+        }
+        if (intake) {
+          intake.parsedAt = now;
+          if (pe.status === 'empty') intake.noProposals = true;
+          if (pe.status === 'error') intake.parseError = pe.errorReason || true;
+          marked++;
+        }
+      }
+      await persistDriveData();
+      return { ok: true, staged, marked };
+    } catch (e) {
+      console.error('Store.applyDrainedEmailProposals failed:', e);
+      return { ok: false, staged: 0, marked: 0, error: e.message || String(e) };
+    }
+  },
   async getSyncTimestamps() {
     return { ...(driveData.syncTimestamps || {}) };
   },
@@ -2512,6 +2572,116 @@ function updateLastSyncedLabel(elId) {
   if (el) el.textContent = `Last updated: ${formatSyncTimestamp(new Date().toISOString())}`;
 }
 
+// ---- Tripsy email intake (forwarded-confirmation pipeline) ----
+// The owner forwards trip confirmations to a "+" alias of their own address;
+// the app finds them and hands them to a tripsy-trips-refresh run to parse.
+// See the Store.listTripsyEmailIntake comment for the full data flow.
+const TRIPSY_EMAIL_INTAKE_ADDRESS = 'jskagan+kaganworldtravel@gmail.com';
+const TRIPSY_EMAIL_PROPOSALS_FILENAME = 'tripsy-email-proposals.json';
+
+// Prefer an HTML part (richer), fall back to text/plain -- mirrors
+// findHtmlPartData but for the plain-text alternative some senders use.
+function findTextPartData(payload) {
+  if (payload.mimeType === 'text/plain' && payload.body && payload.body.data) return payload.body.data;
+  if (payload.parts) {
+    for (const part of payload.parts) {
+      const found = findTextPartData(part);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+async function fetchTripsyIntakeEmail(messageId) {
+  const msg = await gmailApiFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=full`);
+  const headers = msg.payload.headers || [];
+  const subject = (headers.find(h => h.name === 'Subject') || {}).value || '';
+  const rfc822Header = headers.find(h => h.name.toLowerCase() === 'message-id');
+  const rfc822MessageId = rfc822Header ? rfc822Header.value.replace(/^<|>$/g, '') : null;
+  let body = '';
+  const htmlData = findHtmlPartData(msg.payload);
+  if (htmlData) {
+    body = htmlToPlainText(decodeQuotedPrintableIfNeeded(base64UrlDecodeToUtf8(htmlData)));
+  } else {
+    const textData = findTextPartData(msg.payload) || (msg.payload.body && msg.payload.body.data);
+    if (textData) body = decodeQuotedPrintableIfNeeded(base64UrlDecodeToUtf8(textData)).replace(/\s+/g, ' ').trim();
+  }
+  return { id: messageId, rfc822MessageId, subject, body, foundAt: new Date().toISOString(), parsedAt: null };
+}
+
+// Owner-only. Searches the Sent folder for emails forwarded to the Tripsy
+// intake alias since the last scan and appends new ones to
+// driveData.tripsyEmailIntake. Best-effort; caller wraps in try/catch.
+async function scanTripsyEmailIntake() {
+  if (!isOwner) return { ok: true, added: 0 };
+  const ts = (await Store.getSyncTimestamps()).tripsyEmailScan;
+  // Day-granular Gmail date filter + 1 day of padding; the per-id dedup below
+  // is what actually prevents reprocessing, so the padding is just a net.
+  let dayClause = '';
+  if (ts) {
+    const days = Math.max(1, Math.ceil((Date.now() - new Date(ts).getTime()) / 86400000) + 1);
+    dayClause = ` newer_than:${days}d`;
+  }
+  const query = `in:sent to:${TRIPSY_EMAIL_INTAKE_ADDRESS}${dayClause}`;
+  const searchUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}`;
+  const searchResult = await gmailApiFetch(searchUrl);
+  const refs = searchResult.messages || [];
+  const known = new Set((await Store.listTripsyEmailIntake()).map(e => e.id));
+  const toFetch = refs.filter(m => !known.has(m.id));
+  const fetched = [];
+  for (const ref of toFetch) {
+    try { fetched.push(await fetchTripsyIntakeEmail(ref.id)); }
+    catch (e) { console.error('fetchTripsyIntakeEmail failed for', ref.id, e); }
+  }
+  const res = await Store.addTripsyEmailIntakeEntries(fetched);
+  await Store.setSyncTimestamp('tripsyEmailScan', new Date().toISOString());
+  return { ok: res.ok, added: res.added || 0 };
+}
+
+// Owner-only. Drains any proposals relay file(s) a tripsy-trips-refresh run
+// created (Claude can create Drive files but can't update flight-log-data.json,
+// so it returns parsed proposals this way): stages each into
+// tripsyParseProposals, marks its source email parsed, deletes the file.
+async function drainTripsyEmailProposals() {
+  if (!isOwner) return { ok: true, staged: 0 };
+  const q = encodeURIComponent(`name='${TRIPSY_EMAIL_PROPOSALS_FILENAME}' and trashed=false`);
+  const listRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&spaces=drive`);
+  const files = (await listRes.json()).files || [];
+  let totalStaged = 0;
+  for (const f of files) {
+    try {
+      const contentRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`);
+      const text = await contentRes.text();
+      let relay;
+      try { relay = JSON.parse(text); } catch (e) { console.error('Tripsy proposals relay not valid JSON, skipping', f.id); continue; }
+      const applied = await Store.applyDrainedEmailProposals(relay.parsedEmails || []);
+      totalStaged += applied.staged || 0;
+      // Consumed -- delete it (the app has full drive scope; Claude's connector
+      // has no delete tool, which is exactly why the app owns cleanup).
+      await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE' });
+    } catch (e) {
+      console.error('drainTripsyEmailProposals failed on file', f.id, e);
+    }
+  }
+  return { ok: true, staged: totalStaged };
+}
+
+// Runs both halves of the app's side of the email pipeline (drain first so
+// anything Claude parsed since last open is staged, then scan for newly
+// forwarded emails), refreshes the status badge, and re-renders the Trips
+// page if it's open and unlocked. Shared by startup and manual Refresh All.
+async function runTripsyEmailIntake() {
+  if (!isOwner) return;
+  try {
+    await drainTripsyEmailProposals();
+    await scanTripsyEmailIntake();
+    await updateTripsyStatusBadge();
+    if (currentView === 'tripsytrips' && tripsyDecryptedTrips) renderTripsyEventsList();
+  } catch (e) {
+    console.error('Tripsy email intake failed:', e);
+  }
+}
+
 async function runBackgroundSyncs() {
   if (!isOwner) return;
 
@@ -2536,6 +2706,8 @@ async function runBackgroundSyncs() {
   } catch (e) {
     console.error('Background PS balance sync failed:', e);
   }
+
+  await runTripsyEmailIntake();
 }
 
 function todayLocalDateString() {
@@ -2576,6 +2748,8 @@ async function refreshAllReports() {
     console.error('Refresh All: report recompute failed:', e);
     anyFailure = true;
   }
+
+  await runTripsyEmailIntake();
 
   if (currentView === 'home') await renderHome();
   else if (currentView === 'reservations') await renderReservationsList();

@@ -71,6 +71,8 @@ driveData = {
                                     // their own separate Drive file, not inlined here)
   tripsyParseProposals: [...],     // draft events extracted from a flagged attachment or a
                                     // forwarded confirmation email, awaiting owner review
+  tripsyEmailIntake: [...],        // raw forwarded confirmation emails the app found in Gmail,
+                                    // awaiting parse by a tripsy-trips-refresh run (see below)
   syncTimestamps: {...},           // { reservations, psBalance, tripsyEmailScan } ISO strings,
                                     // last successful sync/check for each
   gmailCalendarAccessEmails: [...],// lowercased emails (besides OWNER_EMAIL) opted into requesting
@@ -178,10 +180,17 @@ back / 1095 forward, i.e. 3 years).
   own — a separate, on-demand-only Claude Code runbook
   (`~/.claude/scheduled-tasks/tripsy-pdf-parse/RUN_NOW.md`, triggered by asking to "process flagged
   Tripsy docs"; deliberately not scheduled) reads the flagged file and extracts event fields.
-  Independently, the daily `tripsy-trips-refresh` task also scans Gmail for confirmation emails the
-  owner has forwarded to a "+" alias of their own address (`jskagan+kaganworldtravel@gmail.com` —
-  lands in the same inbox, just filterable via `to:`), and extracts fields from those too. Both
-  sources stage their finds into the exact same queue, `driveData.tripsyParseProposals`
+  Independently, there's an **email-intake pipeline** for confirmations the owner forwards to a "+"
+  alias of their own address (`jskagan+kaganworldtravel@gmail.com` — lands in the same inbox, just
+  filterable via `to:`). It's split so no browser is ever needed: the **app** (on any device, owner
+  only, in `runTripsyEmailIntake`/`scanTripsyEmailIntake`, `index.html:2515` area) searches Gmail
+  for those forwards and appends each one's plain-text body to `driveData.tripsyEmailIntake`; the
+  **`tripsy-trips-refresh` task** (step 1b, headless — it reads `flight-log-data.json` directly via
+  its Drive connector, which *can* see that file despite older task-doc claims) parses each into
+  events and writes them to a separate `tripsy-email-proposals.json` Drive file; the **app** drains
+  that file on its next open (`drainTripsyEmailProposals`), staging into the same proposal queue and
+  deleting the relay file. Claude never touches the app's domain or `flight-log-data.json` writes.
+  Both sources stage their finds into the exact same queue, `driveData.tripsyParseProposals`
   (`Store.saveTripsyParseProposal`, `index.html:1760`) — **nothing extracted becomes a real Tripsy
   change until the owner explicitly reviews it** on the "Review Parsed Docs" page
   (`renderTripsyParseReview`, `index.html:13995` area): Import / Modify-then-import / Reject per
@@ -200,8 +209,8 @@ back / 1095 forward, i.e. 3 years).
   to review, or a completed sync to clear). Clicking opens a panel listing the specific reason(s)
   for the current state, each linking to where it's handled. Per-trip flags are always green (a
   matched proposal is post-parse by definition); yellow lives only in this global badge. Owner-only.
-  `tripsyEmailsAwaitingParseCount()` is a forward-compatible hook reading `driveData.tripsyEmailIntake`
-  (0 until the app-side email-intake pipeline is built).
+  `tripsyEmailsAwaitingParseCount()` reads `driveData.tripsyEmailIntake` (entries not yet
+  `parsedAt`) to drive the yellow "N forwarded emails waiting to be parsed" reason.
 - **Categories**: flight / transportation / hotel / dining / concert / tour / other, derived from
   Tripsy's own activity/transportation type slugs at refresh time (see `tripsy-trips-refresh`'s own
   category-mapping step for the exact rules) — unlike the old TripIt integration this replaced,
