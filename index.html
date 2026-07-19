@@ -1823,6 +1823,41 @@ const Store = {
       return false;
     }
   },
+  // Combines everything a single Import press on the review page needs --
+  // queueing the real Tripsy change(s), resolving the proposal event, and
+  // (if that was the proposal's last pending event) marking its attachment
+  // reviewed and deleting the now-empty proposal -- into ONE persistDriveData()
+  // write instead of up to four separate ones. Each write is a full-file
+  // Drive PATCH, so chaining several of them sequentially (as
+  // tripsyParseImportProposalEvent/tripsyParseMaybeFinishProposal used to,
+  // calling queueTripsyChange/resolveTripsyParseProposalEvent/
+  // markTripsyAttachmentReviewed/deleteTripsyParseProposal independently) is
+  // what caused the noticeable Import delay. `newTripChange` is only passed
+  // when the reviewer picked "create a new trip" for this event.
+  async importTripsyParseProposalEvent({ newTripChange, eventChange, proposalId, eventId, resolutionPatch }) {
+    try {
+      if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
+      if (newTripChange) driveData.tripsyPendingChanges.push({ ...newTripChange, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
+      driveData.tripsyPendingChanges.push({ ...eventChange, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
+
+      const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
+      const event = proposal && proposal.events.find(e => e.id === eventId);
+      if (!event) return false;
+      Object.assign(event, resolutionPatch);
+
+      if (proposal.events.every(e => e.resolution !== 'pending')) {
+        const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
+        if (a) a.parseStatus = 'done';
+        driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== proposalId);
+      }
+
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.importTripsyParseProposalEvent failed:', e);
+      return false;
+    }
+  },
   // Raw forwarded-email intake for the Tripsy email pipeline. The app appends
   // emails it finds in the Sent folder (scanTripsyEmailIntake); a
   // tripsy-trips-refresh run reads them by reading flight-log-data.json
@@ -14192,15 +14227,19 @@ function tripsyParseEventFieldsHtml(resource, fields) {
 
 // Shared by "Import as-is" and "Modify then import" -- the only difference
 // between them is whether fieldsOverride (the edited fields) is passed.
-// Creates the destination trip first if the reviewer picked "new trip"
-// (prompting for a name; single-day range defaulting to the event's own
-// day -- editable for real once it syncs, or just Cancel and redo if it's
-// wrong), then queues the real create_event, then records the resolution.
-// Returns false (and toasts) on any storage failure, without leaving the
-// proposal event stuck in a half-resolved state.
+// Builds the destination trip's change (if the reviewer picked "new trip",
+// prompting for a name; single-day range defaulting to the event's own day
+// -- editable for real once it syncs, or just Cancel and redo if it's
+// wrong) and the create_event change, then hands both plus the proposal
+// resolution to Store.importTripsyParseProposalEvent in one call -- that
+// single Drive write is what used to be three or four separate ones (queue
+// trip, queue event, resolve proposal event, finish proposal), which was
+// the whole cost of the Import button's noticeable delay. Returns false
+// (and toasts) on any storage failure, without leaving the proposal event
+// stuck in a half-resolved state.
 async function tripsyParseImportProposalEvent(proposal, event, destinationValue, fieldsOverride) {
   const fields = fieldsOverride || event.fields;
-  let tripKey, tripName, tripsyTripId;
+  let tripKey, tripName, tripsyTripId, newTripChange;
   if (destinationValue === '__new__') {
     const name = prompt('Name for the new trip:', event.eventSummary || 'New Trip');
     if (!name || !name.trim()) return false;
@@ -14208,30 +14247,32 @@ async function tripsyParseImportProposalEvent(proposal, event, destinationValue,
     tripKey = `tripsy-pending-${crypto.randomUUID().slice(0, 8)}`;
     tripName = name.trim();
     tripsyTripId = null;
-    const tripOk = await Store.queueTripsyChange({
+    newTripChange = {
       id: crypto.randomUUID(), type: 'create_trip', createdAt: new Date().toISOString(),
       tripKey, name: tripName, start: dayKey, end: dayKey,
-    });
-    if (!tripOk) { toast('Could not create the new trip — storage error. Please try again.', 'error'); return false; }
+    };
   } else {
     const trip = tripsyDecryptedTrips.find(t => t.key === destinationValue);
     if (!trip) { toast('Could not find that trip.', 'error'); return false; }
     tripKey = trip.key; tripName = trip.name; tripsyTripId = tripsyTripIdFromKey(trip.key);
   }
   const changeId = crypto.randomUUID();
-  const eventOk = await Store.queueTripsyChange({
+  const eventChange = {
     id: changeId, type: 'create_event', createdAt: new Date().toISOString(),
     tripKey, tripName, tripsyResource: event.tripsyResource, tripsyTripId,
     eventSummary: event.eventSummary, fields,
+  };
+  const ok = await Store.importTripsyParseProposalEvent({
+    newTripChange, eventChange, proposalId: proposal.id, eventId: event.id,
+    resolutionPatch: {
+      resolution: fieldsOverride ? 'modified-accepted' : 'accepted',
+      resolvedAt: new Date().toISOString(),
+      destinationTripKey: tripKey,
+      modifiedFields: fieldsOverride || null,
+      appliedChangeId: changeId,
+    },
   });
-  if (!eventOk) { toast('Could not queue the event — storage error. Please try again.', 'error'); return false; }
-  await Store.resolveTripsyParseProposalEvent(proposal.id, event.id, {
-    resolution: fieldsOverride ? 'modified-accepted' : 'accepted',
-    resolvedAt: new Date().toISOString(),
-    destinationTripKey: tripKey,
-    modifiedFields: fieldsOverride || null,
-    appliedChangeId: changeId,
-  });
+  if (!ok) { toast('Could not import — storage error. Please try again.', 'error'); return false; }
   return true;
 }
 
@@ -14369,6 +14410,15 @@ async function renderTripsyParseReview() {
     await updateTripsyDocParseBadge();
     await renderTripsyParseReview();
   };
+  // Import already folds the "finish proposal" step into its one atomic
+  // Store.importTripsyParseProposalEvent write (see that function) -- calling
+  // tripsyParseMaybeFinishProposal here too would just be a redundant
+  // Drive read/no-op write, re-introducing the extra round-trip this was
+  // meant to remove.
+  const afterImport = async () => {
+    await updateTripsyDocParseBadge();
+    await renderTripsyParseReview();
+  };
 
   container.querySelectorAll("[data-parse-import]").forEach(btn => {
     btn.addEventListener("click", async () => {
@@ -14379,7 +14429,7 @@ async function renderTripsyParseReview() {
       const destValue = row.querySelector("[data-parse-event-trip-select]").value;
       btn.disabled = true;
       const ok = await tripsyParseImportProposalEvent(proposal, event, destValue, null);
-      if (ok) { toast("Imported."); await afterAction(proposalId); } else { btn.disabled = false; }
+      if (ok) { toast("Imported."); await afterImport(); } else { btn.disabled = false; }
     });
   });
 
@@ -14409,7 +14459,7 @@ async function renderTripsyParseReview() {
         onSave: async newFields => {
           const destValue = row.querySelector("[data-parse-event-trip-select]").value;
           const ok = await tripsyParseImportProposalEvent(proposal, event, destValue, newFields);
-          if (ok) { toast("Imported with your changes."); afterAction(proposalId); }
+          if (ok) { toast("Imported with your changes."); afterImport(); }
           return ok;
         },
       });
