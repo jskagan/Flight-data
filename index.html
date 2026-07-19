@@ -872,8 +872,17 @@
   </div>
 </div>
 <div class="app" id="app-root" style="display:none;">
-  <button id="tripsy-pending-warning-badge" title="My Trips has changes waiting to be pushed -- click for instructions" style="display:none; position:fixed; top:14px; right:14px; z-index:500; background:none; border:none; cursor:pointer; font-size:30px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));">⚠️</button>
-  <button id="tripsy-doc-parse-badge" title="" style="display:none; position:fixed; top:60px; right:14px; z-index:500; width:30px; height:30px; border-radius:50%; border:none; cursor:pointer; align-items:center; justify-content:center; font-weight:800; font-size:17px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));"></button>
+  <!-- Single consolidated top-right status badge. Three states, in strict
+       priority: red 🛑 (a Tripsy push genuinely failed) > yellow ⚠️ (a Claude
+       step is needed -- changes waiting to push, docs/emails waiting to be
+       parsed) > green 🟢 (your turn in the app -- proposals to review, or a
+       completed sync to clear). Hidden when there's nothing at all. Clicking
+       opens #tripsy-status-panel, which lists the specific reason(s) for the
+       current state and links to where each is handled. Replaces the two
+       former separate badges (pending-changes + doc-parse), which are now
+       one unified indicator -- see updateTripsyStatusBadge. -->
+  <button id="tripsy-status-badge" title="" style="display:none; position:fixed; top:14px; right:14px; z-index:500; background:none; border:none; cursor:pointer; font-size:30px; line-height:1; padding:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5));"></button>
+  <div id="tripsy-status-panel" style="display:none; position:fixed; top:52px; right:14px; z-index:501; background:var(--panel-2); border:1px solid var(--line); border-radius:10px; padding:12px; min-width:260px; max-width:340px; box-shadow:0 8px 28px rgba(0,0,0,0.45);"></div>
   <div class="rail">
     <div class="rail-brand">Travel Tracker<small>Simplifying Luxury Travel</small><small id="view-only-badge" style="display:none; color:var(--amber); font-weight:700;">VIEW ONLY</small></div>
     <button class="rail-item" data-view="home"><span class="nav-icon" id="nav-home-icon">📊</span>Home</button>
@@ -12788,14 +12797,18 @@ async function renderTripsyEventsListImpl() {
       `<button class="btn" data-tripsy-cancel-pending-trip data-change-id="${esc(trip._isPendingCreateTrip.id)}" title="Cancel this not-yet-created trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:24px; display:flex; align-items:center; justify-content:center;">🗑️</button>`,
       'Cancel'
     ) : '';
-    // Small yellow-triangle badge next to the trip name -- see
-    // pendingParseTripCounts above. Deliberately plain (not run through
+    // Small green-circle badge next to the trip name -- see
+    // pendingParseTripCounts above. Green (not yellow) because by the time a
+    // proposal is matched to a specific trip, the Claude parsing step is
+    // already done -- this is a "your turn to review" state, matching the
+    // green semantics of the top-right status badge, not a "Claude needs to
+    // run something" (yellow) state. Deliberately plain (not run through
     // iconLabelButton) since it's a notification, not one of the trip's own
-    // actions -- it just jumps to the existing Review Parsed Docs page,
-    // which already has full Import/Modify/Reject controls per event.
+    // actions -- it just jumps to the existing Review Parsed Docs page, which
+    // already has full Import/Modify/Reject controls per event.
     const pendingParseCount = pendingParseTripCounts.get(trip.key) || 0;
     const parseReviewBadgeHtml = pendingParseCount ? `
-      <button data-tripsy-review-proposals data-key="${esc(trip.key)}" title="${pendingParseCount} item${pendingParseCount === 1 ? '' : 's'} from a parsed doc or email awaiting review for this trip" style="background:#f5c518; border:none; border-radius:50%; width:22px; height:22px; padding:0; font-size:12px; line-height:1; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">⚠️</button>
+      <button data-tripsy-review-proposals data-key="${esc(trip.key)}" title="${pendingParseCount} item${pendingParseCount === 1 ? '' : 's'} from a parsed doc or email awaiting your review for this trip" style="background:var(--home-green); color:#04210F; border:none; border-radius:50%; width:22px; height:22px; padding:0; font-size:13px; font-weight:800; line-height:1; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">✓</button>
     ` : '';
     return `
       <div class="card" style="margin-bottom:14px;">
@@ -13792,75 +13805,122 @@ function tripsyChangesReadyToClear(changes) {
 // page, which shows the matching content for whichever state(s) apply.
 // Called once after sign-in and again after every action that adds to or
 // clears driveData.tripsyPendingChanges.
-async function updateTripsyPendingWarningBadge() {
-  const badge = document.getElementById('tripsy-pending-warning-badge');
-  if (!badge) return;
-  if (!isOwner) {
-    badge.style.display = 'none';
-    return;
+// Forward-compatible hook for the email-intake pipeline (built separately):
+// the app-side Gmail scan records emails it has exported to Drive but not yet
+// seen parsed back into a proposal. Until that pipeline exists this is simply
+// 0, so the badge behaves exactly as before for every state that exists today.
+function tripsyEmailsAwaitingParseCount() {
+  return ((driveData && driveData.tripsyEmailIntake) || []).filter(e => !e.parsedAt).length;
+}
+
+// Aggregates every "needs attention" signal across the Tripsy pipelines into
+// one of three prioritized states for the single top-right badge:
+//   RED    -- a queued change's push genuinely failed (pushConfirmationFailed).
+//   YELLOW -- a Claude step is needed: changes still waiting to be pushed,
+//             docs flagged but unparsed, or emails saved but unparsed. Yellow
+//             deliberately outranks green so the owner runs the refresh FIRST
+//             (which may itself surface more to review), then reviews once.
+//   GREEN  -- nothing needs Claude; it's the owner's turn in the app: proposed
+//             events awaiting review, or a completed sync whose queue can be
+//             cleared.
+// Returns { state, reasons:[{label, view}] } so the click panel can list each
+// specific reason and link to where it's handled. Owner-gated.
+async function computeTripsyStatus() {
+  if (!isOwner) return { state: 'hidden', reasons: [] };
+  const [changes, attachments, proposals] = await Promise.all([
+    Store.listTripsyPendingChanges(),
+    Store.listTripsyAttachments(),
+    Store.listTripsyParseProposals(),
+  ]);
+
+  // RED -- highest priority, a genuine failure.
+  if (changes.some(c => c.pushConfirmationFailed)) {
+    return { state: 'red', reasons: [{ label: 'A Tripsy push could not be verified — re-run a refresh', view: 'utilitiestripsyrefresh' }] };
   }
-  const changes = await Store.listTripsyPendingChanges();
-  if (!changes.length) {
+
+  // YELLOW -- a Claude step is needed before anything else.
+  const yellow = [];
+  // "Waiting to push" = queued at/after the current snapshot, i.e. no refresh
+  // has landed since (mirrors tripsyChangesReadyToClear's own comparison).
+  const changesToPush = changes.filter(c => !((c.queuedSnapshotAt || '') < TRIPSY_SNAPSHOT_GENERATED_AT));
+  if (changesToPush.length) yellow.push({ label: `${changesToPush.length} change${changesToPush.length === 1 ? '' : 's'} waiting to be pushed to Tripsy — run a refresh`, view: 'utilitiestripsyrefresh' });
+  const docsToParse = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'pending');
+  if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged, waiting to be parsed — process flagged docs in Claude`, view: 'utilitiesparsingdocs' });
+  const emailsToParse = tripsyEmailsAwaitingParseCount();
+  if (emailsToParse) yellow.push({ label: `${emailsToParse} forwarded email${emailsToParse === 1 ? '' : 's'} waiting to be parsed — run a refresh`, view: 'utilitiestripsyrefresh' });
+  if (yellow.length) return { state: 'yellow', reasons: yellow };
+
+  // GREEN -- the owner's turn in the app. Keyed off pending proposal events
+  // directly (source-agnostic: covers parsed attachments AND, later, emails),
+  // rather than an attachment's 'staged' status.
+  const green = [];
+  const proposalsToReview = proposals.reduce((n, p) => n + p.events.filter(e => e.resolution === 'pending').length, 0);
+  if (proposalsToReview) green.push({ label: `${proposalsToReview} proposed event${proposalsToReview === 1 ? '' : 's'} ready to review`, view: 'tripsyparsereview' });
+  if (changes.length && tripsyChangesReadyToClear(changes)) green.push({ label: 'Tripsy sync complete — clear the pushed changes', view: 'utilitiestripsyrefresh' });
+  if (green.length) return { state: 'green', reasons: green };
+
+  return { state: 'hidden', reasons: [] };
+}
+
+async function updateTripsyStatusBadge() {
+  const badge = document.getElementById('tripsy-status-badge');
+  if (!badge) return;
+  const panel = document.getElementById('tripsy-status-panel');
+  const { state } = await computeTripsyStatus();
+  if (state === 'hidden') {
     badge.style.display = 'none';
+    if (panel) panel.style.display = 'none';
     return;
   }
   badge.style.display = '';
-  if (changes.some(c => c.pushConfirmationFailed)) {
+  badge.style.color = '';
+  if (state === 'red') {
     badge.textContent = '🛑';
-    badge.style.color = '';
-    badge.title = 'A Tripsy push could not be verified -- click for details';
-  } else if (tripsyChangesReadyToClear(changes)) {
-    // Plain text glyph (not an emoji) so it can actually be colored --
-    // there's no single "green triangle" emoji in Unicode.
-    badge.textContent = '▲';
-    badge.style.color = 'var(--home-green)';
-    badge.title = 'Tripsy sync complete -- click to clear';
-  } else {
+    badge.title = 'A Tripsy push could not be verified — click for details';
+  } else if (state === 'yellow') {
     badge.textContent = '⚠️';
-    badge.style.color = '';
-    badge.title = 'My Trips has changes waiting to be pushed -- click for instructions';
+    badge.title = 'Claude has a step to run for My Trips — click to see what';
+  } else {
+    badge.textContent = '🟢';
+    badge.title = 'You have My Trips items to review — click to see';
   }
+  // If the panel is open while a background refresh changes the state, keep
+  // its contents in sync.
+  if (panel && panel.style.display === 'block') renderTripsyStatusPanel();
 }
 
-// Same fixed-badge pattern as updateTripsyPendingWarningBadge above, for
-// doc-parse flags -- a hand-drawn circle (not an emoji, since there's no
-// single "yellow circle with an exclamation point" glyph) rather than text
-// content alone, so both color and symbol can be controlled precisely.
-// Two states, in priority order: yellow "!" while any flagged doc is still
-// pending (unprocessed); green "✓" once nothing is pending but at least one
-// is done and awaiting the owner's review/clear step. Both link to the same
-// Parsing Docs Utilities page, which already lists both groups -- once
-// every "done" attachment has been cleared (Store.clearTripsyAttachmentParseFlag)
-// and nothing new is pending, the badge disappears entirely. Owner-gated,
-// same reasoning as the Tripsy badge: only the owner can act on it.
-async function updateTripsyDocParseBadge() {
-  const badge = document.getElementById('tripsy-doc-parse-badge');
-  if (!badge) return;
-  if (!isOwner) {
-    badge.style.display = 'none';
-    return;
-  }
-  const attachments = await Store.listTripsyAttachments();
-  const pending = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'pending');
-  // 'staged' means parsed with a proposal awaiting review (see
-  // Store.markTripsyAttachmentParsed) -- 'done' now means fully reviewed,
-  // so the green state keys off 'staged', not 'done'.
-  const staged = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'staged');
-  if (pending.length) {
-    badge.style.display = 'flex';
-    badge.style.background = '#f5c518';
-    badge.style.color = '#1a1500';
-    badge.textContent = '!';
-    badge.title = `${pending.length} doc${pending.length === 1 ? '' : 's'} waiting to be parsed -- click to see the list`;
-  } else if (staged.length) {
-    badge.style.display = 'flex';
-    badge.style.background = 'var(--home-green)';
-    badge.style.color = '#04210F';
-    badge.textContent = '✓';
-    badge.title = `${staged.length} doc${staged.length === 1 ? '' : 's'} parsed -- click to review`;
-  } else {
-    badge.style.display = 'none';
-  }
+// The two former badge updaters are called from ~19 sites across the app after
+// any mutation; they now both just refresh the one unified badge, so every
+// existing call site keeps working untouched.
+async function updateTripsyPendingWarningBadge() { return updateTripsyStatusBadge(); }
+async function updateTripsyDocParseBadge() { return updateTripsyStatusBadge(); }
+
+// Renders the click panel: a state heading plus one clickable row per reason,
+// each navigating to where that reason is handled.
+async function renderTripsyStatusPanel() {
+  const panel = document.getElementById('tripsy-status-panel');
+  if (!panel) return;
+  const { state, reasons } = await computeTripsyStatus();
+  if (state === 'hidden' || !reasons.length) { panel.style.display = 'none'; return; }
+  const heading = state === 'red' ? '🛑 Needs attention'
+    : state === 'yellow' ? '⚠️ Claude needs to run something'
+    : '🟢 Ready for your review';
+  const headingColor = state === 'green' ? 'var(--home-green)' : (state === 'red' ? 'var(--red, #c0392b)' : 'var(--amber)');
+  panel.innerHTML = `
+    <div style="font-family:var(--mono); font-size:13px; font-weight:700; color:${headingColor}; margin-bottom:6px;">${heading}</div>
+    ${reasons.map(r => `
+      <button class="btn" data-tripsy-status-go data-view="${esc(r.view)}" style="display:block; width:100%; text-align:left; background:none; border:none; padding:8px 6px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px; border-top:1px solid var(--line);">
+        ${esc(r.label)} <span style="color:var(--muted);">›</span>
+      </button>
+    `).join('')}
+  `;
+  panel.querySelectorAll('[data-tripsy-status-go]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      panel.style.display = 'none';
+      navigate(btn.dataset.view);
+    });
+  });
+  panel.style.display = 'block';
 }
 
 // ---- doc-parse review-and-accept page ----
@@ -15296,11 +15356,25 @@ document.getElementById('signout-btn').addEventListener('click', () => {
   location.reload();
 });
 
-document.getElementById('tripsy-pending-warning-badge').addEventListener('click', () => navigate('utilitiestripsyrefresh'));
-document.getElementById('tripsy-doc-parse-badge').addEventListener('click', async () => {
-  const attachments = await Store.listTripsyAttachments();
-  const hasStaged = attachments.some(a => a.purpose === 'parse' && a.parseStatus === 'staged');
-  navigate(hasStaged ? 'tripsyparsereview' : 'utilitiesparsingdocs');
+// Unified status badge: clicking toggles the reason panel (renders fresh each
+// open so it reflects current state); each panel row navigates to where that
+// reason is handled.
+document.getElementById('tripsy-status-badge').addEventListener('click', async (e) => {
+  e.stopPropagation();
+  const panel = document.getElementById('tripsy-status-panel');
+  if (panel.style.display === 'block') {
+    panel.style.display = 'none';
+  } else {
+    await renderTripsyStatusPanel();
+  }
+});
+// Click anywhere outside the open panel (and not on the badge itself) closes it.
+document.addEventListener('click', (e) => {
+  const panel = document.getElementById('tripsy-status-panel');
+  const badge = document.getElementById('tripsy-status-badge');
+  if (!panel || panel.style.display !== 'block') return;
+  if (panel.contains(e.target) || (badge && badge.contains(e.target))) return;
+  panel.style.display = 'none';
 });
 
 // The left nav rail is static markup (not re-rendered by navigate()), so

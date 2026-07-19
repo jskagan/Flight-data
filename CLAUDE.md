@@ -164,12 +164,12 @@ back / 1095 forward, i.e. 3 years).
   (`Store.queueTripsyChange`/`cancelTripsyChange`/`listTripsyPendingChanges`, `index.html:1454`
   area) rather than applied immediately. The next `tripsy-trips-refresh` run — scheduled, or asked
   for directly in a Claude Code session ("run a Tripsy Trips refresh") — is what actually pushes
-  each queued change to the real Tripsy API and clears it from the queue. A top-right badge
-  (`tripsy-pending-warning-badge`, `index.html:875`) shows amber while changes are
-  queued-but-unconfirmed, green once a refresh has landed since queuing, or a red 🛑 if a push
-  couldn't be verified even after retries — see the "Tripsy Refresh" utility page
-  (`renderUtilitiesTripsyRefresh`, `index.html:5757`) for the full state explanation and a manual
-  "Check Now" button.
+  each queued change to the real Tripsy API and clears it from the queue. This state feeds into the
+  single consolidated top-right status badge (`tripsy-status-badge`, `index.html:875` — see the
+  badge note at the end of this section) — a queued-but-unpushed change shows yellow, a push that
+  couldn't be verified shows red, and once a refresh has landed the "clear the pushed changes"
+  action shows green. The "Tripsy Refresh" utility page (`renderUtilitiesTripsyRefresh`,
+  `index.html:5757`) has the full state explanation and a manual "Check Now" button.
 - **Attachments, and doc/email parsing — always human-reviewed, never automatic**: the owner can
   attach a file (boarding pass, confirmation, full itinerary) to a trip or event
   (`renderTripsyAttachPanel`, `index.html:7777`; metadata in `driveData.tripsyAttachments`, actual
@@ -186,10 +186,22 @@ back / 1095 forward, i.e. 3 years).
   change until the owner explicitly reviews it** on the "Review Parsed Docs" page
   (`renderTripsyParseReview`, `index.html:13995` area): Import / Modify-then-import / Reject per
   event, with a trip-reassignment dropdown (or "Create a new trip") if the date-based guess is
-  wrong. A small yellow ⚠️ badge appears directly on any trip card whose date range matches a
-  still-pending proposal event, in addition to the separate global top-right doc-parse badge
-  (`tripsy-doc-parse-badge`, amber "!" while something's flagged and not yet parsed, green "✓" once
-  staged and awaiting review).
+  wrong. A small green ✓ circle appears directly on any trip card whose date range matches a
+  still-pending proposal event (`data-tripsy-review-proposals`) — green, not yellow, because by the
+  time a proposal is matched to a trip the parsing is already done and it's the owner's turn to
+  review (see the badge color rule below).
+- **The consolidated top-right status badge** (`tripsy-status-badge`, `index.html:875`;
+  `computeTripsyStatus`/`updateTripsyStatusBadge`/`renderTripsyStatusPanel`, `index.html:13795`
+  area) is a single indicator with three prioritized states, replacing what used to be two separate
+  badges (pending-changes + doc-parse). The color rule is consistent across every Tripsy signal:
+  **red 🛑** = a push genuinely failed; **yellow ⚠️** = a Claude step is needed (changes waiting to
+  push, docs flagged-but-unparsed, or emails saved-but-unparsed) — yellow deliberately outranks
+  green so the owner runs the refresh first; **green 🟢** = the owner's turn in the app (proposals
+  to review, or a completed sync to clear). Clicking opens a panel listing the specific reason(s)
+  for the current state, each linking to where it's handled. Per-trip flags are always green (a
+  matched proposal is post-parse by definition); yellow lives only in this global badge. Owner-only.
+  `tripsyEmailsAwaitingParseCount()` is a forward-compatible hook reading `driveData.tripsyEmailIntake`
+  (0 until the app-side email-intake pipeline is built).
 - **Categories**: flight / transportation / hotel / dining / concert / tour / other, derived from
   Tripsy's own activity/transportation type slugs at refresh time (see `tripsy-trips-refresh`'s own
   category-mapping step for the exact rules) — unlike the old TripIt integration this replaced,
