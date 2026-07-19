@@ -2750,8 +2750,16 @@ async function drainTripsyAppliedChanges() {
 // then scan Gmail for newly forwarded confirmations. Drains run before the scan
 // so anything already processed is reflected first. Refreshes the status badge
 // and re-renders the Trips page if it's open and unlocked.
+// Guarded by an in-flight flag so overlapping callers (startup's
+// runBackgroundSyncs, the Tripsy Refresh page's "Check Now", and the
+// status-badge click below all call this) can't run two drains at once and
+// race each other's Drive PATCH write-backs -- a second caller while one is
+// running just no-ops, since the running one will refresh the badge anyway.
+let tripsyRelaySyncInFlight = false;
 async function syncTripsyRelays() {
   if (!isOwner) return;
+  if (tripsyRelaySyncInFlight) return;
+  tripsyRelaySyncInFlight = true;
   try {
     await drainTripsyAppliedChanges();
     await drainTripsyEmailProposals();
@@ -2760,6 +2768,8 @@ async function syncTripsyRelays() {
     if (currentView === 'tripsytrips' && tripsyDecryptedTrips) renderTripsyEventsList();
   } catch (e) {
     console.error('Tripsy relay sync failed:', e);
+  } finally {
+    tripsyRelaySyncInFlight = false;
   }
 }
 
@@ -15640,14 +15650,39 @@ document.getElementById('signout-btn').addEventListener('click', () => {
 
 // Unified status badge: clicking toggles the reason panel (renders fresh each
 // open so it reflects current state); each panel row navigates to where that
-// reason is handled.
+// reason is handled. Opening the panel ALSO runs the on-demand relay check --
+// the same syncTripsyRelays() that startup and the Tripsy Refresh page's
+// "Check Now" run: it drains push confirmations + parsed-email proposals a
+// refresh left on Drive and scans Gmail for newly forwarded confirmations,
+// then updates the badge + panel in place. This lets a refresh that landed
+// while the app was already open resolve straight from the badge, instead of
+// making the owner go to Utilities > Tripsy Refresh and press Check Now. It
+// deliberately does NOT force the "reload if a newer snapshot is deployed"
+// step that Check Now also does -- that would yank the page out from under a
+// user who just tapped the badge to peek; the lighter relay drain is what
+// actually moves the badge's state. Owner-only, best-effort.
 document.getElementById('tripsy-status-badge').addEventListener('click', async (e) => {
   e.stopPropagation();
   const panel = document.getElementById('tripsy-status-panel');
   if (panel.style.display === 'block') {
     panel.style.display = 'none';
-  } else {
-    await renderTripsyStatusPanel();
+    return;
+  }
+  await renderTripsyStatusPanel();
+  if (isOwner) {
+    // Show a transient "checking" line; syncTripsyRelays -> updateTripsyStatusBadge
+    // re-renders the panel when done (dropping this line), or we clear it below
+    // if the panel got closed / state didn't change.
+    if (panel.style.display === 'block') {
+      const checking = document.createElement('div');
+      checking.id = 'tripsy-status-checking';
+      checking.style.cssText = 'font-size:11px; color:var(--muted); padding:6px 6px 0; margin-top:4px; border-top:1px solid var(--line);';
+      checking.textContent = 'Checking for updates…';
+      panel.appendChild(checking);
+    }
+    await syncTripsyRelays();
+    const stale = document.getElementById('tripsy-status-checking');
+    if (stale) stale.remove();
   }
 });
 // Click anywhere outside the open panel (and not on the badge itself) closes it.
