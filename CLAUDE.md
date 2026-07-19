@@ -37,10 +37,11 @@ commit pending changes.
 snapshot" procedure (see `TRIPSY_SNAPSHOT_GENERATED_AT`/`TRIPSY_ENCRYPTED` in `index.html`) and the
 resulting diff touches *only* those two constants — no other lines changed — commit and push
 without asking first. Still describe what was refreshed (trip/event counts, any pending changes
-applied) after the fact. If the diff touches anything else, the normal go-ahead rule applies. This
-exception also covers the `tripsy-trips-refresh-retry` and `tripsy-trips-refresh-retry-2` scheduled
-tasks (9:00am/9:30am conditional retries of that same task's pending-changes step) — same scope,
-same diff restriction, no separate authorization needed for them.
+applied) after the fact. If the diff touches anything else, the normal go-ahead rule applies.
+(There used to be two companion `tripsy-trips-refresh-retry`/`-retry-2` tasks that retried the
+pending-changes step when a browser session wasn't available; they were removed once that step
+became headless — the main task now applies pending changes on every run with no browser, so no
+retry is needed.)
 
 Every refresh summary must say whether the top-right Tripsy pending-changes badge is now green
 (i.e. whether `tripsyChangesReadyToClear` is true for `driveData.tripsyPendingChanges` given the
@@ -149,9 +150,8 @@ actually refreshes.
 
 Tripsy's own API isn't reachable from a public browser (no public/CORS-friendly developer access),
 so there is no in-browser sync at all for this pipeline — unlike PS Reservations/Balance above.
-Instead, a daily Claude Code scheduled task (`tripsy-trips-refresh`, plus two same-morning
-conditional retries, `tripsy-trips-refresh-retry`/`-retry-2` — see the Git workflow section above
-for their push-authorization scope) talks to a Tripsy MCP connector, builds a plain JSON snapshot
+Instead, a daily Claude Code scheduled task (`tripsy-trips-refresh` — see the Git workflow section
+above for its push-authorization scope) talks to a Tripsy MCP connector, builds a plain JSON snapshot
 of every trip/event in range, and embeds it **encrypted** directly in `index.html` as
 `TRIPSY_ENCRYPTED` (AES-256-GCM, key derived via PBKDF2 from a passphrase kept in a private Drive
 file, decrypted client-side via `decryptTripsyData()`, `index.html:6471`) — necessary because this
@@ -160,18 +160,25 @@ repo is public and the trip data includes confirmation codes, phone numbers, and
 window is `TRIP_SYNC_DAYS_BACK`/`TRIP_SYNC_DAYS_FORWARD` (`index.html:2450`, currently 60 days
 back / 1095 forward, i.e. 3 years).
 
-- **Pending changes, not live writes**: the browser can't call Tripsy's API directly either, so any
-  edit/delete/create the owner makes on the Trips page (per-event Edit/Delete icons, "Delete Trip",
-  the per-trip Add-item menu) is queued as a plain-data change in `driveData.tripsyPendingChanges`
+- **Pending changes, not live writes (headless push via a Drive relay)**: the browser can't call
+  Tripsy's API directly, so any edit/delete/create the owner makes on the Trips page (per-event
+  Edit/Delete icons, "Delete Trip", the per-trip Add-item menu, "create a new trip" on the review
+  page) is queued as a plain-data change in `driveData.tripsyPendingChanges`
   (`Store.queueTripsyChange`/`cancelTripsyChange`/`listTripsyPendingChanges`, `index.html:1454`
-  area) rather than applied immediately. The next `tripsy-trips-refresh` run — scheduled, or asked
-  for directly in a Claude Code session ("run a Tripsy Trips refresh") — is what actually pushes
-  each queued change to the real Tripsy API and clears it from the queue. This state feeds into the
-  single consolidated top-right status badge (`tripsy-status-badge`, `index.html:875` — see the
-  badge note at the end of this section) — a queued-but-unpushed change shows yellow, a push that
-  couldn't be verified shows red, and once a refresh has landed the "clear the pushed changes"
-  action shows green. The "Tripsy Refresh" utility page (`renderUtilitiesTripsyRefresh`,
-  `index.html:5757`) has the full state explanation and a manual "Check Now" button.
+  area) rather than applied immediately. A `tripsy-trips-refresh` run (step 1a) applies each to the
+  real Tripsy API — **fully headless**: it reads the queue by reading `flight-log-data.json`
+  directly via its Drive connector, applies via the `tripsy_` connectors, and (since it can't write
+  that file) reports per-change results in a `tripsy-applied-changes.json` Drive relay file. The app
+  drains that relay on its next open (`drainTripsyAppliedChanges`/`Store.applyDrainedPushResults`,
+  `index.html:2515`/`1858` area): `applied` → removed from the queue, `unverified` →
+  `pushConfirmationFailed` (red), `failed` → left to retry. This is the same Drive-relay pattern as
+  the email pipeline, in reverse, and it's what lets a refresh push from an iPad Claude session with
+  no browser. **The badge flag is confirmation-based, not snapshot-timestamp-based**: a change shows
+  yellow ("waiting to push") as long as it's in the queue and not yet explicitly confirmed applied —
+  it only clears when a relay marks that exact change `applied` — so a push that fails stays yellow
+  instead of being falsely inferred "done" from the snapshot clock advancing. The "Tripsy Refresh"
+  utility page (`renderUtilitiesTripsyRefresh`, `index.html:5757`) explains the states and its
+  "Check Now" button drains the relays on demand.
 - **Attachments, and doc/email parsing — always human-reviewed, never automatic**: the owner can
   attach a file (boarding pass, confirmation, full itinerary) to a trip or event
   (`renderTripsyAttachPanel`, `index.html:7777`; metadata in `driveData.tripsyAttachments`, actual
@@ -203,10 +210,12 @@ back / 1095 forward, i.e. 3 years).
   `computeTripsyStatus`/`updateTripsyStatusBadge`/`renderTripsyStatusPanel`, `index.html:13795`
   area) is a single indicator with three prioritized states, replacing what used to be two separate
   badges (pending-changes + doc-parse). The color rule is consistent across every Tripsy signal:
-  **red 🛑** = a push genuinely failed; **yellow ⚠️** = a Claude step is needed (changes waiting to
-  push, docs flagged-but-unparsed, or emails saved-but-unparsed) — yellow deliberately outranks
-  green so the owner runs the refresh first; **green 🟢** = the owner's turn in the app (proposals
-  to review, or a completed sync to clear). Clicking opens a panel listing the specific reason(s)
+  **red 🛑** = a push genuinely failed/unverified; **yellow ⚠️** = a Claude step is needed (changes
+  waiting to push, docs flagged-but-unparsed, or emails saved-but-unparsed) — yellow deliberately
+  outranks green so the owner runs the refresh first; **green 🟢** = the owner's turn in the app
+  (proposals to review). There's no green "clear the pushed changes" state anymore — applied changes
+  are auto-removed from the queue when a relay confirms them, so a queued change is always either
+  yellow (unconfirmed) or red (unverified). Clicking opens a panel listing the specific reason(s)
   for the current state, each linking to where it's handled. Per-trip flags are always green (a
   matched proposal is post-parse by definition); yellow lives only in this global badge. Owner-only.
   `tripsyEmailsAwaitingParseCount()` reads `driveData.tripsyEmailIntake` (entries not yet

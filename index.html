@@ -1883,6 +1883,36 @@ const Store = {
       return { ok: false, staged: 0, marked: 0, error: e.message || String(e) };
     }
   },
+  // The return leg of the headless push: a tripsy-trips-refresh run applies
+  // queued changes to Tripsy's API (it can read this queue via its Drive
+  // connector, but can't write flight-log-data.json), then reports per-change
+  // results in a `tripsy-applied-changes.json` relay file the app drains here.
+  // `results` is [{ changeId, status: 'applied'|'unverified'|'failed', reason? }].
+  // A change is only removed once EXPLICITLY confirmed applied -- so its badge
+  // flag stays "waiting to push" (yellow) until then, rather than being inferred
+  // pushed from the snapshot timestamp (which advances even when a specific push
+  // fails). 'unverified' -> pushConfirmationFailed (red); 'failed' -> left
+  // queued to retry (stays yellow), with the reason recorded.
+  async applyDrainedPushResults(results) {
+    try {
+      if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
+      const byId = new Map((results || []).filter(r => r && r.changeId).map(r => [r.changeId, r]));
+      let cleared = 0, flagged = 0, failed = 0;
+      const now = new Date().toISOString();
+      driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(c => {
+        const r = byId.get(c.id);
+        if (!r) return true; // no result for this change -> leave it untouched
+        if (r.status === 'applied') { cleared++; return false; } // confirmed -> remove
+        if (r.status === 'unverified') { c.pushConfirmationFailed = true; c.pushConfirmationFailedAt = now; flagged++; return true; }
+        c.lastPushError = r.reason || true; failed++; return true; // 'failed' -> retry next run
+      });
+      await persistDriveData();
+      return { ok: true, cleared, flagged, failed };
+    } catch (e) {
+      console.error('Store.applyDrainedPushResults failed:', e);
+      return { ok: false, cleared: 0, flagged: 0, failed: 0, error: e.message || String(e) };
+    }
+  },
   async getSyncTimestamps() {
     return { ...(driveData.syncTimestamps || {}) };
   },
@@ -2578,6 +2608,7 @@ function updateLastSyncedLabel(elId) {
 // See the Store.listTripsyEmailIntake comment for the full data flow.
 const TRIPSY_EMAIL_INTAKE_ADDRESS = 'jskagan+kaganworldtravel@gmail.com';
 const TRIPSY_EMAIL_PROPOSALS_FILENAME = 'tripsy-email-proposals.json';
+const TRIPSY_APPLIED_CHANGES_FILENAME = 'tripsy-applied-changes.json';
 
 // Prefer an HTML part (richer), fall back to text/plain -- mirrors
 // findHtmlPartData but for the plain-text alternative some senders use.
@@ -2638,47 +2669,61 @@ async function scanTripsyEmailIntake() {
   return { ok: res.ok, added: res.added || 0 };
 }
 
-// Owner-only. Drains any proposals relay file(s) a tripsy-trips-refresh run
-// created (Claude can create Drive files but can't update flight-log-data.json,
-// so it returns parsed proposals this way): stages each into
-// tripsyParseProposals, marks its source email parsed, deletes the file.
-async function drainTripsyEmailProposals() {
-  if (!isOwner) return { ok: true, staged: 0 };
-  const q = encodeURIComponent(`name='${TRIPSY_EMAIL_PROPOSALS_FILENAME}' and trashed=false`);
+// Shared drain: find every Drive file named `filename`, hand its parsed JSON to
+// applyFn, then delete it. Both relays a tripsy-trips-refresh run writes back
+// (email-proposals and applied-changes) use this -- Claude can create these
+// files but has no way to update or delete them, so the app (full drive scope)
+// owns reading and cleanup.
+async function drainTripsyRelayFiles(filename, applyFn) {
+  const q = encodeURIComponent(`name='${filename}' and trashed=false`);
   const listRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&spaces=drive`);
   const files = (await listRes.json()).files || [];
-  let totalStaged = 0;
   for (const f of files) {
     try {
       const contentRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`);
       const text = await contentRes.text();
       let relay;
-      try { relay = JSON.parse(text); } catch (e) { console.error('Tripsy proposals relay not valid JSON, skipping', f.id); continue; }
-      const applied = await Store.applyDrainedEmailProposals(relay.parsedEmails || []);
-      totalStaged += applied.staged || 0;
-      // Consumed -- delete it (the app has full drive scope; Claude's connector
-      // has no delete tool, which is exactly why the app owns cleanup).
+      try { relay = JSON.parse(text); } catch (e) { console.error('Tripsy relay not valid JSON, skipping', filename, f.id); continue; }
+      await applyFn(relay);
       await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE' });
     } catch (e) {
-      console.error('drainTripsyEmailProposals failed on file', f.id, e);
+      console.error('drainTripsyRelayFiles failed on', filename, f.id, e);
     }
   }
-  return { ok: true, staged: totalStaged };
 }
 
-// Runs both halves of the app's side of the email pipeline (drain first so
-// anything Claude parsed since last open is staged, then scan for newly
-// forwarded emails), refreshes the status badge, and re-renders the Trips
-// page if it's open and unlocked. Shared by startup and manual Refresh All.
-async function runTripsyEmailIntake() {
+// Owner-only. Stages parsed forwarded-email events (proposals) a refresh run
+// extracted, into tripsyParseProposals for review.
+async function drainTripsyEmailProposals() {
+  if (!isOwner) return;
+  await drainTripsyRelayFiles(TRIPSY_EMAIL_PROPOSALS_FILENAME, relay => Store.applyDrainedEmailProposals(relay.parsedEmails || []));
+}
+
+// Owner-only. Applies the per-change push results a refresh run reported --
+// clearing confirmed-applied changes from the queue (so their badge flag stops
+// showing), flagging unverified ones red, leaving failed ones to retry. This is
+// what makes the whole push headless: the refresh applies to Tripsy and reports
+// here, and the app does the queue write-back it alone can do.
+async function drainTripsyAppliedChanges() {
+  if (!isOwner) return;
+  await drainTripsyRelayFiles(TRIPSY_APPLIED_CHANGES_FILENAME, relay => Store.applyDrainedPushResults(relay.results || []));
+}
+
+// Runs the app's side of every Drive-relay pipeline on startup / Refresh All:
+// drain applied-change confirmations and parsed email proposals a refresh left,
+// then scan Gmail for newly forwarded confirmations. Drains run before the scan
+// so anything already processed is reflected first. Refreshes the status badge
+// and re-renders the Trips page if it's open and unlocked.
+async function syncTripsyRelays() {
   if (!isOwner) return;
   try {
+    await drainTripsyAppliedChanges();
     await drainTripsyEmailProposals();
     await scanTripsyEmailIntake();
     await updateTripsyStatusBadge();
     if (currentView === 'tripsytrips' && tripsyDecryptedTrips) renderTripsyEventsList();
   } catch (e) {
-    console.error('Tripsy email intake failed:', e);
+    console.error('Tripsy relay sync failed:', e);
   }
 }
 
@@ -2707,7 +2752,7 @@ async function runBackgroundSyncs() {
     console.error('Background PS balance sync failed:', e);
   }
 
-  await runTripsyEmailIntake();
+  await syncTripsyRelays();
 }
 
 function todayLocalDateString() {
@@ -2749,7 +2794,7 @@ async function refreshAllReports() {
     anyFailure = true;
   }
 
-  await runTripsyEmailIntake();
+  await syncTripsyRelays();
 
   if (currentView === 'home') await renderHome();
   else if (currentView === 'reservations') await renderReservationsList();
@@ -5940,7 +5985,6 @@ async function renderUtilitiesReparsePsReservations() {
 async function renderUtilitiesTripsyRefresh() {
   const changes = isOwner ? await Store.listTripsyPendingChanges() : [];
   const unverified = changes.filter(c => c.pushConfirmationFailed);
-  const readyToClear = tripsyChangesReadyToClear(changes);
   main.innerHTML = `
     <div class="page-title">Tripsy Refresh</div>
     <div class="page-sub">My Trips data moves between this app and the real Tripsy account through a daily scheduled refresh (or one you trigger yourself) -- this page shows what's waiting to go out, when data last came in, and how the whole process works.</div>
@@ -5955,13 +5999,6 @@ async function renderUtilitiesTripsyRefresh() {
           <p>${unverified.length === 1 ? 'This change was' : 'These changes were'} sent to Tripsy, and most likely went through -- but the app couldn't confirm that afterward, even after retrying twice more. ${unverified.length === 1 ? "It's" : "They're"} kept in the queue below (marked 🛑) as a safety net so nothing gets silently lost.</p>
           <p style="margin-top:8px;">Re-sending ${unverified.length === 1 ? 'it' : 'them'} isn't necessary and, for a new item, could create a duplicate -- <b>don't</b> cancel and redo it manually in Tripsy. To resolve this, trigger a refresh again (see Manual Refresh below): it checks whether each change already exists in Tripsy before doing anything further, so it's safe to re-run.</p>
         </div>
-      </div>
-      ` : ''}
-      ${readyToClear ? `
-      <div style="padding:10px 12px; margin-bottom:12px; border:1px solid var(--home-green); border-radius:6px; text-align:center;">
-        <div style="font-size:16px; font-weight:700; color:var(--home-green); margin-bottom:6px;">Sync Completed on ${esc(formatSyncTimestamp(TRIPSY_SNAPSHOT_GENERATED_AT))}</div>
-        <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Everything below was queued before that refresh, so it's safe to assume it's already been applied.</div>
-        <button id="tripsy-sync-complete-clear-btn" class="btn primary">Press Button To Clear</button>
       </div>
       ` : ''}
       <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700; margin-bottom:6px;">${changes.length ? `${changes.length} change${changes.length === 1 ? '' : 's'} waiting` : 'Nothing waiting'}</div>
@@ -5986,12 +6023,12 @@ async function renderUtilitiesTripsyRefresh() {
       <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">Scheduled Refresh</div>
       <div style="font-size:13px; line-height:1.6;">
         <p>Every day at <b>8:30 AM</b>, a Claude Code scheduled task ("tripsy-trips-refresh") runs automatically and does two things, in order:</p>
-        <p style="margin-top:10px;"><b>1. Push.</b> It applies everything in the "Queued to Push" box above to the real Tripsy account, then clears each one from the queue. This step needs a device with this app already signed in and open somewhere -- if it can't find one, it's simply skipped for the day, and the queue just waits for a day when a signed-in session is found, or for a manual refresh.</p>
-        <p style="margin-top:8px;"><b>2. Pull.</b> It fetches the current state of every trip in the sync window straight from Tripsy's API, rebuilds the encrypted snapshot embedded in this page, and republishes the site -- updating the "Last Pulled from Tripsy" timestamp above. This half doesn't need a signed-in session and always runs.</p>
-        <p style="margin-top:10px;"><b>What the symbols mean</b> (top-right corner, every screen):</p>
+        <p style="margin-top:10px;"><b>1. Push.</b> It reads the "Queued to Push" changes straight from this app's data file, applies each to the real Tripsy account, and reports back which succeeded. The app then clears those from the queue the next time you open it. This runs <b>headless</b> -- no signed-in browser needed -- so it also works from a Claude session on an iPad while you travel.</p>
+        <p style="margin-top:8px;"><b>2. Pull.</b> It fetches the current state of every trip in the sync window straight from Tripsy's API, rebuilds the encrypted snapshot embedded in this page, and republishes the site -- updating the "Last Pulled from Tripsy" timestamp above.</p>
+        <p style="margin-top:10px;"><b>What the symbols mean</b> (top-right corner, every screen -- click it for the specific reason):</p>
         <ul style="margin:6px 0 0 20px; padding:0;">
-          <li><span style="font-size:16px;">⚠️</span> <b>Warning triangle</b> -- something's queued and no refresh has confirmed it yet. Normal and expected between when you queue a change and the next refresh.</li>
-          <li style="margin-top:4px;"><span style="font-size:16px; color:var(--home-green);">▲</span> <b>Green triangle</b> -- a refresh has happened since everything currently queued was added, so it's safe to press "Press Button To Clear" above.</li>
+          <li><span style="font-size:16px;">⚠️</span> <b>Yellow triangle</b> -- a Claude step is needed: changes waiting to be pushed to Tripsy, or forwarded emails/flagged docs waiting to be parsed. Run a refresh.</li>
+          <li style="margin-top:4px;"><span style="font-size:16px;">🟢</span> <b>Green circle</b> -- your turn in the app: proposed events (from a parsed email or doc) are ready for you to review.</li>
           <li style="margin-top:4px;"><span style="font-size:16px;">🛑</span> <b>Red octagon</b> -- a push likely succeeded but couldn't be confirmed, even after retrying. Takes priority over the other two. See the explanation in the "Queued to Push" box above.</li>
         </ul>
       </div>
@@ -6027,15 +6064,6 @@ async function renderUtilitiesTripsyRefresh() {
       renderUtilitiesTripsyRefresh();
     });
   });
-  if (readyToClear) {
-    document.getElementById('tripsy-sync-complete-clear-btn').addEventListener('click', async () => {
-      const ok = await Store.clearAllTripsyPendingChanges();
-      if (ok) {
-        await updateTripsyPendingWarningBadge();
-        renderUtilitiesTripsyRefresh();
-      }
-    });
-  }
   document.getElementById('tripsy-check-now-btn').addEventListener('click', checkForFreshTripsySnapshot);
   main.querySelectorAll("[data-nav]").forEach(el => {
     el.addEventListener("click", e => {
@@ -6063,6 +6091,10 @@ async function checkForFreshTripsySnapshot() {
   btn.disabled = true;
   status.textContent = 'Checking…';
   try {
+    // First pull down anything a refresh left on Drive -- push confirmations
+    // (which clear applied changes from the queue) and parsed email proposals.
+    // This is the on-demand version of what startup does automatically.
+    if (isOwner) await syncTripsyRelays();
     const res = await fetch(location.href, { cache: 'no-store' });
     const text = await res.text();
     const m = text.match(/const TRIPSY_SNAPSHOT_GENERATED_AT = '([^']*)';/);
@@ -6071,11 +6103,13 @@ async function checkForFreshTripsySnapshot() {
       location.reload();
       return;
     }
-    status.textContent = 'No newer refresh yet.';
+    // No newer snapshot, but the drain above may have cleared/updated the queue
+    // -- re-render this page so it reflects the current state (this replaces the
+    // button, so no need to re-enable it).
+    renderUtilitiesTripsyRefresh();
   } catch (e) {
     console.error('checkForFreshTripsySnapshot failed:', e);
     status.textContent = 'Could not check — try again.';
-  } finally {
     btn.disabled = false;
   }
 }
@@ -13953,17 +13987,6 @@ const TRIPSY_PENDING_CHANGE_LABEL = {
   create_trip: '➕ New trip',
 };
 
-// True once every queued change was queued against an older snapshot than
-// the one this page was built with -- i.e. a Claude Code refresh has
-// actually happened since everything currently in the queue was added,
-// rather than just "something is queued". A change missing the stamp
-// (from before this field existed) is treated as arbitrarily old, so it
-// still counts as ready rather than blocking readiness forever. Shared by
-// the top-right badge (which icon to show) and the Tripsy Refresh page
-// (whether to show the "Sync Completed" clear box).
-function tripsyChangesReadyToClear(changes) {
-  return changes.length > 0 && changes.every(c => (c.queuedSnapshotAt || '') < TRIPSY_SNAPSHOT_GENERATED_AT);
-}
 
 // Shows/hides and re-skins the fixed top-right badge (present in the app
 // shell, outside #main, so it survives navigating between views) --
@@ -14014,10 +14037,15 @@ async function computeTripsyStatus() {
 
   // YELLOW -- a Claude step is needed before anything else.
   const yellow = [];
-  // "Waiting to push" = queued at/after the current snapshot, i.e. no refresh
-  // has landed since (mirrors tripsyChangesReadyToClear's own comparison).
-  const changesToPush = changes.filter(c => !((c.queuedSnapshotAt || '') < TRIPSY_SNAPSHOT_GENERATED_AT));
-  if (changesToPush.length) yellow.push({ label: `${changesToPush.length} change${changesToPush.length === 1 ? '' : 's'} waiting to be pushed to Tripsy — run a refresh`, view: 'utilitiestripsyrefresh' });
+  // "Waiting to push" = still in the queue and not itself the failed one caught
+  // by the RED branch above. This is CONFIRMATION-based, not snapshot-timestamp
+  // based: a refresh removes a change from the queue only once it explicitly
+  // confirms that change was applied (drainTripsyAppliedChanges), so anything
+  // still queued genuinely hasn't been confirmed pushed yet -- the flag stays
+  // amber until then, instead of being inferred "done" from the snapshot clock
+  // advancing (which it does even when a specific push fails).
+  const changesToPush = changes.filter(c => !c.pushConfirmationFailed);
+  if (changesToPush.length) yellow.push({ kind: 'changes-push', label: `${changesToPush.length} change${changesToPush.length === 1 ? '' : 's'} waiting to be pushed to Tripsy — run a refresh`, view: 'utilitiestripsyrefresh' });
   const docsToParse = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'pending');
   if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged, waiting to be parsed — process flagged docs in Claude`, view: 'utilitiesparsingdocs' });
   const emailsToParse = tripsyEmailsAwaitingParseCount();
@@ -14030,7 +14058,10 @@ async function computeTripsyStatus() {
   const green = [];
   const proposalsToReview = proposals.reduce((n, p) => n + p.events.filter(e => e.resolution === 'pending').length, 0);
   if (proposalsToReview) green.push({ label: `${proposalsToReview} proposed event${proposalsToReview === 1 ? '' : 's'} ready to review`, view: 'tripsyparsereview' });
-  if (changes.length && tripsyChangesReadyToClear(changes)) green.push({ label: 'Tripsy sync complete — clear the pushed changes', view: 'utilitiestripsyrefresh' });
+  // (No "sync complete — clear the pushed changes" green state anymore: applied
+  // changes are now auto-removed from the queue by drainTripsyAppliedChanges as
+  // soon as a refresh confirms them, so a change remaining in the queue always
+  // means "not yet confirmed pushed" -- amber above -- never a green tidy-up.)
   if (green.length) return { state: 'green', reasons: green };
 
   return { state: 'hidden', reasons: [] };
@@ -14069,8 +14100,28 @@ async function updateTripsyStatusBadge() {
 async function updateTripsyPendingWarningBadge() { return updateTripsyStatusBadge(); }
 async function updateTripsyDocParseBadge() { return updateTripsyStatusBadge(); }
 
+// Read-only Drive check: is a push-results relay from a refresh currently
+// sitting on Drive, waiting for the app to drain it? Distinguishes "queued,
+// not yet pushed to Tripsy" from "already pushed, confirmation waiting to sync"
+// for the flag panel's stage note. Owner-only; false on any error.
+async function tripsyAppliedRelayWaiting() {
+  if (!isOwner) return false;
+  try {
+    const q = encodeURIComponent(`name='${TRIPSY_APPLIED_CHANGES_FILENAME}' and trashed=false`);
+    const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&spaces=drive`);
+    return (((await res.json()).files) || []).length > 0;
+  } catch (e) {
+    console.error('tripsyAppliedRelayWaiting failed:', e);
+    return false;
+  }
+}
+
 // Renders the click panel: a state heading plus one clickable row per reason,
-// each navigating to where that reason is handled.
+// each navigating to where that reason is handled. For the "changes waiting to
+// push" reason it adds a stage note saying WHERE in the pipeline those changes
+// are -- since a queued change is already saved to Drive instantly, the real
+// question is whether a refresh has pushed it Drive->Tripsy yet (detected by
+// whether a results relay is waiting on Drive).
 async function renderTripsyStatusPanel() {
   const panel = document.getElementById('tripsy-status-panel');
   if (!panel) return;
@@ -14080,12 +14131,18 @@ async function renderTripsyStatusPanel() {
     : state === 'yellow' ? '⚠️ Claude needs to run something'
     : '🟢 Ready for your review';
   const headingColor = state === 'green' ? 'var(--home-green)' : (state === 'red' ? 'var(--red, #c0392b)' : 'var(--amber)');
+  // Only hits Drive if there's actually a changes-push reason to annotate.
+  const relayWaiting = reasons.some(r => r.kind === 'changes-push') ? await tripsyAppliedRelayWaiting() : false;
+  const changesStageNote = relayWaiting
+    ? 'Already pushed to Tripsy by a refresh — waiting for the app to sync the confirmation. Reload, or use "Check Now" on the Tripsy Refresh page, to clear it.'
+    : 'Saved to your Drive file. A refresh is what reads the queue and pushes it on to Tripsy — run one to do it now.';
   panel.innerHTML = `
     <div style="font-family:var(--mono); font-size:13px; font-weight:700; color:${headingColor}; margin-bottom:6px;">${heading}</div>
     ${reasons.map(r => `
       <button class="btn" data-tripsy-status-go data-view="${esc(r.view)}" style="display:block; width:100%; text-align:left; background:none; border:none; padding:8px 6px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px; border-top:1px solid var(--line);">
         ${esc(r.label)} <span style="color:var(--muted);">›</span>
       </button>
+      ${r.kind === 'changes-push' ? `<div style="font-size:11px; color:var(--muted); padding:0 6px 6px; line-height:1.5;">${esc(changesStageNote)}</div>` : ''}
     `).join('')}
   `;
   panel.querySelectorAll('[data-tripsy-status-go]').forEach(btn => {
