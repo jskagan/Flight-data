@@ -1063,16 +1063,36 @@ async function createDriveDataFile(data) {
 }
 
 // Drive's "simple" upload (uploadType=media, a single PATCH with the whole
-// body) only reliably works under ~5MB -- driveData long ago grew past
-// that (mainly accumulated base64 Tripsy place photos, tripsyPlacePhotoCache,
+// body) only reliably works under ~5MB -- driveData once grew well past that
+// (mainly accumulated base64 Tripsy place photos, tripsyPlacePhotoCache,
 // across every trip), which was silently turning every write (including
 // Tripsy Trips delete/edit, which route through here via persistDriveData)
 // into a failed "storage error" once the file crossed that threshold. A
 // resumable upload has no such limit: first request a session URL (an
 // empty-bodied PATCH/POST to uploadType=resumable), then PUT the actual
-// JSON to that URL. Both requests need the same Authorization header, so
-// both still go through driveApiFetch.
+// JSON to that URL -- but that's TWO network round trips for every single
+// Store write in the whole app, which is only actually needed above the
+// simple-upload cap. Since place photos/attachments moved out into their
+// own separate Drive files (see uploadBlobToDrive's own comment), this blob
+// shrank back down to a few hundred KB -- so the common case was paying an
+// extra, unnecessary round trip (a real, user-visible delay on every click
+// that saves anything, e.g. Import/Reject on the Review Parsed Docs page)
+// for a size limit it wasn't anywhere near. Use simple upload whenever the
+// payload comfortably fits under Google's cap (leaving headroom for
+// metadata overhead and UTF-8 expansion), falling back to the slower but
+// unlimited resumable path only when it doesn't -- so a future return to a
+// large file degrades gracefully instead of failing outright.
+const DRIVE_SIMPLE_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
 async function updateDriveDataFile(fileId, data) {
+  const body = JSON.stringify(data);
+  if (new Blob([body]).size <= DRIVE_SIMPLE_UPLOAD_MAX_BYTES) {
+    await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body,
+    });
+    return;
+  }
   const startRes = await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json; charset=UTF-8' },
@@ -1083,7 +1103,7 @@ async function updateDriveDataFile(fileId, data) {
   await driveApiFetch(uploadUrl, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
+    body,
   });
 }
 
@@ -8263,12 +8283,14 @@ function tripsyParseFindConflicts(proposedEvent, destinationTrip, pendingChanges
     // Store.queueTripsyChange), so checking the real queue here covers
     // that case automatically along with manually-added items -- no need
     // to separately track "other accepted proposal events." isRealEvent:
-    // false since it isn't a real Tripsy event yet, just a pending create
-    // -- "Modify existing instead" doesn't apply to it (only Keep new/
-    // Keep existing).
+    // false since it isn't a real Tripsy event yet, just a pending create --
+    // the review page's "Modify Existing Event" (which edits a REAL synced
+    // Tripsy event) doesn't apply here, but changeId lets it offer a
+    // "Modify Existing Change" instead, which edits this queued change's own
+    // fields in place (see wireTripsyConflictUi).
     ...pendingChanges.filter(c => c.type === 'create_event' && c.tripKey === destinationTrip.key).map(c => ({
       resource: c.tripsyResource, start: c.fields.startsAt || c.fields.departureAt, end: c.fields.endsAt || c.fields.arrivalAt,
-      summary: c.eventSummary, isRealEvent: false,
+      summary: c.eventSummary, isRealEvent: false, changeId: c.id,
     })),
   ];
   const newStart = proposedEvent.fields.startsAt || proposedEvent.fields.departureAt;
@@ -8370,7 +8392,13 @@ function tripsyLiveConflicts(ctx) {
   if (!destTrip) return { noDate: false, conflicts: [] };
   const conflicts = tripsyParseFindConflicts({ fields: ctx.newFields, tripsyResource: ctx.resource }, destTrip, ctx.pendingChanges)
     .map(c => {
-      const ov = c.eventKey && ctx.overrides[c.eventKey];
+      // Keyed by whichever identity this candidate actually has -- eventKey
+      // for a real Tripsy event (Modify Existing Event), changeId for a
+      // still-pending create_event (Modify Existing Change). The two never
+      // collide (different id formats), so one shared ctx.overrides map
+      // works for both.
+      const key = c.eventKey || c.changeId;
+      const ov = key && ctx.overrides[key];
       return ov ? { ...c, start: ov.startsAt || ov.departureAt || null, end: ov.endsAt || ov.arrivalAt || null } : c;
     })
     .filter(c => tripsyEventOverlap(ns, ne, c.start, c.end));
@@ -14511,15 +14539,16 @@ function tripsyConflictUiHtml(ctx) {
   return `
     <div style="margin-top:8px; padding:8px; border:1px solid var(--amber); border-radius:6px;">
       <div style="font-size:12px; color:var(--amber); font-weight:700;">⚠️ ${esc(label)} ${esc(reason)}</div>
-      ${existing ? `<div ${firstReal ? 'data-parse-conflict-open-existing title="Click to edit this existing event"' : ''} style="font-size:12px; color:var(--text); margin-top:8px;${firstReal ? ' cursor:pointer; text-decoration:underline dotted;' : ''}"><b>Existing Event:</b> ${esc(existing.summary || 'Existing event')} — ${esc(tripsyEventOneLine(existing.start, existing.end))}</div>` : ''}
+      ${existing ? `<div ${firstReal || existing.changeId ? 'data-parse-conflict-open-existing title="Click to edit this existing event"' : ''} style="font-size:12px; color:var(--text); margin-top:8px;${firstReal || existing.changeId ? ' cursor:pointer; text-decoration:underline dotted;' : ''}"><b>Existing Event:</b> ${esc(existing.summary || 'Existing event')} — ${esc(tripsyEventOneLine(existing.start, existing.end))}${!firstReal && existing.changeId ? ' <span style="color:var(--muted);">(not yet synced to Tripsy)</span>' : ''}</div>` : ''}
       <div data-parse-conflict-open-new title="Click to edit the new event" style="font-size:12px; color:var(--text); margin-top:2px; cursor:pointer; text-decoration:underline dotted;"><b>New Event:</b> ${esc(ctx.event.eventSummary)} — ${esc(tripsyEventOneLine(ns, ne))}</div>
     </div>
     <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
       <button class="btn primary" data-parse-conflict-import-anyway style="font-size:12px; padding:5px 12px;">Import with conflict</button>
-      ${firstReal ? `<button class="btn" data-parse-conflict-modify-existing data-event-key="${esc(firstReal.eventKey)}" style="font-size:12px; padding:5px 12px;">Modify Existing Event</button>` : ''}
       <button class="btn" data-parse-conflict-modify-new style="font-size:12px; padding:5px 12px;">Modify New Event</button>
-      ${firstReal ? `<button class="btn" data-parse-conflict-delete-existing data-event-key="${esc(firstReal.eventKey)}" style="font-size:12px; padding:5px 12px;">Delete Existing Event</button>` : ''}
+      ${firstReal ? `<button class="btn" data-parse-conflict-modify-existing data-event-key="${esc(firstReal.eventKey)}" style="font-size:12px; padding:5px 12px;">Modify Existing Event</button>` : ''}
+      ${!firstReal && existing && existing.changeId ? `<button class="btn" data-parse-conflict-modify-existing-change data-change-id="${esc(existing.changeId)}" style="font-size:12px; padding:5px 12px;">Modify Existing Change</button>` : ''}
       <button class="btn" data-parse-conflict-ignore-new style="font-size:12px; padding:5px 12px;">Ignore New Event</button>
+      ${firstReal ? `<button class="btn" data-parse-conflict-delete-existing data-event-key="${esc(firstReal.eventKey)}" style="font-size:12px; padding:5px 12px;">Delete Existing Event</button>` : ''}
     </div>
     <div data-parse-conflict-existing-panel style="display:none; margin-top:10px;"></div>
     <div data-parse-conflict-new-panel style="display:none; margin-top:10px;"></div>`;
@@ -14661,11 +14690,43 @@ function wireTripsyConflictUi(ctx) {
       panel.style.display = 'block';
     });
 
+    // The conflict may be against a real, already-synced Tripsy event
+    // (Modify Existing Event, above) OR a still-pending, not-yet-pushed
+    // create_event (this button instead) -- tripsyConflictUiHtml only ever
+    // renders one or the other for a given conflict, never both, so exactly
+    // one of modExBtn/modExChangeBtn exists per row. Editing here updates
+    // the QUEUED CHANGE's own fields in place (same id, re-queued), since
+    // there's no real Tripsy event yet to send an edit_event against.
+    const modExChangeBtn = q('[data-parse-conflict-modify-existing-change]');
+    if (modExChangeBtn) modExChangeBtn.addEventListener('click', () => {
+      const panel = ui.querySelector('[data-parse-conflict-existing-panel]');
+      const wasOpen = panel.style.display !== 'none' && !!panel.innerHTML;
+      panel.style.display = 'none'; panel.innerHTML = '';
+      if (wasOpen) return;
+      const changeId = modExChangeBtn.dataset.changeId;
+      const change = ctx.pendingChanges.find(c => c.id === changeId);
+      if (!change) { toast('Could not find that change — it may have changed.', 'error'); return; }
+      const raw = { ...tripsyBlankRaw(change.tripsyResource, null), ...change.fields };
+      renderTripsyEditPanel(panel, raw, null, null, change.eventSummary, {
+        onSave: async newFields => {
+          const mergedFields = { ...change.fields, ...newFields };
+          const ok = await Store.queueTripsyChange({ ...change, fields: mergedFields });
+          if (!ok) { toast('Could not save your changes — storage error.', 'error'); return false; }
+          ctx.overrides[changeId] = mergedFields;
+          setTimeout(rerender, 0);
+          toast('Existing change updated.');
+          return true;
+        },
+      });
+      panel.style.display = 'block';
+    });
+
     // Clicking the "Existing Event" / "New Event" lines inside the amber box
     // opens the same inline editor as the Modify buttons (which then re-check
     // the conflict on save via rerender).
     const openExLine = q('[data-parse-conflict-open-existing]');
     if (openExLine && modExBtn) openExLine.addEventListener('click', () => modExBtn.click());
+    if (openExLine && modExChangeBtn) openExLine.addEventListener('click', () => modExChangeBtn.click());
     const openNewLine = q('[data-parse-conflict-open-new]');
     if (openNewLine && modNewBtn) openNewLine.addEventListener('click', () => modNewBtn.click());
   }
