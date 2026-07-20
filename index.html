@@ -8209,18 +8209,17 @@ function tripsyParseMatchTrips(dayKey, trips) {
   });
 }
 
-// Heuristic, not exact-duplicate detection -- flags anything that LOOKS
-// like it might already cover the same event so the reviewer can decide,
-// rather than silently creating a duplicate. Checks the destination trip's
-// real synced events (not pending edits to them -- a rare enough edge case
-// for an approximate heuristic to skip) plus any OTHER proposal's events
-// already accepted/modified-accepted (functionally real once queued) --
+// Flags an existing same-resource item on the destination trip whose time
+// range actually OVERLAPS the proposed event's -- not merely the same day,
+// which is not a conflict (two dinners hours apart don't clash). Overlap is
+// judged by tripsyEventOverlap (needs real clock times on both; a missing
+// end is treated as an instant at the start, and back-to-back does not
+// count). Checks the trip's real synced events plus any OTHER proposal's
+// events already accepted/modified-accepted (functionally real once queued);
 // deliberately excludes other proposals' still-pending events, so two
-// undecided proposals never conflict with each other before either is
-// resolved.
+// undecided proposals never conflict before either is resolved.
 function tripsyParseFindConflicts(proposedEvent, destinationTrip, pendingChanges) {
   if (!destinationTrip) return [];
-  const dayKey = tripsyDayKey(proposedEvent.fields.startsAt || proposedEvent.fields.departureAt);
   const candidates = [
     // isRealEvent:true carries enough (raw/eventKey/tripKey/tripName) for
     // the review page's "Modify existing instead" to open that event's own
@@ -8246,13 +8245,9 @@ function tripsyParseFindConflicts(proposedEvent, destinationTrip, pendingChanges
       summary: c.eventSummary, isRealEvent: false,
     })),
   ];
-  if (proposedEvent.tripsyResource === 'transportation') {
-    const newStart = proposedEvent.fields.departureAt, newEnd = proposedEvent.fields.arrivalAt;
-    return candidates.filter(c => c.resource === 'transportation' && (
-      (newStart && newEnd && c.start && c.end) ? (newStart < c.end && c.start < newEnd) : (tripsyDayKey(c.start) === dayKey)
-    ));
-  }
-  return candidates.filter(c => c.resource === proposedEvent.tripsyResource && tripsyDayKey(c.start) === dayKey);
+  const newStart = proposedEvent.fields.startsAt || proposedEvent.fields.departureAt;
+  const newEnd = proposedEvent.fields.endsAt || proposedEvent.fields.arrivalAt;
+  return candidates.filter(c => c.resource === proposedEvent.tripsyResource && tripsyEventOverlap(newStart, newEnd, c.start, c.end));
 }
 
 // ---- Conflict-resolution helpers for the Review Parsed Docs page ----
@@ -8262,20 +8257,36 @@ function tripsyConflictWhen(iso) {
   return formatTripTime(iso) || formatTripDateRange(iso, null);
 }
 
-// Plain-language reason a proposed event conflicts with one existing item --
-// an explicit overlap window when both have real start/end times (e.g. one
-// event's end running into another's start), otherwise a same-day note.
+// True only when two events genuinely overlap in day AND time -- the single
+// definition of a conflict, shared by detection and re-check. Both need a real
+// clock time (same-day alone is NOT a conflict). A missing end is treated as
+// an instant at that event's start, an identical start instant counts as an
+// overlap, and back-to-back (one ends exactly when the other starts) does not.
+// ISO strings here are literal wall-clock (no offsets), so string compare works.
+function tripsyEventOverlap(aStart, aEnd, bStart, bEnd) {
+  const aP = parseTripLocalParts(aStart), bP = parseTripLocalParts(bStart);
+  if (!aP || aP.hour == null || !bP || bP.hour == null) return false;
+  if (aStart === bStart) return true;
+  const ae = aEnd || aStart, be = bEnd || bStart;
+  return aStart < be && bStart < ae;
+}
+
+// Plain-language reason a proposed event conflicts with one existing item.
+// Since a conflict always means a real time overlap (see tripsyEventOverlap),
+// this always describes that overlap window -- collapsing to "at <time>" when
+// the window is a single instant (equal starts, or point events).
 // Caller esc()s the result before inserting it into the DOM.
 function tripsyConflictReason(newFields, resource, c) {
   const name = c.summary || 'an existing event';
   const ns = newFields.startsAt || newFields.departureAt;
-  const ne = newFields.endsAt || newFields.arrivalAt;
-  if (ns && ne && c.start && c.end && ns < c.end && c.start < ne) {
-    const oStart = ns > c.start ? ns : c.start;
-    const oEnd = ne < c.end ? ne : c.end;
-    return `the new event overlaps "${name}" from ${tripsyConflictWhen(oStart)} to ${tripsyConflictWhen(oEnd)}`;
+  const ne = (newFields.endsAt || newFields.arrivalAt) || ns;
+  const cs = c.start, ce = c.end || c.start;
+  const oStart = ns > cs ? ns : cs;
+  const oEnd = ne < ce ? ne : ce;
+  if (!oStart || !oEnd || oStart >= oEnd) {
+    return `the new event overlaps "${name}" at ${tripsyConflictWhen(oStart || ns)}`;
   }
-  return `the new event is on the same day as "${name}"${c.start ? ` (${tripsyConflictWhen(c.start)})` : ''}`;
+  return `the new event overlaps "${name}" from ${tripsyConflictWhen(oStart)} to ${tripsyConflictWhen(oEnd)}`;
 }
 
 // Re-runs the same overlap test tripsyParseFindConflicts uses, but against a
@@ -8286,15 +8297,12 @@ function tripsyConflictReason(newFields, resource, c) {
 function tripsyRecheckConflicts(newFields, resource, baseConflicts, overrides) {
   const ns = newFields.startsAt || newFields.departureAt;
   const ne = newFields.endsAt || newFields.arrivalAt;
-  const newDay = tripsyDayKey(ns);
   return baseConflicts
     .map(c => {
       const ov = c.eventKey && overrides[c.eventKey];
       return ov ? { ...c, start: ov.startsAt || ov.departureAt || null, end: ov.endsAt || ov.arrivalAt || null } : c;
     })
-    .filter(c => resource === 'transportation'
-      ? ((ns && ne && c.start && c.end) ? (ns < c.end && c.start < ne) : (tripsyDayKey(c.start) === newDay))
-      : (tripsyDayKey(c.start) === newDay));
+    .filter(c => tripsyEventOverlap(ns, ne, c.start, c.end));
 }
 
 // Among a proposal's still-pending events that matched NO existing trip,
@@ -14371,8 +14379,8 @@ function tripsyConflictUiHtml(ctx) {
     </div>
     <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
       <button class="btn primary" data-parse-conflict-import-anyway style="font-size:12px; padding:5px 12px;">Import with conflict</button>
-      ${firstReal ? `<button class="btn" data-parse-conflict-delete-existing data-event-key="${esc(firstReal.eventKey)}" style="font-size:12px; padding:5px 12px;">Delete Existing Event</button>` : ''}
       <button class="btn" data-parse-conflict-modify-new style="font-size:12px; padding:5px 12px;">Modify New Event</button>
+      ${firstReal ? `<button class="btn" data-parse-conflict-delete-existing data-event-key="${esc(firstReal.eventKey)}" style="font-size:12px; padding:5px 12px;">Delete Existing Event</button>` : ''}
       <button class="btn" data-parse-conflict-ignore-new style="font-size:12px; padding:5px 12px;">Ignore New Event</button>
     </div>
     <div data-parse-conflict-new-panel style="display:none; margin-top:10px;"></div>`;
