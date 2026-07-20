@@ -204,10 +204,13 @@ back / 1095 forward, i.e. 3 years).
   change until the owner explicitly reviews it** on the "Review Parsed Docs" page
   (`renderTripsyParseReview`, `index.html:13995` area): Import / Modify-then-import / Reject per
   event, with a trip-reassignment dropdown (or "Create a new trip") if the date-based guess is
-  wrong. A small green ✓ circle appears directly on any trip card whose date range matches a
-  still-pending proposal event (`data-tripsy-review-proposals`) — green, not yellow, because by the
-  time a proposal is matched to a trip the parsing is already done and it's the owner's turn to
-  review (see the badge color rule below).
+  wrong. A small circle appears directly on any trip card whose date range matches a
+  still-pending proposal event (`data-tripsy-review-proposals`): a green ✓ when the owner just needs
+  to review it, but a **yellow ⚠️ triangle** while any of that trip's pending proposal events still
+  has an unresolved potential conflict (`pendingParseTripConflicts`, judged with
+  `tripsyParseFindConflicts`) — it stays yellow until the conflict is resolved (import-with-conflict,
+  modify one side out of overlap, delete the existing event, or ignore the new one), then flips to
+  green (see the badge color rule below).
 - **The consolidated top-right status badge** (`tripsy-status-badge`, `index.html:875`;
   `computeTripsyStatus`/`updateTripsyStatusBadge`/`renderTripsyStatusPanel`, `index.html:13795`
   area) is a single indicator with three prioritized states, replacing what used to be two separate
@@ -218,8 +221,9 @@ back / 1095 forward, i.e. 3 years).
   (proposals to review). There's no green "clear the pushed changes" state anymore — applied changes
   are auto-removed from the queue when a relay confirms them, so a queued change is always either
   yellow (unconfirmed) or red (unverified). Clicking opens a panel listing the specific reason(s)
-  for the current state, each linking to where it's handled. Per-trip flags are always green (a
-  matched proposal is post-parse by definition); yellow lives only in this global badge. Owner-only.
+  for the current state, each linking to where it's handled. Per-trip flags are green once any
+  conflict is resolved (a matched proposal is post-parse by definition), but show yellow while a
+  potential conflict is still unresolved (see the per-trip badge note above). Owner-only.
   `tripsyEmailsAwaitingParseCount()` reads `driveData.tripsyEmailIntake` (entries not yet
   `parsedAt`) to drive the yellow "N forwarded emails waiting to be parsed" reason.
 - **Categories**: flight / transportation / hotel / dining / concert / tour / other, derived from
