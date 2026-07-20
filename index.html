@@ -8257,35 +8257,60 @@ function tripsyConflictWhen(iso) {
   return formatTripTime(iso) || formatTripDateRange(iso, null);
 }
 
-// True only when two events genuinely overlap in day AND time -- the single
-// definition of a conflict, shared by detection and re-check. Both need a real
-// clock time (same-day alone is NOT a conflict). A missing end is treated as
-// an instant at that event's start, an identical start instant counts as an
-// overlap, and back-to-back (one ends exactly when the other starts) does not.
-// ISO strings here are literal wall-clock (no offsets), so string compare works.
+// Whether an ISO wall-clock string carries a real clock time (not just a date).
+function tripsyHasClockTime(iso) {
+  const p = parseTripLocalParts(iso);
+  return !!(p && p.hour != null);
+}
+
+// An event's effective [start, end] on the timeline, filling missing times
+// with day boundaries: an event with no beginning time is assumed to run from
+// the start of its day, and one with no ending time to run to the end of its
+// day -- so a time-less event spans its whole day and can clash with timed
+// events before or after it. Returns null only when no date at all is known
+// (nothing to place). Literal wall-clock strings, so string compare orders
+// them correctly across days.
+function tripsyEventBounds(start, end) {
+  const day = tripsyDayKey(start) || tripsyDayKey(end);
+  if (!day) return null;
+  return {
+    start: tripsyHasClockTime(start) ? start : day + 'T00:00:00',
+    end: tripsyHasClockTime(end) ? end : (tripsyDayKey(end) || day) + 'T23:59:59',
+  };
+}
+
+// The single definition of a conflict, shared by detection and re-check: two
+// same-resource events whose effective day+time ranges (see tripsyEventBounds)
+// actually overlap. Same-day alone is not enough on its own -- but a time-less
+// event spans its whole day, so it does overlap timed neighbours. Back-to-back
+// (one ends exactly when the other starts) does not count; identical starts do.
 function tripsyEventOverlap(aStart, aEnd, bStart, bEnd) {
-  const aP = parseTripLocalParts(aStart), bP = parseTripLocalParts(bStart);
-  if (!aP || aP.hour == null || !bP || bP.hour == null) return false;
-  if (aStart === bStart) return true;
-  const ae = aEnd || aStart, be = bEnd || bStart;
-  return aStart < be && bStart < ae;
+  const a = tripsyEventBounds(aStart, aEnd), b = tripsyEventBounds(bStart, bEnd);
+  if (!a || !b) return false;
+  if (a.start === b.start) return true;
+  return a.start < b.end && b.start < a.end;
 }
 
 // Plain-language reason a proposed event conflicts with one existing item.
-// Since a conflict always means a real time overlap (see tripsyEventOverlap),
-// this always describes that overlap window -- collapsing to "at <time>" when
-// the window is a single instant (equal starts, or point events).
+// When both events are fully timed it describes the actual overlap window;
+// when a missing beginning/ending time is what makes them potentially clash
+// (the time-less side is assumed to span its whole day), it just says so.
 // Caller esc()s the result before inserting it into the DOM.
 function tripsyConflictReason(newFields, resource, c) {
   const name = c.summary || 'an existing event';
   const ns = newFields.startsAt || newFields.departureAt;
-  const ne = (newFields.endsAt || newFields.arrivalAt) || ns;
-  const cs = c.start, ce = c.end || c.start;
-  const oStart = ns > cs ? ns : cs;
-  const oEnd = ne < ce ? ne : ce;
-  if (!oStart || !oEnd || oStart >= oEnd) {
-    return `the new event overlaps "${name}" at ${tripsyConflictWhen(oStart || ns)}`;
-  }
+  const ne = newFields.endsAt || newFields.arrivalAt;
+  const nsT = tripsyHasClockTime(ns), neT = tripsyHasClockTime(ne);
+  if (!nsT && !neT) return `the new event has no beginning or ending time, so it could conflict with "${name}"`;
+  if (!nsT) return `the new event has no beginning time, so it could conflict with "${name}"`;
+  if (!neT) return `the new event has no ending time, so it could conflict with "${name}"`;
+  const csT = tripsyHasClockTime(c.start), ceT = tripsyHasClockTime(c.end);
+  if (!csT && !ceT) return `"${name}" has no beginning or ending time, so the new event could conflict with it`;
+  if (!csT) return `"${name}" has no beginning time, so the new event could conflict with it`;
+  if (!ceT) return `"${name}" has no ending time, so the new event could conflict with it`;
+  const oStart = ns > c.start ? ns : c.start;
+  const oEnd = ne < c.end ? ne : c.end;
+  if (oStart >= oEnd) return `the new event overlaps "${name}" at ${tripsyConflictWhen(oStart)}`;
   return `the new event overlaps "${name}" from ${tripsyConflictWhen(oStart)} to ${tripsyConflictWhen(oEnd)}`;
 }
 
