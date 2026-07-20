@@ -669,25 +669,6 @@
   .tp-generate-panel-check-on { background: #1A222C; border-color: #1A222C; }
   .tp-generate-panel-check-interactive { cursor: pointer; transition: box-shadow 0.15s; }
   .tp-generate-panel-check-interactive:hover { box-shadow: 0 0 0 2px var(--amber, #8A5A12); }
-
-  /* Review Parsed Docs: per-event View/Modify/Add/Ignore boxes
-     (tripsyParseReviewCardHtml). Add/Ignore are persistent, mutually-
-     exclusive selections read by the card's bulk Import button, not
-     immediate actions -- their -on state must stay visible until that
-     button runs or the page re-renders. Modify's -modified state is
-     deliberately separate from -add-on/-ignore-on: it just means "this
-     row's fields were edited," and stays colored even if Add is later
-     unchecked, so the owner can see at a glance which rows they touched. */
-  .tripsy-toggle-box {
-    width: 32px; height: 32px; border-radius: 6px; border: 1px solid var(--line);
-    background: var(--panel-2); font-size: 15px; cursor: pointer;
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-  }
-  .tripsy-toggle-box:hover { border-color: var(--muted); }
-  .tripsy-toggle-box-add-on { background: var(--home-green); border-color: var(--home-green); }
-  .tripsy-toggle-box-ignore-on { background: var(--red, #c0392b); border-color: var(--red, #c0392b); }
-  .tripsy-toggle-box-modified { background: var(--amber); border-color: var(--amber); }
-  .tripsy-toggle-box-view-on { border-color: var(--amber); }
   @media print {
     .tp-day-block-linkable { cursor: auto; }
     .tp-day-block-linkable:hover { box-shadow: none; }
@@ -7719,20 +7700,19 @@ function tripsyEditActionButtonsHtml(saveDataAttr, cancelDataAttr, { vertical = 
   `;
 }
 
-// Renders the inline edit form for one Tripsy-sourced event's raw fields
-// into `panel`, wiring Save (queues an edit_event pending change) and Exit
-// without saving. `raw` is the CURRENT effective raw fields (including any
-// already-pending edit), so re-opening a panel after a partial edit picks
-// up where it left off rather than reverting to the original synced data.
-// `createOptions` is null for editing an existing Tripsy-sourced event, or
-// { pendingChangeId, tripsyTripId } when this panel is instead adding a new
-// item that doesn't exist in Tripsy yet -- see addTripsyItem, which opens
-// this same form pre-filled with a blank record and the chosen category.
-function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, createOptions) {
+// Grouped, TRIPSY_EDIT_FIELDS-driven editable-field markup for one raw
+// record -- extracted out of renderTripsyEditPanel so both that panel (which
+// wraps this with its own Save/Cancel) and the Review Parsed Docs page's
+// always-visible inline form (which wraps this with its own Import/Reject)
+// render identical fields/inputs/grouping from one place rather than two
+// copies drifting apart. Returns `fields` too, so a caller can read values
+// back out later via tripsyReadEditFieldsFromContainer using the exact same
+// list this was built from.
+function tripsyEditFieldsFormHtml(raw) {
   const fields = TRIPSY_EDIT_FIELDS[raw.resource] || [];
   // A fresh id per render (not tied to the event's own id, which doesn't
-  // exist yet in create mode) so multiple panels open at once never
-  // collide on the same datalist id.
+  // exist yet in create mode) so multiple forms rendered at once (e.g. every
+  // row on the Review Parsed Docs page) never collide on the same datalist id.
   const airlineDatalistId = 'tripsy-airline-datalist-' + Math.random().toString(36).slice(2, 10);
   const inputHtml = f => {
     const val = raw[f.key] || '';
@@ -7752,10 +7732,10 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     if (f.kind === 'company') {
       // Free-text input backed by a <datalist> -- looks and behaves like a
       // dropdown of suggestions, but still accepts any typed value (see
-      // the Save handler for how a new one gets remembered). The datalist
-      // itself is populated (or emptied) by the Type-change listener
-      // wired up below, so airline suggestions only appear when Type is
-      // currently Airplane.
+      // tripsyWireEditFieldsAirlineDatalist for how a new one gets
+      // remembered). The datalist itself is populated (or emptied) by the
+      // Type-change listener that helper wires up, so airline suggestions
+      // only appear when Type is currently Airplane.
       return `<input type="text" data-tripsy-edit-field="${f.key}" value="${esc(val)}" class="field-input" list="${airlineDatalistId}" autocomplete="off"><datalist id="${airlineDatalistId}"></datalist>`;
     }
     return `<input type="text" data-tripsy-edit-field="${f.key}" value="${esc(val)}" class="field-input">`;
@@ -7777,27 +7757,63 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
       </div>
     </div>
   `;
+  return { html: groupOrder.map(sectionHtml).join(''), fields };
+}
+
+// Airline suggestions only make sense once Type is Airplane -- populate the
+// datalist on open (matching whatever Type currently is) and again on every
+// Type change. Looks up the datalist by simple descendant query rather than
+// threading its generated id through the caller, since a container only ever
+// holds the one form tripsyEditFieldsFormHtml just rendered into it.
+function tripsyWireEditFieldsAirlineDatalist(container, raw) {
+  if (raw.resource !== 'transportation') return;
+  const categorySelect = container.querySelector('[data-tripsy-edit-field="category"]');
+  const airlineDatalist = container.querySelector('datalist');
+  if (!categorySelect || !airlineDatalist) return;
+  const refreshAirlineOptions = () => {
+    airlineDatalist.innerHTML = categorySelect.value === 'airplane'
+      ? getAllTripsyAirlines().map(a => `<option value="${esc(a)}"></option>`).join('')
+      : '';
+  };
+  categorySelect.addEventListener('change', refreshAirlineOptions);
+  refreshAirlineOptions();
+}
+
+// Reads current values out of a rendered tripsyEditFieldsFormHtml container,
+// keyed the same way TRIPSY_EDIT_FIELDS lists them. Only non-empty fields are
+// included -- same "don't guess/fill blanks" convention renderTripsyEditPanel's
+// own create-mode save already used before this was extracted out of it --
+// datetime values normalized to always carry seconds.
+function tripsyReadEditFieldsFromContainer(container, fields) {
+  const values = {};
+  for (const f of fields) {
+    const el = container.querySelector(`[data-tripsy-edit-field="${f.key}"]`);
+    if (!el) continue;
+    let val = el.value.trim();
+    if (f.kind === 'datetime' && val) val = val.length === 16 ? `${val}:00` : val;
+    if (val) values[f.key] = val;
+  }
+  return values;
+}
+
+// Renders the inline edit form for one Tripsy-sourced event's raw fields
+// into `panel`, wiring Save (queues an edit_event pending change) and Exit
+// without saving. `raw` is the CURRENT effective raw fields (including any
+// already-pending edit), so re-opening a panel after a partial edit picks
+// up where it left off rather than reverting to the original synced data.
+// `createOptions` is null for editing an existing Tripsy-sourced event, or
+// { pendingChangeId, tripsyTripId } when this panel is instead adding a new
+// item that doesn't exist in Tripsy yet -- see addTripsyItem, which opens
+// this same form pre-filled with a blank record and the chosen category.
+function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, createOptions) {
+  const { html: fieldsHtml, fields } = tripsyEditFieldsFormHtml(raw);
   panel.innerHTML = `
     <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
-      ${groupOrder.map(sectionHtml).join('')}
+      ${fieldsHtml}
       ${tripsyEditActionButtonsHtml('data-tripsy-edit-save', 'data-tripsy-edit-exit')}
     </div>
   `;
-
-  // Airline suggestions only make sense once Type is Airplane -- populate
-  // the datalist on open (matching whatever Type currently is) and again
-  // on every Type change, rather than tying it to a fixed element swap.
-  if (raw.resource === 'transportation') {
-    const categorySelect = panel.querySelector('[data-tripsy-edit-field="category"]');
-    const airlineDatalist = document.getElementById(airlineDatalistId);
-    const refreshAirlineOptions = () => {
-      airlineDatalist.innerHTML = categorySelect.value === 'airplane'
-        ? getAllTripsyAirlines().map(a => `<option value="${esc(a)}"></option>`).join('')
-        : '';
-    };
-    categorySelect.addEventListener('change', refreshAirlineOptions);
-    refreshAirlineOptions();
-  }
+  tripsyWireEditFieldsAirlineDatalist(panel, raw);
 
   panel.querySelector("[data-tripsy-edit-exit]").addEventListener("click", () => {
     panel.style.display = "none";
@@ -7824,13 +7840,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     if (createOptions) {
       // Create mode: there's no baseline to diff against yet, so every
       // non-empty field the user filled in becomes part of the new item.
-      const newFields = {};
-      for (const f of fields) {
-        const el = panel.querySelector(`[data-tripsy-edit-field="${f.key}"]`);
-        let val = el.value.trim();
-        if (f.kind === 'datetime' && val) val = val.length === 16 ? `${val}:00` : val;
-        if (val) newFields[f.key] = val;
-      }
+      const newFields = tripsyReadEditFieldsFromContainer(panel, fields);
       if (Object.keys(newFields).length === 0) {
         panel.style.display = "none";
         panel.innerHTML = "";
@@ -14724,45 +14734,26 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
     // which renders the dateless flag with only Modify New / Ignore New.
     const evDay = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt) || tripsyDayKey(ev.fields.endsAt || ev.fields.arrivalAt);
     const flagConflict = conflicts.length || !evDay;
+    const raw = { ...tripsyBlankRaw(ev.tripsyResource, null), ...ev.fields };
+    const fieldsFormHtml = flagConflict ? '' : tripsyEditFieldsFormHtml(raw).html;
     return `
       <div data-parse-event-row data-event-id="${esc(ev.id)}" data-proposal-id="${esc(proposal.id)}" ${flagConflict ? 'data-parse-has-conflict="1"' : ''} style="border-top:1px solid var(--line); padding:12px 0;">
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
-          <div style="min-width:0; flex:1;">
-            <div style="font-size:14px; font-weight:600; color:var(--text);">${esc(ev.eventSummary)} <span style="color:var(--muted); font-weight:400; font-size:12px;">(${esc(tripsySlugToLabel(ev.tripsyResource))})</span></div>
-            <div data-parse-trip-label style="margin-top:10px; font-size:12px; color:var(--muted);">${matches.length ? `Falls within an existing trip:` : `Doesn't match any existing trip.`}</div>
-            <select data-parse-event-trip-select class="field-input" style="margin-top:4px; font-size:13px; max-width:280px;">${selectOptions}</select>
-          </div>
-          ${flagConflict ? '' : `
-            <div data-parse-box-row style="display:flex; gap:6px; flex-shrink:0;">
-              <button type="button" data-parse-view-toggle class="tripsy-toggle-box" title="View">👁️</button>
-              <button type="button" data-parse-modify-toggle class="tripsy-toggle-box" title="Modify">✏️</button>
-              <button type="button" data-parse-add-toggle class="tripsy-toggle-box" role="checkbox" aria-checked="false" title="Add">➕</button>
-              <button type="button" data-parse-ignore-toggle class="tripsy-toggle-box" role="checkbox" aria-checked="false" title="Ignore">🚫</button>
-            </div>
-          `}
-        </div>
+        <div style="font-size:14px; font-weight:600; color:var(--text);">${esc(ev.eventSummary)} <span style="color:var(--muted); font-weight:400; font-size:12px;">(${esc(tripsySlugToLabel(ev.tripsyResource))})</span></div>
+        ${flagConflict ? tripsyParseEventFieldsHtml(ev.tripsyResource, ev.fields) : `<div data-parse-fields-form style="margin-top:10px; display:flex; flex-direction:column; gap:12px;">${fieldsFormHtml}</div>`}
+        <div data-parse-trip-label style="margin-top:10px; font-size:12px; color:var(--muted);">${matches.length ? `Falls within an existing trip:` : `Doesn't match any existing trip.`}</div>
+        <select data-parse-event-trip-select class="field-input" style="margin-top:4px; font-size:13px; max-width:280px;">${selectOptions}</select>
         ${flagConflict
-          ? `${tripsyParseEventFieldsHtml(ev.tripsyResource, ev.fields)}
-            <div data-parse-conflict-ui></div>`
-          : `<div data-parse-view-panel style="display:none; margin-top:10px;">${tripsyParseEventFieldsHtml(ev.tripsyResource, ev.fields)}</div>
-            <div data-parse-modify-panel style="display:none; margin-top:12px;"></div>`}
+          ? `<div data-parse-conflict-ui></div>`
+          : `<div data-parse-actions style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn primary" data-parse-import style="font-size:12px; padding:5px 12px;">Import</button>
+              <button class="btn" data-parse-reject style="font-size:12px; padding:5px 12px;">Reject</button>
+            </div>`}
       </div>
     `;
   };
 
   const clusterCandidates = pendingEvents.filter(ev => !tripsyParseMatchTrips(tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt), tripsyDecryptedTrips).length);
   const cluster = tripsyParseFindCluster(clusterCandidates);
-  // The bulk Import button only makes sense if at least one row is plain
-  // (has Add/Ignore boxes) -- a card whose every event is conflicting has
-  // nothing for it to act on, since conflict rows resolve themselves
-  // immediately via their own controller, not this button.
-  const hasPlainRow = pendingEvents.some(ev => {
-    const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
-    const destTrip = tripsyParseMatchTrips(dayKey, tripsyDecryptedTrips)[0] || null;
-    const conflicts = destTrip ? tripsyParseFindConflicts(ev, destTrip, pendingChanges) : [];
-    const evDay = dayKey || tripsyDayKey(ev.fields.endsAt || ev.fields.arrivalAt);
-    return !(conflicts.length || !evDay);
-  });
 
   return `
     <div class="card" style="margin-bottom:16px;">
@@ -14772,7 +14763,6 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
         <div style="font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:12px;">${dayKey === 'undated' ? 'Undated' : esc(tripsyDayHeaderLabel(dayKey))}</div>
         ${byDay.get(dayKey).map(eventRowHtml).join('')}
       `).join('')}
-      ${hasPlainRow ? `<button type="button" class="btn home-green" data-parse-bulk-import data-proposal-id="${esc(proposal.id)}" style="width:100%; margin-top:16px; font-size:14px; padding:10px;">✅ Import Selected</button>` : ''}
       ${cluster ? `
         <div data-parse-cluster-box data-proposal-id="${esc(proposal.id)}" data-event-ids="${esc(cluster.eventIds.join(','))}" style="margin-top:16px; padding:10px 12px; border:1px solid var(--home-green); border-radius:6px;">
           <div style="font-size:13px; color:var(--home-green); font-weight:700;">These ${cluster.eventIds.length} events (${esc(formatTripDateRange(cluster.start, cluster.end))}) don't match any existing trip — create a new trip for them?</div>
@@ -14790,7 +14780,7 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
 async function renderTripsyParseReview() {
   main.innerHTML = `
     <div class="page-title">Review Parsed Docs</div>
-    <div class="page-sub">Nothing below has been sent to Tripsy yet. Check Add or Ignore for each event (View to see details, Modify to fix anything), then hit Import at the bottom of each card.</div>
+    <div class="page-sub">Nothing below has been sent to Tripsy yet. Edit any field if it needs fixing, then Import or Reject each proposed event.</div>
     <div id="tripsy-parse-review-container"><div class="card"><div class="empty-state">Loading…</div></div></div>
   `;
   const container = document.getElementById("tripsy-parse-review-container");
@@ -14840,119 +14830,41 @@ async function renderTripsyParseReview() {
     await renderTripsyParseReview();
   };
 
-  // Plain (non-conflicting) rows use a batch-select model instead of
-  // immediate per-row actions: View/Modify/Add/Ignore only mutate the row's
-  // own DOM (no Store write, no re-render) until the card's bulk Import
-  // button runs and reads whatever's currently checked -- same shape as the
-  // itinerary narrative "Generate" panel's checkbox-then-Update pattern
-  // elsewhere in this file. A row left with neither Add nor Ignore checked
-  // is simply skipped by that button and stays pending for a later pass.
-
-  container.querySelectorAll("[data-parse-view-toggle]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const row = btn.closest("[data-parse-event-row]");
-      const panel = row.querySelector("[data-parse-view-panel]");
-      const open = panel.style.display !== "none";
-      panel.style.display = open ? "none" : "block";
-      btn.classList.toggle("tripsy-toggle-box-view-on", !open);
-    });
+  // Plain (non-conflicting) rows show their fields as an always-editable
+  // form (tripsyEditFieldsFormHtml) rather than read-only text behind a
+  // separate Modify step -- Import reads whatever's currently in the form
+  // (edited or not) via tripsyReadEditFieldsFromContainer, same convention
+  // renderTripsyEditPanel's own create-mode save already uses.
+  container.querySelectorAll("[data-parse-event-row]:not([data-parse-has-conflict])").forEach(row => {
+    const proposal = proposals.find(p => p.id === row.dataset.proposalId);
+    const event = proposal && proposal.events.find(e => e.id === row.dataset.eventId);
+    if (!event) return;
+    const raw = { ...tripsyBlankRaw(event.tripsyResource, null), ...event.fields };
+    tripsyWireEditFieldsAirlineDatalist(row, raw);
   });
 
-  container.querySelectorAll("[data-parse-modify-toggle]").forEach(btn => {
-    btn.addEventListener("click", () => {
+  container.querySelectorAll("[data-parse-import]").forEach(btn => {
+    btn.addEventListener("click", async () => {
       const row = btn.closest("[data-parse-event-row]");
       const proposalId = row.dataset.proposalId, eventId = row.dataset.eventId;
       const proposal = proposals.find(p => p.id === proposalId);
       const event = proposal.events.find(e => e.id === eventId);
-      const panel = row.querySelector("[data-parse-modify-panel]");
-      const wasOpen = panel.style.display !== "none" && !!panel.innerHTML;
-      panel.style.display = "none";
-      panel.innerHTML = "";
-      if (wasOpen) return;
-      const raw = { ...tripsyBlankRaw(event.tripsyResource, null), ...event.fields };
-      renderTripsyEditPanel(panel, raw, null, null, event.eventSummary, {
-        // Deliberately does NOT import immediately (unlike this same panel's
-        // other call sites) -- this compact list defers every plain row to
-        // the card's bulk Import button. Saving an edit here just stashes it
-        // for that button to pick up later, and marks the row Add (modifying
-        // implies intent to import) so the owner doesn't also have to
-        // separately check Add after fixing a row's fields.
-        onSave: async newFields => {
-          row.dataset.modifiedFields = JSON.stringify(newFields);
-          const addBtn = row.querySelector("[data-parse-add-toggle]");
-          const ignoreBtn = row.querySelector("[data-parse-ignore-toggle]");
-          addBtn.classList.add("tripsy-toggle-box-add-on");
-          addBtn.setAttribute("aria-checked", "true");
-          ignoreBtn.classList.remove("tripsy-toggle-box-ignore-on");
-          ignoreBtn.setAttribute("aria-checked", "false");
-          btn.classList.add("tripsy-toggle-box-modified");
-          panel.style.display = "none";
-          panel.innerHTML = "";
-          toast("Change saved -- hit Import at the bottom of the card to apply it.");
-          return true;
-        },
-      });
-      panel.style.display = "block";
-    });
-  });
-
-  container.querySelectorAll("[data-parse-add-toggle]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const row = btn.closest("[data-parse-event-row]");
-      const on = btn.getAttribute("aria-checked") !== "true";
-      btn.classList.toggle("tripsy-toggle-box-add-on", on);
-      btn.setAttribute("aria-checked", String(on));
-      const ignoreBtn = row.querySelector("[data-parse-ignore-toggle]");
-      ignoreBtn.classList.remove("tripsy-toggle-box-ignore-on");
-      ignoreBtn.setAttribute("aria-checked", "false");
-    });
-  });
-
-  container.querySelectorAll("[data-parse-ignore-toggle]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const row = btn.closest("[data-parse-event-row]");
-      const on = btn.getAttribute("aria-checked") !== "true";
-      btn.classList.toggle("tripsy-toggle-box-ignore-on", on);
-      btn.setAttribute("aria-checked", String(on));
-      const addBtn = row.querySelector("[data-parse-add-toggle]");
-      addBtn.classList.remove("tripsy-toggle-box-add-on");
-      addBtn.setAttribute("aria-checked", "false");
-    });
-  });
-
-  container.querySelectorAll("[data-parse-bulk-import]").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      const card = btn.closest(".card");
-      const proposalId = btn.dataset.proposalId;
-      const proposal = proposals.find(p => p.id === proposalId);
-      const rows = [...card.querySelectorAll("[data-parse-event-row]:not([data-parse-has-conflict])")];
+      const destValue = row.querySelector("[data-parse-event-trip-select]").value;
+      const fields = TRIPSY_EDIT_FIELDS[event.tripsyResource] || [];
+      const fieldsOverride = tripsyReadEditFieldsFromContainer(row, fields);
       btn.disabled = true;
-      btn.textContent = "Importing…";
-      let imported = 0, ignored = 0;
-      for (const row of rows) {
-        const event = proposal.events.find(e => e.id === row.dataset.eventId);
-        if (!event) continue;
-        const addOn = row.querySelector("[data-parse-add-toggle]").getAttribute("aria-checked") === "true";
-        const ignoreOn = row.querySelector("[data-parse-ignore-toggle]").getAttribute("aria-checked") === "true";
-        if (addOn) {
-          const destValue = row.querySelector("[data-parse-event-trip-select]").value;
-          const fieldsOverride = row.dataset.modifiedFields ? JSON.parse(row.dataset.modifiedFields) : null;
-          const ok = await tripsyParseImportProposalEvent(proposal, event, destValue, fieldsOverride);
-          if (ok) imported++;
-        } else if (ignoreOn) {
-          const ok = await Store.resolveTripsyParseProposalEvent(proposalId, event.id, { resolution: 'rejected', resolvedAt: new Date().toISOString() });
-          if (ok) ignored++;
-        }
-      }
-      // Import already self-finishes the proposal via Store.importTripsyParseProposalEvent
-      // when a row was its last pending event; calling this again is a safe,
-      // cheap no-op the same way afterAction already relies on elsewhere on
-      // this page -- needed here specifically to cover the ignore-only case.
-      await tripsyParseMaybeFinishProposal(proposalId);
-      const left = proposal.events.filter(e => e.resolution === 'pending').length - imported - ignored;
-      toast(`Imported ${imported}, ignored ${ignored}${left > 0 ? ` — ${left} left to review.` : '.'}`);
-      await updateTripsyDocParseBadge();
-      await renderTripsyParseReview();
+      const ok = await tripsyParseImportProposalEvent(proposal, event, destValue, fieldsOverride);
+      if (ok) { toast("Imported."); await afterImport(); } else { btn.disabled = false; }
+    });
+  });
+
+  container.querySelectorAll("[data-parse-reject]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const row = btn.closest("[data-parse-event-row]");
+      const proposalId = row.dataset.proposalId, eventId = row.dataset.eventId;
+      btn.disabled = true;
+      await Store.resolveTripsyParseProposalEvent(proposalId, eventId, { resolution: 'rejected', resolvedAt: new Date().toISOString() });
+      await afterAction(proposalId);
     });
   });
 
@@ -14962,7 +14874,7 @@ async function renderTripsyParseReview() {
   // so its amber "Possible conflict" box can live-update to "Conflict Not
   // Resolved" or clear to a green "Conflict Resolved" + Import as the reviewer
   // edits, without rebuilding the whole page. Non-conflict rows keep the plain
-  // Import as-is / Modify then import / Reject buttons wired above.
+  // editable-fields-form + Import/Reject wired above.
   container.querySelectorAll("[data-parse-event-row][data-parse-has-conflict]").forEach(row => {
     const proposal = proposals.find(p => p.id === row.dataset.proposalId);
     const event = proposal && proposal.events.find(e => e.id === row.dataset.eventId);
