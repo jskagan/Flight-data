@@ -7808,6 +7808,26 @@ function tripsyEditActionButtonsHtml(saveDataAttr, cancelDataAttr, { vertical = 
   `;
 }
 
+// Reads one split date+time field pair (see renderTripsyEditPanel's
+// inputHtml datetime branch) back into a single 'YYYY-MM-DDTHH:MM:00'
+// value, or '' if either half is empty -- matches the old single
+// datetime-local input's own all-or-nothing behavior (a date with no time
+// was never a valid value there either).
+function tripsyReadDateTimeField(panel, key) {
+  const datePart = (panel.querySelector(`[data-tripsy-edit-field-date="${key}"]`) || {}).value || '';
+  const timePart = (panel.querySelector(`[data-tripsy-edit-field-time="${key}"]`) || {}).value || '';
+  return (datePart && timePart) ? `${datePart}T${timePart}:00` : '';
+}
+
+// Counterpart start/end (or departure/arrival) datetime fields per
+// resource, for cross-populating an empty field's date from its already-
+// filled sibling's -- see the date-sync wiring below.
+const TRIPSY_DATETIME_FIELD_COUNTERPARTS = {
+  activity: [['startsAt', 'endsAt']],
+  hosting: [['startsAt', 'endsAt']],
+  transportation: [['departureAt', 'arrivalAt']],
+};
+
 // Renders the inline edit form for one Tripsy-sourced event's raw fields
 // into `panel`, wiring Save (queues an edit_event pending change) and Exit
 // without saving. `raw` is the CURRENT effective raw fields (including any
@@ -7836,7 +7856,12 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
       return `<textarea data-tripsy-edit-field="${f.key}" rows="3" class="field-input">${esc(val)}</textarea>`;
     }
     if (f.kind === 'datetime') {
-      return `<input type="datetime-local" data-tripsy-edit-field="${f.key}" value="${esc(val.slice(0, 16))}" class="field-input">`;
+      const datePart = val ? val.slice(0, 10) : '';
+      const timePart = val ? val.slice(11, 16) : '';
+      return `<div style="display:flex; gap:6px;">
+        <input type="date" data-tripsy-edit-field-date="${f.key}" value="${esc(datePart)}" class="field-input" style="flex:3; min-width:0;">
+        <input type="time" data-tripsy-edit-field-time="${f.key}" value="${esc(timePart)}" class="field-input" style="flex:2; min-width:0;">
+      </div>`;
     }
     if (f.kind === 'company') {
       // Free-text input backed by a <datalist> -- looks and behaves like a
@@ -7888,6 +7913,21 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     refreshAirlineOptions();
   }
 
+  // If one side of a start/end (or departure/arrival) pair already has a
+  // date and the other doesn't, seed the empty one with the same date --
+  // both up front (so opening, say, an empty End date picker starts on the
+  // Start date instead of today) and live as either date gets filled in.
+  // Never overwrites a date that's already set on either side.
+  (TRIPSY_DATETIME_FIELD_COUNTERPARTS[raw.resource] || []).forEach(([keyA, keyB]) => {
+    const dateA = panel.querySelector(`[data-tripsy-edit-field-date="${keyA}"]`);
+    const dateB = panel.querySelector(`[data-tripsy-edit-field-date="${keyB}"]`);
+    if (!dateA || !dateB) return;
+    if (dateA.value && !dateB.value) dateB.value = dateA.value;
+    else if (dateB.value && !dateA.value) dateA.value = dateB.value;
+    dateA.addEventListener('change', () => { if (dateA.value && !dateB.value) dateB.value = dateA.value; });
+    dateB.addEventListener('change', () => { if (dateB.value && !dateA.value) dateA.value = dateB.value; });
+  });
+
   panel.querySelector("[data-tripsy-edit-exit]").addEventListener("click", () => {
     panel.style.display = "none";
     panel.innerHTML = "";
@@ -7915,9 +7955,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
       // non-empty field the user filled in becomes part of the new item.
       const newFields = {};
       for (const f of fields) {
-        const el = panel.querySelector(`[data-tripsy-edit-field="${f.key}"]`);
-        let val = el.value.trim();
-        if (f.kind === 'datetime' && val) val = val.length === 16 ? `${val}:00` : val;
+        const val = f.kind === 'datetime' ? tripsyReadDateTimeField(panel, f.key) : panel.querySelector(`[data-tripsy-edit-field="${f.key}"]`).value.trim();
         if (val) newFields[f.key] = val;
       }
       if (Object.keys(newFields).length === 0) {
@@ -7950,9 +7988,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     } else {
       const changes = {};
       for (const f of fields) {
-        const el = panel.querySelector(`[data-tripsy-edit-field="${f.key}"]`);
-        let newVal = el.value.trim();
-        if (f.kind === 'datetime' && newVal) newVal = newVal.length === 16 ? `${newVal}:00` : newVal;
+        const newVal = f.kind === 'datetime' ? tripsyReadDateTimeField(panel, f.key) : panel.querySelector(`[data-tripsy-edit-field="${f.key}"]`).value.trim();
         const oldVal = raw[f.key] || '';
         if (newVal !== oldVal) changes[f.key] = newVal || null;
       }
@@ -14611,13 +14647,13 @@ async function tripsyParseImportProposalEvent(proposal, event, destinationValue,
 
 // Inner HTML for a conflicting event row's resolution area (the
 // [data-parse-conflict-ui] container). Re-rendered in place by the
-// controller below every time an edit changes whether a conflict remains, so
-// it has three looks: an amber box that says "Possible conflict:" (or
-// "Conflict Not Resolved:" once an edit has been tried) with the reason, the
-// "Modify Existing Event" control, and the four resolution buttons below it;
-// or, once no conflict remains, a green "Conflict Resolved" line with a
-// single Import button that replaces the whole amber block. Owner-facing on
-// the review page only.
+// controller below every time an edit changes whether a conflict remains --
+// always the same amber-or-green box with both events' details and the same
+// action buttons, so nothing about the row disappears just because an edit
+// happened to clear the overlap; only the color/label and the Import
+// button's wording flip to reflect resolved vs. not. The row itself (and
+// this box with it) only really goes away once the owner actually imports or
+// ignores it. Owner-facing on the review page only.
 function tripsyConflictUiHtml(ctx) {
   const { noDate, conflicts } = tripsyLiveConflicts(ctx);
   if (noDate) {
@@ -14632,28 +14668,39 @@ function tripsyConflictUiHtml(ctx) {
       </div>
       <div data-parse-conflict-new-panel style="display:none; margin-top:10px;"></div>`;
   }
-  if (conflicts.length === 0) {
-    return `
-      <div style="margin-top:8px; padding:8px; border:1px solid var(--home-green); border-radius:6px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-        <span style="color:var(--home-green); font-weight:700; font-size:13px;">🟢 Conflict Resolved</span>
-        <button class="btn primary" data-parse-conflict-import style="font-size:12px; padding:5px 12px;">Import</button>
-      </div>
-      <div data-parse-conflict-new-panel style="display:none;"></div>`;
+  const resolved = conflicts.length === 0;
+  // tripsyLiveConflicts only ever returns candidates that STILL overlap, so
+  // once an edit clears the overlap there's nothing left in `conflicts` to
+  // read the counterpart's identity from. Remember it here the first time a
+  // conflict is seen, and keep using that remembered counterpart for the
+  // rest of this row's life (across rerenders within this same wire() closure)
+  // so the box can keep showing "Existing Event: ..." even once resolved.
+  if (conflicts.length) ctx.counterpart = conflicts.find(c => c.isRealEvent) || conflicts[0];
+  const counterpart = ctx.counterpart;
+  const firstReal = counterpart && counterpart.isRealEvent ? counterpart : null;
+  // The remembered counterpart's own start/end may be stale if it was itself
+  // edited since (Modify Existing Event/Change) -- reapply any override the
+  // same way tripsyLiveConflicts does for a still-live conflict.
+  let existing = counterpart;
+  if (counterpart) {
+    const key = counterpart.eventKey || counterpart.changeId;
+    const ov = key && ctx.overrides[key];
+    if (ov) existing = { ...counterpart, start: ov.startsAt || ov.departureAt || null, end: ov.endsAt || ov.arrivalAt || null };
   }
-  const label = (ctx.newModified || Object.keys(ctx.overrides).length) ? 'Conflict Not Resolved:' : 'Possible conflict:';
-  const reason = conflicts.map(c => tripsyConflictReason(ctx.newFields, ctx.resource, c)).join('; ');
-  const firstReal = conflicts.find(c => c.isRealEvent);
-  const existing = firstReal || conflicts[0];
+  const label = resolved ? 'Conflict Resolved' : ((ctx.newModified || Object.keys(ctx.overrides).length) ? 'Conflict Not Resolved:' : 'Possible conflict:');
+  const reason = resolved ? '' : conflicts.map(c => tripsyConflictReason(ctx.newFields, ctx.resource, c)).join('; ');
+  const icon = resolved ? '🟢' : '⚠️';
+  const color = resolved ? 'var(--home-green)' : 'var(--amber)';
   const ns = ctx.newFields.startsAt || ctx.newFields.departureAt;
   const ne = ctx.newFields.endsAt || ctx.newFields.arrivalAt;
   return `
-    <div style="margin-top:8px; padding:8px; border:1px solid var(--amber); border-radius:6px;">
-      <div style="font-size:12px; color:var(--amber); font-weight:700;">⚠️ ${esc(label)} ${esc(reason)}</div>
+    <div style="margin-top:8px; padding:8px; border:1px solid ${color}; border-radius:6px;">
+      <div style="font-size:12px; color:${color}; font-weight:700;">${icon} ${esc(label)}${reason ? ' ' + esc(reason) : ''}</div>
       ${existing ? `<div ${firstReal || existing.changeId ? 'data-parse-conflict-open-existing title="Click to edit this existing event"' : ''} style="font-size:12px; color:var(--text); margin-top:8px;${firstReal || existing.changeId ? ' cursor:pointer; text-decoration:underline dotted;' : ''}"><b>Existing Event:</b> ${esc(existing.summary || 'Existing event')} — ${esc(tripsyEventOneLine(existing.start, existing.end))}${!firstReal && existing.changeId ? ' <span style="color:var(--muted);">(not yet synced to Tripsy)</span>' : ''}</div>` : ''}
       <div data-parse-conflict-open-new title="Click to edit the new event" style="font-size:12px; color:var(--text); margin-top:2px; cursor:pointer; text-decoration:underline dotted;"><b>New Event:</b> ${esc(ctx.event.eventSummary)} — ${esc(tripsyEventOneLine(ns, ne))}</div>
     </div>
     <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
-      <button class="btn primary" data-parse-conflict-import-anyway style="font-size:12px; padding:5px 12px;">Import with conflict</button>
+      <button class="btn primary" data-parse-conflict-import${resolved ? '' : '-anyway'} style="font-size:12px; padding:5px 12px;">${resolved ? 'Import' : 'Import with conflict'}</button>
       <button class="btn" data-parse-conflict-modify-new style="font-size:12px; padding:5px 12px;">Modify New Event</button>
       ${firstReal ? `<button class="btn" data-parse-conflict-modify-existing data-event-key="${esc(firstReal.eventKey)}" style="font-size:12px; padding:5px 12px;">Modify Existing Event</button>` : ''}
       ${!firstReal && existing && existing.changeId ? `<button class="btn" data-parse-conflict-modify-existing-change data-change-id="${esc(existing.changeId)}" style="font-size:12px; padding:5px 12px;">Modify Existing Change</button>` : ''}
