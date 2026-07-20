@@ -8777,18 +8777,27 @@ function tripsyGuessCityFromAddress(address) {
 // Same rough-heuristic spirit as tripsyGuessCityFromAddress above, but for
 // the print view's cover header (tripsyTripGeographySummary below), which
 // needs a country (and, for domestic trips, a state) rather than a city.
-// The last comma-separated part of a formatted address is reliably the
-// country in most shapes Google Places/Tripsy return -- except when a
-// standalone postal code trails the country as its own segment (e.g.
-// "..., United Kingdom, E15 2PJ" rather than the far more common "...UK" /
-// "...W1S 4BP, UK" shape folded into one segment), which would otherwise
-// hand back a bare postcode instead of the country underneath it.
+// Used to just trust the last comma-separated segment as the country,
+// stripping a trailing standalone postal code first -- but plenty of real
+// addresses (especially UK ones, and most short addresses a doc/email
+// parser produces) never include a country segment at all, leaving a
+// city, county, or bare postcode ("London", "Oxfordshire", "OX7 4JS") in
+// that position, which then got shown as if it were the trip's
+// destination country. Now only returns a segment if it actually matches
+// a known country (TRIPSY_COUNTRY_ALIASES or TRIPSY_COUNTRY_NAMES below)
+// -- an address with no recognizable country contributes nothing here
+// rather than guessing wrong, and tripsyTripGeographySummary already
+// falls back to the trip's own location field if NO address in the whole
+// trip yields one.
 const TRIPSY_POSTAL_CODE_ONLY_RE = /^([A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}|[\d\s-]+)$/;
 function tripsyGuessCountryFromAddress(address) {
   if (!address) return '';
   const parts = address.split(',').map(p => p.trim()).filter(Boolean);
   while (parts.length > 1 && TRIPSY_POSTAL_CODE_ONLY_RE.test(parts[parts.length - 1])) parts.pop();
-  return parts.length ? parts[parts.length - 1] : '';
+  if (!parts.length) return '';
+  const last = parts[parts.length - 1];
+  const key = last.toLowerCase().replace(/\.$/, '').trim();
+  return (TRIPSY_COUNTRY_ALIASES[key] || TRIPSY_COUNTRY_NAMES.has(key)) ? last : '';
 }
 // Folds common real-world variants of the same country's name down to one
 // canonical display form before tripsyTripGeographySummary dedupes them --
@@ -8808,6 +8817,38 @@ function tripsyCanonicalCountryName(country) {
   const key = country.toLowerCase().replace(/\.$/, '').trim();
   return TRIPSY_COUNTRY_ALIASES[key] || country;
 }
+// Every UN member state's common English short name (lowercase) -- what
+// tripsyGuessCountryFromAddress checks a comma segment against (alongside
+// TRIPSY_COUNTRY_ALIASES' abbreviations/alternate spellings) before
+// trusting it's actually a country, not a city or county that happened to
+// be the last thing in the address.
+const TRIPSY_COUNTRY_NAMES = new Set([
+  'afghanistan', 'albania', 'algeria', 'andorra', 'angola', 'antigua and barbuda', 'argentina', 'armenia',
+  'australia', 'austria', 'azerbaijan', 'bahamas', 'bahrain', 'bangladesh', 'barbados', 'belarus', 'belgium',
+  'belize', 'benin', 'bhutan', 'bolivia', 'bosnia and herzegovina', 'botswana', 'brazil', 'brunei', 'bulgaria',
+  'burkina faso', 'burundi', 'cabo verde', 'cape verde', 'cambodia', 'cameroon', 'canada',
+  'central african republic', 'chad', 'chile', 'china', 'colombia', 'comoros', 'congo',
+  'democratic republic of the congo', 'costa rica', 'croatia', 'cuba', 'cyprus', 'czechia', 'czech republic',
+  'denmark', 'djibouti', 'dominica', 'dominican republic', 'ecuador', 'egypt', 'el salvador',
+  'equatorial guinea', 'eritrea', 'estonia', 'eswatini', 'ethiopia', 'fiji', 'finland', 'france', 'gabon',
+  'gambia', 'georgia', 'germany', 'ghana', 'greece', 'grenada', 'guatemala', 'guinea', 'guinea-bissau',
+  'guyana', 'haiti', 'honduras', 'hungary', 'iceland', 'india', 'indonesia', 'iran', 'iraq', 'ireland',
+  'israel', 'italy', 'ivory coast', "côte d'ivoire", 'jamaica', 'japan', 'jordan', 'kazakhstan', 'kenya',
+  'kiribati', 'kosovo', 'kuwait', 'kyrgyzstan', 'laos', 'latvia', 'lebanon', 'lesotho', 'liberia', 'libya',
+  'liechtenstein', 'lithuania', 'luxembourg', 'madagascar', 'malawi', 'malaysia', 'maldives', 'mali', 'malta',
+  'marshall islands', 'mauritania', 'mauritius', 'mexico', 'micronesia', 'moldova', 'monaco', 'mongolia',
+  'montenegro', 'morocco', 'mozambique', 'myanmar', 'namibia', 'nauru', 'nepal', 'netherlands', 'new zealand',
+  'nicaragua', 'niger', 'nigeria', 'north korea', 'north macedonia', 'norway', 'oman', 'pakistan', 'palau',
+  'palestine', 'panama', 'papua new guinea', 'paraguay', 'peru', 'philippines', 'poland', 'portugal', 'qatar',
+  'romania', 'russia', 'rwanda', 'saint kitts and nevis', 'saint lucia', 'saint vincent and the grenadines',
+  'samoa', 'san marino', 'sao tome and principe', 'saudi arabia', 'senegal', 'serbia', 'seychelles',
+  'sierra leone', 'singapore', 'slovakia', 'slovenia', 'solomon islands', 'somalia', 'south africa',
+  'south korea', 'south sudan', 'spain', 'sri lanka', 'sudan', 'suriname', 'sweden', 'switzerland', 'syria',
+  'taiwan', 'tajikistan', 'tanzania', 'thailand', 'timor-leste', 'togo', 'tonga', 'trinidad and tobago',
+  'tunisia', 'turkey', 'türkiye', 'turkmenistan', 'tuvalu', 'uganda', 'ukraine', 'united arab emirates',
+  'united kingdom', 'united states', 'uruguay', 'uzbekistan', 'vanuatu', 'vatican city', 'venezuela',
+  'vietnam', 'yemen', 'zambia', 'zimbabwe',
+]);
 const TRIPSY_US_COUNTRY_NAMES = new Set(['usa', 'us', 'u.s.', 'u.s.a.', 'united states', 'united states of america']);
 const TRIPSY_US_STATE_NAMES = {
   AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California', CO: 'Colorado',
@@ -10742,8 +10783,12 @@ async function buildTripsyPrintHtml(tripKey) {
     if (photoName) usedPlacePhotoNames.add(photoName);
     if (photoHash) usedPlacePhotoHashes.add(photoHash);
     const isStay = raw.resource === 'hosting';
+    // A hosting/activity event has no departure/arrival description --
+    // that's transportation-only -- so the meta line under its title is
+    // always its own time (bold), not a plain date, which is redundant
+    // with the day divider this card already sits under.
+    const timeMetaLine = formatTripTime(ev.start);
     const metaParts = [
-      formatTripDateRange(ev.start, ev.end),
       address,
       isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
     ].filter(Boolean);
@@ -10766,6 +10811,7 @@ async function buildTripsyPrintHtml(tripKey) {
       <div class="tp-place-card ${isSkipped ? 'tp-place-card-no-photo' : 'tp-place-card-float-left'}" ${rowKey ? `id="tp-detail-event-${esc(rowKey)}"` : ''} ${isSkipped ? '' : `style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;"`} data-tripsy-place-name="${esc(name)}" data-tripsy-place-address="${esc(address)}" data-tripsy-place-title="${esc(ev.summary)}" data-tripsy-place-location-hint="${esc(locationHint)}">
         ${photoAreaHtml}
         <div class="tp-place-card-name">${esc(name)}</div>
+        ${timeMetaLine ? `<div class="tp-place-card-meta" style="font-weight:700;">${esc(timeMetaLine)}</div>` : ''}
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
         ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
         ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, true, hasAnyBlurb, blurb)}
@@ -10831,8 +10877,15 @@ async function buildTripsyPrintHtml(tripKey) {
     const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
     const isSkipped = !!(cachedEntry && cachedEntry.skipped);
     const photoDataUrl = isSkipped ? null : await fetchTripsyTransportationPhoto(company, category);
+    // ev.location is the departure/arrival description line ("LAX → JFK")
+    // -- only present when the event actually has one. When it does, the
+    // date range stays (a real point-to-point leg, worth knowing the day
+    // of, especially one that crosses midnight); when it doesn't, there's
+    // no route to speak of, so the event's own time (bold) is more useful
+    // than a plain date that's redundant with the day divider above it.
+    const hasRoute = !!ev.location;
+    const dateOrTimeMetaLine = hasRoute ? formatTripDateRange(ev.start, ev.end) : formatTripTime(ev.start);
     const metaParts = [
-      formatTripDateRange(ev.start, ev.end),
       ev.location,
       raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
       tripsySeatLabel(raw),
@@ -10866,6 +10919,7 @@ async function buildTripsyPrintHtml(tripKey) {
       <div class="tp-place-card ${isSkipped ? 'tp-place-card-no-photo' : 'tp-place-card-float-left'}" ${rowKey ? `id="tp-detail-event-${esc(rowKey)}"` : ''} ${isSkipped ? '' : `style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;"`} data-tripsy-photo-kind="transportation" data-tripsy-transport-company="${esc(company)}" data-tripsy-transport-category="${esc(category)}" data-tripsy-place-name="${esc(company || ev.summary)}">
         ${photoAreaHtml}
         <div class="tp-place-card-name">${esc(ev.summary)}</div>
+        ${dateOrTimeMetaLine ? `<div class="tp-place-card-meta"${hasRoute ? '' : ' style="font-weight:700;"'}>${esc(dateOrTimeMetaLine)}</div>` : ''}
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
         ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
         ${tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsBlurb, hasAnyBlurb, blurb)}
@@ -11590,11 +11644,11 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
   // One photo+name+meta+blurb card. photoDataUrl may be null (no photo
   // found, or its fetch/crop failed) -- the text column still draws either
   // way, just without an image to its left.
-  const drawCard = async (title, metaParts, blurb, photoObjectUrl) => {
+  const drawCard = async (title, metaParts, blurb, photoObjectUrl, boldMetaText = null) => {
     doc.setFontSize(10);
     const metaLines = metaParts.filter(Boolean);
     const blurbLines = blurb ? doc.splitTextToSize(blurb, TEXT_W) : [];
-    const textH = 16 + metaLines.length * LINE_H + (blurbLines.length ? blurbLines.length * LINE_H + 6 : 0);
+    const textH = 16 + (boldMetaText ? LINE_H : 0) + metaLines.length * LINE_H + (blurbLines.length ? blurbLines.length * LINE_H + 6 : 0);
     const cardH = Math.max(PHOTO_H, textH);
     ensureSpace(cardH);
     const cardY = y;
@@ -11628,9 +11682,14 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
     doc.setTextColor(TRIPSY_PDF_NAVY);
     doc.text(title || '', TEXT_X, textY);
     textY += 16;
-    doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(TRIPSY_PDF_META_TEXT);
+    if (boldMetaText) {
+      doc.setFont('helvetica', 'bold');
+      doc.text(boldMetaText, TEXT_X, textY);
+      textY += LINE_H;
+    }
+    doc.setFont('helvetica', 'normal');
     for (const m of metaLines) {
       doc.text(m, TEXT_X, textY);
       textY += LINE_H;
@@ -11670,8 +11729,16 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
     if (raw.resource === 'transportation') {
       const company = raw.company || '';
       const category = raw.category || '';
+      // ev.location is the departure/arrival description ("LAX → JFK"),
+      // only present when the event actually has one -- when it does, the
+      // date range stays (a real point-to-point leg, worth knowing the day
+      // of); when it doesn't, there's no route to speak of, so the event's
+      // own time (bold) is more useful than a plain date that's redundant
+      // with the day divider this card already sits under.
+      const hasRoute = !!ev.location;
+      const boldMetaText = hasRoute ? null : formatTripTime(ev.start);
       const meta = [
-        formatTripDateRange(ev.start, ev.end), ev.location,
+        hasRoute ? formatTripDateRange(ev.start, ev.end) : null, ev.location,
         raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
         tripsySeatLabel(raw), raw.vehicleDescription || null,
         raw.departureTerminal ? `Terminal ${raw.departureTerminal}` : null,
@@ -11681,7 +11748,7 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
         || (wantsBlurb && summaryBlurbByKey.get(`ev:${ev.id}`))
         || raw.notes || '';
       const photoUrl = await fetchTripsyTransportationPhoto(company, category);
-      await drawCard(ev.summary, meta, blurb, photoUrl);
+      await drawCard(ev.summary, meta, blurb, photoUrl, boldMetaText);
       return;
     }
     if (raw.resource === 'hosting' || raw.resource === 'activity') {
@@ -11689,8 +11756,13 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
       const name = raw.name || ev.summary;
       const address = raw.address || '';
       const isStay = raw.resource === 'hosting';
+      // No departure/arrival description concept for hosting/activity at
+      // all, so the meta line under the title is always the event's own
+      // time (bold) rather than a plain date -- see the transportation
+      // branch above for the fuller reasoning.
+      const boldMetaText = formatTripTime(ev.start);
       const meta = [
-        formatTripDateRange(ev.start, ev.end), address,
+        address,
         isStay && raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
       ];
       const blurb = (eventEntry && eventEntry.content.blurb) || (placeBlurbsByName && placeBlurbsByName.get(name)) || raw.notes || '';
@@ -11698,7 +11770,7 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
       // hosting event's own card -- a hotel already has its own address.
       const locationHint = isStay ? '' : tripsyLodgingCityAt(ev.start);
       const photoUrl = await tripsyDedupedPlacePhotoUrl(name, address, ev.summary, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
-      await drawCard(name, meta, blurb, photoUrl);
+      await drawCard(name, meta, blurb, photoUrl, boldMetaText);
     }
   };
 
