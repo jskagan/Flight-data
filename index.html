@@ -2025,7 +2025,23 @@ const Store = {
       driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(c => {
         const r = byId.get(c.id);
         if (!r) return true; // no result for this change -> leave it untouched
-        if (r.status === 'applied') { cleared++; return false; } // confirmed -> remove
+        if (r.status === 'applied') {
+          cleared++;
+          // A create_event change that had a doc attached before it synced
+          // was keyed by the pending change's own id (there's no real
+          // eventKey until Tripsy actually creates it -- see the Attach Doc
+          // handler for a pending-create row on the Tripsy Trips page). Now
+          // that it's a real event, move any such attachment over to its
+          // real eventKey (reported by the refresh task alongside 'applied'
+          // for a create_event specifically) so it stays attached instead of
+          // pointing at an id nothing matches anymore.
+          if (r.eventKey && driveData.tripsyAttachments) {
+            driveData.tripsyAttachments.forEach(a => {
+              if (a.scope === 'event' && a.eventKey === c.id) a.eventKey = r.eventKey;
+            });
+          }
+          return false; // confirmed -> remove
+        }
         if (r.status === 'unverified') { c.pushConfirmationFailed = true; c.pushConfirmationFailedAt = now; flagged++; return true; }
         c.lastPushError = r.reason || true; failed++; return true; // 'failed' -> retry next run
       });
@@ -7589,7 +7605,7 @@ function tripsyEventKey(tripsyRaw) {
 // underlying panel/eventKey.
 function setTripsyEditIconActive(key, active) {
   if (!key) return;
-  document.querySelectorAll(`[data-tripsy-edit-event][data-key="${CSS.escape(key)}"]`).forEach(btn => {
+  document.querySelectorAll(`[data-tripsy-edit-event][data-key="${CSS.escape(key)}"], [data-tripsy-edit-pending-create][data-change-id="${CSS.escape(key)}"]`).forEach(btn => {
     btn.style.borderColor = active ? 'var(--amber)' : '';
   });
 }
@@ -7606,6 +7622,18 @@ function tripsySeatLabel(raw) {
   if (!raw.seatClass && !raw.seatNumber) return null;
   if (raw.seatClass && raw.seatNumber) return `Seat: ${raw.seatClass} (${raw.seatNumber})`;
   return `Seat: ${raw.seatClass || raw.seatNumber}`;
+}
+
+// Last-resort transportation title when there's no company/number (e.g.
+// "United 123") and no name to fall back on -- names the specific mode
+// (Car, Train, ...) plus its route instead of a bare, uninformative
+// "Transportation" that told the owner nothing on the itinerary.
+function tripsyTransportationFallbackSummary(raw, dep, arr) {
+  const type = raw.category === 'airplane' ? 'Flight' : (tripsySlugToLabel(raw.category) || 'Transportation');
+  if (dep && arr) return `${type} from ${dep} to ${arr}`;
+  if (dep) return `${type} from ${dep}`;
+  if (arr) return `${type} to ${arr}`;
+  return type;
 }
 
 // Rebuilds the display fields (summary/location/notes/tripsyExtra/start/
@@ -7641,7 +7669,7 @@ function tripsyRawToDisplay(resource, raw) {
   const arr = raw.arrivalDescription || '';
   return {
     type: raw.category === 'airplane' ? 'flight' : 'transportation',
-    summary: `${raw.company || ''} ${raw.transportNumber || ''}`.trim() || raw.name || 'Transportation',
+    summary: `${raw.company || ''} ${raw.transportNumber || ''}`.trim() || raw.name || tripsyTransportationFallbackSummary(raw, dep, arr),
     location: dep && arr ? `${dep} → ${arr}` : (dep || arr || null),
     notes: raw.notes || null,
     start: raw.departureAt,
@@ -9472,7 +9500,21 @@ async function buildTripsyPrintDayData(trip) {
   const effectiveTrip = getEffectiveTripsyTrip(trip, pendingChanges);
   const effectiveEvents = trip.events.map(ev => getEffectiveTripsyEvent(ev, pendingChanges));
   const visibleEvents = effectiveEvents.filter(ev => !isTripsyEventEffectivelyHidden(ev));
-  const chronologicalEvents = expandMultiDayTripsyEvents(visibleEvents).sort((a, b) => {
+  // Events imported from a document/email but not yet pushed to Tripsy --
+  // same construction renderTripsyEventsListImpl uses for the My Trips
+  // page's own timeline, so something the owner already reviewed and
+  // imported shows up on the itinerary right away instead of silently
+  // waiting on a future refresh to "really" exist. No hide/show override
+  // exists for these yet (that's keyed by a real eventKey, which these
+  // don't have) -- same as the My Trips page, they skip the hidden filter
+  // above entirely rather than needing one of their own.
+  const pendingCreateEvents = pendingChanges.filter(c => c.type === 'create_event' && c.tripKey === trip.key).map(c => {
+    const raw = { ...tripsyBlankRaw(c.tripsyResource, null), ...c.fields };
+    const display = tripsyRawToDisplay(c.tripsyResource, raw);
+    return { ...display, id: `pending-create-${c.id}`, tripsyRaw: raw, _pendingCreate: c };
+  });
+  const allVisibleEvents = [...visibleEvents, ...pendingCreateEvents];
+  const chronologicalEvents = expandMultiDayTripsyEvents(allVisibleEvents).sort((a, b) => {
     const special = tripsyMultiDayEventOrder(a, b);
     if (special != null) return special;
     return new Date(a.start || 0) - new Date(b.start || 0);
@@ -9487,7 +9529,7 @@ async function buildTripsyPrintDayData(trip) {
     byDay.get(dayKey).push(ev);
   }
 
-  const placeEvents = visibleEvents.filter(ev => ev.tripsyRaw && (ev.tripsyRaw.resource === 'hosting' || ev.tripsyRaw.resource === 'activity'));
+  const placeEvents = allVisibleEvents.filter(ev => ev.tripsyRaw && (ev.tripsyRaw.resource === 'hosting' || ev.tripsyRaw.resource === 'activity'));
   const placesByDay = new Map();
   for (const ev of placeEvents) {
     const dayKey = tripsyDayKey(ev.start) || 'undated';
@@ -13022,9 +13064,25 @@ async function renderTripsyEventsListImpl() {
       }
       if (ev._pendingCreate) {
         const c = ev._pendingCreate;
+        // Docs attached before this item has a real Tripsy id are keyed by
+        // the pending change's own id instead of a real eventKey (see the
+        // attach-pending-create handler below) -- same lookup/menu markup
+        // a real event's Doc icon uses (docIconHtml further down), just
+        // keyed differently.
+        const pendingAttachments = attachments.filter(a => a.scope === 'event' && a.eventKey === c.id);
+        const pendingDocIconHtml = pendingAttachments.length ? `
+          <div style="position:relative;">
+            <button class="btn" data-tripsy-attachments-toggle data-key="${esc(c.id)}" style="font-size:17px; padding:4px 10px;" title="Attached Docs">📄</button>
+            <div data-tripsy-attachments-menu="${esc(c.id)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:360px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+              ${pendingAttachments.map(tripsyAttachmentMenuRowHtml).join('')}
+            </div>
+          </div>
+        ` : '';
         const actionsHtml = `<div style="display:flex; gap:6px; flex-shrink:0;">
+            ${pendingDocIconHtml}
             <button class="btn" data-tripsy-edit-pending-create data-change-id="${esc(c.id)}" style="font-size:17px; padding:4px 10px;" title="Edit">✏️</button>
-            <button class="btn" data-tripsy-remove-pending-create data-change-id="${esc(c.id)}" style="font-size:17px; padding:4px 10px;" title="Remove">🗑️</button>
+            <button class="btn" data-tripsy-attach-pending-create data-change-id="${esc(c.id)}" data-trip-key="${esc(c.tripKey)}" style="font-size:17px; padding:4px 10px;" title="Attach Doc">📎</button>
+            <button class="btn" data-tripsy-remove-pending-create data-change-id="${esc(c.id)}" style="font-size:17px; padding:4px 10px;" title="Delete">🗑️</button>
           </div>`;
         // Clicking the row's own content (not just the pencil icon) also
         // opens the edit form -- reuses the SAME data-tripsy-edit-pending-
@@ -13034,6 +13092,12 @@ async function renderTripsyEventsListImpl() {
         // listener needed. A not-yet-created item has no separate "view"
         // concept -- the edit form IS its full details.
         const viewAttr = `data-tripsy-edit-pending-create data-change-id="${esc(c.id)}" style="cursor:pointer;"`;
+        // Its own inline panel (Edit or Attach, toggled via panel.dataset.mode
+        // same as a real event's shared data-tripsy-edit-panel below) rather
+        // than reusing the trip-level "+" Add Item panel at the top of the
+        // card -- that panel opening far above a row deep in a long trip's
+        // timeline looked like the Edit button silently did nothing.
+        const panelHtml = `<div data-tripsy-pending-panel="${esc(c.id)}" style="display:none; margin:8px 0 0 194px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>`;
         return {
           dayKey: tripsyDayKey(ev.start),
           psMatch: null,
@@ -13048,6 +13112,7 @@ async function renderTripsyEventsListImpl() {
             statusBadge: `<span style="color:var(--home-green);">➕ Not yet created in Tripsy — syncs next refresh</span>`,
             actionsHtml,
             viewAttr,
+            panelHtml,
           },
         };
       }
@@ -14087,22 +14152,67 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
-  // Re-derives the pending change fresh from Store rather than trusting a
-  // closure over `pendingChanges`, same reasoning as the real-event edit
-  // handler above.
+  // Own inline panel per pending-create row (data-tripsy-pending-panel),
+  // toggled between "edit"/"attach" modes the same way a real event's
+  // shared data-tripsy-edit-panel is below -- NOT the trip-level "+" Add
+  // Item panel at the top of the card, which is where this used to open:
+  // for a row deep in a long trip's timeline that panel opened far off-
+  // screen above the current scroll position, looking like Edit did
+  // nothing at all.
   container.querySelectorAll("[data-tripsy-edit-pending-create]").forEach(btn => {
     btn.addEventListener("click", async () => {
       const changeId = btn.dataset.changeId;
+      const panel = container.querySelector(`[data-tripsy-pending-panel="${changeId}"]`);
+      if (!panel) return;
+      const isEditOpen = panel.style.display !== "none" && panel.dataset.mode === "edit";
+      if (isEditOpen) {
+        panel.style.display = "none";
+        panel.innerHTML = "";
+        panel.dataset.mode = "";
+        setTripsyEditIconActive(changeId, false);
+        positionTripsyTimelineConnectors();
+        return;
+      }
+      // Re-derives the pending change fresh from Store rather than trusting
+      // a closure over `pendingChanges`, same reasoning as the real-event
+      // edit handler above.
       const change = (await Store.listTripsyPendingChanges()).find(c => c.id === changeId);
       if (!change) return;
-      const trip = tripsyDecryptedTrips.find(t => t.key === change.tripKey);
-      const addPanel = container.querySelector(`[data-tripsy-add-item-panel="${change.tripKey}"]`);
       const mergedRaw = { ...tripsyBlankRaw(change.tripsyResource, null), ...change.fields };
-      renderTripsyEditPanel(addPanel, mergedRaw, change.tripKey, change.tripName, change.eventSummary, {
+      renderTripsyEditPanel(panel, mergedRaw, change.tripKey, change.tripName, change.eventSummary, {
         pendingChangeId: change.id,
         tripsyTripId: change.tripsyTripId,
       });
-      addPanel.style.display = "block";
+      panel.dataset.mode = "edit";
+      panel.style.display = "block";
+      setTripsyEditIconActive(changeId, true);
+      panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      positionTripsyTimelineConnectors();
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-attach-pending-create]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const changeId = btn.dataset.changeId;
+      const tripKey = btn.dataset.tripKey;
+      const panel = container.querySelector(`[data-tripsy-pending-panel="${changeId}"]`);
+      if (!panel) return;
+      if (panel.style.display !== "none" && panel.dataset.mode === "attach") {
+        panel.style.display = "none";
+        panel.innerHTML = "";
+        panel.dataset.mode = "";
+        positionTripsyTimelineConnectors();
+        return;
+      }
+      // Keyed by the pending change's own id -- there's no real eventKey
+      // yet. The refresh task re-keys these to the real eventKey once it
+      // successfully applies this create_event change, so the doc stays
+      // attached to the (by-then-real) event rather than getting orphaned.
+      renderTripsyAttachPanel(panel, { scope: 'event', tripKey, eventKey: changeId });
+      panel.dataset.mode = "attach";
+      panel.style.display = "block";
+      panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      positionTripsyTimelineConnectors();
     });
   });
 
