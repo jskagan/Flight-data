@@ -8255,6 +8255,48 @@ function tripsyParseFindConflicts(proposedEvent, destinationTrip, pendingChanges
   return candidates.filter(c => c.resource === proposedEvent.tripsyResource && tripsyDayKey(c.start) === dayKey);
 }
 
+// ---- Conflict-resolution helpers for the Review Parsed Docs page ----
+// A human label for one endpoint of a conflict window: its clock time when it
+// has one, otherwise its date. Used to describe an overlap in words.
+function tripsyConflictWhen(iso) {
+  return formatTripTime(iso) || formatTripDateRange(iso, null);
+}
+
+// Plain-language reason a proposed event conflicts with one existing item --
+// an explicit overlap window when both have real start/end times (e.g. one
+// event's end running into another's start), otherwise a same-day note.
+// Caller esc()s the result before inserting it into the DOM.
+function tripsyConflictReason(newFields, resource, c) {
+  const name = c.summary || 'an existing event';
+  const ns = newFields.startsAt || newFields.departureAt;
+  const ne = newFields.endsAt || newFields.arrivalAt;
+  if (ns && ne && c.start && c.end && ns < c.end && c.start < ne) {
+    const oStart = ns > c.start ? ns : c.start;
+    const oEnd = ne < c.end ? ne : c.end;
+    return `the new event overlaps "${name}" from ${tripsyConflictWhen(oStart)} to ${tripsyConflictWhen(oEnd)}`;
+  }
+  return `the new event is on the same day as "${name}"${c.start ? ` (${tripsyConflictWhen(c.start)})` : ''}`;
+}
+
+// Re-runs the same overlap test tripsyParseFindConflicts uses, but against a
+// working copy of the proposed event's fields (as the reviewer edits it) and
+// with any modified existing events overridden by their new field values --
+// so the conflict box can live-update to "Conflict Not Resolved" or clear to
+// "Conflict Resolved" as edits are made, without re-reading the snapshot.
+function tripsyRecheckConflicts(newFields, resource, baseConflicts, overrides) {
+  const ns = newFields.startsAt || newFields.departureAt;
+  const ne = newFields.endsAt || newFields.arrivalAt;
+  const newDay = tripsyDayKey(ns);
+  return baseConflicts
+    .map(c => {
+      const ov = c.eventKey && overrides[c.eventKey];
+      return ov ? { ...c, start: ov.startsAt || ov.departureAt || null, end: ov.endsAt || ov.arrivalAt || null } : c;
+    })
+    .filter(c => resource === 'transportation'
+      ? ((ns && ne && c.start && c.end) ? (ns < c.end && c.start < ne) : (tripsyDayKey(c.start) === newDay))
+      : (tripsyDayKey(c.start) === newDay));
+}
+
 // Among a proposal's still-pending events that matched NO existing trip,
 // checks whether they're tight enough in time to offer as one "create a
 // new trip for these" prompt instead of N separate one-off options.
@@ -14299,6 +14341,151 @@ async function tripsyParseMaybeFinishProposal(proposalId) {
   }
 }
 
+// Inner HTML for a conflicting event row's resolution area (the
+// [data-parse-conflict-ui] container). Re-rendered in place by the
+// controller below every time an edit changes whether a conflict remains, so
+// it has three looks: an amber box that says "Possible conflict:" (or
+// "Conflict Not Resolved:" once an edit has been tried) with the reason, the
+// "Modify Existing Event" control, and the four resolution buttons below it;
+// or, once no conflict remains, a green "Conflict Resolved" line with a
+// single Import button that replaces the whole amber block. Owner-facing on
+// the review page only.
+function tripsyConflictUiHtml(ctx) {
+  const conflicts = tripsyRecheckConflicts(ctx.newFields, ctx.resource, ctx.baseConflicts, ctx.overrides);
+  if (conflicts.length === 0) {
+    return `
+      <div style="margin-top:8px; padding:8px; border:1px solid var(--home-green); border-radius:6px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <span style="color:var(--home-green); font-weight:700; font-size:13px;">🟢 Conflict Resolved</span>
+        <button class="btn primary" data-parse-conflict-import style="font-size:12px; padding:5px 12px;">Import</button>
+      </div>
+      <div data-parse-conflict-new-panel style="display:none;"></div>`;
+  }
+  const label = (ctx.newModified || Object.keys(ctx.overrides).length) ? 'Conflict Not Resolved:' : 'Possible conflict:';
+  const reason = conflicts.map(c => tripsyConflictReason(ctx.newFields, ctx.resource, c)).join('; ');
+  const firstReal = conflicts.find(c => c.isRealEvent);
+  return `
+    <div style="margin-top:8px; padding:8px; border:1px solid var(--amber); border-radius:6px;">
+      <div style="font-size:12px; color:var(--amber); font-weight:700;">⚠️ ${esc(label)} ${esc(reason)}</div>
+      ${firstReal ? `<button class="btn" data-parse-conflict-modify-existing data-event-key="${esc(firstReal.eventKey)}" style="font-size:11px; padding:4px 10px; margin-top:8px;">Modify Existing Event</button>` : ''}
+      <div data-parse-conflict-existing-panel style="display:none; margin-top:10px;"></div>
+    </div>
+    <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
+      <button class="btn primary" data-parse-conflict-import-anyway style="font-size:12px; padding:5px 12px;">Import with conflict</button>
+      ${firstReal ? `<button class="btn" data-parse-conflict-delete-existing data-event-key="${esc(firstReal.eventKey)}" style="font-size:12px; padding:5px 12px;">Delete Existing Event</button>` : ''}
+      <button class="btn" data-parse-conflict-modify-new style="font-size:12px; padding:5px 12px;">Modify New Event</button>
+      <button class="btn" data-parse-conflict-ignore-new style="font-size:12px; padding:5px 12px;">Ignore New Event</button>
+    </div>
+    <div data-parse-conflict-new-panel style="display:none; margin-top:10px;"></div>`;
+}
+
+// Fills and wires one conflicting row's [data-parse-conflict-ui] container,
+// holding the working state (the possibly-edited new-event fields in
+// ctx.newFields, and any modified existing events in ctx.overrides) in a
+// closure so edits re-check and re-render in place without a full page
+// rebuild. The five actions: Import with conflict / the resolved Import both
+// queue the new event as-is (with edits, if any); Delete Existing Event
+// queues a delete for the existing item and imports the new one; Modify New
+// Event / Modify Existing Event open an inline editor and re-check on save
+// (an existing-event edit is queued as a real edit_event); Ignore New Event
+// rejects the proposal.
+function wireTripsyConflictUi(ctx) {
+  const ui = ctx.row.querySelector('[data-parse-conflict-ui]');
+  if (!ui) return;
+  const destValue = () => ctx.row.querySelector('[data-parse-event-trip-select]').value;
+
+  async function doImport() {
+    const ok = await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null);
+    if (ok) { toast('Imported.'); await ctx.afterImport(); }
+    return ok;
+  }
+
+  function wire() {
+    const q = sel => ui.querySelector(sel);
+    const importBtn = q('[data-parse-conflict-import]') || q('[data-parse-conflict-import-anyway]');
+    if (importBtn) importBtn.addEventListener('click', async () => {
+      importBtn.disabled = true;
+      if (!await doImport()) importBtn.disabled = false;
+    });
+
+    const ignoreBtn = q('[data-parse-conflict-ignore-new]');
+    if (ignoreBtn) ignoreBtn.addEventListener('click', async () => {
+      ignoreBtn.disabled = true;
+      await Store.resolveTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id, { resolution: 'rejected', resolvedAt: new Date().toISOString() });
+      await ctx.afterAction(ctx.proposal.id);
+    });
+
+    const delBtn = q('[data-parse-conflict-delete-existing]');
+    if (delBtn) delBtn.addEventListener('click', async () => {
+      delBtn.disabled = true;
+      const found = findTripsyRawByKey(delBtn.dataset.eventKey);
+      if (!found) { toast('Could not find that event — it may have changed.', 'error'); delBtn.disabled = false; return; }
+      const summary = tripsyRawToDisplay(found.raw.resource, found.raw).summary;
+      const delOk = await Store.queueTripsyChange({
+        id: crypto.randomUUID(), type: 'delete_event', createdAt: new Date().toISOString(),
+        tripKey: found.tripKey, tripName: found.tripName, eventKey: delBtn.dataset.eventKey,
+        eventSummary: summary, tripsyResource: found.raw.resource, tripsyId: found.raw.id,
+      });
+      if (!delOk) { toast('Could not queue the delete — storage error.', 'error'); delBtn.disabled = false; return; }
+      const ok = await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null);
+      if (ok) { toast('Deleted the existing event and imported the new one.'); await ctx.afterImport(); }
+    });
+
+    const modNewBtn = q('[data-parse-conflict-modify-new]');
+    if (modNewBtn) modNewBtn.addEventListener('click', () => {
+      const panel = ui.querySelector('[data-parse-conflict-new-panel]');
+      const wasOpen = panel.style.display !== 'none' && !!panel.innerHTML;
+      panel.style.display = 'none'; panel.innerHTML = '';
+      if (wasOpen) return;
+      const raw = { ...tripsyBlankRaw(ctx.resource, null), ...ctx.newFields };
+      renderTripsyEditPanel(panel, raw, null, null, ctx.event.eventSummary, {
+        onSave: async newFields => {
+          ctx.newFields = { ...ctx.newFields, ...newFields };
+          ctx.newModified = true;
+          setTimeout(rerender, 0);
+          return true;
+        },
+      });
+      panel.style.display = 'block';
+    });
+
+    const modExBtn = q('[data-parse-conflict-modify-existing]');
+    if (modExBtn) modExBtn.addEventListener('click', () => {
+      const panel = ui.querySelector('[data-parse-conflict-existing-panel]');
+      const wasOpen = panel.style.display !== 'none' && !!panel.innerHTML;
+      panel.style.display = 'none'; panel.innerHTML = '';
+      if (wasOpen) return;
+      const key = modExBtn.dataset.eventKey;
+      const found = findTripsyRawByKey(key);
+      if (!found) { toast('Could not find that event — it may have changed.', 'error'); return; }
+      const original = { ...found.raw };
+      const summary = tripsyRawToDisplay(found.raw.resource, found.raw).summary;
+      const raw = { ...tripsyBlankRaw(found.raw.resource, null), ...found.raw };
+      renderTripsyEditPanel(panel, raw, null, null, summary, {
+        onSave: async newFields => {
+          const changes = {};
+          for (const k of Object.keys(newFields)) if ((newFields[k] || '') !== (original[k] || '')) changes[k] = newFields[k] || null;
+          if (Object.keys(changes).length) {
+            const ok = await Store.queueTripsyChange({
+              id: crypto.randomUUID(), type: 'edit_event', createdAt: new Date().toISOString(),
+              tripKey: found.tripKey, tripName: found.tripName, eventKey: key,
+              eventSummary: summary, tripsyResource: found.raw.resource, tripsyId: found.raw.id, changes,
+            });
+            if (!ok) { toast('Could not queue the edit — storage error.', 'error'); return false; }
+          }
+          ctx.overrides[key] = { ...original, ...newFields };
+          setTimeout(rerender, 0);
+          toast('Existing event updated.');
+          return true;
+        },
+      });
+      panel.style.display = 'block';
+    });
+  }
+
+  function rerender() { ui.innerHTML = tripsyConflictUiHtml(ctx); wire(); }
+  rerender();
+}
+
 // One proposal's "chart" -- title/summary at top, then every still-pending
 // proposed event grouped by day, each with its full extracted details, a
 // destination-trip picker (defaulting to the first date-matched trip, or
@@ -14326,29 +14513,19 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
     const destTrip = matches[0] || null;
     const conflicts = destTrip ? tripsyParseFindConflicts(ev, destTrip, pendingChanges) : [];
     return `
-      <div data-parse-event-row data-event-id="${esc(ev.id)}" data-proposal-id="${esc(proposal.id)}" style="border-top:1px solid var(--line); padding:12px 0;">
+      <div data-parse-event-row data-event-id="${esc(ev.id)}" data-proposal-id="${esc(proposal.id)}" ${conflicts.length ? 'data-parse-has-conflict="1"' : ''} style="border-top:1px solid var(--line); padding:12px 0;">
         <div style="font-size:14px; font-weight:600; color:var(--text);">${esc(ev.eventSummary)} <span style="color:var(--muted); font-weight:400; font-size:12px;">(${esc(tripsySlugToLabel(ev.tripsyResource))})</span></div>
         ${tripsyParseEventFieldsHtml(ev.tripsyResource, ev.fields)}
         <div style="margin-top:10px; font-size:12px; color:var(--muted);">${matches.length ? `Falls within an existing trip:` : `Doesn't match any existing trip.`}</div>
         <select data-parse-event-trip-select class="field-input" style="margin-top:4px; font-size:13px; max-width:280px;">${selectOptions}</select>
-        ${conflicts.length ? `
-          <div data-parse-conflict-box style="margin-top:8px; padding:8px; border:1px solid var(--amber); border-radius:6px;">
-            <div style="font-size:12px; color:var(--amber); font-weight:700;">⚠️ Possible conflict with an existing item</div>
-            ${conflicts.map(c => `<div style="font-size:12px; color:var(--text); margin-top:4px;">${esc(c.summary || 'Existing event')} — ${esc(formatTripDateRange(c.start, c.end))}</div>`).join('')}
-            <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
-              <button class="btn" data-parse-conflict-keep-new style="font-size:11px; padding:3px 8px;">Keep new</button>
-              <button class="btn" data-parse-conflict-keep-existing style="font-size:11px; padding:3px 8px;">Keep existing</button>
-              ${conflicts[0].isRealEvent ? `<button class="btn" data-parse-conflict-modify-existing data-event-key="${esc(conflicts[0].eventKey)}" data-trip-key="${esc(conflicts[0].tripKey)}" data-trip-name="${esc(conflicts[0].tripName)}" data-summary="${esc(conflicts[0].summary || '')}" style="font-size:11px; padding:3px 8px;">Modify existing instead</button>` : ''}
+        ${conflicts.length
+          ? `<div data-parse-conflict-ui></div>`
+          : `<div data-parse-actions style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn primary" data-parse-import style="font-size:12px; padding:5px 12px;">Import as-is</button>
+              <button class="btn" data-parse-modify style="font-size:12px; padding:5px 12px;">Modify then import</button>
+              <button class="btn" data-parse-reject style="font-size:12px; padding:5px 12px;">Reject</button>
             </div>
-            <div data-parse-conflict-edit-panel style="display:none; margin-top:10px;"></div>
-          </div>
-        ` : ''}
-        <div data-parse-actions style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-          <button class="btn primary" data-parse-import style="font-size:12px; padding:5px 12px;">Import as-is</button>
-          <button class="btn" data-parse-modify style="font-size:12px; padding:5px 12px;">Modify then import</button>
-          <button class="btn" data-parse-reject style="font-size:12px; padding:5px 12px;">Reject</button>
-        </div>
-        <div data-parse-modify-panel style="display:none; margin-top:12px;"></div>
+            <div data-parse-modify-panel style="display:none; margin-top:12px;"></div>`}
       </div>
     `;
   };
@@ -14478,35 +14655,24 @@ async function renderTripsyParseReview() {
     });
   });
 
-  // Conflict box: "Keep new" just dismisses the warning so Import/Modify
-  // proceed normally; "Keep existing" rejects the proposed event outright
-  // (same effect as the Reject button); "Modify existing instead" opens
-  // the real conflicting event's own normal edit panel inline.
-  container.querySelectorAll("[data-parse-conflict-keep-new]").forEach(btn => {
-    btn.addEventListener("click", () => { btn.closest("[data-parse-conflict-box]").style.display = "none"; });
-  });
-  container.querySelectorAll("[data-parse-conflict-keep-existing]").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      const row = btn.closest("[data-parse-event-row]");
-      const proposalId = row.dataset.proposalId, eventId = row.dataset.eventId;
-      btn.disabled = true;
-      await Store.resolveTripsyParseProposalEvent(proposalId, eventId, { resolution: 'rejected', resolvedAt: new Date().toISOString() });
-      await afterAction(proposalId);
-    });
-  });
-  container.querySelectorAll("[data-parse-conflict-modify-existing]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const panel = btn.closest("[data-parse-conflict-box]").querySelector("[data-parse-conflict-edit-panel]");
-      const wasOpen = panel.style.display !== "none" && !!panel.innerHTML;
-      panel.style.display = "none";
-      panel.innerHTML = "";
-      if (wasOpen) return;
-      const found = findTripsyRawByKey(btn.dataset.eventKey);
-      if (!found) { toast("Could not find that event — it may have changed.", "error"); return; }
-      renderTripsyViewPanel(panel, found.raw, btn.dataset.summary, () => {
-        renderTripsyEditPanel(panel, found.raw, found.tripKey, found.tripName, btn.dataset.summary);
-      });
-      panel.style.display = "block";
+  // Each conflicting row gets its own self-contained conflict-resolution
+  // controller (see wireTripsyConflictUi) holding that row's working state --
+  // the possibly-edited new-event fields and any modified existing events --
+  // so its amber "Possible conflict" box can live-update to "Conflict Not
+  // Resolved" or clear to a green "Conflict Resolved" + Import as the reviewer
+  // edits, without rebuilding the whole page. Non-conflict rows keep the plain
+  // Import as-is / Modify then import / Reject buttons wired above.
+  container.querySelectorAll("[data-parse-event-row][data-parse-has-conflict]").forEach(row => {
+    const proposal = proposals.find(p => p.id === row.dataset.proposalId);
+    const event = proposal && proposal.events.find(e => e.id === row.dataset.eventId);
+    if (!event) return;
+    const dayKey = tripsyDayKey(event.fields.startsAt || event.fields.departureAt);
+    const destTrip = tripsyParseMatchTrips(dayKey, tripsyDecryptedTrips)[0] || null;
+    const baseConflicts = destTrip ? tripsyParseFindConflicts(event, destTrip, pendingChanges) : [];
+    wireTripsyConflictUi({
+      proposal, event, resource: event.tripsyResource,
+      newFields: { ...event.fields }, newModified: false,
+      baseConflicts, overrides: {}, row, afterAction, afterImport,
     });
   });
 
