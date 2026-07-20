@@ -12704,8 +12704,9 @@ async function renderTripsyEventsListImpl() {
   const pendingParseTripCounts = new Map();
   // Trip keys that have at least one pending proposal event still in an
   // unresolved potential-conflict with something already on that trip -- drives
-  // the badge's yellow-triangle vs green-check look (see parseReviewBadgeHtml).
-  const pendingParseTripConflicts = new Set();
+  // the badge's yellow-triangle vs green-check look (see parseReviewBadgeHtml),
+  // shared with the global status badge via tripsyParseConflictTripKeys.
+  let pendingParseTripConflicts = new Set();
   if (isOwner) {
     const parseProposals = await Store.listTripsyParseProposals();
     parseProposals.forEach(p => {
@@ -12713,10 +12714,10 @@ async function renderTripsyEventsListImpl() {
         const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
         tripsyParseMatchTrips(dayKey, trips).forEach(t => {
           pendingParseTripCounts.set(t.key, (pendingParseTripCounts.get(t.key) || 0) + 1);
-          if (tripsyParseFindConflicts(ev, t, pendingChanges).length) pendingParseTripConflicts.add(t.key);
         });
       });
     });
+    pendingParseTripConflicts = tripsyParseConflictTripKeys(parseProposals, trips, pendingChanges);
   }
   // Which of those attachments already have a local offline copy on THIS
   // device -- drives the offline toggle's tooltip wording in
@@ -13167,9 +13168,13 @@ async function renderTripsyEventsListImpl() {
     // there were none). The color follows the same yellow=needs-attention /
     // green=your-turn semantics as the top-right status badge.
     const hasParseConflict = pendingParseTripConflicts.has(trip.key);
-    const parseReviewBadgeHtml = pendingParseCount ? `
-      <button data-tripsy-review-proposals data-key="${esc(trip.key)}" title="${pendingParseCount} item${pendingParseCount === 1 ? '' : 's'} from a parsed doc or email awaiting your review for this trip${hasParseConflict ? ' (potential conflict to resolve)' : ''}" style="background:${hasParseConflict ? 'var(--amber)' : 'var(--home-green)'}; color:#04210F; border:none; border-radius:50%; width:22px; height:22px; padding:0; font-size:13px; font-weight:800; line-height:1; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">${hasParseConflict ? '⚠️' : '✓'}</button>
-    ` : '';
+    // Yellow state renders as a bare ⚠️ triangle (no circular chip); the green
+    // "ready to review" state stays a green ✓ circle.
+    const parseReviewBadgeHtml = pendingParseCount ? (hasParseConflict ? `
+      <button data-tripsy-review-proposals data-key="${esc(trip.key)}" title="${pendingParseCount} item${pendingParseCount === 1 ? '' : 's'} awaiting review — potential conflict to resolve" style="background:none; border:none; padding:0; font-size:17px; line-height:1; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">⚠️</button>
+    ` : `
+      <button data-tripsy-review-proposals data-key="${esc(trip.key)}" title="${pendingParseCount} item${pendingParseCount === 1 ? '' : 's'} from a parsed doc or email awaiting your review for this trip" style="background:var(--home-green); color:#04210F; border:none; border-radius:50%; width:22px; height:22px; padding:0; font-size:13px; font-weight:800; line-height:1; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">✓</button>
+    `) : '';
     return `
       <div class="card" style="margin-bottom:14px;">
         <div data-tripsy-header-toggle="${esc(trip.key)}" style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; cursor:pointer;">
@@ -14162,6 +14167,23 @@ function tripsyEmailsAwaitingParseCount() {
   return ((driveData && driveData.tripsyEmailIntake) || []).filter(e => !e.parsedAt).length;
 }
 
+// Trip keys that have at least one still-pending parse-proposal event in an
+// unresolved potential-conflict with something already on that trip. Shared by
+// the per-trip card badge (yellow ⚠️ vs green ✓) and the global status badge
+// (which stays yellow while any trip badge is yellow).
+function tripsyParseConflictTripKeys(proposals, trips, pendingChanges) {
+  const set = new Set();
+  (proposals || []).forEach(p => {
+    p.events.filter(e => e.resolution === 'pending').forEach(ev => {
+      const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
+      tripsyParseMatchTrips(dayKey, trips || []).forEach(t => {
+        if (tripsyParseFindConflicts(ev, t, pendingChanges).length) set.add(t.key);
+      });
+    });
+  });
+  return set;
+}
+
 // Aggregates every "needs attention" signal across the Tripsy pipelines into
 // one of three prioritized states for the single top-right badge:
 //   RED    -- a queued change's push genuinely failed (pushConfirmationFailed).
@@ -14169,6 +14191,8 @@ function tripsyEmailsAwaitingParseCount() {
 //             docs flagged but unparsed, or emails saved but unparsed. Yellow
 //             deliberately outranks green so the owner runs the refresh FIRST
 //             (which may itself surface more to review), then reviews once.
+//             Also stays yellow while any trip card shows a yellow ⚠️
+//             (an unresolved parse-proposal conflict), mirroring that flag.
 //   GREEN  -- nothing needs Claude; it's the owner's turn in the app: proposed
 //             events awaiting review, or a completed sync whose queue can be
 //             cleared.
@@ -14202,6 +14226,11 @@ async function computeTripsyStatus() {
   if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged, waiting to be parsed — process flagged docs in Claude`, view: 'utilitiesparsingdocs' });
   const emailsToParse = tripsyEmailsAwaitingParseCount();
   if (emailsToParse) yellow.push({ label: `${emailsToParse} forwarded email${emailsToParse === 1 ? '' : 's'} waiting to be parsed — run a refresh`, view: 'utilitiestripsyrefresh' });
+  // Mirror the per-trip yellow ⚠️ flag: while any trip has a still-unresolved
+  // parse-proposal conflict, keep the global badge yellow too (it links to the
+  // Review Parsed Docs page where each conflict is resolved).
+  const conflictTrips = tripsyParseConflictTripKeys(proposals, tripsyDecryptedTrips, changes);
+  if (conflictTrips.size) yellow.push({ label: `${conflictTrips.size} trip${conflictTrips.size === 1 ? '' : 's'} with a potential conflict to resolve`, view: 'tripsyparsereview' });
   if (yellow.length) return { state: 'yellow', reasons: yellow };
 
   // GREEN -- the owner's turn in the app. Keyed off pending proposal events
