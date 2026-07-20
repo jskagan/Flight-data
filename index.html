@@ -1815,24 +1815,6 @@ const Store = {
       return false;
     }
   },
-  // Bulk sibling to resolveTripsyParseProposalEvent -- only used by the
-  // cluster-accept flow, where N sibling events resolve together and
-  // shouldn't cost N separate Drive writes. patches is [{eventId, patch}].
-  async resolveTripsyParseProposalEvents(proposalId, patches) {
-    try {
-      const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
-      if (!proposal) return false;
-      for (const { eventId, patch } of patches) {
-        const event = proposal.events.find(e => e.id === eventId);
-        if (event) Object.assign(event, patch);
-      }
-      await persistDriveData();
-      return true;
-    } catch (e) {
-      console.error('Store.resolveTripsyParseProposalEvents failed:', e);
-      return false;
-    }
-  },
   async deleteTripsyParseProposal(proposalId) {
     try {
       driveData.tripsyParseProposals = (driveData.tripsyParseProposals || []).filter(p => p.id !== proposalId);
@@ -1840,6 +1822,35 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.deleteTripsyParseProposal failed:', e);
+      return false;
+    }
+  },
+  // Combines what a Reject / "Ignore New Event" press needs -- resolving the
+  // proposal event as rejected, and (if that was the proposal's last pending
+  // event) marking its attachment reviewed and deleting the now-empty
+  // proposal -- into ONE persistDriveData() write instead of up to three
+  // separate ones. Same reasoning as importTripsyParseProposalEvent right
+  // above (which already got this treatment): each write is a full-file
+  // Drive PATCH, and this app's real-world save latency (2-3.5s per write,
+  // even for a small file, per live timing) makes three sequential writes
+  // for one button press a genuinely bad delay, not just a theoretical one.
+  async rejectTripsyParseProposalEvent(proposalId, eventId) {
+    try {
+      const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
+      const event = proposal && proposal.events.find(e => e.id === eventId);
+      if (!event) return false;
+      Object.assign(event, { resolution: 'rejected', resolvedAt: new Date().toISOString() });
+
+      if (proposal.events.every(e => e.resolution !== 'pending')) {
+        const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
+        if (a) a.parseStatus = 'done';
+        driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== proposalId);
+      }
+
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.rejectTripsyParseProposalEvent failed:', e);
       return false;
     }
   },
@@ -1854,9 +1865,14 @@ const Store = {
   // markTripsyAttachmentReviewed/deleteTripsyParseProposal independently) is
   // what caused the noticeable Import delay. `newTripChange` is only passed
   // when the reviewer picked "create a new trip" for this event.
-  async importTripsyParseProposalEvent({ newTripChange, eventChange, proposalId, eventId, resolutionPatch }) {
+  // `deleteExistingChange` is only passed by "Delete Existing Event" (the
+  // conflict box's own delete_event change for the REAL conflicting event),
+  // so that action's queue-the-delete + import-the-new-event also lands in
+  // this same single write instead of two sequential ones.
+  async importTripsyParseProposalEvent({ newTripChange, eventChange, deleteExistingChange, proposalId, eventId, resolutionPatch }) {
     try {
       if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
+      if (deleteExistingChange) driveData.tripsyPendingChanges.push({ ...deleteExistingChange, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
       if (newTripChange) driveData.tripsyPendingChanges.push({ ...newTripChange, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
       driveData.tripsyPendingChanges.push({ ...eventChange, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
 
@@ -1875,6 +1891,48 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.importTripsyParseProposalEvent failed:', e);
+      return false;
+    }
+  },
+  // Combines what the review page's cluster-accept button needs -- queueing
+  // ONE create_trip change plus a create_event change for every clustered
+  // event, resolving all of those proposal events, and (since accepting a
+  // whole cluster commonly resolves everything left in the proposal)
+  // finishing the proposal if it's now fully resolved -- into ONE
+  // persistDriveData() write. This used to be 1 (create_trip) + N
+  // (create_event, one per clustered event) + 1 (resolveTripsyParseProposalEvents)
+  // + up to 2 more (maybe-finish) sequential Drive PATCHes -- for a 5-event
+  // cluster, as many as 9 -- same "each write is a full-file PATCH" cost
+  // that made Import and Reject slow before they got this same treatment.
+  // `eventChanges` is `[{eventId, change, patch}]` -- eventId identifies
+  // which proposal event this create_event change/resolution patch belongs
+  // to; patch is applied as-is (appliedChangeId included by the caller), so
+  // this method stores exactly what it's given without inferring anything.
+  async acceptTripsyParseProposalCluster({ tripChange, eventChanges, proposalId }) {
+    try {
+      if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
+      driveData.tripsyPendingChanges.push({ ...tripChange, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
+      for (const { change } of eventChanges) {
+        driveData.tripsyPendingChanges.push({ ...change, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
+      }
+
+      const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
+      if (!proposal) return false;
+      for (const { eventId, patch } of eventChanges) {
+        const event = proposal.events.find(e => e.id === eventId);
+        if (event) Object.assign(event, patch);
+      }
+
+      if (proposal.events.every(e => e.resolution !== 'pending')) {
+        const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
+        if (a) a.parseStatus = 'done';
+        driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== proposalId);
+      }
+
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.acceptTripsyParseProposalCluster failed:', e);
       return false;
     }
   },
@@ -14249,6 +14307,31 @@ function tripsyParseConflictTripKeys(proposals, trips, pendingChanges) {
   return set;
 }
 
+// How many still-pending parse-proposal events actually show a conflict box
+// on the Review Parsed Docs page -- NOT the same number as
+// tripsyParseConflictTripKeys().size above, which dedupes by TRIP (a trip
+// with 9 conflicting events only ever shows one yellow ⚠️ on its own card,
+// which is the right question for that badge). The global status badge's
+// label was reusing that trip count as if it were a conflict count, so 9
+// real conflicts all landing on one trip read as "1 ... to resolve" --
+// misleading. Mirrors tripsyParseReviewCardHtml's own per-row flagConflict
+// logic exactly (same destTrip-is-just-the-first-match choice, same
+// dateless-event fallback) so this number always equals the count of amber
+// boxes the owner will actually see when they open that page.
+function tripsyParseConflictEventCount(proposals, trips, pendingChanges) {
+  let count = 0;
+  (proposals || []).forEach(p => {
+    p.events.filter(e => e.resolution === 'pending').forEach(ev => {
+      const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
+      const destTrip = tripsyParseMatchTrips(dayKey, trips || [])[0] || null;
+      const conflicts = destTrip ? tripsyParseFindConflicts(ev, destTrip, pendingChanges) : [];
+      const evDay = dayKey || tripsyDayKey(ev.fields.endsAt || ev.fields.arrivalAt);
+      if (conflicts.length || !evDay) count++;
+    });
+  });
+  return count;
+}
+
 // Aggregates every "needs attention" signal across the Tripsy pipelines into
 // one of three prioritized states for the single top-right badge:
 //   RED    -- a queued change's push genuinely failed (pushConfirmationFailed).
@@ -14295,7 +14378,16 @@ async function computeTripsyStatus() {
   // parse-proposal conflict, keep the global badge yellow too (it links to the
   // Review Parsed Docs page where each conflict is resolved).
   const conflictTrips = tripsyParseConflictTripKeys(proposals, tripsyDecryptedTrips, changes);
-  if (conflictTrips.size) yellow.push({ label: `${conflictTrips.size} trip${conflictTrips.size === 1 ? '' : 's'} with a potential conflict to resolve`, view: 'tripsyparsereview' });
+  if (conflictTrips.size) {
+    // The gate above is still "does at least one trip have a conflict"
+    // (kept in sync with the per-trip ⚠️ cards), but the label itself shows
+    // the real number of conflicting EVENTS, not the number of distinct
+    // trips they happen to land on -- 9 conflicts all on one trip used to
+    // read as "1 trip... to resolve", which read as "1 conflict" and badly
+    // undercounted what the owner would actually find on the review page.
+    const conflictEventCount = tripsyParseConflictEventCount(proposals, tripsyDecryptedTrips, changes);
+    yellow.push({ label: `${conflictEventCount} event${conflictEventCount === 1 ? '' : 's'} with a potential conflict to resolve`, view: 'tripsyparsereview' });
+  }
   if (yellow.length) return { state: 'yellow', reasons: yellow };
 
   // GREEN -- the owner's turn in the app. Keyed off pending proposal events
@@ -14448,7 +14540,7 @@ function tripsyParseEventFieldsHtml(resource, fields) {
 // the whole cost of the Import button's noticeable delay. Returns false
 // (and toasts) on any storage failure, without leaving the proposal event
 // stuck in a half-resolved state.
-async function tripsyParseImportProposalEvent(proposal, event, destinationValue, fieldsOverride) {
+async function tripsyParseImportProposalEvent(proposal, event, destinationValue, fieldsOverride, deleteExistingChange) {
   const fields = fieldsOverride || event.fields;
   let tripKey, tripName, tripsyTripId, newTripChange;
   if (destinationValue === '__new__') {
@@ -14474,7 +14566,7 @@ async function tripsyParseImportProposalEvent(proposal, event, destinationValue,
     eventSummary: event.eventSummary, fields,
   };
   const ok = await Store.importTripsyParseProposalEvent({
-    newTripChange, eventChange, proposalId: proposal.id, eventId: event.id,
+    newTripChange, eventChange, deleteExistingChange, proposalId: proposal.id, eventId: event.id,
     resolutionPatch: {
       resolution: fieldsOverride ? 'modified-accepted' : 'accepted',
       resolvedAt: new Date().toISOString(),
@@ -14485,18 +14577,6 @@ async function tripsyParseImportProposalEvent(proposal, event, destinationValue,
   });
   if (!ok) { toast('Could not import — storage error. Please try again.', 'error'); return false; }
   return true;
-}
-
-// Once every event in a proposal has been resolved (one way or another),
-// it's done -- flip the attachment to 'done' and remove the now-empty
-// proposal, same terminal state Store.markTripsyAttachmentReviewed exists
-// for.
-async function tripsyParseMaybeFinishProposal(proposalId) {
-  const proposal = (await Store.listTripsyParseProposals()).find(p => p.id === proposalId);
-  if (proposal && proposal.events.every(e => e.resolution !== 'pending')) {
-    await Store.markTripsyAttachmentReviewed(proposal.attachmentId);
-    await Store.deleteTripsyParseProposal(proposal.id);
-  }
 }
 
 // Inner HTML for a conflicting event row's resolution area (the
@@ -14610,8 +14690,12 @@ function wireTripsyConflictUi(ctx) {
     const ignoreBtn = q('[data-parse-conflict-ignore-new]');
     if (ignoreBtn) ignoreBtn.addEventListener('click', async () => {
       ignoreBtn.disabled = true;
-      await Store.resolveTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id, { resolution: 'rejected', resolvedAt: new Date().toISOString() });
-      await ctx.afterAction(ctx.proposal.id);
+      // Store.rejectTripsyParseProposalEvent already folds the "maybe finish
+      // the proposal" step into its one write -- afterImport (badge + full
+      // re-render only, no separate tripsyParseMaybeFinishProposal call) is
+      // the right post-action here, same as a real Import.
+      await Store.rejectTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id);
+      await ctx.afterImport();
     });
 
     const delBtn = q('[data-parse-conflict-delete-existing]');
@@ -14620,14 +14704,16 @@ function wireTripsyConflictUi(ctx) {
       const found = findTripsyRawByKey(delBtn.dataset.eventKey);
       if (!found) { toast('Could not find that event — it may have changed.', 'error'); delBtn.disabled = false; return; }
       const summary = tripsyRawToDisplay(found.raw.resource, found.raw).summary;
-      const delOk = await Store.queueTripsyChange({
+      // Built here but not queued separately -- passed through as
+      // deleteExistingChange so it lands in the SAME write as the new
+      // event's import below, instead of two sequential Drive PATCHes.
+      const deleteChange = {
         id: crypto.randomUUID(), type: 'delete_event', createdAt: new Date().toISOString(),
         tripKey: found.tripKey, tripName: found.tripName, eventKey: delBtn.dataset.eventKey,
         eventSummary: summary, tripsyResource: found.raw.resource, tripsyId: found.raw.id,
-      });
-      if (!delOk) { toast('Could not queue the delete — storage error.', 'error'); delBtn.disabled = false; return; }
-      const ok = await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null);
-      if (ok) { toast('Deleted the existing event and imported the new one.'); await ctx.afterImport(); }
+      };
+      const ok = await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null, deleteChange);
+      if (ok) { toast('Deleted the existing event and imported the new one.'); await ctx.afterImport(); } else { delBtn.disabled = false; }
     });
 
     const modNewBtn = q('[data-parse-conflict-modify-new]');
@@ -14846,16 +14932,13 @@ async function renderTripsyParseReview() {
   // Every action below follows the same shape: mutate, then re-render this
   // whole page fresh (matches how the rest of the Tripsy Trips code
   // re-renders its own full list after any single action, rather than
-  // hand-patching individual rows) plus refresh the top-right badge.
-  const afterAction = async proposalId => {
-    await tripsyParseMaybeFinishProposal(proposalId);
-    await updateTripsyDocParseBadge();
-    await renderTripsyParseReview();
-  };
-  // Import already folds the "finish proposal" step into its one atomic
-  // Store.importTripsyParseProposalEvent write (see that function) -- calling
-  // tripsyParseMaybeFinishProposal here too would just be a redundant
-  // Drive read/no-op write, re-introducing the extra round-trip this was
+  // hand-patching individual rows) plus refresh the top-right badge. Every
+  // action on this page (Import, Reject, Delete Existing Event, cluster
+  // accept) now goes through a single Store method that already folds its
+  // own "finish the proposal if that was the last pending event" step into
+  // its one atomic write -- so this is the only post-action helper needed;
+  // a separate re-check-then-maybe-finish step would just be a redundant
+  // Drive read/no-op write, re-introducing the extra round trips this was
   // meant to remove.
   const afterImport = async () => {
     await updateTripsyDocParseBadge();
@@ -14880,8 +14963,11 @@ async function renderTripsyParseReview() {
       const row = btn.closest("[data-parse-event-row]");
       const proposalId = row.dataset.proposalId, eventId = row.dataset.eventId;
       btn.disabled = true;
-      await Store.resolveTripsyParseProposalEvent(proposalId, eventId, { resolution: 'rejected', resolvedAt: new Date().toISOString() });
-      await afterAction(proposalId);
+      // Store.rejectTripsyParseProposalEvent already folds the "maybe finish
+      // the proposal" step into its one write -- afterImport (badge + full
+      // re-render only) is the right post-action, same as a real Import.
+      await Store.rejectTripsyParseProposalEvent(proposalId, eventId);
+      await afterImport();
     });
   });
 
@@ -14923,7 +15009,7 @@ async function renderTripsyParseReview() {
     wireTripsyConflictUi({
       proposal, event, resource: event.tripsyResource,
       newFields: { ...event.fields }, newModified: false,
-      overrides: {}, pendingChanges, row, afterAction, afterImport,
+      overrides: {}, pendingChanges, row, afterImport,
     });
   });
 
@@ -14938,25 +15024,31 @@ async function renderTripsyParseReview() {
       const clusterEvents = eventIds.map(id => proposal.events.find(e => e.id === id)).filter(Boolean);
       const dayKeys = clusterEvents.map(e => tripsyDayKey(e.fields.startsAt || e.fields.departureAt)).filter(Boolean).sort();
       btn.disabled = true;
+      // Built in memory and sent as ONE write (Store.acceptTripsyParseProposalCluster)
+      // instead of 1 (create_trip) + N (create_event) + 1 (resolve) + up to 2
+      // more (maybe-finish) sequential Drive PATCHes -- same reasoning as
+      // Import/Reject/Delete Existing Event's own single-write treatment.
       const tripKey = `tripsy-pending-${crypto.randomUUID().slice(0, 8)}`;
-      const tripOk = await Store.queueTripsyChange({
+      const tripChange = {
         id: crypto.randomUUID(), type: 'create_trip', createdAt: new Date().toISOString(),
         tripKey, name, start: dayKeys[0], end: dayKeys[dayKeys.length - 1],
-      });
-      if (!tripOk) { toast("Could not create the new trip — storage error. Please try again.", "error"); btn.disabled = false; return; }
-      const patches = [];
-      for (const ev of clusterEvents) {
+      };
+      const eventChanges = clusterEvents.map(ev => {
         const changeId = crypto.randomUUID();
-        const eventOk = await Store.queueTripsyChange({
-          id: changeId, type: 'create_event', createdAt: new Date().toISOString(),
-          tripKey, tripName: name, tripsyResource: ev.tripsyResource, tripsyTripId: null,
-          eventSummary: ev.eventSummary, fields: ev.fields,
-        });
-        if (eventOk) patches.push({ eventId: ev.id, patch: { resolution: 'accepted', resolvedAt: new Date().toISOString(), destinationTripKey: tripKey, appliedChangeId: changeId } });
-      }
-      await Store.resolveTripsyParseProposalEvents(proposalId, patches);
-      toast(`Created "${name}" with ${patches.length} event${patches.length === 1 ? '' : 's'}.`);
-      await afterAction(proposalId);
+        return {
+          eventId: ev.id,
+          change: {
+            id: changeId, type: 'create_event', createdAt: new Date().toISOString(),
+            tripKey, tripName: name, tripsyResource: ev.tripsyResource, tripsyTripId: null,
+            eventSummary: ev.eventSummary, fields: ev.fields,
+          },
+          patch: { resolution: 'accepted', resolvedAt: new Date().toISOString(), destinationTripKey: tripKey, appliedChangeId: changeId },
+        };
+      });
+      const ok = await Store.acceptTripsyParseProposalCluster({ tripChange, eventChanges, proposalId });
+      if (!ok) { toast("Could not create the new trip — storage error. Please try again.", "error"); btn.disabled = false; return; }
+      toast(`Created "${name}" with ${eventChanges.length} event${eventChanges.length === 1 ? '' : 's'}.`);
+      await afterImport();
     });
   });
   container.querySelectorAll("[data-parse-cluster-dismiss]").forEach(btn => {
