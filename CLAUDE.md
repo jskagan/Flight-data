@@ -150,8 +150,8 @@ actually refreshes.
 
 Tripsy's own API isn't reachable from a public browser (no public/CORS-friendly developer access),
 so there is no in-browser sync at all for this pipeline — unlike PS Reservations/Balance above.
-Instead, a daily Claude Code scheduled task (`tripsy-trips-refresh` — see the Git workflow section
-above for its push-authorization scope) talks to a Tripsy MCP connector, builds a plain JSON snapshot
+Instead, a Claude Code agent following the `tripsy-trips-refresh` runbook (see the Git workflow
+section above for its push-authorization scope) talks to a Tripsy MCP connector, builds a plain JSON snapshot
 of every trip/event in range, and embeds it **encrypted** directly in `index.html` as
 `TRIPSY_ENCRYPTED` (AES-256-GCM, key derived via PBKDF2 from a passphrase kept in a private Drive
 file, decrypted client-side via `decryptTripsyData()`, `index.html:6471`) — necessary because this
@@ -159,6 +159,25 @@ repo is public and the trip data includes confirmation codes, phone numbers, and
 `TRIPSY_SNAPSHOT_GENERATED_AT` tracks when the embedded snapshot was last refreshed. The sync
 window is `TRIP_SYNC_DAYS_BACK`/`TRIP_SYNC_DAYS_FORWARD` (`index.html:2450`, currently 60 days
 back / 1095 forward, i.e. 3 years).
+
+**How a refresh actually gets triggered** — three routes, all running the same procedure:
+
+- **Scheduled (cloud routine).** A Claude Code cloud routine, "Tripsy Trips Refresh", runs at
+  **9:00am / 5:00pm / 11:00pm Pacific** (cron `0 0,6,16 * * *`, fixed in UTC — so an hour earlier
+  during PST). It executes in Anthropic's cloud, so it fires with every local device switched off.
+  Managed at `https://claude.ai/code/routines`. Its prompt carries the whole runbook **inline**,
+  because the cloud sandbox clones this repo from GitHub and `.claude/` is gitignored — so edits to
+  the local runbook do *not* propagate to it; update both if the procedure changes.
+- **On demand, desktop (preferred).** Double-click `~/Desktop/Refresh Tripsy Trips.command`. It runs
+  `claude -p` headlessly with a fixed `--allowedTools` list, so it never prompts. This is the path
+  `LOCAL_SETUP.md` documents: it reads `flight-log-data.json` and the passphrase, and writes the
+  relay files, through the **Google Drive for Desktop mount** as ordinary local files rather than
+  the Drive connector (whose `create_file` currently fails from cloud sessions).
+- **On demand, by hand.** Tell any local Claude Code session "run a Tripsy refresh"; it follows
+  `~/.claude/scheduled-tasks/tripsy-trips-refresh/SKILL.md`. That file is untracked and
+  machine-local. **Despite the `scheduled-tasks/` folder name, nothing is scheduled there** — no
+  cron, no launchd, no OS-level job; it is only where the runbook text lives. (An older "daily
+  8:23/8:30am scheduled task" referenced in earlier docs no longer exists.)
 
 - **Pending changes, not live writes (headless push via a Drive relay)**: the browser can't call
   Tripsy's API directly, so any edit/delete/create the owner makes on the Trips page (per-event
@@ -218,9 +237,16 @@ back / 1095 forward, i.e. 3 years).
   badges (pending-changes + doc-parse). The color rule is consistent across every Tripsy signal:
   **red 🛑** = a push genuinely failed/unverified; **yellow ⚠️** = a Claude step is needed (changes
   waiting to push, docs flagged-but-unparsed, or emails saved-but-unparsed) *or* any trip card is
-  showing its yellow ⚠️ conflict flag (`tripsyParseConflictTripKeys`) — so the global badge stays
-  yellow as long as any individual trip flag is yellow; yellow deliberately outranks green so the
-  owner clears it first; **green 🟢** = the owner's turn in the app (proposals to review). There's no green "clear the pushed changes" state anymore — applied changes
+  showing its yellow ⚠️ conflict flag (`tripsyParseConflictTripKeys`) — so the global badge mirrors
+  any individual trip flag that's yellow; yellow deliberately outranks green so the
+  owner clears it first; **green 🟢** = the owner's turn in the app (proposals to review).
+  One caveat on that mirroring: conflict detection needs the *decrypted* trips to date-match
+  proposals against, so it only works once `tripsyDecryptedTrips` is populated. `syncTripsyRelays`
+  attempts a silent `ensureTripsyDecrypted()` before its badge refresh (covering startup on any
+  device that unlocks without prompting), and `renderTripsyEventsList` refreshes the badge after
+  each render — but on a device that can't unlock silently (first visit, rotated passphrase) the
+  badge can briefly read green while a trip card would read yellow, until something decrypts.
+  There's no green "clear the pushed changes" state anymore — applied changes
   are auto-removed from the queue when a relay confirms them, so a queued change is always either
   yellow (unconfirmed) or red (unverified). Clicking opens a panel listing the specific reason(s)
   for the current state, each linking to where it's handled. Per-trip flags are green once any

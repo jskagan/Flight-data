@@ -52,6 +52,33 @@ avoids the connector's response-size limit that the cloud session keeps hitting.
    "List my Tripsy trips" — it should return trips.
 5. The Google Drive MCP connector is **not needed locally** — that's the point.
 
+## Gotchas when running headlessly (the `.command` shortcut)
+
+The desktop shortcut `~/Desktop/Refresh Tripsy Trips.command` runs `claude -p` (non-interactive)
+with an explicit `--allowedTools` list. Four things bit us setting that up; all are fixed in the
+current file, but they're worth knowing if it's ever rebuilt or moved to another Mac:
+
+1. **`claude` isn't on `PATH` in a double-clicked `.command`.** The native installer puts it at
+   `~/.local/bin/claude` and wires that into the *zsh* startup files, but a `.command` runs under
+   non-login `bash`, which never sources them — you get `claude: command not found`. The script
+   therefore sets `export PATH="$HOME/.local/bin:$PATH"` itself. (Same reason plain `claude` fails
+   in a bash Terminal; use `~/.local/bin/claude` there.)
+2. **Headless sessions see a different Tripsy server than interactive ones.** An interactive session
+   uses the **claude.ai Tripsy connector**, whose tools are namespaced `mcp__claude_ai_Tripsy__*`.
+   A `claude -p` run instead loads the user-scoped HTTP server registered in `~/.claude.json`,
+   whose tools are `mcp__tripsy__*`. `--allowedTools` must list the **`mcp__tripsy__*`** names or
+   every Tripsy call is silently denied.
+3. **That HTTP server needs its own one-time OAuth**, separate from the claude.ai connector, and
+   `-p` mode can't run an interactive sign-in. Authorize it from a **standalone terminal CLI**
+   (`~/.local/bin/claude`, then `/mcp` → `tripsy` → sign in). The `/mcp` panel *inside the desktop
+   app does not list it* — that panel only manages claude.ai connectors. Verify with
+   `~/.local/bin/claude mcp list`, which should show `tripsy: ... ✔ Connected`.
+4. **`Write` must be in `--allowedTools`.** The transform/encrypt step needs a scratch Python file
+   in `/tmp` (an inline bash heredoc is rejected by the command analyzer, because the embedded JSON
+   braces look like shell brace expansion). Without `Write` the run gets all the way to step 7 and
+   then stalls. `Bash(python3 *)` and `Bash(pip3 install *)` are needed for the same step, and
+   `WebFetch` for geocoding an activity's address (activity creates require lat/long).
+
 ## Key locations on the desktop
 
 - **Drive folder (holds everything the refresh touches):**

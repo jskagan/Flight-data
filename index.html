@@ -2764,6 +2764,16 @@ async function syncTripsyRelays() {
     await drainTripsyAppliedChanges();
     await drainTripsyEmailProposals();
     await scanTripsyEmailIntake();
+    // computeTripsyStatus can only spot a per-trip parse conflict if the
+    // decrypted trips are there to date-match proposals against -- with
+    // tripsyDecryptedTrips still null it finds none, so the badge sits green
+    // while a trip card would show its yellow conflict triangle. Unlock first
+    // when that can be done SILENTLY: ensureTripsyDecrypted tries the
+    // Drive-shared passphrase then a locally cached one, never prompts, and
+    // returns null if neither works (the badge then behaves as it did before,
+    // correcting itself once My Trips renders). Best-effort -- an unlock
+    // failure must never abort the badge refresh below.
+    try { await ensureTripsyDecrypted(); } catch (e) { /* ignore -- badge falls back to pre-decryption behavior */ }
     await updateTripsyStatusBadge();
     if (currentView === 'tripsytrips' && tripsyDecryptedTrips) renderTripsyEventsList();
   } catch (e) {
@@ -6033,7 +6043,7 @@ async function renderUtilitiesTripsyRefresh() {
   const unverified = changes.filter(c => c.pushConfirmationFailed);
   main.innerHTML = `
     <div class="page-title">Tripsy Refresh</div>
-    <div class="page-sub">My Trips data moves between this app and the real Tripsy account through a daily scheduled refresh (or one you trigger yourself) -- this page shows what's waiting to go out, when data last came in, and how the whole process works.</div>
+    <div class="page-sub">My Trips data moves between this app and the real Tripsy account through a scheduled refresh that runs three times a day (or one you trigger yourself) -- this page shows what's waiting to go out, when data last came in, and how the whole process works.</div>
 
     <div class="card" style="margin-bottom:16px;">
       <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">Queued to Push</div>
@@ -6068,7 +6078,7 @@ async function renderUtilitiesTripsyRefresh() {
     <div class="card" style="margin-bottom:16px;">
       <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">Scheduled Refresh</div>
       <div style="font-size:13px; line-height:1.6;">
-        <p>Every day at <b>8:30 AM</b>, a Claude Code scheduled task ("tripsy-trips-refresh") runs automatically and does two things, in order:</p>
+        <p>Three times a day -- <b>9:00 AM</b>, <b>5:00 PM</b>, and <b>11:00 PM</b> Pacific -- a scheduled Claude Code <b>cloud routine</b> ("Tripsy Trips Refresh") runs automatically and does two things, in order. It runs in the cloud, so it fires whether or not this Mac or your iPad is switched on. (Times are fixed in UTC, so during Pacific Standard Time they land an hour earlier: 8 AM / 4 PM / 10 PM.)</p>
         <p style="margin-top:10px;"><b>1. Push.</b> It reads the "Queued to Push" changes straight from this app's data file, applies each to the real Tripsy account, and reports back which succeeded. The app then clears those from the queue the next time you open it. This runs <b>headless</b> -- no signed-in browser needed -- so it also works from a Claude session on an iPad while you travel.</p>
         <p style="margin-top:8px;"><b>2. Pull.</b> It fetches the current state of every trip in the sync window straight from Tripsy's API, rebuilds the encrypted snapshot embedded in this page, and republishes the site -- updating the "Last Pulled from Tripsy" timestamp above.</p>
         <p style="margin-top:10px;"><b>What the symbols mean</b> (top-right corner, every screen -- click it for the specific reason):</p>
@@ -6084,14 +6094,14 @@ async function renderUtilitiesTripsyRefresh() {
     <div class="card">
       <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">Manual Refresh</div>
       <div style="font-size:13px; line-height:1.6;">
-        <p>You don't have to wait for 8:30 AM -- the same push-then-pull refresh can be triggered any time from a <b>Claude Code session</b>, since Tripsy's API key only ever exists there, never in this page. In every case you just tell Claude <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span> and it applies each queued change to Tripsy, pulls fresh data, and republishes this page. The only difference between devices is how the refresh's confirmation files get written back to your Drive.</p>
+        <p>You don't have to wait for the next scheduled run -- the same push-then-pull refresh can be triggered any time from a <b>Claude Code session</b>, since Tripsy's API key only ever exists there, never in this page. In every case you just tell Claude <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span> and it applies each queued change to Tripsy, pulls fresh data, and republishes this page. The only difference between devices is how the refresh's confirmation files get written back to your Drive.</p>
         <p style="margin-top:10px;"><b>On the Mac at your desk (fully automatic -- preferred):</b></p>
         <ol style="margin:6px 0 0 20px; padding:0;">
-          <li>Open the local <b>Claude Code</b> session in the cloned repo (with <b>Google Drive for Desktop</b> running, so the <i>Travel Reservation Tracking</i> folder is mounted as normal files -- see <span style="font-family:var(--mono);">LOCAL_SETUP.md</span> for the one-time setup).</li>
-          <li>Send: <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span></li>
-          <li>Claude does the whole thing end to end -- pushing changes, pulling data, republishing, <b>and</b> writing the confirmation/proposal files straight into the Drive folder as local files. Nothing to upload; the Drive connector's write bug doesn't apply locally.</li>
+          <li>Double-click <span style="font-family:var(--mono);">Refresh Tripsy Trips.command</span> on the Desktop.</li>
+          <li>A Terminal window opens and runs the whole refresh without asking you anything -- it takes a few minutes and looks idle while it works. It then prints a summary and waits for a keypress to close.</li>
+          <li>That's the whole thing end to end -- pushing queued changes, pulling data, republishing, <b>and</b> writing the confirmation/proposal files straight into the Drive folder as local files. Nothing to upload; the Drive connector's write bug doesn't apply locally.</li>
         </ol>
-        <p style="margin-top:8px; font-size:12px; color:var(--muted);">Shortcut: if you've set up the <span style="font-family:var(--mono);">Refresh Tripsy Trips.command</span> file, double-clicking it runs the same local refresh without opening a session by hand.</p>
+        <p style="margin-top:8px; font-size:12px; color:var(--muted);">Same thing by hand: open a local <b>Claude Code</b> session inside the cloned repo and send <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span>. Either route needs <b>Google Drive for Desktop</b> running, so the <i>Travel Reservation Tracking</i> folder is mounted as normal files -- see <span style="font-family:var(--mono);">LOCAL_SETUP.md</span> for the one-time setup, including the one-time Tripsy sign-in the headless run depends on.</p>
         <p style="margin-top:10px;"><b>On an iPad (one manual upload step):</b></p>
         <ol style="margin:6px 0 0 20px; padding:0;">
           <li>Open Safari (or the Claude app) and go to <b>claude.ai/code</b>.</li>
@@ -12659,10 +12669,14 @@ function renderTripsyEventsList() {
   const run = _tripsyEventsListRenderChain.then(() => renderTripsyEventsListImpl());
   // Once the trip cards (and their per-trip conflict flags) have rendered,
   // tripsyDecryptedTrips is populated -- refresh the global status badge from
-  // that same data so it can't sit green while a trip shows a yellow conflict
-  // triangle. Nothing else recomputes the badge after decryption, so without
-  // this the badge only reflects conflicts on the NEXT recompute. Best-effort,
-  // owner-only; runs alongside (not in place of) the returned promise below.
+  // that same data so it doesn't sit green while a trip shows a yellow conflict
+  // triangle. syncTripsyRelays already tries a silent unlock before its own
+  // badge refresh, which covers the startup case on any device that can unlock
+  // without prompting; this covers the rest (first visit to a device, a rotated
+  // passphrase, or a manual unlock), where the badge can't see conflicts until
+  // something decrypts. So the two agree from the first render onward, not
+  // necessarily before it. Best-effort, owner-only; runs alongside (not in
+  // place of) the returned promise below.
   run.then(() => { if (isOwner) return updateTripsyStatusBadge(); }).catch(() => {});
   // Swallow the wrapper's own rejection so one failed render doesn't
   // permanently wedge the chain for every render after it -- the real
