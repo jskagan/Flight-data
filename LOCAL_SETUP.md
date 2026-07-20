@@ -78,6 +78,19 @@ current file, but they're worth knowing if it's ever rebuilt or moved to another
    braces look like shell brace expansion). Without `Write` the run gets all the way to step 7 and
    then stalls. `Bash(python3 *)` and `Bash(pip3 install *)` are needed for the same step, and
    `WebFetch` for geocoding an activity's address (activity creates require lat/long).
+5. **Claude can't clean up its own scratch — the shell script has to.** Step 12 decrypts the current
+   snapshot to diff against, so the scratch files hold trip data in **cleartext** (confirmation
+   codes, addresses, phone numbers). Claude's bash sandbox refuses `rm` outside the repo, so
+   granting a `Bash(rm ...)` permission does *not* help — a run on 2026-07-20 left
+   `/tmp/tt_old_plaintext.json` and `/tmp/tt_new_plaintext.json` (94 events, 34 confirmation codes)
+   sitting on disk. The `.command` file therefore creates `/tmp/tripsy-refresh-scratch`, instructs
+   the run to put **every** scratch file there and to not attempt its own cleanup, and wipes that
+   directory with `trap '...' EXIT` so it also runs on Ctrl-C or an early failure. Keep the wipe
+   scoped to that one directory: a broader `/tmp/tt_*` sweep can delete files out from under a
+   concurrent Claude session working on this repo (that happened too).
+
+   The passphrase itself is *not* at risk here — the scratch scripts read it from the Drive file at
+   runtime rather than embedding it, so it never lands on disk.
 
 ## Key locations on the desktop
 
