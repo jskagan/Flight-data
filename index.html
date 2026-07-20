@@ -8314,20 +8314,28 @@ function tripsyConflictReason(newFields, resource, c) {
   return `the new event overlaps "${name}" from ${tripsyConflictWhen(oStart)} to ${tripsyConflictWhen(oEnd)}`;
 }
 
-// Re-runs the same overlap test tripsyParseFindConflicts uses, but against a
-// working copy of the proposed event's fields (as the reviewer edits it) and
-// with any modified existing events overridden by their new field values --
-// so the conflict box can live-update to "Conflict Not Resolved" or clear to
-// "Conflict Resolved" as edits are made, without re-reading the snapshot.
-function tripsyRecheckConflicts(newFields, resource, baseConflicts, overrides) {
-  const ns = newFields.startsAt || newFields.departureAt;
-  const ne = newFields.endsAt || newFields.arrivalAt;
-  return baseConflicts
+// Live conflict state for a row, recomputed from the current working new-event
+// fields (ctx.newFields) each render so a date/time edit re-evaluates on the
+// spot. `noDate` is true when the new event has no date at all -- a potential
+// conflict with everything, which the UI flags without naming a counterpart
+// (see the dateless branch in tripsyConflictUiHtml), since it could clash with
+// any of them. Otherwise it finds the trip the new date falls in and returns
+// the existing same-resource events it actually overlaps, applying any
+// in-progress edits to those existing events (ctx.overrides).
+function tripsyLiveConflicts(ctx) {
+  const ns = ctx.newFields.startsAt || ctx.newFields.departureAt;
+  const ne = ctx.newFields.endsAt || ctx.newFields.arrivalAt;
+  const day = tripsyDayKey(ns) || tripsyDayKey(ne);
+  if (!day) return { noDate: true, conflicts: [] };
+  const destTrip = tripsyParseMatchTrips(day, tripsyDecryptedTrips)[0] || null;
+  if (!destTrip) return { noDate: false, conflicts: [] };
+  const conflicts = tripsyParseFindConflicts({ fields: ctx.newFields, tripsyResource: ctx.resource }, destTrip, ctx.pendingChanges)
     .map(c => {
-      const ov = c.eventKey && overrides[c.eventKey];
+      const ov = c.eventKey && ctx.overrides[c.eventKey];
       return ov ? { ...c, start: ov.startsAt || ov.departureAt || null, end: ov.endsAt || ov.arrivalAt || null } : c;
     })
     .filter(c => tripsyEventOverlap(ns, ne, c.start, c.end));
+  return { noDate: false, conflicts };
 }
 
 // Among a proposal's still-pending events that matched NO existing trip,
@@ -14384,7 +14392,19 @@ async function tripsyParseMaybeFinishProposal(proposalId) {
 // single Import button that replaces the whole amber block. Owner-facing on
 // the review page only.
 function tripsyConflictUiHtml(ctx) {
-  const conflicts = tripsyRecheckConflicts(ctx.newFields, ctx.resource, ctx.baseConflicts, ctx.overrides);
+  const { noDate, conflicts } = tripsyLiveConflicts(ctx);
+  if (noDate) {
+    // No date at all -> potential conflict with everything, so name no specific
+    // counterpart and omit the orange box; the only ways forward are to give it
+    // a date (Modify New Event) or drop it (Ignore New Event).
+    return `
+      <div style="margin-top:8px; font-size:12px; color:var(--amber); font-weight:700;">⚠️ Possible conflict: the new event has no date, so it could conflict with other events. Add a date, or ignore it.</div>
+      <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
+        <button class="btn" data-parse-conflict-modify-new style="font-size:12px; padding:5px 12px;">Modify New Event</button>
+        <button class="btn" data-parse-conflict-ignore-new style="font-size:12px; padding:5px 12px;">Ignore New Event</button>
+      </div>
+      <div data-parse-conflict-new-panel style="display:none; margin-top:10px;"></div>`;
+  }
   if (conflicts.length === 0) {
     return `
       <div style="margin-top:8px; padding:8px; border:1px solid var(--home-green); border-radius:6px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
@@ -14545,13 +14565,18 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
     ].join('');
     const destTrip = matches[0] || null;
     const conflicts = destTrip ? tripsyParseFindConflicts(ev, destTrip, pendingChanges) : [];
+    // A proposed event with no date at all is itself a potential conflict (it
+    // could land on any day), so it goes through the conflict controller too --
+    // which renders the dateless flag with only Modify New / Ignore New.
+    const evDay = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt) || tripsyDayKey(ev.fields.endsAt || ev.fields.arrivalAt);
+    const flagConflict = conflicts.length || !evDay;
     return `
-      <div data-parse-event-row data-event-id="${esc(ev.id)}" data-proposal-id="${esc(proposal.id)}" ${conflicts.length ? 'data-parse-has-conflict="1"' : ''} style="border-top:1px solid var(--line); padding:12px 0;">
+      <div data-parse-event-row data-event-id="${esc(ev.id)}" data-proposal-id="${esc(proposal.id)}" ${flagConflict ? 'data-parse-has-conflict="1"' : ''} style="border-top:1px solid var(--line); padding:12px 0;">
         <div style="font-size:14px; font-weight:600; color:var(--text);">${esc(ev.eventSummary)} <span style="color:var(--muted); font-weight:400; font-size:12px;">(${esc(tripsySlugToLabel(ev.tripsyResource))})</span></div>
         ${tripsyParseEventFieldsHtml(ev.tripsyResource, ev.fields)}
         <div style="margin-top:10px; font-size:12px; color:var(--muted);">${matches.length ? `Falls within an existing trip:` : `Doesn't match any existing trip.`}</div>
         <select data-parse-event-trip-select class="field-input" style="margin-top:4px; font-size:13px; max-width:280px;">${selectOptions}</select>
-        ${conflicts.length
+        ${flagConflict
           ? `<div data-parse-conflict-ui></div>`
           : `<div data-parse-actions style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
               <button class="btn primary" data-parse-import style="font-size:12px; padding:5px 12px;">Import as-is</button>
@@ -14699,13 +14724,10 @@ async function renderTripsyParseReview() {
     const proposal = proposals.find(p => p.id === row.dataset.proposalId);
     const event = proposal && proposal.events.find(e => e.id === row.dataset.eventId);
     if (!event) return;
-    const dayKey = tripsyDayKey(event.fields.startsAt || event.fields.departureAt);
-    const destTrip = tripsyParseMatchTrips(dayKey, tripsyDecryptedTrips)[0] || null;
-    const baseConflicts = destTrip ? tripsyParseFindConflicts(event, destTrip, pendingChanges) : [];
     wireTripsyConflictUi({
       proposal, event, resource: event.tripsyResource,
       newFields: { ...event.fields }, newModified: false,
-      baseConflicts, overrides: {}, row, afterAction, afterImport,
+      overrides: {}, pendingChanges, row, afterAction, afterImport,
     });
   });
 
