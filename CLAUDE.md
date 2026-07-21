@@ -179,6 +179,21 @@ back / 1095 forward, i.e. 3 years).
   cron, no launchd, no OS-level job; it is only where the runbook text lives. (An older "daily
   8:23/8:30am scheduled task" referenced in earlier docs no longer exists.)
 
+**The transform itself is committed code, not runbook prose: `tools/build_tripsy_snapshot.py`.**
+Every refresh route above pulls the raw Tripsy records, assembles them into that script's input
+shape (`{"trips":[{"trip":{…}, "activities":[…], "hostings":[…], "transportations":[…]}]}`), and
+runs the script to produce the snapshot plaintext — then encrypts that. It is a pure function (raw
+JSON in, plaintext out; no passphrase, no network, no encryption), which is why it lives in this
+public repo. It exists because re-deriving the transform from prose each run kept drifting (event-id
+shape, `""`-vs-`null`, key order, the `→` arrow, the transportation-title rule) and hand-retyping
+raw records silently corrupted data (a curly apostrophe flattened, a U+200E mark dropped); reading
+raw JSON in code makes both impossible. **One caveat**: the app *also* recomputes display fields for
+pending (unsynced) events client-side in `tripsyRawToDisplay`/`tripsyTransportationFallbackSummary`
+(`index.html`) — the single-file/no-imports app can't share the Python module — so the
+transportation-`summary` rule (route-first title, shortened endpoints) exists in both places and
+must be kept in lockstep. A refresh's step-12 diff against the decrypted live snapshot is the test
+that catches drift between them.
+
 - **Pending changes, not live writes (headless push via a Drive relay)**: the browser can't call
   Tripsy's API directly, so any edit/delete/create the owner makes on the Trips page (per-event
   Edit/Delete icons, "Delete Trip", the per-trip Add-item menu, "create a new trip" on the review
