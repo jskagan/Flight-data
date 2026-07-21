@@ -10893,7 +10893,7 @@ field_corrections carries what needs to change, as a list of { field_key, new_va
 - For a difference in START time only, use field_key "startsAt_time" (activity/hosting) or "departureAt_time" (transportation); for END time only, use "endsAt_time" (activity/hosting) or "arrivalAt_time" (transportation). new_value for these four pseudo-fields is a plain local time string exactly as written on the PDF, e.g. "5:30 PM" -- never a date, never a full timestamp.
 - For every other field, use one of these exact field_key names depending on resource: activity/hosting -> name, address, confirmation, phone, website, notes; transportation -> category, confirmation, company, transportNumber, vehicleDescription, departureDescription, departureTerminal, arrivalDescription, arrivalTerminal, seatClass, seatNumber, notes. new_value is the literal corrected text.
 
-reason is one short sentence explaining the classification or what differs -- empty string for a clean "match".
+reason is a SHORT phrase (under 12 words) explaining the classification or what differs -- empty string for a clean "match". Keep it terse; this trip may have many events and the full response needs to fit within the output limit.
 
 If the current-events list below is empty, every PDF event must be "pdf_only" -- do not invent "tripsy_only" rows from nothing.
 
@@ -10909,7 +10909,18 @@ ${JSON.stringify(currentEventsForPrompt)}`;
     },
     body: JSON.stringify({
       model: 'claude-opus-4-8',
-      max_tokens: 8192,
+      // A real trip's worth of comparison rows (LA Phil 2026, for
+      // example, has ~50+ events) can easily need more than the 4096-8192
+      // this app's other narrative calls use -- each row carries several
+      // string fields (summaries, a reason, possible field_corrections),
+      // and the ORIGINAL 8192 cap was confirmed too small in production:
+      // the response got cut off mid-row, JSON.parse threw on the
+      // truncated text, and that surfaced as a generic "Could not compare
+      // itinerary" with no hint why. 16000 gives real headroom; the
+      // explicit stop_reason check below also means a future trip that's
+      // STILL too large fails with a clear, specific message instead of a
+      // cryptic parse error.
+      max_tokens: 16000,
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{
         role: 'user',
@@ -10925,6 +10936,9 @@ ${JSON.stringify(currentEventsForPrompt)}`;
     throw new Error(`Claude API error ${res.status}: ${errBody.slice(0, 500)}`);
   }
   const data = await res.json();
+  if (data.stop_reason === 'max_tokens') {
+    throw new Error('The comparison was too large and got cut off (hit the response size limit). Try again, or split a very large itinerary into a smaller PDF.');
+  }
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude API returned no text block');
   return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
@@ -12964,9 +12978,14 @@ async function runTripsyUpdateComparison(tripKey, file) {
     renderTripsyUpdateOverlayContent();
   } catch (err) {
     console.error('Tripsy itinerary PDF comparison failed:', err);
+    // Show the actual error text (e.g. the max_tokens/API-error messages
+    // thrown by compareTripsyItineraryPdf), not just a generic "please
+    // try again" -- a real production failure surfaced as an unhelpfully
+    // vague message with no clue what actually went wrong.
     content.innerHTML = `
       <div style="padding:40px 20px; text-align:center;">
-        <div style="color:#B33; margin-bottom:14px;">Could not compare itinerary. Please try again.</div>
+        <div style="color:#B33; margin-bottom:6px; font-weight:600;">Could not compare itinerary.</div>
+        <div style="color:#888; font-size:13px; margin-bottom:14px;">${esc((err && err.message) || 'Unknown error.')}</div>
         <button type="button" class="btn" data-tripsy-update-retry>Retry</button>
       </div>
     `;
@@ -14479,10 +14498,10 @@ async function renderTripsyEventsListImpl() {
         <button class="btn" data-tripsy-itinerary-menu-toggle data-key="${esc(trip.key)}" title="Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🧭</button>
         <div data-tripsy-itinerary-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${isOwner ? menuListButtonHtml(`data-tripsy-generate-panel-toggle data-key="${esc(trip.key)}"`, '📝', 'Generate') : ''}
-          ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', 'Update') : ''}
           ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '👀', 'Preview')}
           ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
           ${menuListButtonHtml(`data-tripsy-create-pdf-itinerary data-key="${esc(trip.key)}"`, '📄', 'Create PDF')}
+          ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', 'Update') : ''}
         </div>
         <div data-tripsy-generate-panel="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:280px; max-width:380px; max-height:70vh; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.4);"></div>
       </div>
