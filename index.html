@@ -846,6 +846,50 @@
     width: 100%; max-width: 800px; background: #fff; border-radius: 8px; padding: 40px;
     box-shadow: 0 12px 40px rgba(0,0,0,0.5); font-family: var(--sans); color: #1A222C;
   }
+  /* Itinerary menu's "Update" button (compareTripsyItineraryPdf,
+     renderTripsyUpdateOverlay) -- same fixed full-screen modal shape as
+     #tripsy-preview-overlay above (dark backdrop, click-outside-to-close),
+     just a wider paper since each row needs room for two event summaries
+     plus up to 3 buttons side by side. */
+  #tripsy-update-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9000;
+    overflow-y: auto; padding: 32px 16px; flex-direction: column; align-items: center;
+  }
+  @media print {
+    #tripsy-update-overlay { display: none !important; }
+  }
+  .tripsy-update-toolbar {
+    max-width: 900px; width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px;
+  }
+  .tripsy-update-toolbar-title { color: #fff; font-size: 14px; font-weight: 600; }
+  .tripsy-update-paper {
+    width: 100%; max-width: 900px; background: #fff; border-radius: 8px; padding: 32px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5); font-family: var(--sans); color: #1A222C;
+  }
+  .tripsy-update-day-head {
+    font-family: var(--mono); font-weight: 700; font-size: 13px; color: var(--amber, #8A5A12);
+    padding: 14px 0 6px; border-bottom: 1px solid #DDE2E8; margin-bottom: 4px;
+  }
+  .tripsy-update-row {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    padding: 12px 0; border-bottom: 1px solid #EEE;
+  }
+  .tripsy-update-row-sides { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; font-size: 13.5px; }
+  .tripsy-update-pdf-side { color: #1A222C; }
+  .tripsy-update-tripsy-side { color: #444; }
+  .tripsy-update-reason { font-size: 12px; color: #8A5A12; font-style: italic; margin-top: 2px; }
+  .tripsy-update-row-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
+  .tripsy-update-row-actions .btn { font-size: 12px; padding: 5px 10px; white-space: nowrap; }
+  .tripsy-update-match-badge { font-size: 12px; font-weight: 700; color: #1A7A3C; }
+  .tripsy-update-queued-label { font-size: 12px; font-weight: 700; color: #8A5A12; }
+  .tripsy-update-ignored-label { font-size: 12px; color: #999; font-style: italic; }
+  .tripsy-update-diff-summary {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px; margin-bottom: 10px; font-size: 13px;
+  }
+  .tripsy-update-diff-summary-title { font-weight: 700; margin-bottom: 6px; color: var(--amber, #8A5A12); }
+  .tripsy-update-diff-summary-row { display: flex; gap: 8px; padding: 2px 0; }
+  .tripsy-update-diff-summary-field { font-weight: 600; min-width: 90px; flex-shrink: 0; }
 </style>
 </head>
 <body>
@@ -7732,9 +7776,18 @@ function tripsyRawToDisplay(resource, raw) {
   // "Company Number" detail line (see tripsyTimelineDetailLines, and the
   // itinerary cards' own meta line for this same reason).
   const companyNumber = `${raw.company || ''} ${raw.transportNumber || ''}`.trim();
+  const isFlight = raw.category === 'airplane';
+  const baseSummary = (dep || arr) ? tripsyTransportationFallbackSummary(raw, dep, arr) : (companyNumber || usableName || tripsyTransportationFallbackSummary(raw, dep, arr));
+  // Flights only: company + flight number moves INTO the header/title,
+  // after the origin/destination, rather than living only in its own
+  // detail line (tripsyTimelineDetailLines drops that line for flights
+  // now that it's here instead -- see that function's own comment).
+  // Guarded against duplicating companyNumber when baseSummary already
+  // IS companyNumber (the no-route fallback case above).
+  const summary = (isFlight && companyNumber && baseSummary !== companyNumber) ? `${baseSummary} • ${companyNumber}` : baseSummary;
   return {
-    type: raw.category === 'airplane' ? 'flight' : 'transportation',
-    summary: (dep || arr) ? tripsyTransportationFallbackSummary(raw, dep, arr) : (companyNumber || usableName || tripsyTransportationFallbackSummary(raw, dep, arr)),
+    type: isFlight ? 'flight' : 'transportation',
+    summary,
     location: dep && arr ? `${dep} → ${arr}` : (dep || arr || null),
     notes: raw.notes || null,
     start: raw.departureAt,
@@ -7746,6 +7799,40 @@ function tripsyRawToDisplay(resource, raw) {
       raw.departureTerminal ? `Terminal ${raw.departureTerminal}` : '',
     ]),
   };
+}
+
+// Backs the "Update" (PDF comparison) feature -- a compact per-event
+// summary of this trip's CURRENT Tripsy events, sent to Claude alongside
+// an uploaded PDF so it can match/diff them (compareTripsyItineraryPdf).
+// Runs every event through getEffectiveTripsyEvent first so a re-run of
+// Update after some changes are already queued (but not yet pushed to
+// Tripsy) compares against that pending state, not stale pre-edit data --
+// otherwise accepting one correction and then re-uploading the same PDF
+// would just flag the same field as a conflict all over again. Reuses
+// tripsyRawToDisplay for the resource-specific start/end/summary/location
+// join rules rather than re-deriving them (transportation's
+// departureAt/arrivalAt vs. activity/hosting's startsAt/endsAt) --
+// P/S Reservations are never part of trip.events at all (a separate,
+// Gmail-derived data source with its own drift-matching feature), so
+// they're excluded from this comparison by construction, not by a filter.
+function buildTripsyCurrentEventsPrompt(trip, pendingChanges) {
+  return trip.events
+    .map(ev => getEffectiveTripsyEvent(ev, pendingChanges))
+    .map(ev => {
+      const raw = ev.tripsyRaw;
+      const display = tripsyRawToDisplay(raw.resource, raw);
+      return {
+        id: tripsyEventKey(raw),
+        resource: raw.resource,
+        category: raw.category || null,
+        name: display.summary || null,
+        date: tripsyDayKey(display.start),
+        startTime: formatTripTime(display.start),
+        endTime: formatTripTime(display.end),
+        address: display.location,
+      };
+    })
+    .filter(e => e.id);
 }
 
 // Overlays any queued pending edit/delete onto a Tripsy-sourced event for
@@ -8700,6 +8787,57 @@ function tripsyTimelineDotIcon(ev) {
   return TRIPSY_TIMELINE_TYPE_ICON[ev.type] || '📍';
 }
 
+// The one place this app needs REAL timezone math -- everywhere else
+// deliberately treats stored times as literal wall-clock digits (see
+// CLAUDE.md's "Display times are the event's own local time" note). A
+// flight's own departure/arrival times read correctly as literal digits,
+// but its DURATION doesn't: naively subtracting two literal local times
+// gets the wall-clock gap between two different zones, not the actual
+// elapsed time (a LAX -> LHR flight's local digits are ~19 hours apart,
+// not its real ~11-hour flight time). departureTimezone/arrivalTimezone
+// are already carried through by build_tripsy_snapshot.py's tripsy_raw
+// (confirmed in that script), just never read by the app until now.
+// Converts a literal local wall-clock string + IANA zone name into a real
+// UTC instant (ms) via the standard "double conversion" trick: treat the
+// wall-clock as if it already were UTC, ask Intl what that same instant
+// reads as in the target zone, and correct by the difference. Returns
+// null if either input is missing or unparseable.
+function tripsyZonedWallClockToUtcMs(iso, timeZone) {
+  const parts = parseTripLocalParts(iso);
+  if (!parts || parts.hour == null || !timeZone) return null;
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute || 0);
+  try {
+    const dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone, hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    const get = type => Number(dtf.formatToParts(new Date(asUtc)).find(p => p.type === type).value);
+    const hour = get('hour') % 24; // Intl can report hour "24" for midnight
+    const asZoned = Date.UTC(get('year'), get('month') - 1, get('day'), hour, get('minute'), get('second'));
+    return asUtc - (asZoned - asUtc);
+  } catch (e) {
+    return null;
+  }
+}
+
+// "Flight Time" detail line (tripsyTimelineDetailLines) -- the real
+// elapsed duration of a flight, using its departure/arrival timezones so
+// a cross-timezone leg comes out right rather than as the wall-clock gap.
+// Returns null (never a negative/zero/nonsensical value) if either time
+// or zone is missing.
+function tripsyFlightDurationLabel(raw) {
+  const depMs = tripsyZonedWallClockToUtcMs(raw.departureAt, raw.departureTimezone);
+  const arrMs = tripsyZonedWallClockToUtcMs(raw.arrivalAt, raw.arrivalTimezone);
+  if (depMs == null || arrMs == null) return null;
+  const minutes = Math.round((arrMs - depMs) / 60000);
+  if (!(minutes > 0)) return null;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+
 // Short, separately-labeled detail lines for the row body -- replaces the
 // old single packed "tripsyExtra" string (e.g. "Confirmation: X • phone •
 // website") with only the essentials, one fact per line. Phone/website/
@@ -8727,8 +8865,13 @@ function tripsyTimelineDetailLines(ev) {
   // transportation (including flight)
   const lines = [];
   const isFlight = raw.category === 'airplane';
-  const numberParts = [raw.company, raw.transportNumber].filter(Boolean).join(' ').trim();
-  if (numberParts) lines.push(isFlight ? numberParts : `${tripsySlugToLabel(raw.category)} ${numberParts}`);
+  // Flights only: company + flight number now lives in the header/title
+  // itself (tripsyRawToDisplay), after the origin/destination -- moved
+  // there, not duplicated, so it's skipped as its own detail line here.
+  if (!isFlight) {
+    const numberParts = [raw.company, raw.transportNumber].filter(Boolean).join(' ').trim();
+    if (numberParts) lines.push(`${tripsySlugToLabel(raw.category)} ${numberParts}`);
+  }
   if (ev._splitHalf === 'end') {
     // Arrival half of an overnight NON-FLIGHT leg split by
     // expandMultiDayTripsyEvents (flights are never split) -- its own
@@ -8738,11 +8881,20 @@ function tripsyTimelineDetailLines(ev) {
   } else {
     if (raw.departureTerminal) lines.push(`Terminal ${raw.departureTerminal}`);
     const seatLabel = tripsySeatLabel(raw);
-    if (seatLabel) lines.push(seatLabel);
-    // Equipment (e.g. "A350" for a flight, a rental car's model for ground
-    // transportation) -- shown for every transportation type, same as the
-    // itinerary Preview/Print cards already do (tripsyTransportationCardHtml).
-    if (raw.vehicleDescription) lines.push(raw.vehicleDescription);
+    if (isFlight) {
+      // Seat + equipment share one line for a flight (seats first, e.g.
+      // "Seat: 11D, 11H • Boeing 787-9") -- same " • " join style
+      // tripsyRawToDisplay's own extra() already uses elsewhere. Non-flight
+      // transportation keeps them as two separate lines below.
+      const seatEquipment = [seatLabel, raw.vehicleDescription].filter(Boolean).join(' • ');
+      if (seatEquipment) lines.push(seatEquipment);
+    } else {
+      if (seatLabel) lines.push(seatLabel);
+      // Equipment (e.g. a rental car's model) -- shown for every
+      // non-flight transportation type, same as the itinerary Preview/
+      // Print cards already do (tripsyTransportationCardHtml).
+      if (raw.vehicleDescription) lines.push(raw.vehicleDescription);
+    }
   }
   // Arrival date (only shown when it differs from the departure date) +
   // time, always as the LAST line -- only for an unsplit leg. Flights are
@@ -8760,7 +8912,28 @@ function tripsyTimelineDetailLines(ev) {
     const arriveLabel = (startDay && startDay === endDay)
       ? arriveTime
       : [formatTripDateRange(ev.end, null), arriveTime].filter(Boolean).join(' ');
+    // Flights only, directly above the Arrive line -- the row's own
+    // left-side time already IS the departure time, but per the same
+    // "don't rely solely on the ambient time column" rule the PS
+    // reservation lines already follow, it's spelled out here too rather
+    // than left implicit. Flight Time is the real elapsed duration
+    // (tripsyFlightDurationLabel), not the wall-clock gap between two
+    // possibly-different local times.
+    if (isFlight) {
+      const departTime = formatTripTime(ev.start);
+      if (departTime) lines.push(`Departs: ${departTime}`);
+      const flightTime = tripsyFlightDurationLabel(raw);
+      if (flightTime) lines.push(`Flight Time: ${flightTime}`);
+    }
     if (arriveLabel) lines.push(`Arrive ${arriveLabel}`);
+    // Meals, flights only, always the LAST line -- Tripsy's own sync
+    // pipeline stores meal service (e.g. "Dinner, Breakfast") directly in
+    // a flight's notes field (confirmed against real production data),
+    // nowhere else this function reads notes for transportation at all,
+    // so any non-empty notes on a flight IS its meal info.
+    if (isFlight && raw.notes && raw.notes.trim()) {
+      lines.push(`Meals: ${raw.notes.trim().replace(/\n+/g, ', ')}`);
+    }
   }
   return lines;
 }
@@ -9766,6 +9939,21 @@ function tripsyExtractTimeFromText(text) {
   if (!m) return null;
   return `${m[1]}:${m[2]} ${m[3].toUpperCase()}M`;
 }
+// Converts a 12-hour clock string like "5:30 PM" (compareTripsyItineraryPdf's
+// *_time pseudo-field corrections are always plain strings like this, never
+// a full timestamp -- see that function's own comment for why) into
+// zero-padded 24-hour { hour: '17', minute: '30' } for splicing into a
+// stored "YYYY-MM-DDTHH:MM:00" value (buildTripsyRowChangePayload). Returns
+// null for anything that doesn't parse, same "don't guess" posture as
+// tripsyExtractTimeFromText above.
+function tripsyParse12HourTime(text) {
+  if (!text) return null;
+  const m = String(text).trim().match(/^(1[0-2]|0?[1-9]):([0-5][0-9])\s*([AaPp])\.?[Mm]\.?$/);
+  if (!m) return null;
+  let hour = Number(m[1]) % 12;
+  if (m[3].toUpperCase() === 'P') hour += 12;
+  return { hour: String(hour).padStart(2, '0'), minute: m[2] };
+}
 // Which meal a restaurant-category activity's title should be framed as,
 // purely from its own start time -- covers the full 24 hours with no
 // gaps, wrapping "Late Night" across midnight back around to Breakfast.
@@ -10622,6 +10810,168 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList
   return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
 }
 
+// Backs the Itinerary menu's "Update" button (tripsyUpdateRows,
+// renderTripsyUpdateOverlay) -- compares an uploaded PDF itinerary against
+// this trip's current Tripsy events in a SINGLE call that does both
+// extraction and matching together, rather than extracting first and then
+// fuzzy-matching in JS. Matching by title-string similarity alone provably
+// fails on real data: a Tripsy placeholder titled "Dinner - TBD" needs to
+// match a PDF event titled "Welcome Dinner at the Balmoral" purely by
+// date + time + venue, with zero title overlap -- that needs judgment, not
+// string distance, so it stays with Claude in the same pass as extraction.
+// pdfBase64 is the raw base64 payload (no "data:application/pdf;base64,"
+// prefix). currentEventsForPrompt is buildTripsyCurrentEventsPrompt's
+// output. Never asks Claude to construct a full ISO datetime -- this app
+// stores Tripsy timestamps as bare local literal strings (no offset, see
+// parseTripLocalParts), so date+time are kept as separate plain fields
+// (pdf_date already a literal YYYY-MM-DD straight off the PDF's own day
+// heading, and any time correction as a plain "5:30 PM"-style string) and
+// combined into a storable value afterward in plain JS
+// (buildTripsyRowChangePayload), which eliminates an entire class of
+// possible datetime-formatting error.
+async function compareTripsyItineraryPdf(effectiveTrip, currentEventsForPrompt, pdfBase64) {
+  const apiKey = await fetchAnthropicApiKeyFromDrive();
+  const schema = {
+    type: 'object',
+    properties: {
+      rows: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['match', 'conflict', 'pdf_only', 'tripsy_only'] },
+            matched_event_key: { type: 'string' },
+            pdf_date: { type: 'string' },
+            resource: { type: 'string', enum: ['activity', 'hosting', 'transportation'] },
+            category: { type: 'string' },
+            pdf_summary: { type: 'string' },
+            tripsy_summary: { type: 'string' },
+            field_corrections: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  field_key: { type: 'string' },
+                  new_value: { type: 'string' },
+                },
+                required: ['field_key', 'new_value'],
+                additionalProperties: false,
+              },
+            },
+            reason: { type: 'string' },
+          },
+          required: ['status', 'matched_event_key', 'pdf_date', 'resource', 'category', 'pdf_summary', 'tripsy_summary', 'field_corrections', 'reason'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['rows'],
+    additionalProperties: false,
+  };
+  const promptText = `Compare the attached PDF travel itinerary against this trip's currently tracked events, and classify every event on either side.
+
+Trip: ${effectiveTrip.name || ''}, ${formatTripDateRange(effectiveTrip.start, effectiveTrip.end)}${effectiveTrip.location ? `, ${effectiveTrip.location}` : ''}.
+
+Return one rows[] entry for EVERY event that appears on the PDF, on the current-events list below, or both, with status set to exactly one of:
+- "match": the same real-world event appears on both sides, and nothing meaningfully differs.
+- "conflict": the same real-world event appears on both sides, but at least one field differs (time, venue/address, confirmation number, company, flight/transport number, etc.).
+- "pdf_only": the PDF describes an event with no reasonable match among the current tracked events.
+- "tripsy_only": a currently tracked event has no reasonable match anywhere on the PDF.
+
+Match events by DATE + TIME + what the event actually is (venue, description, context) -- NEVER by title text similarity alone. A currently tracked event's name is very often a generic placeholder (e.g. "Dinner - TBD", "Reception and Dinner") that shares no words at all with the PDF's fuller description of the exact same real event -- treat a generic/placeholder current-event name as unnamed and match it on date, time, and venue/address instead of comparing title text.
+
+For "match" and "conflict" rows, set matched_event_key to the "id" value copied VERBATIM from the matching entry in the current-events list below. Leave it as an empty string for "pdf_only" rows (there is no current event yet) -- never invent one.
+
+For "pdf_only"/"tripsy_only"/"conflict" rows, set resource/category to the best-fit classification (activity/hosting/transportation, with a category slug matching the vocabulary already used in the current-events list below) -- for tripsy_only and conflict rows this MUST match the actual matched/existing event's own resource, not a guess.
+
+Extract pdf_date as the plain YYYY-MM-DD calendar date printed on the PDF's own day heading for that event (e.g. "Day 4 - Wednesday, August 12, 2026" -> "2026-08-12") -- read it directly off the page, never calculate or infer it. Leave pdf_date as an empty string for "tripsy_only" rows.
+
+field_corrections carries what needs to change, as a list of { field_key, new_value } pairs:
+- For "conflict" rows: ONLY the fields that actually differ between the PDF and the current event.
+- For "pdf_only" rows: ALL of the event's fields as described by the PDF, since these become the fields of a brand new event.
+- For "match"/"tripsy_only" rows: always an empty array.
+- For a difference in START time only, use field_key "startsAt_time" (activity/hosting) or "departureAt_time" (transportation); for END time only, use "endsAt_time" (activity/hosting) or "arrivalAt_time" (transportation). new_value for these four pseudo-fields is a plain local time string exactly as written on the PDF, e.g. "5:30 PM" -- never a date, never a full timestamp.
+- For every other field, use one of these exact field_key names depending on resource: activity/hosting -> name, address, confirmation, phone, website, notes; transportation -> category, confirmation, company, transportNumber, vehicleDescription, departureDescription, departureTerminal, arrivalDescription, arrivalTerminal, seatClass, seatNumber, notes. new_value is the literal corrected text.
+
+reason is one short sentence explaining the classification or what differs -- empty string for a clean "match".
+
+If the current-events list below is empty, every PDF event must be "pdf_only" -- do not invent "tripsy_only" rows from nothing.
+
+Current tracked events:
+${JSON.stringify(currentEventsForPrompt)}`;
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-4-8',
+      max_tokens: 8192,
+      output_config: { format: { type: 'json_schema', schema } },
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+          { type: 'text', text: promptText },
+        ],
+      }],
+    }),
+  });
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`Claude API error ${res.status}: ${errBody.slice(0, 500)}`);
+  }
+  const data = await res.json();
+  const textBlock = (data.content || []).find(b => b.type === 'text');
+  if (!textBlock) throw new Error('Claude API returned no text block');
+  return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
+}
+
+// The four *_time pseudo-fields compareTripsyItineraryPdf's schema uses for
+// time-only corrections (see that function's own comment for why -- never a
+// full datetime, just a plain "5:30 PM"-style string), mapped to the real
+// TRIPSY_EDIT_FIELDS key each one corrects.
+const TRIPSY_UPDATE_TIME_PSEUDO_FIELDS = {
+  startsAt_time: 'startsAt',
+  endsAt_time: 'endsAt',
+  departureAt_time: 'departureAt',
+  arrivalAt_time: 'arrivalAt',
+};
+
+// Turns one compareTripsyItineraryPdf row into the changes/fields object
+// the pending-changes queue expects (Store.queueTripsyChange's edit_event
+// `changes` for a "conflict" row, or create_event `fields` for a
+// "pdf_only" row, seeded onto tripsyBlankRaw by the caller). matchedRaw is
+// the existing event's raw Tripsy fields for a "conflict" row, or null for
+// "pdf_only" (nothing exists yet). The only real complexity here is
+// turning a *_time pseudo-field's plain time string into a full stored
+// "YYYY-MM-DDTHH:MM:00" value: the date half comes from the matched
+// event's OWN existing timestamp when there is one (falling back across
+// its sibling start/end fields if that exact one is empty), or from the
+// row's own pdf_date when there's no existing event to anchor to.
+function buildTripsyRowChangePayload(row, matchedRaw) {
+  const payload = {};
+  const fallbackDate = matchedRaw
+    ? (tripsyDayKey(matchedRaw.startsAt) || tripsyDayKey(matchedRaw.departureAt) || tripsyDayKey(matchedRaw.endsAt) || tripsyDayKey(matchedRaw.arrivalAt))
+    : null;
+  for (const correction of row.field_corrections || []) {
+    const realKey = TRIPSY_UPDATE_TIME_PSEUDO_FIELDS[correction.field_key];
+    if (realKey) {
+      const time = tripsyParse12HourTime(correction.new_value);
+      if (!time) continue;
+      const dateStr = (matchedRaw && tripsyDayKey(matchedRaw[realKey])) || fallbackDate || row.pdf_date || null;
+      if (!dateStr) continue;
+      payload[realKey] = `${dateStr}T${time.hour}:${time.minute}:00`;
+    } else {
+      payload[correction.field_key] = correction.new_value;
+    }
+  }
+  return payload;
+}
+
 // Generates the print view's Part 1 one-line-per-event summary blurbs --
 // separate from generateTripsyItineraryNarrative above since the prompt
 // shape is different (every row across the WHOLE trip, including P/S
@@ -11201,8 +11551,11 @@ async function buildTripsyPrintHtml(tripKey) {
     const timeMetaLine = tripsyTransportationTimeLine(ev);
     // The title is route-based whenever there's a route (tripsyRawToDisplay),
     // which bumps the company name out of it -- shown here instead so it
-    // isn't lost, only when it's not already the title (no route).
-    const companyMetaLine = hasRoute && company ? `${company}${raw.transportNumber ? ' ' + raw.transportNumber : ''}` : null;
+    // isn't lost, only when it's not already the title (no route). Flights
+    // are the one exception: tripsyRawToDisplay now bakes company + flight
+    // number straight into a flight's title (after the route), so this
+    // would just duplicate it there.
+    const companyMetaLine = hasRoute && company && category !== 'airplane' ? `${company}${raw.transportNumber ? ' ' + raw.transportNumber : ''}` : null;
     const metaParts = [
       ev.location,
       companyMetaLine,
@@ -12060,8 +12413,11 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
       // The title is route-based whenever there's a route
       // (tripsyRawToDisplay), which bumps the company name out of it --
       // shown here instead so it isn't lost, only when it's not already
-      // the title (no route).
-      const companyMetaLine = hasRoute && company ? `${company}${raw.transportNumber ? ' ' + raw.transportNumber : ''}` : null;
+      // the title (no route). Flights are the one exception:
+      // tripsyRawToDisplay now bakes company + flight number straight into
+      // a flight's title (after the route), so this would just duplicate
+      // it there.
+      const companyMetaLine = hasRoute && company && category !== 'airplane' ? `${company}${raw.transportNumber ? ' ' + raw.transportNumber : ''}` : null;
       const meta = [
         ev.location,
         companyMetaLine,
@@ -12204,6 +12560,417 @@ async function openTripsyItineraryPrintView(tripKey) {
   const printRoot = getOrCreateTripsyPrintRoot();
   printRoot.innerHTML = html;
   await triggerTripsyPrint(printRoot);
+}
+
+// Itinerary menu's "Update" button -- compares an uploaded PDF against
+// this trip's current Tripsy events (compareTripsyItineraryPdf) and lets
+// the owner act on each row. The comparison itself is ephemeral: held only
+// in this module-level array for the current upload session, never
+// persisted to driveData -- re-uploading (or re-opening Update) always
+// starts a fresh comparison against whatever's actually in Tripsy now.
+let tripsyUpdateRows = [];
+let tripsyUpdateOverlayTripKey = null;
+
+function tripsyFileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+// tripsy_only rows have no pdf_date at all (nothing on the PDF to read a
+// day heading from) -- this buckets them into the right day group anyway,
+// using the matched EXISTING event's own date, so a stray Tripsy event
+// still shows up next to the PDF's events for that same day rather than
+// getting dumped in an "Unscheduled" catch-all.
+function tripsyDayKeyForEventKey(eventKey) {
+  if (!eventKey) return null;
+  const found = findTripsyRawByKey(eventKey);
+  if (!found) return null;
+  const display = tripsyRawToDisplay(found.raw.resource, found.raw);
+  return tripsyDayKey(display.start);
+}
+
+// Only a "conflict" or "tripsy_only" row's Tripsy-side summary is a
+// hyperlink -- "match" rows have nothing to act on, and "pdf_only" rows
+// have no existing event to link to in the first place.
+function tripsyUpdateRowIsLinkable(row) {
+  return !!row.matched_event_key && (row.status === 'conflict' || row.status === 'tripsy_only');
+}
+
+function tripsyUpdateRowHtml(row) {
+  const pdfSide = row.pdf_summary
+    ? `<div class="tripsy-update-pdf-side">${row.pdf_date ? `<b>${esc(tripsyDayHeaderLabel(row.pdf_date))}</b> — ` : ''}${esc(row.pdf_summary)}</div>`
+    : `<div class="tripsy-update-pdf-side" style="color:#999; font-style:italic;">— not on PDF —</div>`;
+  const linkable = tripsyUpdateRowIsLinkable(row);
+  const tripsySide = row.tripsy_summary
+    ? `<div class="tripsy-update-tripsy-side">${linkable ? `<a href="#" class="tp-generate-panel-label-link" data-tripsy-update-modify data-row-idx="${row._idx}">${esc(row.tripsy_summary)}</a>` : esc(row.tripsy_summary)}</div>`
+    : `<div class="tripsy-update-tripsy-side" style="color:#999; font-style:italic;">— not in Tripsy —</div>`;
+  const reasonHtml = row.reason ? `<div class="tripsy-update-reason">${esc(row.reason)}</div>` : '';
+
+  let actionsHtml;
+  if (row._actionState === 'queued') {
+    actionsHtml = `<span class="tripsy-update-queued-label">✓ Queued</span>`;
+  } else if (row._actionState === 'ignored') {
+    actionsHtml = `<span class="tripsy-update-ignored-label">Ignored</span>`;
+  } else if (row.status === 'match') {
+    actionsHtml = `<span class="tripsy-update-match-badge">✓ Match</span>`;
+  } else if (row.status === 'conflict') {
+    actionsHtml = `
+      <button type="button" class="btn primary" data-tripsy-update-accept data-row-idx="${row._idx}">Accept Update</button>
+      <button type="button" class="btn" data-tripsy-update-ignore data-row-idx="${row._idx}">Ignore Update</button>
+      <button type="button" class="btn" data-tripsy-update-modify data-row-idx="${row._idx}">Modify Existing</button>
+    `;
+  } else if (row.status === 'pdf_only') {
+    actionsHtml = `
+      <button type="button" class="btn primary" data-tripsy-update-add data-row-idx="${row._idx}">Add Event</button>
+      <button type="button" class="btn" data-tripsy-update-ignore data-row-idx="${row._idx}">Ignore</button>
+    `;
+  } else {
+    actionsHtml = `
+      <button type="button" class="btn" data-tripsy-update-delete data-row-idx="${row._idx}">Delete</button>
+      <button type="button" class="btn" data-tripsy-update-ignore data-row-idx="${row._idx}">Ignore</button>
+    `;
+  }
+
+  return `
+    <div class="tripsy-update-row" data-tripsy-update-row data-row-idx="${row._idx}">
+      <div class="tripsy-update-row-sides">
+        ${pdfSide}
+        ${tripsySide}
+        ${reasonHtml}
+      </div>
+      <div class="tripsy-update-row-actions">${actionsHtml}</div>
+    </div>
+  `;
+}
+
+function renderTripsyUpdateOverlayRows(rows) {
+  const byDay = new Map();
+  for (const row of rows) {
+    const key = row._dayKey || 'unscheduled';
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(row);
+  }
+  const dayKeys = [...byDay.keys()].sort((a, b) => {
+    if (a === 'unscheduled') return 1;
+    if (b === 'unscheduled') return -1;
+    return a.localeCompare(b);
+  });
+  return dayKeys.map(dayKey => `
+    <div class="tripsy-update-day-head">${esc(dayKey === 'unscheduled' ? 'Unscheduled' : tripsyDayHeaderLabel(dayKey))}</div>
+    ${byDay.get(dayKey).map(row => tripsyUpdateRowHtml(row)).join('')}
+  `).join('');
+}
+
+// Rendered inside the real edit panel (renderTripsyEditPanel, unmodified)
+// when "Modify Existing"/the hyperlink opens it -- just THIS row's
+// differences, not the whole comparison table, per explicit request.
+function tripsyUpdateDiffSummaryHtml(row) {
+  if (!row.field_corrections || !row.field_corrections.length) return '';
+  const fieldLabel = key => {
+    if (key === 'startsAt_time' || key === 'departureAt_time') return 'Start time';
+    if (key === 'endsAt_time' || key === 'arrivalAt_time') return 'End time';
+    return key;
+  };
+  return `
+    <div class="tripsy-update-diff-summary">
+      <div class="tripsy-update-diff-summary-title">Difference from uploaded PDF${row.reason ? `: ${esc(row.reason)}` : ''}</div>
+      ${row.field_corrections.map(c => `
+        <div class="tripsy-update-diff-summary-row">
+          <span class="tripsy-update-diff-summary-field">${esc(fieldLabel(c.field_key))}:</span>
+          <span>PDF says <b>${esc(c.new_value)}</b></span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+// One lazily-created, body-level file input for the Update button -- not
+// one per trip card, since only one upload can be in flight at a time.
+// Which trip it's for is stashed on the element itself right before each
+// .click() (see the Update menu handler in renderTripsyEventsListImpl), so
+// the single 'change' listener wired here at creation time always reads
+// the right target without needing to be rebound per trip/per render.
+function getOrCreateTripsyUpdateFileInput() {
+  let input = document.getElementById('tripsy-update-file-input');
+  if (input) return input;
+  input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'application/pdf';
+  input.id = 'tripsy-update-file-input';
+  input.style.display = 'none';
+  document.body.appendChild(input);
+  input.addEventListener('change', async () => {
+    if (!input.files.length) return;
+    await runTripsyUpdateComparison(input.dataset.tripKey, input.files[0]);
+  });
+  return input;
+}
+
+function getOrCreateTripsyUpdateOverlay() {
+  let overlay = document.getElementById('tripsy-update-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-update-overlay';
+  overlay.innerHTML = `
+    <div class="tripsy-update-toolbar">
+      <div class="tripsy-update-toolbar-title" data-tripsy-update-title></div>
+      <button class="btn" id="tripsy-update-close-btn">Close</button>
+    </div>
+    <div class="tripsy-update-paper" id="tripsy-update-content"></div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#tripsy-update-close-btn').addEventListener('click', () => {
+    overlay.style.display = 'none';
+  });
+  // Click-outside-to-close: same pattern as #tripsy-preview-overlay -- a
+  // click landing directly on the fixed backdrop (never on the toolbar or
+  // paper, both descendants) means it was outside the actual document.
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) overlay.style.display = 'none';
+  });
+  wireTripsyUpdateOverlayButtons(overlay);
+  return overlay;
+}
+
+function renderTripsyUpdateOverlayContent() {
+  const content = document.getElementById('tripsy-update-content');
+  if (!content) return;
+  content.innerHTML = tripsyUpdateRows.length ? renderTripsyUpdateOverlayRows(tripsyUpdateRows) : '';
+}
+
+// One delegated listener for every per-row button, bound once at overlay
+// creation (the overlay element itself is only ever created once --
+// getOrCreateTripsyUpdateOverlay's early return guarantees that -- so no
+// extra "wire once" flag is needed here the way container-level listeners
+// elsewhere need one).
+function wireTripsyUpdateOverlayButtons(overlay) {
+  overlay.addEventListener('click', async e => {
+    const retryBtn = e.target.closest('[data-tripsy-update-retry]');
+    const acceptBtn = e.target.closest('[data-tripsy-update-accept]');
+    const ignoreBtn = e.target.closest('[data-tripsy-update-ignore]');
+    const modifyEl = e.target.closest('[data-tripsy-update-modify]');
+    const addBtn = e.target.closest('[data-tripsy-update-add]');
+    const deleteBtn = e.target.closest('[data-tripsy-update-delete]');
+    if (!retryBtn && !acceptBtn && !ignoreBtn && !modifyEl && !addBtn && !deleteBtn) return;
+
+    if (retryBtn) {
+      const input = document.getElementById('tripsy-update-file-input');
+      if (input && input.files.length) await runTripsyUpdateComparison(tripsyUpdateOverlayTripKey, input.files[0]);
+      return;
+    }
+
+    const btn = acceptBtn || ignoreBtn || modifyEl || addBtn || deleteBtn;
+    const idx = Number(btn.dataset.rowIdx);
+    const row = tripsyUpdateRows[idx];
+    if (!row) return;
+
+    if (modifyEl) { e.preventDefault(); return handleTripsyUpdateModify(row); }
+    if (acceptBtn) return handleTripsyUpdateAccept(row, acceptBtn);
+    if (ignoreBtn) return handleTripsyUpdateIgnore(row);
+    if (addBtn) return handleTripsyUpdateAdd(row, addBtn);
+    if (deleteBtn) return handleTripsyUpdateDelete(row, deleteBtn);
+  });
+}
+
+// "Accept Update" -- queues an edit_event pending change built directly
+// from the row's field_corrections, exactly mirroring the shape
+// renderTripsyEditPanel's own Save button queues (index.html ~8086), just
+// without opening that form at all -- a deliberate one-click action, per
+// explicit request.
+async function handleTripsyUpdateAccept(row, btn) {
+  const found = row.matched_event_key ? findTripsyRawByKey(row.matched_event_key) : null;
+  if (!found) { toast('Could not find the matching event. Please try again.', 'error'); return; }
+  btn.disabled = true;
+  try {
+    const changes = buildTripsyRowChangePayload(row, found.raw);
+    if (!Object.keys(changes).length) {
+      toast('Nothing to update for this event.', 'error');
+      btn.disabled = false;
+      return;
+    }
+    const ok = await Store.queueTripsyChange({
+      id: crypto.randomUUID(),
+      type: 'edit_event',
+      createdAt: new Date().toISOString(),
+      tripKey: found.tripKey,
+      tripName: found.tripName,
+      eventKey: row.matched_event_key,
+      eventSummary: row.tripsy_summary || row.pdf_summary,
+      tripsyResource: found.raw.resource,
+      tripsyId: found.raw.id,
+      changes,
+    });
+    if (!ok) { toast("Could not save changes — storage error. Please try again.", "error"); btn.disabled = false; return; }
+    row._actionState = 'queued';
+    renderTripsyUpdateOverlayContent();
+    renderTripsyEventsList();
+    updateTripsyPendingWarningBadge();
+    toast('Update queued.', 'success');
+  } catch (err) {
+    console.error('Failed to queue Tripsy update accept:', err);
+    toast("Could not save changes — storage error. Please try again.", "error");
+    btn.disabled = false;
+  }
+}
+
+// "Ignore Update" / "Ignore" -- purely visual, no Store call at all: this
+// whole comparison is ephemeral (held only in tripsyUpdateRows for the
+// current upload session), so "doing nothing" really does mean nothing
+// gets written anywhere.
+function handleTripsyUpdateIgnore(row) {
+  row._actionState = 'ignored';
+  renderTripsyUpdateOverlayContent();
+}
+
+// "Modify Existing" / clicking the Tripsy-side hyperlink -- closes the
+// overlay and opens the SAME edit panel the timeline's own Edit button
+// opens (exact lookup/merge/render sequence as that handler), then
+// prepends just this row's diff summary above the form and scrolls to it.
+async function handleTripsyUpdateModify(row) {
+  const eventKey = row.matched_event_key;
+  if (!eventKey) return;
+  const overlay = document.getElementById('tripsy-update-overlay');
+  if (overlay) overlay.style.display = 'none';
+  const found = findTripsyRawByKey(eventKey);
+  if (!found) { toast('Could not find that event.', 'error'); return; }
+  if (isTripsyTripCollapsed(found.tripKey)) {
+    setTripsyTripCollapsed(found.tripKey, false);
+    await renderTripsyEventsList();
+  }
+  const container = document.getElementById('tripsy-card');
+  const panel = container && container.querySelector(`[data-tripsy-edit-panel="${CSS.escape(eventKey)}"]`);
+  if (!panel) { toast('Could not find that event on the page.', 'error'); return; }
+  const pending = await Store.listTripsyPendingChanges();
+  const editChange = pending.find(c => c.type === 'edit_event' && c.eventKey === eventKey);
+  const effectiveRaw = editChange ? { ...found.raw, ...editChange.changes } : found.raw;
+  const display = tripsyRawToDisplay(effectiveRaw.resource, effectiveRaw);
+  renderTripsyEditPanel(panel, effectiveRaw, found.tripKey, found.tripName, display.summary);
+  panel.style.display = 'block';
+  panel.insertAdjacentHTML('afterbegin', tripsyUpdateDiffSummaryHtml(row));
+  const viewEl = container.querySelector(`[data-tripsy-view-event="${CSS.escape(eventKey)}"]`);
+  const rowEl = viewEl ? viewEl.closest('.tripsy-tl-row') : panel;
+  (rowEl || panel).scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// "Add Event" -- queues a create_event pending change built from the
+// row's field_corrections seeded onto a blank raw for the resource Claude
+// inferred, mirroring the Add-item panel's own create_event shape
+// (index.html ~8060), again as a deliberate one-click action rather than
+// opening the create form first.
+async function handleTripsyUpdateAdd(row, btn) {
+  const tripKey = tripsyUpdateOverlayTripKey;
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return;
+  btn.disabled = true;
+  try {
+    const fields = buildTripsyRowChangePayload(row, null);
+    const eventSummary = fields.name || fields.company || row.pdf_summary || 'New item';
+    const ok = await Store.queueTripsyChange({
+      id: crypto.randomUUID(),
+      type: 'create_event',
+      createdAt: new Date().toISOString(),
+      tripKey,
+      tripName: trip.name,
+      tripsyResource: row.resource,
+      tripsyTripId: tripsyTripIdFromKey(tripKey),
+      eventSummary,
+      fields,
+    });
+    if (!ok) { toast("Could not save changes — storage error. Please try again.", "error"); btn.disabled = false; return; }
+    row._actionState = 'queued';
+    renderTripsyUpdateOverlayContent();
+    renderTripsyEventsList();
+    updateTripsyPendingWarningBadge();
+    toast('New event queued.', 'success');
+  } catch (err) {
+    console.error('Failed to queue Tripsy add event:', err);
+    toast("Could not save changes — storage error. Please try again.", "error");
+    btn.disabled = false;
+  }
+}
+
+// "Delete" -- same confirm() dialog and delete_event shape as the
+// timeline's own per-event delete button (index.html ~14477).
+async function handleTripsyUpdateDelete(row, btn) {
+  const found = row.matched_event_key ? findTripsyRawByKey(row.matched_event_key) : null;
+  if (!found) { toast('Could not find that event.', 'error'); return; }
+  const confirmed = confirm(`Delete "${row.tripsy_summary}" from Tripsy? This can't be undone once it syncs.`);
+  if (!confirmed) return;
+  btn.disabled = true;
+  try {
+    const ok = await Store.queueTripsyChange({
+      id: crypto.randomUUID(),
+      type: 'delete_event',
+      createdAt: new Date().toISOString(),
+      tripKey: found.tripKey,
+      tripName: found.tripName,
+      eventKey: row.matched_event_key,
+      eventSummary: row.tripsy_summary,
+      tripsyResource: found.raw.resource,
+      tripsyId: found.raw.id,
+    });
+    if (!ok) { toast("Could not queue deletion — storage error. Please try again.", "error"); btn.disabled = false; return; }
+    row._actionState = 'queued';
+    renderTripsyUpdateOverlayContent();
+    renderTripsyEventsList();
+    updateTripsyPendingWarningBadge();
+    toast('Deletion queued.', 'success');
+  } catch (err) {
+    console.error('Failed to queue Tripsy delete:', err);
+    toast("Could not queue deletion — storage error. Please try again.", "error");
+    btn.disabled = false;
+  }
+}
+
+// Orchestrates one full Update run: reads the picked file, snapshots the
+// trip's CURRENT events (through pending changes, so a re-run after
+// accepting some updates compares against that pending state rather than
+// stale pre-edit data), calls compareTripsyItineraryPdf, and renders the
+// result. Opens the overlay with a loading state immediately (before the
+// await) rather than waiting for the round-trip to finish, same reasoning
+// previewTripsyItinerary already follows for its own loading placeholder.
+async function runTripsyUpdateComparison(tripKey, file) {
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return;
+  const overlay = getOrCreateTripsyUpdateOverlay();
+  const titleEl = overlay.querySelector('[data-tripsy-update-title]');
+  const content = overlay.querySelector('#tripsy-update-content');
+  tripsyUpdateOverlayTripKey = tripKey;
+  if (titleEl) titleEl.textContent = `Comparing "${file.name}" against ${trip.name}`;
+  content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Reading itinerary and comparing to Tripsy…</div>`;
+  overlay.style.display = 'flex';
+  tripsyUpdateRows = [];
+  try {
+    const pdfBase64 = await tripsyFileToBase64(file);
+    const pendingChanges = await Store.listTripsyPendingChanges();
+    const effectiveTrip = getEffectiveTripsyTrip(trip, pendingChanges);
+    const currentEventsForPrompt = buildTripsyCurrentEventsPrompt(trip, pendingChanges);
+    const result = await compareTripsyItineraryPdf(effectiveTrip, currentEventsForPrompt, pdfBase64);
+    const rows = (result.rows || []).map((row, idx) => ({
+      ...row,
+      _idx: idx,
+      _dayKey: row.pdf_date || tripsyDayKeyForEventKey(row.matched_event_key) || 'unscheduled',
+      _actionState: null,
+    }));
+    tripsyUpdateRows = rows;
+    if (!rows.length) {
+      content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">No events found in this PDF — is it an itinerary?</div>`;
+      return;
+    }
+    renderTripsyUpdateOverlayContent();
+  } catch (err) {
+    console.error('Tripsy itinerary PDF comparison failed:', err);
+    content.innerHTML = `
+      <div style="padding:40px 20px; text-align:center;">
+        <div style="color:#B33; margin-bottom:14px;">Could not compare itinerary. Please try again.</div>
+        <button type="button" class="btn" data-tripsy-update-retry>Retry</button>
+      </div>
+    `;
+  }
 }
 
 // On-screen preview: builds the exact same HTML as Print (same photo
@@ -13712,6 +14479,7 @@ async function renderTripsyEventsListImpl() {
         <button class="btn" data-tripsy-itinerary-menu-toggle data-key="${esc(trip.key)}" title="Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🧭</button>
         <div data-tripsy-itinerary-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${isOwner ? menuListButtonHtml(`data-tripsy-generate-panel-toggle data-key="${esc(trip.key)}"`, '📝', 'Generate') : ''}
+          ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', 'Update') : ''}
           ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '👀', 'Preview')}
           ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
           ${menuListButtonHtml(`data-tripsy-create-pdf-itinerary data-key="${esc(trip.key)}"`, '📄', 'Create PDF')}
@@ -13944,6 +14712,21 @@ async function renderTripsyEventsListImpl() {
         console.error('Failed to load itinerary sections for Generate panel:', err);
         panel.innerHTML = `<div style="padding:8px; font-size:12px; color:#B33;">Could not load itinerary sections. Please try again.</div>`;
       }
+    });
+  });
+
+  // Update (owner-only) -- opens the shared, lazily-created file input
+  // (getOrCreateTripsyUpdateFileInput) targeted at this trip; the input's
+  // own 'change' listener (wired once, at creation time) picks up from
+  // there via runTripsyUpdateComparison.
+  container.querySelectorAll("[data-tripsy-update-itinerary]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      closeAllTripsyTripPanels();
+      const input = getOrCreateTripsyUpdateFileInput();
+      input.dataset.tripKey = btn.dataset.key;
+      input.value = "";
+      input.click();
     });
   });
 
