@@ -10297,6 +10297,66 @@ function tripsyUpdateEventNarrativeControls(container, rowKey, isApproved) {
     );
   });
 }
+// Refresh the trip Overview (intro) section in place after a text edit --
+// update/insert/remove the intro paragraph, sync the custom-box textarea, and
+// re-render the controls (Generate <-> Regenerate/Delete) -- instead of
+// rebuilding the whole preview. The Overview has no photos and no Part 1
+// copy, so this is a self-contained swap. Editing always lands unapproved.
+function tripsyRefreshIntroSectionInPlace(container, introText) {
+  if (!container) return;
+  const overview = container.querySelector('#tp-detail-overview');
+  const section = container.querySelector('[data-tripsy-intro-narrative-section]');
+  if (overview && section) {
+    let p = overview.querySelector('.tp-trip-intro');
+    if (introText) {
+      if (!p) { p = document.createElement('p'); p.className = 'tp-trip-intro'; overview.insertBefore(p, section); }
+      p.textContent = introText;
+    } else if (p) {
+      p.remove();
+    }
+  }
+  if (section) {
+    section.dataset.hasIntro = introText ? '1' : '0';
+    const controls = section.querySelector('.tp-narrative-controls');
+    if (controls) controls.innerHTML = tripsyIntroControlsInnerHtml(false, !!introText);
+    const textarea = section.querySelector('[data-tripsy-intro-narrative-custom-input]');
+    if (textarea) textarea.value = introText || '';
+    const box = section.querySelector('[data-tripsy-intro-narrative-custom-box]');
+    if (box) box.style.display = 'none';
+  }
+}
+// Refresh one event's blurb in place on its Part 2 detailed card, plus its
+// controls -- instead of rebuilding the whole preview. blurb is the new text
+// ('' to clear). Only the Part 2 card carries this per-event blurb; the Part 1
+// summary row shows a separate bulk "Event Summaries" line and is deliberately
+// left untouched (see the summary-row builder). Photos are untouched, and
+// editing always lands unapproved.
+function tripsyRefreshEventBlurbInPlace(container, rowKey, blurb) {
+  if (!container) return;
+  container.querySelectorAll('[data-tripsy-event-narrative-section]').forEach(section => {
+    if (section.dataset.rowKey !== rowKey) return;
+    section.dataset.hasBlurb = blurb ? '1' : '0';
+    section.dataset.displayedBlurb = blurb || '';
+    const controls = section.querySelector('.tp-narrative-controls');
+    if (controls) controls.innerHTML = tripsyEventControlsInnerHtml(false, section.dataset.wantsGenerate === '1', !!blurb);
+    const textarea = section.querySelector('[data-tripsy-event-narrative-custom-input]');
+    if (textarea) textarea.value = blurb || '';
+    const box = section.querySelector('[data-tripsy-event-narrative-custom-box]');
+    if (box) box.style.display = 'none';
+    // The Part 2 card body: a .tp-place-card-blurb div sits right before this
+    // controls section. Create / update / remove it to match the new blurb.
+    const card = section.closest('.tp-place-card');
+    if (card) {
+      let blurbDiv = card.querySelector('.tp-place-card-blurb');
+      if (blurb) {
+        if (!blurbDiv) { blurbDiv = document.createElement('div'); blurbDiv.className = 'tp-place-card-blurb'; card.insertBefore(blurbDiv, section); }
+        blurbDiv.textContent = blurb;
+      } else if (blurbDiv) {
+        blurbDiv.remove();
+      }
+    }
+  });
+}
 function tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsGenerate, hasAnyBlurb, displayedBlurb) {
   if (!isOwner || !rowKey) return '';
   // hasAnyBlurb reflects whatever text is actually showing on the card --
@@ -12601,7 +12661,8 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
         try {
           const { effectiveTrip, dayKeys, byDay, summaryByDay } = await buildTripsyPrintDayData(trip);
           await tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, { includeIntro: true, includeSummary: false, dayKeysToGenerate: [] });
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          const introCache = await Store.getTripsyNarrativeCache();
+          tripsyRefreshIntroSectionInPlace(previewContent, (introCache[cacheKey] && introCache[cacheKey].content.trip_intro) || '');
         } catch (err) {
           console.error('Failed to generate trip overview:', err);
           toast('Could not generate overview — see console for details.', 'error');
@@ -12616,7 +12677,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
         try {
           const ok = await Store.deleteTripsyNarrativeSection(cacheKey);
           if (!ok) { toast('Could not delete overview. Please try again.', 'error'); return; }
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          tripsyRefreshIntroSectionInPlace(previewContent, '');
         } catch (err) {
           console.error('Failed to delete trip overview:', err);
           toast('Could not delete overview. Please try again.', 'error');
@@ -12639,7 +12700,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
             [cacheKey]: { content: { trip_intro: textInput.value.trim() }, fingerprint: tripsyContentFingerprint(introFingerprintData), generatedAt: new Date().toISOString() },
           });
           if (!ok) throw new Error('Failed to save overview to storage');
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          tripsyRefreshIntroSectionInPlace(previewContent, textInput.value.trim());
         } catch (err) {
           console.error('Failed to save custom trip overview:', err);
           toast('Could not save overview — see console for details.', 'error');
@@ -12759,7 +12820,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
             [cacheKey]: { content: { blurb }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString() },
           });
           if (!ok) throw new Error('Failed to save narrative to storage');
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          tripsyRefreshEventBlurbInPlace(previewContent, rowKey, blurb);
         } catch (err) {
           console.error('Failed to generate event note:', err);
           toast('Could not generate note — see console for details.', 'error');
@@ -12789,7 +12850,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
             [cacheKey]: { content: { blurb: '' }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString() },
           });
           if (!ok) { toast('Could not delete note. Please try again.', 'error'); return; }
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          tripsyRefreshEventBlurbInPlace(previewContent, rowKey, '');
         } catch (err) {
           console.error('Failed to delete event note:', err);
           toast('Could not delete note. Please try again.', 'error');
@@ -12814,7 +12875,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
             [cacheKey]: { content: { blurb: textInput.value.trim() }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString() },
           });
           if (!ok) throw new Error('Failed to save narrative to storage');
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          tripsyRefreshEventBlurbInPlace(previewContent, rowKey, textInput.value.trim());
         } catch (err) {
           console.error('Failed to save custom event note:', err);
           toast('Could not save note — see console for details.', 'error');
