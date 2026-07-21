@@ -10357,6 +10357,55 @@ function tripsyRefreshEventBlurbInPlace(container, rowKey, blurb) {
     }
   });
 }
+// Refresh a day's narrative section in place after a text edit -- update the
+// day title + paragraphs + controls, and (since delete/generate change the
+// day's place-blurbs) re-derive the blurb on that day's place cards that have
+// NO per-event override. Only activity/hosting cards inherit the day's
+// place-blurbs; transportation and P/S cards draw their blurb from a separate
+// source, so they're left alone. Reuses tripsyRefreshEventBlurbInPlace per
+// affected card. ndContent is the new day narrative content
+// ({title, narrative, place_blurbs}) or null when it was deleted.
+async function tripsyRefreshDaySectionInPlace(previewContainer, trip, tripKey, dayKey, ndContent) {
+  if (!previewContainer) return;
+  const section = [...previewContainer.querySelectorAll('[data-tripsy-narrative-section]')].find(s => s.dataset.dayKey === dayKey);
+  const dayEl = section ? section.closest('.tp-narrative-day') : null;
+  if (dayEl && section) {
+    // Replace the title + narrative paragraphs (they sit between the divider
+    // and the controls section), then re-render the controls.
+    dayEl.querySelectorAll('.tp-narrative-day-title, .tp-narrative-day-text').forEach(n => n.remove());
+    const title = (ndContent && ndContent.title) ? tripsyStripDayLabelFromTitle(ndContent.title) : '';
+    if (title) {
+      const h = document.createElement('h3'); h.className = 'tp-narrative-day-title'; h.textContent = title;
+      dayEl.insertBefore(h, section);
+    }
+    ((ndContent && ndContent.narrative) || '').split(/\n{2,}/).map(p => p.trim()).filter(Boolean).forEach(p => {
+      const pe = document.createElement('p'); pe.className = 'tp-narrative-day-text'; pe.textContent = p;
+      dayEl.insertBefore(pe, section);
+    });
+    section.dataset.hasNarrative = ndContent ? '1' : '0';
+    const controls = section.querySelector('.tp-narrative-controls');
+    if (controls) controls.innerHTML = tripsyDayControlsInnerHtml(false, !!ndContent);
+    const titleInput = section.querySelector('[data-tripsy-narrative-custom-title]');
+    if (titleInput) titleInput.value = (ndContent && ndContent.title) || '';
+    const textarea = section.querySelector('[data-tripsy-narrative-custom-input]');
+    if (textarea) textarea.value = (ndContent && ndContent.narrative) || '';
+    const box = section.querySelector('[data-tripsy-narrative-custom-box]');
+    if (box) box.style.display = 'none';
+  }
+  // Re-derive inherited place-card blurbs for this day.
+  const { summaryByDay } = await buildTripsyPrintDayData(trip);
+  const narrativeCache = await Store.getTripsyNarrativeCache();
+  const placeBlurbs = new Map(((ndContent && ndContent.place_blurbs) || []).map(pb => [pb.place_name, pb.blurb]));
+  for (const item of (summaryByDay.get(dayKey) || [])) {
+    if (item.isLayover || item.psReservation) continue;
+    const ev = item.ev, raw = ev && ev.tripsyRaw;
+    if (!raw || raw.resource === 'transportation' || ev._splitHalf === 'end') continue;
+    const rowKey = tripsySummaryRowKey(item);
+    if (!rowKey || narrativeCache[`${tripKey}::eventblurb::${rowKey}`]) continue; // a per-event override wins, so unaffected
+    const name = raw.name || ev.summary;
+    tripsyRefreshEventBlurbInPlace(previewContainer, rowKey, placeBlurbs.get(name) || raw.notes || '');
+  }
+}
 function tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsGenerate, hasAnyBlurb, displayedBlurb) {
   if (!isOwner || !rowKey) return '';
   // hasAnyBlurb reflects whatever text is actually showing on the card --
@@ -12529,7 +12578,8 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
         try {
           const { effectiveTrip, dayKeys, byDay, summaryByDay } = await buildTripsyPrintDayData(trip);
           await tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, { includeIntro: false, includeSummary: false, dayKeysToGenerate: [dayKey] });
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          const dayCache = await Store.getTripsyNarrativeCache();
+          await tripsyRefreshDaySectionInPlace(previewContent, trip, tripKey, dayKey, (dayCache[`${tripKey}::day::${dayKey}`] || {}).content || null);
         } catch (err) {
           console.error('Failed to generate day narrative:', err);
           toast('Could not generate narrative — see console for details.', 'error');
@@ -12544,7 +12594,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
         try {
           const ok = await Store.deleteTripsyNarrativeSection(`${tripKey}::day::${dayKey}`);
           if (!ok) { toast('Could not delete narrative. Please try again.', 'error'); return; }
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          await tripsyRefreshDaySectionInPlace(previewContent, trip, tripKey, dayKey, null);
         } catch (err) {
           console.error('Failed to delete day narrative:', err);
           toast('Could not delete narrative. Please try again.', 'error');
@@ -12579,7 +12629,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
           };
           const ok = await Store.saveTripsyNarrativeSections(sectionsToSave);
           if (!ok) throw new Error('Failed to save narrative to storage');
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          await tripsyRefreshDaySectionInPlace(previewContent, trip, tripKey, dayKey, sectionsToSave[`${tripKey}::day::${dayKey}`].content);
         } catch (err) {
           console.error('Failed to save custom narrative:', err);
           toast('Could not save narrative — see console for details.', 'error');
