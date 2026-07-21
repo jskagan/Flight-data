@@ -10217,6 +10217,47 @@ function tripsyNarrativeDayControlsHtml(dayKey, nd) {
 // real user content rather than AI narrative and the exclusion only ever
 // applied to generation. No title field (unlike the day version): an event
 // already has its own name/title shown right next to these controls.
+//
+// The buttons (or the collapsed "Approved" badge) that go inside an event's
+// .tp-narrative-controls row. Split out from tripsyEventNarrativeControlsHtml
+// so tripsyUpdateEventNarrativeControls can re-render JUST this row in place
+// on approve/un-approve, rather than rebuilding the whole itinerary (which
+// re-downloads every place photo -- the source of the long delay on click).
+function tripsyEventControlsInnerHtml(isApproved, wantsGenerate, hasBlurb) {
+  if (isApproved) {
+    return `<span class="tp-narrative-approved-badge" data-tripsy-event-narrative-unapprove title="Approved — click to un-approve">✅ Approved</span>`;
+  }
+  return `
+    ${wantsGenerate
+      ? (hasBlurb
+          ? `<button type="button" class="btn" data-tripsy-event-narrative-regenerate>Regenerate</button>
+             <button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>`
+          : `<button type="button" class="btn" data-tripsy-event-narrative-generate>Generate</button>`)
+      : (hasBlurb ? `<button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>` : '')}
+    <button type="button" class="btn" data-tripsy-event-narrative-custom-toggle>Custom Note</button>
+    ${hasBlurb ? `<button type="button" class="btn" data-tripsy-event-narrative-approve>Approved</button>` : ''}
+  `;
+}
+// Flip an event's controls between the "Approved" badge and the button set in
+// place, across BOTH copies of the row that can be on the page at once (a
+// Part 1 summary row and a Part 2 detail card share a rowKey). Approve and
+// un-approve only change this controls row -- never the card body -- so this
+// targeted swap fully replaces the old whole-preview rebuild for those two
+// actions. wants-generate / has-blurb are read back from each section's own
+// data attributes so each copy regenerates its correct buttons.
+function tripsyUpdateEventNarrativeControls(container, rowKey, isApproved) {
+  if (!container) return;
+  container.querySelectorAll('[data-tripsy-event-narrative-section]').forEach(section => {
+    if (section.dataset.rowKey !== rowKey) return;
+    const controls = section.querySelector('.tp-narrative-controls');
+    if (!controls) return;
+    controls.innerHTML = tripsyEventControlsInnerHtml(
+      isApproved,
+      section.dataset.wantsGenerate === '1',
+      section.dataset.hasBlurb === '1',
+    );
+  });
+}
 function tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsGenerate, hasAnyBlurb, displayedBlurb) {
   if (!isOwner || !rowKey) return '';
   // hasAnyBlurb reflects whatever text is actually showing on the card --
@@ -10237,20 +10278,9 @@ function tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsGenerate, has
   // into one first (same "freeze the text" move Delete already makes).
   const isApproved = hasBlurb && !!(eventEntry && eventEntry.approved);
   return `
-    <div class="tp-narrative-section" data-tripsy-event-narrative-section data-row-key="${esc(rowKey)}" data-displayed-blurb="${esc(displayedBlurb || '')}">
+    <div class="tp-narrative-section" data-tripsy-event-narrative-section data-row-key="${esc(rowKey)}" data-displayed-blurb="${esc(displayedBlurb || '')}" data-wants-generate="${wantsGenerate ? '1' : '0'}" data-has-blurb="${hasBlurb ? '1' : '0'}">
       <div class="tp-narrative-controls">
-        ${isApproved
-          ? `<span class="tp-narrative-approved-badge" data-tripsy-event-narrative-unapprove title="Approved — click to un-approve">✅ Approved</span>`
-          : `
-            ${wantsGenerate
-              ? (hasBlurb
-                  ? `<button type="button" class="btn" data-tripsy-event-narrative-regenerate>Regenerate</button>
-                     <button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>`
-                  : `<button type="button" class="btn" data-tripsy-event-narrative-generate>Generate</button>`)
-              : (hasBlurb ? `<button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>` : '')}
-            <button type="button" class="btn" data-tripsy-event-narrative-custom-toggle>Custom Note</button>
-            ${hasBlurb ? `<button type="button" class="btn" data-tripsy-event-narrative-approve>Approved</button>` : ''}
-          `}
+        ${tripsyEventControlsInnerHtml(isApproved, wantsGenerate, hasBlurb)}
       </div>
       <div class="tp-narrative-custom-box" data-tripsy-event-narrative-custom-box style="display:none;">
         <textarea data-tripsy-event-narrative-custom-input rows="3" placeholder="Write your own note for this event…">${esc(displayedBlurb || '')}</textarea>
@@ -12646,7 +12676,10 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
             });
           }
           if (!ok) { toast('Could not mark as approved. Please try again.', 'error'); return; }
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          // Flip just this event's controls to the Approved badge in place --
+          // the card body is unchanged, so no need to rebuild the whole
+          // preview (which re-downloads every photo and is the slow part).
+          tripsyUpdateEventNarrativeControls(previewContent, rowKey, true);
         } catch (err) {
           console.error('Failed to approve event note:', err);
           toast('Could not mark as approved. Please try again.', 'error');
@@ -12660,7 +12693,9 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
         try {
           const ok = await Store.setTripsyNarrativeApproved(cacheKey, false);
           if (!ok) { toast('Could not un-approve. Please try again.', 'error'); return; }
-          await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
+          // In-place controls swap (see the approve branch) rather than a full
+          // preview rebuild -- un-approve only brings the buttons back.
+          tripsyUpdateEventNarrativeControls(previewContent, rowKey, false);
         } catch (err) {
           console.error('Failed to un-approve event note:', err);
           toast('Could not un-approve. Please try again.', 'error');
