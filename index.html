@@ -6226,16 +6226,23 @@ async function renderUtilitiesTripsyRefresh() {
       </div>
       ` : ''}
       <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700; margin-bottom:6px;">${changes.length ? `${changes.length} change${changes.length === 1 ? '' : 's'} waiting` : 'Nothing waiting'}</div>
-      ${changes.length ? changes.map(c => `
+      ${changes.length ? changes.map(c => {
+        const needsLoc = tripsyChangeNeedsLocation(c);
+        return `
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:8px 0; border-top:1px solid var(--line); font-size:13px;">
           <div>
             <span style="color:${c.pushConfirmationFailed ? 'var(--red, #c0392b)' : 'var(--amber)'};">${c.pushConfirmationFailed ? '🛑 ' : ''}${esc(TRIPSY_PENDING_CHANGE_LABEL[c.type] || c.type)}</span>
             — ${esc(c.eventSummary || c.tripName)} <span style="color:var(--muted);">(${esc(c.tripName)})</span>
             ${c.pushConfirmationFailed ? `<div style="margin-top:2px; color:var(--muted);">Sent to Tripsy but not confirmed -- see note above.</div>` : ''}
+            ${needsLoc ? `<div style="margin-top:3px; color:var(--amber);">📍 No location yet — this activity can't sync until you set one.</div>` : ''}
           </div>
-          <button class="btn" data-tripsy-push-cancel data-change-id="${esc(c.id)}" style="font-size:11px; padding:3px 8px; flex-shrink:0;">Cancel</button>
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            ${needsLoc ? `<button class="btn" data-tripsy-search-location data-change-id="${esc(c.id)}" style="font-size:11px; padding:3px 8px;">Search location</button>` : ''}
+            <button class="btn" data-tripsy-push-cancel data-change-id="${esc(c.id)}" style="font-size:11px; padding:3px 8px;">Cancel</button>
+          </div>
         </div>
-      `).join("") : `<div style="font-size:13px; color:var(--muted);">Nothing is currently queued -- editing or deleting something on the My Trips page adds it here.</div>`}
+        ${needsLoc ? `<div data-tripsy-loc-picker="${esc(c.id)}" style="display:none;"></div>` : ''}
+      `; }).join("") : `<div style="font-size:13px; color:var(--muted);">Nothing is currently queued -- editing or deleting something on the My Trips page adds it here.</div>`}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
@@ -6296,6 +6303,9 @@ async function renderUtilitiesTripsyRefresh() {
       renderUtilitiesTripsyRefresh();
     });
   });
+  document.querySelectorAll("[data-tripsy-search-location]").forEach(btn => {
+    btn.addEventListener("click", () => tripsyToggleLocationPicker(btn.dataset.changeId, changes));
+  });
   document.getElementById('tripsy-check-now-btn').addEventListener('click', checkForFreshTripsySnapshot);
   main.querySelectorAll("[data-nav]").forEach(el => {
     el.addEventListener("click", e => {
@@ -6303,6 +6313,63 @@ async function renderUtilitiesTripsyRefresh() {
       navigate(el.dataset.nav);
     });
   });
+}
+
+// The "Search location" picker for a queued activity that has no coordinates
+// (add-time geocoding didn't resolve its address). Lets the owner search Places
+// and pick the right result; writes lat/long back onto the SAME pending change
+// (re-queue by id replaces in place, see Store.queueTripsyChange) so it can then
+// sync -- human disambiguation for the addresses auto-geocode can't resolve.
+function tripsyToggleLocationPicker(changeId, changes) {
+  const sel = (window.CSS && CSS.escape) ? CSS.escape(changeId) : changeId;
+  const container = document.querySelector(`[data-tripsy-loc-picker="${sel}"]`);
+  if (!container) return;
+  if (container.style.display !== 'none' && container.innerHTML.trim()) {
+    container.style.display = 'none'; container.innerHTML = ''; return; // toggle closed
+  }
+  container.style.display = 'block';
+  const change = (changes || []).find(c => c.id === changeId);
+  if (change) tripsyRenderLocationPicker(container, change);
+}
+
+function tripsyRenderLocationPicker(container, change) {
+  const prefill = [change.fields && change.fields.name, change.fields && change.fields.address].filter(Boolean).join(', ');
+  container.innerHTML = `
+    <div style="border:1px solid var(--line); border-radius:6px; padding:10px; margin:2px 0 6px;">
+      <div style="font-size:12px; color:var(--muted); margin-bottom:6px;">Search for this activity's place to set its map location:</div>
+      <div style="display:flex; gap:6px;">
+        <input type="text" data-loc-query placeholder="Venue name and city" value="${esc(prefill)}" style="flex:1; font-size:13px; padding:5px 8px;">
+        <button class="btn" data-loc-find style="font-size:11px; padding:3px 10px; flex-shrink:0;">Find</button>
+      </div>
+      <div data-loc-results style="margin-top:8px;"></div>
+    </div>`;
+  const input = container.querySelector('[data-loc-query]');
+  const results = container.querySelector('[data-loc-results]');
+  const runSearch = async () => {
+    results.innerHTML = `<div style="font-size:12px; color:var(--muted);">Searching…</div>`;
+    const cands = await tripsyPlaceLocationCandidates(input.value);
+    if (!cands.length) {
+      results.innerHTML = `<div style="font-size:12px; color:var(--muted);">No matches — try a more specific name, or add the city.</div>`;
+      return;
+    }
+    results.innerHTML = cands.map((p, i) => `
+      <button class="btn" data-loc-pick="${i}" style="display:block; width:100%; text-align:left; margin-bottom:4px; padding:6px 8px; font-size:12px;">
+        <b>${esc(p.displayName || '(unnamed place)')}</b>${p.formattedAddress ? ` — <span style="color:var(--muted);">${esc(p.formattedAddress)}</span>` : ''}
+      </button>`).join('');
+    results.querySelectorAll('[data-loc-pick]').forEach(b => {
+      b.addEventListener('click', async () => {
+        const p = cands[Number(b.dataset.locPick)];
+        const updated = { ...change, fields: { ...change.fields, latitude: p.latitude, longitude: p.longitude } };
+        const ok = await Store.queueTripsyChange(updated); // same id -> replaces the coordless change in place
+        if (ok) { toast('Location set — this activity can sync now.'); updateTripsyStatusBadge(); renderUtilitiesTripsyRefresh(); }
+        else toast('Could not save the location — storage error.', 'error');
+      });
+    });
+  };
+  container.querySelector('[data-loc-find]').addEventListener('click', runSearch);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); runSearch(); } });
+  input.focus();
+  if (prefill) runSearch(); // auto-search the prefilled name/address
 }
 
 // TRIPSY_SNAPSHOT_GENERATED_AT is a JS constant baked into this page at
@@ -8183,8 +8250,14 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
       // handling as "Import as-is", just with these fields instead of the
       // originally-extracted ones).
       if (createOptions.onSave) {
+        // "Modify then import" -- hands fields back to the review-page import
+        // path, which geocodes activities itself; don't double-geocode here.
         ok = await createOptions.onSave(newFields);
       } else {
+        // Geocode a new activity's address now (Places), so its create carries
+        // lat/long and no refresh has to geocode. Best-effort: if it doesn't
+        // resolve, it queues without coords and shows as "needs a location".
+        await tripsyAddCoordsToActivityFields(raw.resource, newFields);
         ok = await Store.queueTripsyChange({
           id: createOptions.pendingChangeId,
           type: 'create_event',
@@ -9249,6 +9322,103 @@ async function tripsyFindFirstPlacePhotoName(apiKey, name, address, eventTitle, 
 
 async function tripsyGatherPlacePhotoCandidates(apiKey, name, address, eventTitle, locationHint) {
   return tripsyGatherPhotoCandidatesForQueries(apiKey, tripsyPlacePhotoQueryVariants(name, address, eventTitle, locationHint));
+}
+
+// --- Geocoding (lat/long) via the same Places searchText endpoint ------------
+// Tripsy's activity CREATE requires non-null latitude/longitude, but the add
+// form only collects an address. We geocode here, at add time, and stash the
+// coords on the pending create_event change -- so NO Tripsy refresh ever has to
+// geocode (the cloud refresh sandbox can't reach a geocoder at all). Same
+// endpoint/auth as the photo lookups above, just a different field mask.
+async function tripsyGeocodeViaPlaces(apiKey, queries) {
+  for (const query of queries) {
+    let res;
+    try {
+      res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.location' },
+        body: JSON.stringify({ textQuery: query, maxResultCount: 1 }),
+      });
+    } catch (e) { continue; }
+    if (!res.ok) continue;
+    const data = await res.json();
+    const loc = data?.places?.[0]?.location;
+    if (loc && typeof loc.latitude === 'number' && typeof loc.longitude === 'number') {
+      return { latitude: loc.latitude, longitude: loc.longitude };
+    }
+  }
+  return null;
+}
+
+// Best-effort geocode of an activity being added, from its name + address.
+// Returns {latitude, longitude} or null (no key, nothing to search on, or
+// nothing resolved). NEVER throws -- a null just leaves the activity flagged
+// "needs a location" for manual resolution (see the status badge + the Tripsy
+// Refresh page's Search-location picker). Reuses the photo query variants so
+// the search strategy (most-specific to least, city-biased) stays consistent.
+async function tripsyGeocodeActivityFields(name, address) {
+  try {
+    const apiKey = await Store.getPlacesApiKey();
+    if (!apiKey) return null;
+    const queries = tripsyPlacePhotoQueryVariants(name, address, null, tripsyGuessCityFromAddress(address)).filter(Boolean);
+    if (!queries.length) return null;
+    return await tripsyGeocodeViaPlaces(apiKey, queries);
+  } catch (e) {
+    console.error('tripsyGeocodeActivityFields failed:', e);
+    return null;
+  }
+}
+
+// Geocode an activity's fields IN PLACE right before it's queued/imported, so
+// its create_event carries latitude/longitude. No-op unless it's an activity
+// that has a name or address to search on and doesn't already have coords.
+// Best-effort and silent -- if it can't resolve, the fields just stay without
+// coords and the activity surfaces as "needs a location" for manual fixing.
+async function tripsyAddCoordsToActivityFields(resource, fields) {
+  if (resource !== 'activity' || !fields) return;
+  if (fields.latitude != null && fields.longitude != null) return;
+  if (!fields.name && !fields.address) return;
+  const coords = await tripsyGeocodeActivityFields(fields.name, fields.address);
+  if (coords) { fields.latitude = coords.latitude; fields.longitude = coords.longitude; }
+}
+
+// A queued activity create_event with no coordinates can't be created in Tripsy
+// (activity creates REQUIRE lat/long), so it's stuck until a location is
+// resolved -- either add-time geocoding succeeded, or the owner fixes it with
+// the "Search location" picker on the Tripsy Refresh page. Drives both the
+// status-badge "needs a location" reason and that page's per-item picker.
+function tripsyChangeNeedsLocation(c) {
+  return !!c && c.type === 'create_event' && c.tripsyResource === 'activity'
+    && (!c.fields || c.fields.latitude == null || c.fields.longitude == null);
+}
+
+// Candidate list for the manual "Search location" picker on the Tripsy Refresh
+// page: up to `limit` {displayName, formattedAddress, latitude, longitude} for a
+// free-text query, so the owner can disambiguate an address that auto-geocode
+// couldn't resolve. Never throws; returns [] on any failure.
+async function tripsyPlaceLocationCandidates(query, limit = 6) {
+  try {
+    const apiKey = await Store.getPlacesApiKey();
+    if (!apiKey || !query || !query.trim()) return [];
+    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey,
+                 'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.location' },
+      body: JSON.stringify({ textQuery: query.trim(), maxResultCount: limit }),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data?.places || [])
+      .filter(p => p?.location && typeof p.location.latitude === 'number' && typeof p.location.longitude === 'number')
+      .map(p => ({
+        displayName: (p.displayName && p.displayName.text) || '',
+        formattedAddress: p.formattedAddress || '',
+        latitude: p.location.latitude, longitude: p.location.longitude,
+      }));
+  } catch (e) {
+    console.error('tripsyPlaceLocationCandidates failed:', e);
+    return [];
+  }
 }
 
 async function tripsyFetchPlacePhotoBlob(apiKey, photoName) {
@@ -15784,6 +15954,12 @@ async function computeTripsyStatus() {
     const conflictEventCount = tripsyParseConflictEventCount(proposals, tripsyDecryptedTrips, changes);
     yellow.push({ label: `${conflictEventCount} event${conflictEventCount === 1 ? '' : 's'} with a potential conflict to resolve`, view: 'tripsyparsereview' });
   }
+  // A queued activity with no coordinates can't sync (Tripsy activity creates
+  // require lat/long). Keep the badge yellow, and link to the Tripsy Refresh
+  // page where each one gets a "Search location" picker. Reappears on every app
+  // open until resolved, since this recomputes each time.
+  const needLocation = changes.filter(tripsyChangeNeedsLocation);
+  if (needLocation.length) yellow.push({ label: `${needLocation.length} ${needLocation.length === 1 ? 'activity needs' : 'activities need'} a location — search for it on the Tripsy Refresh page`, view: 'utilitiestripsyrefresh' });
   if (yellow.length) return { state: 'yellow', reasons: yellow };
 
   // GREEN -- the owner's turn in the app. Keyed off pending proposal events
@@ -15937,7 +16113,8 @@ function tripsyParseEventFieldsHtml(resource, fields) {
 // (and toasts) on any storage failure, without leaving the proposal event
 // stuck in a half-resolved state.
 async function tripsyParseImportProposalEvent(proposal, event, destinationValue, fieldsOverride, deleteExistingChange) {
-  const fields = fieldsOverride || event.fields;
+  // Shallow-copy so geocoding below adds coords to THIS change, not the stored proposal.
+  const fields = { ...(fieldsOverride || event.fields) };
   let tripKey, tripName, tripsyTripId, newTripChange;
   if (destinationValue === '__new__') {
     const name = prompt('Name for the new trip:', event.eventSummary || 'New Trip');
@@ -15955,6 +16132,9 @@ async function tripsyParseImportProposalEvent(proposal, event, destinationValue,
     if (!trip) { toast('Could not find that trip.', 'error'); return false; }
     tripKey = trip.key; tripName = trip.name; tripsyTripId = tripsyTripIdFromKey(trip.key);
   }
+  // Geocode a new activity now so its create carries lat/long (no refresh
+  // geocoding). Best-effort; unresolved ones show as "needs a location".
+  await tripsyAddCoordsToActivityFields(event.tripsyResource, fields);
   const changeId = crypto.randomUUID();
   const eventChange = {
     id: changeId, type: 'create_event', createdAt: new Date().toISOString(),
@@ -16440,18 +16620,21 @@ async function renderTripsyParseReview() {
         id: crypto.randomUUID(), type: 'create_trip', createdAt: new Date().toISOString(),
         tripKey, name, start: dayKeys[0], end: dayKeys[dayKeys.length - 1],
       };
-      const eventChanges = clusterEvents.map(ev => {
+      const eventChanges = await Promise.all(clusterEvents.map(async ev => {
         const changeId = crypto.randomUUID();
+        // Copy so geocoding adds coords to the change, not the stored proposal.
+        const fields = { ...ev.fields };
+        await tripsyAddCoordsToActivityFields(ev.tripsyResource, fields);
         return {
           eventId: ev.id,
           change: {
             id: changeId, type: 'create_event', createdAt: new Date().toISOString(),
             tripKey, tripName: name, tripsyResource: ev.tripsyResource, tripsyTripId: null,
-            eventSummary: ev.eventSummary, fields: ev.fields,
+            eventSummary: ev.eventSummary, fields,
           },
           patch: { resolution: 'accepted', resolvedAt: new Date().toISOString(), destinationTripKey: tripKey, appliedChangeId: changeId },
         };
-      });
+      }));
       const ok = await Store.acceptTripsyParseProposalCluster({ tripChange, eventChanges, proposalId });
       if (!ok) { toast("Could not create the new trip — storage error. Please try again.", "error"); btn.disabled = false; return; }
       toast(`Created "${name}" with ${eventChanges.length} event${eventChanges.length === 1 ? '' : 's'}.`);
