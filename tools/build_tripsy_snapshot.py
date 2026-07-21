@@ -53,6 +53,13 @@ ACTIVITY_CATEGORY_TO_TYPE = {
     "concert": "concert", "theater": "concert",
     "tour": "tour", "museum": "tour", "nationalPark": "tour", "zoo": "tour",
     "aquarium": "tour", "amusementPark": "tour",
+    # The owner's custom Tripsy categories, which have no built-in type, get
+    # their own display type stamped into the snapshot so already-synced
+    # events render the right dot/icon (index.html's re-derive path only
+    # covers pending/edited events). Keep in lockstep with index.html's
+    # TRIPSY_ACTIVITY_CATEGORY_TO_TYPE.
+    "7XGVGtMARwoON7rl52N1P4j36dI9gf4NDgw": "spa",
+    "Y16QHWPgO5Z7T7jTBdfgdEK0ZvGDecv8jW0": "reception",
 }
 ACTIVITY_TYPES = [
     "general", "note", "event", "meeting", "relax", "fit", "kids", "shopping",
@@ -65,7 +72,10 @@ ACTIVITY_TYPES = [
 ]
 TRANSPORTATION_TYPES = ["airplane", "bike", "bus", "car", "roadtrip", "cruise",
                         "ferry", "motorcycle", "train", "walk"]
-CUSTOM_CATEGORY_LABELS = {"7XGVGtMARwoON7rl52N1P4j36dI9gf4NDgw": "Spa"}
+CUSTOM_CATEGORY_LABELS = {
+    "7XGVGtMARwoON7rl52N1P4j36dI9gf4NDgw": "Spa",
+    "Y16QHWPgO5Z7T7jTBdfgdEK0ZvGDecv8jW0": "Reception",
+}
 
 AGENT_KEYS = ["agentName", "agency", "agentPhone", "agencyReservationNumber", "agentWebsite"]
 
