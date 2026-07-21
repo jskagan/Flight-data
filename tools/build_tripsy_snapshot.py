@@ -138,7 +138,9 @@ def transportation_summary(raw):
     dep = raw.get("departure_description") or ""
     arr = raw.get("arrival_description") or ""
     cat = raw.get("transportation_type")
-    kind = "Flight" if cat == "airplane" else (slug_to_label(cat) or "Transportation")
+    is_flight = cat == "airplane"
+    kind = "Flight" if is_flight else (slug_to_label(cat) or "Transportation")
+    company_number = f"{raw.get('company') or ''} {raw.get('transport_number') or ''}".strip()
 
     def short(x):
         return x.split(",")[0].strip() if x else x
@@ -146,14 +148,20 @@ def transportation_summary(raw):
     if dep or arr:  # a real route wins over the company name
         sd, sa = short(dep), short(arr)
         if sd and sa:
-            return f"{kind} from {sd} to {sa}"
-        if sd:
-            return f"{kind} from {sd}"
-        if sa:
-            return f"{kind} to {sa}"
-        return kind
+            base = f"{kind} from {sd} to {sa}"
+        elif sd:
+            base = f"{kind} from {sd}"
+        elif sa:
+            base = f"{kind} to {sa}"
+        else:
+            base = kind
+        # Flights only: company + flight number moves into the title,
+        # after the origin/destination -- mirrors tripsyRawToDisplay in
+        # index.html; keep the two in lockstep.
+        if is_flight and company_number:
+            return f"{base} • {company_number}"
+        return base
     # no route at all -> company+number, then a real name, then bare kind
-    company_number = f"{raw.get('company') or ''} {raw.get('transport_number') or ''}".strip()
     name = raw.get("name")
     usable_name = name if (name and name.strip().lower() != "transportation") else None
     return company_number or usable_name or kind
