@@ -60,6 +60,7 @@ ACTIVITY_CATEGORY_TO_TYPE = {
     # TRIPSY_ACTIVITY_CATEGORY_TO_TYPE.
     "7XGVGtMARwoON7rl52N1P4j36dI9gf4NDgw": "spa",
     "Y16QHWPgO5Z7T7jTBdfgdEK0ZvGDecv8jW0": "reception",
+    "VuucvcPkCXTTzz6FHsSY5AMjvcmtx42pO5s": "cooking",
 }
 ACTIVITY_TYPES = [
     "general", "note", "event", "meeting", "relax", "fit", "kids", "shopping",
@@ -75,6 +76,7 @@ TRANSPORTATION_TYPES = ["airplane", "bike", "bus", "car", "roadtrip", "cruise",
 CUSTOM_CATEGORY_LABELS = {
     "7XGVGtMARwoON7rl52N1P4j36dI9gf4NDgw": "Spa",
     "Y16QHWPgO5Z7T7jTBdfgdEK0ZvGDecv8jW0": "Reception",
+    "VuucvcPkCXTTzz6FHsSY5AMjvcmtx42pO5s": "Cooking",
 }
 
 AGENT_KEYS = ["agentName", "agency", "agentPhone", "agencyReservationNumber", "agentWebsite"]
