@@ -175,9 +175,17 @@ back / 1095 forward, i.e. 3 years).
   the Drive connector (whose `create_file` currently fails from cloud sessions).
 - **On demand, by hand.** Tell any local Claude Code session "run a Tripsy refresh"; it follows
   `~/.claude/scheduled-tasks/tripsy-trips-refresh/SKILL.md`. That file is untracked and
-  machine-local. **Despite the `scheduled-tasks/` folder name, nothing is scheduled there** — no
-  cron, no launchd, no OS-level job; it is only where the runbook text lives. (An older "daily
-  8:23/8:30am scheduled task" referenced in earlier docs no longer exists.)
+  machine-local — it is the runbook text, not a schedule by itself.
+
+  **A note on scheduling — don't be fooled by empty `crontab`/`launchd`.** There genuinely IS (was)
+  a second scheduler: the **Claude desktop app runs its own scheduled tasks**, registered in
+  `~/Library/Application Support/Claude/claude-code-sessions/<userId>/<workspaceId>/scheduled-tasks.json`,
+  which fires `SKILL.md` as a `<scheduled-task>` local run. This is **invisible to `crontab` and
+  `launchd`** — checking only those and concluding "nothing is scheduled" is wrong (that mistake was
+  made on 2026-07-20). A `tripsy-trips-refresh` entry there ran daily at **8:24am** (`cronExpression`
+  `24 8 * * *`) and duplicated the cloud routine; it was set `enabled:false` on 2026-07-21 to
+  consolidate on the cloud routine. If you need to know what's scheduled, read that `scheduled-tasks.json`
+  and the cloud `https://claude.ai/code/routines` — not the OS schedulers.
 
 **The transform itself is committed code, not runbook prose: `tools/build_tripsy_snapshot.py`.**
 Every refresh route above pulls the raw Tripsy records, assembles them into that script's input
