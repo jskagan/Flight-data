@@ -7624,15 +7624,23 @@ function tripsySeatLabel(raw) {
   return `Seat: ${raw.seatClass || raw.seatNumber}`;
 }
 
-// Last-resort transportation title when there's no company/number (e.g.
-// "United 123") and no name to fall back on -- names the specific mode
-// (Car, Train, ...) plus its route instead of a bare, uninformative
-// "Transportation" that told the owner nothing on the itinerary.
+// Route-based transportation title -- names the specific mode (Car,
+// Train, ...) plus its route instead of a bare, uninformative
+// "Transportation" that told the owner nothing on the itinerary, or (now
+// that this also wins over a company name whenever there's a route) an
+// overly specific operator name like "Bluetick Chauffeur Services" that
+// says who's driving but not where. dep/arr are shortened to just their
+// leading venue/place name (the part before the first comma) for the
+// title -- "Car from Soho Farmhouse to Brown's Hotel", not the entire
+// formatted address -- since the full description is already shown
+// separately in ev.location.
 function tripsyTransportationFallbackSummary(raw, dep, arr) {
   const type = raw.category === 'airplane' ? 'Flight' : (tripsySlugToLabel(raw.category) || 'Transportation');
-  if (dep && arr) return `${type} from ${dep} to ${arr}`;
-  if (dep) return `${type} from ${dep}`;
-  if (arr) return `${type} to ${arr}`;
+  const shortDep = dep ? dep.split(',')[0].trim() : dep;
+  const shortArr = arr ? arr.split(',')[0].trim() : arr;
+  if (shortDep && shortArr) return `${type} from ${shortDep} to ${shortArr}`;
+  if (shortDep) return `${type} from ${shortDep}`;
+  if (shortArr) return `${type} to ${shortArr}`;
   return type;
 }
 
@@ -7673,9 +7681,19 @@ function tripsyRawToDisplay(resource, raw) {
   // so the from/to fallback below still kicks in instead of surfacing it
   // verbatim.
   const usableName = raw.name && raw.name.trim().toLowerCase() !== 'transportation' ? raw.name : null;
+  // A real point-to-point route (from at least one of dep/arr) is more
+  // useful as the title than the operating company's name -- "Car from
+  // Soho Farmhouse to Brown's Hotel" says what the leg actually IS, where
+  // "Bluetick Chauffeur Services" doesn't. Only fall back to company+
+  // number (then name, then a bare type) when there's no route to
+  // describe at all. The company name isn't lost when it loses the title
+  // -- every caller still has it via tripsyRaw.company for its own
+  // "Company Number" detail line (see tripsyTimelineDetailLines, and the
+  // itinerary cards' own meta line for this same reason).
+  const companyNumber = `${raw.company || ''} ${raw.transportNumber || ''}`.trim();
   return {
     type: raw.category === 'airplane' ? 'flight' : 'transportation',
-    summary: `${raw.company || ''} ${raw.transportNumber || ''}`.trim() || usableName || tripsyTransportationFallbackSummary(raw, dep, arr),
+    summary: (dep || arr) ? tripsyTransportationFallbackSummary(raw, dep, arr) : (companyNumber || usableName || tripsyTransportationFallbackSummary(raw, dep, arr)),
     location: dep && arr ? `${dep} → ${arr}` : (dep || arr || null),
     notes: raw.notes || null,
     start: raw.departureAt,
@@ -7862,6 +7880,33 @@ const TRIPSY_DATETIME_FIELD_COUNTERPARTS = {
   transportation: [['departureAt', 'arrivalAt']],
 };
 
+// Hides the Save/Cancel row (tripsyEditActionButtonsHtml's own wrapping
+// div, found via the Save button's parentElement) until the owner
+// actually changes a field -- a freshly-opened edit form has nothing yet
+// to save or discard, and the panel's own opening control (Edit icon,
+// "+" Add, etc.) already toggles the whole panel closed regardless, so
+// hiding Cancel too strands no one. Snapshots every matched field's
+// value at call time (call this AFTER any programmatic auto-fill, e.g.
+// the datetime cross-sync below, has already run, so that doesn't itself
+// register as a "change"), then re-checks on every input/change --
+// including a change undone by hand, which hides the row again -- and
+// toggles display to match whether anything currently differs.
+function tripsyWireEditFormChangeDetection(panel, saveDataAttr, fieldSelector) {
+  const inputs = [...panel.querySelectorAll(fieldSelector)];
+  const initialValues = new Map(inputs.map(el => [el, el.value]));
+  const buttonsRow = panel.querySelector(`[${saveDataAttr}]`)?.parentElement;
+  if (!buttonsRow) return;
+  const updateVisibility = () => {
+    const changed = inputs.some(el => el.value !== initialValues.get(el));
+    buttonsRow.style.display = changed ? '' : 'none';
+  };
+  updateVisibility();
+  inputs.forEach(el => {
+    el.addEventListener('input', updateVisibility);
+    el.addEventListener('change', updateVisibility);
+  });
+}
+
 // Renders the inline edit form for one Tripsy-sourced event's raw fields
 // into `panel`, wiring Save (queues an edit_event pending change) and Exit
 // without saving. `raw` is the CURRENT effective raw fields (including any
@@ -7961,6 +8006,10 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     dateA.addEventListener('change', () => { if (dateA.value && !dateB.value) dateB.value = dateA.value; });
     dateB.addEventListener('change', () => { if (dateB.value && !dateA.value) dateA.value = dateB.value; });
   });
+
+  // After the datetime cross-sync above, so its auto-fill doesn't itself
+  // register as a "change" the moment the form opens.
+  tripsyWireEditFormChangeDetection(panel, 'data-tripsy-edit-save', '[data-tripsy-edit-field], [data-tripsy-edit-field-date], [data-tripsy-edit-field-time]');
 
   panel.querySelector("[data-tripsy-edit-exit]").addEventListener("click", () => {
     panel.style.display = "none";
@@ -8087,6 +8136,8 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
       </div>
     </div>
   `;
+
+  tripsyWireEditFormChangeDetection(panel, 'data-tripsy-edit-trip-save', '[data-tripsy-edit-trip-field]');
 
   // The attach panel is a sibling div in the same trip card (rendered
   // alongside this edit-trip panel and the add-item panel), not a child of
@@ -9671,13 +9722,41 @@ function tripsyExtractTimeFromText(text) {
   if (!m) return null;
   return `${m[1]}:${m[2]} ${m[3].toUpperCase()}M`;
 }
+// Which meal a restaurant-category activity's title should be framed as,
+// purely from its own start time -- covers the full 24 hours with no
+// gaps, wrapping "Late Night" across midnight back around to Breakfast.
+function tripsyRestaurantMealLabel(startIso) {
+  const parts = parseTripLocalParts(startIso);
+  if (!parts || parts.hour == null) return null;
+  const minutes = parts.hour * 60 + (parts.minute || 0);
+  if (minutes >= 6 * 60 && minutes < 10 * 60) return 'Breakfast';
+  if (minutes >= 10 * 60 && minutes < 11 * 60 + 30) return 'Brunch';
+  if (minutes >= 11 * 60 + 30 && minutes < 14 * 60 + 30) return 'Lunch';
+  if (minutes >= 14 * 60 + 30 && minutes < 17 * 60) return 'Tea';
+  if (minutes >= 17 * 60 && minutes < 21 * 60) return 'Dinner';
+  return 'Late Night'; // 9:00 PM through 5:59 AM
+}
+// Itinerary-only display title for a restaurant-category activity --
+// "Breakfast at Ivy" instead of the bare venue name, based on when it
+// starts. Deliberately NOT applied to tripsyRawToDisplay (which My Trips
+// and everything else read from) or to the venue-identity values used for
+// Places photo search/matching (name/data-tripsy-place-name/blurb
+// lookups) -- those all still need the plain venue name.
+function tripsyItineraryEventTitle(ev) {
+  const raw = ev && ev.tripsyRaw;
+  if (raw && raw.resource === 'activity' && raw.category === 'restaurant' && ev.summary) {
+    const meal = tripsyRestaurantMealLabel(ev.start);
+    if (meal) return `${meal} at ${ev.summary}`;
+  }
+  return ev.summary;
+}
 // What the row shows before an AI blurb has ever been generated (or if
 // generation fails) -- plain but always available, so Print never breaks
 // on a trip whose summary blurbs haven't been generated yet.
 function tripsySummaryRowFallbackText(item) {
   if (item.isLayover) return `${tripsyFormatLayoverDuration(item.layoverMinutes)} layover in ${item.layoverAirport}`;
   if (item.psReservation) return `P/S Reservation${item.psReservation.experience ? ' • ' + item.psReservation.experience : ''}`;
-  return item.ev.summary || '';
+  return tripsyItineraryEventTitle(item.ev) || '';
 }
 // The facts sent to Claude for one row when generating summary blurbs --
 // deliberately excludes layover rows (tripsySummaryRowKey returns null for
@@ -10810,7 +10889,7 @@ async function buildTripsyPrintHtml(tripKey) {
     return `
       <div class="tp-place-card ${isSkipped ? 'tp-place-card-no-photo' : 'tp-place-card-float-left'}" ${rowKey ? `id="tp-detail-event-${esc(rowKey)}"` : ''} ${isSkipped ? '' : `style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;"`} data-tripsy-place-name="${esc(name)}" data-tripsy-place-address="${esc(address)}" data-tripsy-place-title="${esc(ev.summary)}" data-tripsy-place-location-hint="${esc(locationHint)}">
         ${photoAreaHtml}
-        <div class="tp-place-card-name">${esc(name)}</div>
+        <div class="tp-place-card-name">${esc(tripsyItineraryEventTitle(ev))}</div>
         ${timeMetaLine ? `<div class="tp-place-card-meta" style="font-weight:700;">${esc(timeMetaLine)}</div>` : ''}
         ${metaParts.map(m => `<div class="tp-place-card-meta">${esc(m)}</div>`).join('')}
         ${blurb ? `<div class="tp-place-card-blurb">${esc(blurb)}</div>` : ''}
@@ -10885,8 +10964,13 @@ async function buildTripsyPrintHtml(tripKey) {
     // than a plain date that's redundant with the day divider above it.
     const hasRoute = !!ev.location;
     const dateOrTimeMetaLine = hasRoute ? formatTripDateRange(ev.start, ev.end) : formatTripTime(ev.start);
+    // The title is route-based whenever there's a route (tripsyRawToDisplay),
+    // which bumps the company name out of it -- shown here instead so it
+    // isn't lost, only when it's not already the title (no route).
+    const companyMetaLine = hasRoute && company ? `${company}${raw.transportNumber ? ' ' + raw.transportNumber : ''}` : null;
     const metaParts = [
       ev.location,
+      companyMetaLine,
       raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
       tripsySeatLabel(raw),
       raw.vehicleDescription || null,
@@ -11737,8 +11821,14 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
       // with the day divider this card already sits under.
       const hasRoute = !!ev.location;
       const boldMetaText = hasRoute ? null : formatTripTime(ev.start);
+      // The title is route-based whenever there's a route
+      // (tripsyRawToDisplay), which bumps the company name out of it --
+      // shown here instead so it isn't lost, only when it's not already
+      // the title (no route).
+      const companyMetaLine = hasRoute && company ? `${company}${raw.transportNumber ? ' ' + raw.transportNumber : ''}` : null;
       const meta = [
         hasRoute ? formatTripDateRange(ev.start, ev.end) : null, ev.location,
+        companyMetaLine,
         raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null,
         tripsySeatLabel(raw), raw.vehicleDescription || null,
         raw.departureTerminal ? `Terminal ${raw.departureTerminal}` : null,
@@ -11770,7 +11860,7 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
       // hosting event's own card -- a hotel already has its own address.
       const locationHint = isStay ? '' : tripsyLodgingCityAt(ev.start);
       const photoUrl = await tripsyDedupedPlacePhotoUrl(name, address, ev.summary, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
-      await drawCard(name, meta, blurb, photoUrl, boldMetaText);
+      await drawCard(tripsyItineraryEventTitle(ev), meta, blurb, photoUrl, boldMetaText);
     }
   };
 
