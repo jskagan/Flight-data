@@ -77,6 +77,9 @@ driveData = {
                                     // forwarded confirmation email, awaiting owner review
   tripsyEmailIntake: [...],        // raw forwarded confirmation emails the app found in Gmail,
                                     // awaiting parse by a tripsy-trips-refresh run (see below)
+  tripsyUpdatePages: [...],        // saved Itinerary -> Update comparisons (tour-operator PDF vs.
+                                    // Tripsy), one per trip, kept until every row is resolved or a
+                                    // referenced event is edited some other way (see below)
   syncTimestamps: {...},           // { reservations, psBalance, tripsyEmailScan } ISO strings,
                                     // last successful sync/check for each
   gmailCalendarAccessEmails: [...],// lowercased emails (besides OWNER_EMAIL) opted into requesting
@@ -298,6 +301,33 @@ that catches drift between them.
   (`isTripsyTripCollapsed`/`setTripsyTripCollapsed`, `index.html:6313` area) — deliberately *not*
   in `driveData`, since view-only users have no Drive write access to persist anything into the
   shared file.
+- **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
+  upload a PDF from a trip's Itinerary → Modify → Update menu, which calls
+  `compareTripsyItineraryPdf` and shows a row per PDF/Tripsy difference (match/conflict/pdf_only/
+  tripsy_only) for the owner to Accept/Ignore/Modify/Add/Delete one at a time
+  (`runTripsyUpdateComparison`, `index.html:13634` area). The result is saved to
+  `driveData.tripsyUpdatePages` (one entry per trip, `Store.getTripsyUpdatePage`/
+  `saveTripsyUpdatePage`/`deleteTripsyUpdatePage`) the moment it's generated, so closing the overlay
+  or reloading never loses it — clicking Update again on a trip with a saved page resumes straight
+  into it (`showTripsyUpdatePage`) instead of asking for another upload; "Upload New PDF" in the
+  overlay toolbar starts a fresh comparison on purpose, which supersedes it. The page is deleted
+  automatically in exactly two cases: **(1)** every row has been resolved (Accepted/Added/Deleted/
+  Ignored/Dismissed — `persistTripsyUpdatePageState`, called after each), or **(2)** the owner edits
+  or deletes one of the specific events the page references through some path *other than* the
+  Update page's own actions (the per-event Edit panel, the timeline's Delete button, doc/email-parse
+  import, etc.) — that snapshot is now stale, so `Store.queueTripsyChange` drops the page rather than
+  leave it showing differences against events that no longer match reality. Actions taken *through*
+  the Update page itself (Accept/Add/Delete, and Modify Existing's jump into the real edit panel) are
+  stamped `source: 'tripsy_update_page'` on the pending change they queue specifically so this check
+  can tell those apart from an unrelated edit to the same event.
+- **A partial-itinerary PDF only compares the days it actually covers**: `compareTripsyItineraryPdf`
+  determines the PDF's own date range from its day headings (`pdf_date_range`, part of the schema) —
+  which can be narrower than the trip's real date range, e.g. a supplement covering just the middle
+  leg of a longer trip. A currently-tracked event dated outside that range is never returned as
+  `tripsy_only` (the prompt says so explicitly; `runTripsyUpdateComparison` also filters defensively
+  in case Claude doesn't fully comply), so days the PDF doesn't mention at all never get flagged as
+  "missing." When the PDF's range is narrower than the trip's, the owner sees a blocking `alert()`
+  stating exactly which dates were compared before the Update page renders.
 
 ### Review / ambiguity resolution
 

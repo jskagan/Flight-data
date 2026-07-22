@@ -1744,6 +1744,23 @@ const Store = {
           c => !(c.type === 'edit_trip' && c.tripKey === change.tripKey)
         );
       }
+      // A saved Update comparison page (see saveTripsyUpdatePage) is a
+      // snapshot of specific events at the moment it was generated -- if one
+      // of those events gets edited or deleted through anything OTHER than
+      // the Update page's own Accept/Add/Delete/Modify-Existing actions
+      // (which stamp source: 'tripsy_update_page'), that snapshot no longer
+      // reflects reality and gets dropped rather than left showing stale
+      // rows. Deleting a trip takes every Update page for it along,
+      // regardless of source.
+      if (driveData.tripsyUpdatePages && driveData.tripsyUpdatePages.length) {
+        if (change.type === 'delete_trip') {
+          driveData.tripsyUpdatePages = driveData.tripsyUpdatePages.filter(p => p.tripKey !== change.tripKey);
+        } else if ((change.type === 'edit_event' || change.type === 'delete_event') && change.source !== 'tripsy_update_page') {
+          driveData.tripsyUpdatePages = driveData.tripsyUpdatePages.filter(
+            p => !(p.eventKeys || []).includes(change.eventKey)
+          );
+        }
+      }
       driveData.tripsyPendingChanges.push(change);
       await persistDriveData();
       return true;
@@ -1947,6 +1964,40 @@ const Store = {
     } catch (e) {
       console.error('Store.saveTripsyGeneratedPdf failed:', e);
       return { ok: false, error: e.message || String(e) };
+    }
+  },
+  // A generated Update comparison (Itinerary -> Update), kept alive in
+  // driveData instead of only the in-memory tripsyUpdateRows var -- so it
+  // survives a reload/device switch and isn't lost just by closing the
+  // overlay. One entry per trip (a fresh comparison replaces the old one
+  // outright); see runTripsyUpdateComparison for when this is saved,
+  // tripsyUpdateResolveEntry's caller sites for when it's re-saved/deleted
+  // as rows resolve, and queueTripsyChange above for the staleness check
+  // that deletes it early if the owner edits one of its events elsewhere.
+  async getTripsyUpdatePage(tripKey) {
+    return (driveData.tripsyUpdatePages || []).find(p => p.tripKey === tripKey) || null;
+  },
+  async saveTripsyUpdatePage(page) {
+    try {
+      if (!driveData.tripsyUpdatePages) driveData.tripsyUpdatePages = [];
+      driveData.tripsyUpdatePages = driveData.tripsyUpdatePages.filter(p => p.tripKey !== page.tripKey);
+      driveData.tripsyUpdatePages.push(page);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.saveTripsyUpdatePage failed:', e);
+      return false;
+    }
+  },
+  async deleteTripsyUpdatePage(tripKey) {
+    try {
+      if (!driveData.tripsyUpdatePages || !driveData.tripsyUpdatePages.length) return true;
+      driveData.tripsyUpdatePages = driveData.tripsyUpdatePages.filter(p => p.tripKey !== tripKey);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.deleteTripsyUpdatePage failed:', e);
+      return false;
     }
   },
   // `keepOffline` is the one shared, cross-device marker for "this doc
@@ -8351,7 +8402,13 @@ function tripsyWireEditFormChangeDetection(panel, saveDataAttr, fieldSelector) {
 // return and the real save-success path). Used by callers that need to
 // return somewhere else once this form is done, e.g. the Update overlay's
 // Modify Existing reopening itself after this panel closes.
-function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, createOptions, onClose) {
+// source (optional, 8th param) is stamped onto the queued edit_event change
+// as-is -- today only handleTripsyUpdateModify passes 'tripsy_update_page',
+// so Store.queueTripsyChange's Update-page-staleness check (see there) can
+// tell "the owner modified this exact event through the Update page's own
+// Modify Existing" apart from any other edit to the same event, which
+// SHOULD invalidate a saved Update comparison referencing it.
+function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, createOptions, onClose, source) {
   const fields = TRIPSY_EDIT_FIELDS[raw.resource] || [];
   // A fresh id per render (not tied to the event's own id, which doesn't
   // exist yet in create mode) so multiple panels open at once never
@@ -8537,6 +8594,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
         tripsyResource: raw.resource,
         tripsyId: raw.id,
         changes,
+        ...(source ? { source } : {}),
       });
     }
     if (!ok) toast("Could not save changes — storage error. Please try again.", "error");
@@ -11254,6 +11312,15 @@ async function compareTripsyItineraryPdf(effectiveTrip, currentEventsForPrompt, 
   const schema = {
     type: 'object',
     properties: {
+      pdf_date_range: {
+        type: 'object',
+        properties: {
+          start: { type: 'string' },
+          end: { type: 'string' },
+        },
+        required: ['start', 'end'],
+        additionalProperties: false,
+      },
       rows: {
         type: 'array',
         items: {
@@ -11285,12 +11352,16 @@ async function compareTripsyItineraryPdf(effectiveTrip, currentEventsForPrompt, 
         },
       },
     },
-    required: ['rows'],
+    required: ['pdf_date_range', 'rows'],
     additionalProperties: false,
   };
   const promptText = `Compare the attached PDF travel itinerary against this trip's currently tracked events, and classify every event on either side.
 
 Trip: ${effectiveTrip.name || ''}, ${formatTripDateRange(effectiveTrip.start, effectiveTrip.end)}${effectiveTrip.location ? `, ${effectiveTrip.location}` : ''}.
+
+First, read every day heading on the PDF and determine the full range of calendar dates it actually covers -- this may be narrower than the trip's own date range above (e.g. a supplemental itinerary for just part of a longer trip). Return that as pdf_date_range.start/end (plain YYYY-MM-DD, the earliest and latest dates that appear on the PDF).
+
+The PDF's own date range from the step above is also the ONLY range "tripsy_only" comparisons are scoped to: a currently tracked event dated outside pdf_date_range must NEVER be returned as "tripsy_only" -- the PDF simply doesn't cover that day at all, so there's nothing to compare it against. Only current events falling ON OR BETWEEN pdf_date_range.start and pdf_date_range.end are candidates for "tripsy_only".
 
 Return one rows[] entry for EVERY event that appears on the PDF, on the current-events list below, or both, with status set to exactly one of:
 - "match": the same real-world event appears on both sides, and nothing meaningfully differs.
@@ -13064,16 +13135,69 @@ async function openTripsyItineraryPrintView(tripKey) {
 
 // Itinerary menu's "Update" button -- compares an uploaded PDF against
 // this trip's current Tripsy events (compareTripsyItineraryPdf) and lets
-// the owner act on each row. The comparison itself is ephemeral: held only
-// in this module-level array for the current upload session, never
-// persisted to driveData -- re-uploading (or re-opening Update) always
-// starts a fresh comparison against whatever's actually in Tripsy now.
+// the owner act on each row. This module-level state mirrors whatever's
+// saved in driveData.tripsyUpdatePages for tripsyUpdateOverlayTripKey (see
+// Store.getTripsyUpdatePage/saveTripsyUpdatePage/deleteTripsyUpdatePage) --
+// a comparison survives a reload/device switch/closing the overlay, and is
+// only ever deleted once every row is resolved or the owner edits one of
+// its events some other way (see the staleness check in
+// Store.queueTripsyChange).
 let tripsyUpdateRows = [];
 let tripsyUpdateOverlayTripKey = null;
 // Set once per comparison run (runTripsyUpdateComparison) so day headers
 // can show "Day N" via tripsyDayNumberFromTripStart, same as the Generate
 // panel already does.
 let tripsyUpdateTripStartDayKey = null;
+
+// The set of existing-event keys a comparison's rows reference (conflict,
+// match, and tripsy_only rows all carry one; pdf_only rows don't, since
+// there's no existing event to match) -- this is what
+// Store.queueTripsyChange's staleness check matches an unrelated edit/
+// delete against to decide whether a saved Update page is now stale.
+function tripsyUpdateRowsEventKeys(rows) {
+  return [...new Set(rows.map(r => r.matched_event_key).filter(Boolean))];
+}
+
+// Builds the persistable snapshot of the current Update session and saves
+// it, or -- once every row has been resolved (accepted/added/deleted/
+// ignored/dismissed) -- deletes it instead. Called after every action that
+// changes a row's resolved state, so driveData always reflects exactly
+// what's still outstanding on screen.
+async function persistTripsyUpdatePageState() {
+  if (!tripsyUpdateOverlayTripKey) return;
+  if (tripsyUpdateRows.every(r => r._actionState)) {
+    await Store.deleteTripsyUpdatePage(tripsyUpdateOverlayTripKey);
+    return;
+  }
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripsyUpdateOverlayTripKey);
+  await Store.saveTripsyUpdatePage({
+    tripKey: tripsyUpdateOverlayTripKey,
+    tripName: trip ? trip.name : '',
+    generatedAt: new Date().toISOString(),
+    tripStartDayKey: tripsyUpdateTripStartDayKey,
+    rows: tripsyUpdateRows,
+    eventKeys: tripsyUpdateRowsEventKeys(tripsyUpdateRows),
+  });
+}
+
+// Loads a previously-saved Update page (Store.getTripsyUpdatePage) straight
+// into the overlay -- no file/re-comparison needed -- so reopening "Update"
+// on a trip that already has unresolved rows resumes exactly where the
+// owner left off instead of demanding a fresh PDF upload.
+function showTripsyUpdatePage(page) {
+  const overlay = getOrCreateTripsyUpdateOverlay();
+  const titleEl = overlay.querySelector('[data-tripsy-update-title]');
+  const content = overlay.querySelector('#tripsy-update-content');
+  tripsyUpdateOverlayTripKey = page.tripKey;
+  tripsyUpdateTripStartDayKey = page.tripStartDayKey;
+  tripsyUpdateRows = page.rows;
+  if (titleEl) titleEl.textContent = `Update comparison for ${page.tripName}`;
+  overlay.style.display = 'flex';
+  renderTripsyUpdateOverlayContent();
+  if (content && !content.innerHTML.trim()) {
+    content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Nothing left to review here.</div>`;
+  }
+}
 
 function tripsyFileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -13257,6 +13381,7 @@ function getOrCreateTripsyUpdateOverlay() {
   overlay.innerHTML = `
     <div class="tripsy-update-toolbar">
       <div class="tripsy-update-toolbar-title" data-tripsy-update-title></div>
+      <button class="tripsy-update-btn" id="tripsy-update-newpdf-btn">Upload New PDF</button>
       <button class="tripsy-update-btn" id="tripsy-update-close-btn">Close</button>
     </div>
     <div class="tripsy-update-paper" id="tripsy-update-content"></div>
@@ -13264,6 +13389,18 @@ function getOrCreateTripsyUpdateOverlay() {
   document.body.appendChild(overlay);
   overlay.querySelector('#tripsy-update-close-btn').addEventListener('click', () => {
     overlay.style.display = 'none';
+  });
+  // Once a page is resumed from driveData (showTripsyUpdatePage) rather
+  // than freshly generated, there's no picked File object to Retry with --
+  // this is how the owner starts a brand new comparison over it instead
+  // (runTripsyUpdateComparison's own save then supersedes whatever was
+  // resumed, same as a Retry does).
+  overlay.querySelector('#tripsy-update-newpdf-btn').addEventListener('click', () => {
+    if (!tripsyUpdateOverlayTripKey) return;
+    const input = getOrCreateTripsyUpdateFileInput();
+    input.dataset.tripKey = tripsyUpdateOverlayTripKey;
+    input.value = '';
+    input.click();
   });
   // Click-outside-to-close: same pattern as #tripsy-preview-overlay -- a
   // click landing directly on the fixed backdrop (never on the toolbar or
@@ -13278,7 +13415,13 @@ function getOrCreateTripsyUpdateOverlay() {
 function renderTripsyUpdateOverlayContent() {
   const content = document.getElementById('tripsy-update-content');
   if (!content) return;
-  content.innerHTML = tripsyUpdateRows.length ? renderTripsyUpdateOverlayRows(tripsyUpdateRows) : '';
+  // Already-resolved rows (_actionState set) stay in tripsyUpdateRows so
+  // data-row-idx lookups by array index never shift -- but a full re-render
+  // (e.g. loading a saved page back in via showTripsyUpdatePage) must skip
+  // them, same as tripsyUpdateResolveEntry's direct DOM removal already
+  // does for the common in-session case.
+  const openRows = tripsyUpdateRows.filter(r => !r._actionState);
+  content.innerHTML = openRows.length ? renderTripsyUpdateOverlayRows(openRows) : '';
 }
 
 // Any resolved entry (Dismiss, Accept/Ignore Update, Add/Delete/Ignore, or
@@ -13329,7 +13472,11 @@ function wireTripsyUpdateOverlayButtons(overlay) {
     if (!row) return;
 
     if (modifyEl) { e.preventDefault(); return handleTripsyUpdateModify(row); }
-    if (dismissBtn) return tripsyUpdateResolveEntry(dismissBtn);
+    if (dismissBtn) {
+      row._actionState = 'dismissed';
+      tripsyUpdateResolveEntry(dismissBtn);
+      return persistTripsyUpdatePageState();
+    }
     if (acceptBtn) return handleTripsyUpdateAccept(row, acceptBtn);
     if (ignoreBtn) return handleTripsyUpdateIgnore(row, ignoreBtn);
     if (addBtn) return handleTripsyUpdateAdd(row, addBtn);
@@ -13364,10 +13511,12 @@ async function handleTripsyUpdateAccept(row, btn) {
       tripsyResource: found.raw.resource,
       tripsyId: found.raw.id,
       changes,
+      source: 'tripsy_update_page',
     });
     if (!ok) { toast("Could not save changes — storage error. Please try again.", "error"); btn.disabled = false; return; }
     row._actionState = 'queued';
     tripsyUpdateResolveEntry(btn);
+    persistTripsyUpdatePageState();
     renderTripsyEventsList();
     updateTripsyPendingWarningBadge();
     toast('Update queued.', 'success');
@@ -13378,13 +13527,14 @@ async function handleTripsyUpdateAccept(row, btn) {
   }
 }
 
-// "Ignore Update" / "Ignore" -- purely visual, no Store call at all: this
-// whole comparison is ephemeral (held only in tripsyUpdateRows for the
-// current upload session), so "doing nothing" really does mean nothing
-// gets written anywhere.
+// "Ignore Update" / "Ignore" -- queues no Tripsy change (ignoring really
+// does mean nothing gets written to Tripsy), but still marks the row
+// resolved and re-saves (or, if this was the last open row, deletes) the
+// persisted Update page via persistTripsyUpdatePageState.
 function handleTripsyUpdateIgnore(row, btn) {
   row._actionState = 'ignored';
   tripsyUpdateResolveEntry(btn);
+  persistTripsyUpdatePageState();
 }
 
 // "Modify Existing" (both the button and the Tripsy-side hyperlink trigger
@@ -13414,7 +13564,7 @@ async function handleTripsyUpdateModify(row) {
   const display = tripsyRawToDisplay(effectiveRaw.resource, effectiveRaw);
   renderTripsyEditPanel(panel, effectiveRaw, found.tripKey, found.tripName, display.summary, null, () => {
     if (overlay) overlay.style.display = 'flex';
-  });
+  }, 'tripsy_update_page');
   panel.style.display = 'block';
   panel.insertAdjacentHTML('afterbegin', tripsyUpdateDiffSummaryHtml(row));
   const viewEl = container.querySelector(`[data-tripsy-view-event="${CSS.escape(eventKey)}"]`);
@@ -13445,10 +13595,12 @@ async function handleTripsyUpdateAdd(row, btn) {
       tripsyTripId: tripsyTripIdFromKey(tripKey),
       eventSummary,
       fields,
+      source: 'tripsy_update_page',
     });
     if (!ok) { toast("Could not save changes — storage error. Please try again.", "error"); btn.disabled = false; return; }
     row._actionState = 'queued';
     tripsyUpdateResolveEntry(btn);
+    persistTripsyUpdatePageState();
     renderTripsyEventsList();
     updateTripsyPendingWarningBadge();
     toast('New event queued.', 'success');
@@ -13482,10 +13634,12 @@ async function handleTripsyUpdateDelete(row, btn) {
       eventSummary: row.tripsy_summary,
       tripsyResource: found.raw.resource,
       tripsyId: found.raw.id,
+      source: 'tripsy_update_page',
     });
     if (!ok) { toast("Could not queue deletion — storage error. Please try again.", "error"); btn.disabled = false; return; }
     row._actionState = 'queued';
     tripsyUpdateResolveEntry(btn);
+    persistTripsyUpdatePageState();
     renderTripsyEventsList();
     updateTripsyPendingWarningBadge();
     toast('Deletion queued.', 'success');
@@ -13521,18 +13675,57 @@ async function runTripsyUpdateComparison(tripKey, file) {
     tripsyUpdateTripStartDayKey = tripsyDayKey(effectiveTrip.start);
     const currentEventsForPrompt = buildTripsyCurrentEventsPrompt(trip, pendingChanges);
     const result = await compareTripsyItineraryPdf(effectiveTrip, currentEventsForPrompt, pdfBase64);
-    const rows = (result.rows || []).map((row, idx) => ({
-      ...row,
-      _idx: idx,
-      _dayKey: row.pdf_date || tripsyDayKeyForEventKey(row.matched_event_key) || 'unscheduled',
-      _actionState: null,
-    }));
+    const rowsRaw = result.rows || [];
+    // pdf_date_range is the PDF's OWN day coverage (see the prompt), which
+    // can be narrower than the trip's full date range -- a supplemental
+    // itinerary for just part of a longer trip, say. Falls back to the
+    // rows' own pdf_date spread if Claude ever omits the field despite the
+    // schema requiring it.
+    const pdfDatesFromRows = rowsRaw.map(r => r.pdf_date).filter(Boolean).sort();
+    const pdfRangeStart = (result.pdf_date_range && result.pdf_date_range.start) || pdfDatesFromRows[0] || null;
+    const pdfRangeEnd = (result.pdf_date_range && result.pdf_date_range.end) || pdfDatesFromRows[pdfDatesFromRows.length - 1] || null;
+    const rows = rowsRaw
+      // Defense-in-depth for the prompt's own "only compare tripsy_only
+      // within pdf_date_range" instruction -- drop any tripsy_only row
+      // for a day the PDF never covered, rather than flag an existing
+      // event as "missing" from a document that was never scoped to that
+      // day in the first place.
+      .filter(row => {
+        if (row.status !== 'tripsy_only' || !pdfRangeStart || !pdfRangeEnd) return true;
+        const dayKey = tripsyDayKeyForEventKey(row.matched_event_key);
+        return !dayKey || (dayKey >= pdfRangeStart && dayKey <= pdfRangeEnd);
+      })
+      .map((row, idx) => ({
+        ...row,
+        _idx: idx,
+        _dayKey: row.pdf_date || tripsyDayKeyForEventKey(row.matched_event_key) || 'unscheduled',
+        _actionState: null,
+      }));
     tripsyUpdateRows = rows;
     if (!rows.length) {
       content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">No events found in this PDF — is it an itinerary?</div>`;
+      // A re-run (Retry/Upload New PDF) that comes back empty replaces
+      // whatever was saved before -- nothing left to resume into.
+      await Store.deleteTripsyUpdatePage(tripKey);
       return;
     }
+    // Per explicit request: if the PDF's own coverage is narrower than the
+    // trip's actual date range, tell the owner exactly what got compared
+    // BEFORE showing the rows -- otherwise a partial-itinerary PDF (e.g.
+    // just the middle leg of a longer trip) could silently look like it
+    // compared the whole thing.
+    const tripStartKey = tripsyDayKey(effectiveTrip.start);
+    const tripEndKey = tripsyDayKey(effectiveTrip.end);
+    if (pdfRangeStart && pdfRangeEnd && tripStartKey && tripEndKey && (pdfRangeStart > tripStartKey || pdfRangeEnd < tripEndKey)) {
+      alert(`This PDF only has events for ${formatTripDateRange(pdfRangeStart, pdfRangeEnd)} (the full trip runs ${formatTripDateRange(effectiveTrip.start, effectiveTrip.end)}). Only that date range was compared -- other days weren't touched.`);
+    }
     renderTripsyUpdateOverlayContent();
+    // A fresh comparison always supersedes whatever was saved before (a
+    // re-run compares against Tripsy's current state, which the old rows
+    // may already be stale against) -- saveTripsyUpdatePage (via
+    // persistTripsyUpdatePageState) replaces any existing entry for this
+    // trip outright rather than merging.
+    await persistTripsyUpdatePageState();
   } catch (err) {
     console.error('Tripsy itinerary PDF comparison failed:', err);
     // Show the actual error text (e.g. the max_tokens/API-error messages
@@ -15131,6 +15324,11 @@ async function renderTripsyEventsListImpl() {
       itineraryNarrativeCache[`${trip.key}::intro`] ||
       Object.keys(itineraryNarrativeCache).some(k => k.startsWith(`${trip.key}::day::`))
     ));
+    // A saved, unresolved Update comparison (Store.getTripsyUpdatePage) --
+    // read straight off driveData since it's already in memory, same as
+    // hasGeneratedNarrative above -- swaps the label so clicking it visibly
+    // promises to resume, not re-upload.
+    const hasPendingUpdatePage = (driveData.tripsyUpdatePages || []).some(p => p.tripKey === trip.key);
     // Preview/Print merged into one "Itinerary" dropdown -- available to
     // every viewer, same as before. For the owner, Preview is also where
     // narrative generation/editing lives (the first-time section picker, or
@@ -15155,7 +15353,7 @@ async function renderTripsyEventsListImpl() {
           </button>
           <div data-tripsy-itinerary-modify-submenu="${esc(trip.key)}" style="display:none; padding-left:14px;">
             ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '👀', 'Preview')}
-            ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', 'Update') : ''}
+            ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', hasPendingUpdatePage ? 'Resume Update' : 'Update') : ''}
           </div>
           ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
           ${menuListButtonHtml(`data-tripsy-create-pdf-itinerary data-key="${esc(trip.key)}"`, '📄', 'Generate PDF')}
@@ -15420,16 +15618,22 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
-  // Update (owner-only) -- opens the shared, lazily-created file input
-  // (getOrCreateTripsyUpdateFileInput) targeted at this trip; the input's
-  // own 'change' listener (wired once, at creation time) picks up from
-  // there via runTripsyUpdateComparison.
+  // Update (owner-only) -- if this trip already has an unresolved saved
+  // comparison (Store.getTripsyUpdatePage), resumes straight into it rather
+  // than demanding a fresh PDF upload (see the module comment above
+  // tripsyUpdateRows for why that page is kept around at all). Otherwise
+  // opens the shared, lazily-created file input (getOrCreateTripsyUpdateFileInput)
+  // targeted at this trip; the input's own 'change' listener (wired once,
+  // at creation time) picks up from there via runTripsyUpdateComparison.
   container.querySelectorAll("[data-tripsy-update-itinerary]").forEach(btn => {
-    btn.addEventListener("click", e => {
+    btn.addEventListener("click", async e => {
       e.stopPropagation();
       closeAllTripsyTripPanels();
+      const tripKey = btn.dataset.key;
+      const savedPage = await Store.getTripsyUpdatePage(tripKey);
+      if (savedPage) { showTripsyUpdatePage(savedPage); return; }
       const input = getOrCreateTripsyUpdateFileInput();
-      input.dataset.tripKey = btn.dataset.key;
+      input.dataset.tripKey = tripKey;
       input.value = "";
       input.click();
     });
