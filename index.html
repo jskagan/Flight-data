@@ -11357,11 +11357,15 @@ ${JSON.stringify(currentEventsForPrompt)}`;
       // example, has ~50+ events) can easily need more than the 4096-8192
       // this app's other narrative calls use -- each row carries several
       // string fields (summaries, a reason, possible field_corrections).
-      // Raised twice now in production: 8192 -> 16000 (still cut off a
-      // real large trip) -> 32000. The explicit stop_reason check below
-      // means a future trip that's STILL too large fails with a clear,
-      // specific message instead of a cryptic parse error.
-      max_tokens: 32000,
+      // Raised in production twice as a NON-streaming request (8192 ->
+      // 16000 -> 32000) and still cut off a real large trip -- streaming
+      // (below) is what actually removes the ceiling, so this can go
+      // much higher without risking an HTTP timeout on the old blocking
+      // request. The explicit stop_reason check below still means a
+      // trip that's STILL too large fails with a clear, specific message
+      // instead of a cryptic parse error.
+      max_tokens: 64000,
+      stream: true,
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{
         role: 'user',
@@ -11376,13 +11380,40 @@ ${JSON.stringify(currentEventsForPrompt)}`;
     const errBody = await res.text().catch(() => '');
     throw new Error(`Claude API error ${res.status}: ${errBody.slice(0, 500)}`);
   }
-  const data = await res.json();
-  if (data.stop_reason === 'max_tokens') {
+  // Streamed (SSE) rather than one blocking JSON response -- a non-streaming
+  // request risks an HTTP timeout well before Claude actually reaches
+  // max_tokens on a large trip, which is what kept forcing max_tokens
+  // increases without fixing the real ceiling. ReadableStream async
+  // iteration is already polyfilled near the top of this file for the
+  // iPad WebView this app also has to run on, so a plain for-await loop
+  // over the response body is safe here too.
+  let text = '';
+  let stopReason = null;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // last line may be a partial chunk -- keep it for next read
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      let evt;
+      try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+      if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
+        text += evt.delta.text;
+      } else if (evt.type === 'message_delta' && evt.delta && evt.delta.stop_reason) {
+        stopReason = evt.delta.stop_reason;
+      }
+    }
+  }
+  if (stopReason === 'max_tokens') {
     throw new Error('The comparison was too large and got cut off (hit the response size limit). Try again, or split a very large itinerary into a smaller PDF.');
   }
-  const textBlock = (data.content || []).find(b => b.type === 'text');
-  if (!textBlock) throw new Error('Claude API returned no text block');
-  return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
+  if (!text) throw new Error('Claude API returned no text content');
+  return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(text));
 }
 
 // The four *_time pseudo-fields compareTripsyItineraryPdf's schema uses for
