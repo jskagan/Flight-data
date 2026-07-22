@@ -17998,51 +17998,62 @@ async function renderHome() {
     window.open("https://reservations.reserveps.com/ps/sign_in", "_blank", "noopener");
   });
 
-  try {
-    const HOME_UPCOMING_TRIPS_YEARS = 2;
-    const decrypted = await ensureTripsyDecrypted();
-    const tripsHost = document.getElementById("home-upcoming-trips");
-    if (!decrypted) {
-      tripsHost.innerHTML = `<div class="empty-state">Trip data is locked -- visit My Trips to unlock.</div>`;
-    } else {
-      const now = Date.now();
-      const cutoffDate = new Date();
-      cutoffDate.setFullYear(cutoffDate.getFullYear() + HOME_UPCOMING_TRIPS_YEARS);
-      const cutoff = cutoffDate.getTime();
-      const upcomingTrips = decrypted
-        .filter(t => !isTripsyTripEffectivelyHidden(t))
-        .filter(t => {
-          const start = t.start ? new Date(t.start).getTime() : null;
-          return start != null && start >= now && start <= cutoff;
-        })
-        .sort((a, b) => new Date(a.start) - new Date(b.start));
-
-      if (!upcomingTrips.length) {
-        tripsHost.innerHTML = `<div class="empty-state">No trips scheduled in the next ${HOME_UPCOMING_TRIPS_YEARS} years.</div>`;
+  // Deferred, NOT awaited: decrypting Tripsy trips (passphrase fetch + PBKDF2 ~250k)
+  // is the single slowest step on Home (~0.8s desktop, more on iPad). Running it
+  // unawaited lets the rest of Home paint and the app reveal immediately; this card
+  // fills in over its "Loading…" placeholder when the decrypt resolves. (On later
+  // in-app navigations the decrypt is memoized, so it's effectively instant.) Because
+  // it's async now, guard every DOM lookup -- the owner may have navigated away from
+  // Home before it resolves.
+  (async () => {
+    try {
+      const HOME_UPCOMING_TRIPS_YEARS = 2;
+      const decrypted = await ensureTripsyDecrypted();
+      const tripsHost = document.getElementById("home-upcoming-trips");
+      if (!tripsHost) return; // navigated away before decrypt finished
+      if (!decrypted) {
+        tripsHost.innerHTML = `<div class="empty-state">Trip data is locked -- visit My Trips to unlock.</div>`;
       } else {
-        tripsHost.innerHTML = `
-          <table class="report-table">
-            <colgroup><col style="width:160px;"><col style="width:220px;"><col style="width:180px;"></colgroup>
-            <thead><tr><th>Date</th><th>Name</th><th>Location</th></tr></thead>
-            <tbody>
-              ${upcomingTrips.map(t => `
-                <tr data-home-trip-row style="cursor:pointer;">
-                  <td>${esc(formatTripDateRange(t.start, t.end))}</td>
-                  <td>${esc(t.name)}</td>
-                  <td>${esc(t.location || "—")}</td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>`;
-        tripsHost.querySelectorAll("[data-home-trip-row]").forEach(row => {
-          row.addEventListener("click", () => navigate("tripsytrips"));
-        });
+        const now = Date.now();
+        const cutoffDate = new Date();
+        cutoffDate.setFullYear(cutoffDate.getFullYear() + HOME_UPCOMING_TRIPS_YEARS);
+        const cutoff = cutoffDate.getTime();
+        const upcomingTrips = decrypted
+          .filter(t => !isTripsyTripEffectivelyHidden(t))
+          .filter(t => {
+            const start = t.start ? new Date(t.start).getTime() : null;
+            return start != null && start >= now && start <= cutoff;
+          })
+          .sort((a, b) => new Date(a.start) - new Date(b.start));
+
+        if (!upcomingTrips.length) {
+          tripsHost.innerHTML = `<div class="empty-state">No trips scheduled in the next ${HOME_UPCOMING_TRIPS_YEARS} years.</div>`;
+        } else {
+          tripsHost.innerHTML = `
+            <table class="report-table">
+              <colgroup><col style="width:160px;"><col style="width:220px;"><col style="width:180px;"></colgroup>
+              <thead><tr><th>Date</th><th>Name</th><th>Location</th></tr></thead>
+              <tbody>
+                ${upcomingTrips.map(t => `
+                  <tr data-home-trip-row style="cursor:pointer;">
+                    <td>${esc(formatTripDateRange(t.start, t.end))}</td>
+                    <td>${esc(t.name)}</td>
+                    <td>${esc(t.location || "—")}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>`;
+          tripsHost.querySelectorAll("[data-home-trip-row]").forEach(row => {
+            row.addEventListener("click", () => navigate("tripsytrips"));
+          });
+        }
       }
+    } catch (e) {
+      console.error('renderHome upcoming trips failed:', e);
+      const host = document.getElementById("home-upcoming-trips");
+      if (host) host.innerHTML = `<span style="color:var(--red)">Could not load upcoming trips.</span>`;
     }
-  } catch (e) {
-    console.error('renderHome upcoming trips failed:', e);
-    document.getElementById("home-upcoming-trips").innerHTML = `<span style="color:var(--red)">Could not load upcoming trips.</span>`;
-  }
+  })();
 
   try {
     const report = cachedReport || await recomputeReport();
