@@ -8223,7 +8223,10 @@ function tripsyTransportationFallbackSummary(raw, dep, arr) {
   const type = raw.category === 'airplane' ? 'Flight' : (tripsySlugToLabel(raw.category) || 'Transportation');
   const shortDep = tripsyShortenPlaceDescription(dep);
   const shortArr = tripsyShortenPlaceDescription(arr);
-  if (shortDep && shortArr) return `${type} from ${shortDep} to ${shortArr}`;
+  // Ordinary point-to-point transport (not flights/roadtrips/cruises) joins its two
+  // endpoints with an arrow rather than the word "to": "Car from A → B".
+  const routeSep = ['airplane', 'roadtrip', 'cruise'].includes(raw.category) ? ' to ' : ' → ';
+  if (shortDep && shortArr) return `${type} from ${shortDep}${routeSep}${shortArr}`;
   if (shortDep) return `${type} from ${shortDep}`;
   if (shortArr) return `${type} to ${shortArr}`;
   return type;
@@ -8277,7 +8280,15 @@ function tripsyRawToDisplay(resource, raw) {
   // itinerary cards' own meta line for this same reason).
   const companyNumber = `${raw.company || ''} ${raw.transportNumber || ''}`.trim();
   const isFlight = raw.category === 'airplane';
-  const baseSummary = (dep || arr) ? tripsyTransportationFallbackSummary(raw, dep, arr) : (companyNumber || usableName || tripsyTransportationFallbackSummary(raw, dep, arr));
+  // When there's no departure/arrival route and the title falls back to the event's
+  // NAME, and that name is itself a route (e.g. "Paddington → Heathrow"), prefix the
+  // type + from/to so the timeline reads "Train from Paddington → Heathrow" (an arrow
+  // in the name = origin+destination -> "from") or "Car to Heathrow" (a lone place ->
+  // "to"). Flights/roadtrips/cruises keep their name as-is.
+  const nameTitle = (usableName && !['airplane', 'roadtrip', 'cruise'].includes(raw.category))
+    ? `${tripsySlugToLabel(raw.category) || 'Transportation'} ${usableName.includes('→') ? 'from' : 'to'} ${usableName}`
+    : usableName;
+  const baseSummary = (dep || arr) ? tripsyTransportationFallbackSummary(raw, dep, arr) : (companyNumber || nameTitle || tripsyTransportationFallbackSummary(raw, dep, arr));
   // Flights only: company + flight number moves INTO the header/title,
   // after the origin/destination, rather than living only in its own
   // detail line (tripsyTimelineDetailLines drops that line for flights
@@ -8499,15 +8510,17 @@ function tripsyEditActionButtonsHtml(saveDataAttr, cancelDataAttr, { vertical = 
   `;
 }
 
-// Reads one split date+time field pair (see renderTripsyEditPanel's
-// inputHtml datetime branch) back into a single 'YYYY-MM-DDTHH:MM:00'
-// value, or '' if either half is empty -- matches the old single
-// datetime-local input's own all-or-nothing behavior (a date with no time
-// was never a valid value there either).
+// Reads one split date+time field pair (see renderTripsyEditPanel's inputHtml
+// datetime branch) back into a single 'YYYY-MM-DDTHH:MM:00' value. No date -> ''
+// (genuinely no value). A DATE with no time defaults the time to 12:00 PM so a
+// dated-but-timeless event (e.g. a restaurant reservation whose exact time isn't
+// known yet) keeps its date instead of the whole value being silently dropped on
+// save -- a date-only value isn't storable/applyable to Tripsy on its own.
 function tripsyReadDateTimeField(panel, key) {
   const datePart = (panel.querySelector(`[data-tripsy-edit-field-date="${key}"]`) || {}).value || '';
   const timePart = (panel.querySelector(`[data-tripsy-edit-field-time="${key}"]`) || {}).value || '';
-  return (datePart && timePart) ? `${datePart}T${timePart}:00` : '';
+  if (!datePart) return '';
+  return `${datePart}T${timePart || '12:00'}:00`;
 }
 
 // Counterpart start/end (or departure/arrival) datetime fields per
@@ -8656,6 +8669,22 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     dateA.addEventListener('change', () => { if (dateA.value && !dateB.value) dateB.value = dateA.value; });
     dateB.addEventListener('change', () => { if (dateB.value && !dateA.value) dateA.value = dateB.value; });
   });
+
+  // A dated-but-timeless event (a date in one of its datetime fields but no specific
+  // time) should open its edit form with BOTH the start and end DATE boxes on that
+  // date -- so seed every still-empty date input from the event's own date (the first
+  // datetime field that carries one). Generalizes the counterpart cross-sync above to
+  // any datetime field; never overwrites a date already present, and leaves the time
+  // boxes untouched.
+  const tripsyEventDate = (fields.filter(f => f.kind === 'datetime')
+    .map(f => (raw[f.key] || '').slice(0, 10))
+    .find(Boolean)) || '';
+  if (tripsyEventDate) {
+    fields.filter(f => f.kind === 'datetime').forEach(f => {
+      const di = panel.querySelector(`[data-tripsy-edit-field-date="${f.key}"]`);
+      if (di && !di.value) di.value = tripsyEventDate;
+    });
+  }
 
   // After the datetime cross-sync above, so its auto-fill doesn't itself
   // register as a "change" the moment the form opens.
@@ -8834,7 +8863,7 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
       </div>
       <div style="display:flex; flex-direction:column; gap:12px; flex-shrink:0;">
         ${tripsyLargeIconButtonHtml('data-tripsy-edit-trip-add-doc', '📄', 'Add Doc')}
-        ${tripsyEditActionButtonsHtml('data-tripsy-edit-trip-save', 'data-tripsy-edit-trip-cancel', { vertical: true })}
+        ${tripsyEditActionButtonsHtml('data-tripsy-edit-trip-save', 'data-tripsy-edit-trip-cancel')}
       </div>
     </div>
   `;
@@ -9018,7 +9047,7 @@ function renderTripsyAttachPanel(panel, target) {
           </label>
         </div>
       </div>
-      ${tripsyEditActionButtonsHtml('data-tripsy-attach-save', 'data-tripsy-attach-cancel', { vertical: true })}
+      ${tripsyEditActionButtonsHtml('data-tripsy-attach-save', 'data-tripsy-attach-cancel')}
     </div>
   `;
 
@@ -15161,6 +15190,13 @@ function renderTripsyPsReservationViewPanel(panel, res, match) {
 // matter how long any earlier call's own work takes.
 let _tripsyEventsListRenderChain = Promise.resolve();
 let _tripsyTripPanelsOutsideClickBound = false;
+// Optimistic Import on the Review Parsed Docs page runs the ~2.5s full-file save in
+// the background so the row clears instantly. Serialize those background saves in a
+// chain so two quick imports can't issue overlapping full-file PATCHes (which the
+// optimistic-concurrency guard would treat as a cross-device conflict); track how many
+// are still in flight so the reconciling re-render runs once, after they all settle.
+let _tripsyParseImportChain = Promise.resolve();
+let _tripsyParseImportPending = 0;
 
 // Every trip-header dropdown/panel that opens on click (Add-item type menu,
 // Add-item create form, Edit Trip form, Attach-doc form, Docs list) --
@@ -17660,8 +17696,41 @@ async function renderTripsyParseReview() {
       const event = proposal.events.find(e => e.id === eventId);
       const destValue = row.querySelector("[data-parse-event-trip-select]").value;
       btn.disabled = true;
-      const ok = await tripsyParseImportProposalEvent(proposal, event, destValue, null);
-      if (ok) { toast("Imported."); await afterImport(); } else { btn.disabled = false; }
+      // "Create a new trip" prompts for a name first, so it can't optimistically clear
+      // the row before the reviewer confirms/cancels -- keep that path blocking.
+      if (destValue === '__new__') {
+        const ok = await tripsyParseImportProposalEvent(proposal, event, destValue, null);
+        if (ok) { toast("Imported."); await afterImport(); } else { btn.disabled = false; }
+        return;
+      }
+      // Optimistic: clear the row and confirm immediately; the full-file save runs in
+      // the background (serialized via _tripsyParseImportChain). If the save actually
+      // fails, put the row back and flag it so nothing is silently dropped.
+      row.style.display = "none";
+      toast("Imported.");
+      _tripsyParseImportPending++;
+      _tripsyParseImportChain = _tripsyParseImportChain
+        .then(() => tripsyParseImportProposalEvent(proposal, event, destValue, null))
+        .then(ok => {
+          _tripsyParseImportPending--;
+          if (!ok) {
+            row.style.display = "";
+            btn.disabled = false;
+            toast("That import didn't save — please try it again.", "error");
+            return;
+          }
+          // Reconcile once every queued import has settled, so the re-render can't
+          // yank the page out from under a still-pending optimistic row.
+          if (_tripsyParseImportPending === 0) afterImport();
+          else updateTripsyDocParseBadge();
+        })
+        .catch(err => {
+          _tripsyParseImportPending--;
+          console.error('Optimistic import failed:', err);
+          row.style.display = "";
+          btn.disabled = false;
+          toast("That import didn't save — please try it again.", "error");
+        });
     });
   });
 

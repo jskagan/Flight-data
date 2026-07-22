@@ -145,10 +145,15 @@ def transportation_summary(raw):
     def short(x):
         return x.split(",")[0].strip() if x else x
 
+    # Ordinary point-to-point transport (not flights/roadtrips/cruises) joins its two
+    # endpoints with an arrow rather than the word "to": "Car from A → B". Mirror of
+    # tripsyTransportationFallbackSummary/tripsyRawToDisplay in index.html.
+    excluded = cat in ("airplane", "roadtrip", "cruise")
+    route_sep = " to " if excluded else " → "
     if dep or arr:  # a real route wins over the company name
         sd, sa = short(dep), short(arr)
         if sd and sa:
-            base = f"{kind} from {sd} to {sa}"
+            base = f"{kind} from {sd}{route_sep}{sa}"
         elif sd:
             base = f"{kind} from {sd}"
         elif sa:
@@ -161,9 +166,12 @@ def transportation_summary(raw):
         if is_flight and company_number:
             return f"{base} • {company_number}"
         return base
-    # no route at all -> company+number, then a real name, then bare kind
+    # no route at all -> company+number, then a real name (prefixed with type + from/to
+    # for ordinary transport whose name is itself a route), then bare kind
     name = raw.get("name")
     usable_name = name if (name and name.strip().lower() != "transportation") else None
+    if usable_name and not excluded:
+        usable_name = f"{kind} {'from' if '→' in usable_name else 'to'} {usable_name}"
     return company_number or usable_name or kind
 
 
