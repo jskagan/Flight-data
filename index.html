@@ -1210,6 +1210,35 @@ async function downloadDriveFileBlob(driveFileId) {
   return res.blob();
 }
 
+// Opens a Drive-stored file (a Tripsy attachment, or a saved generated
+// itinerary PDF) in a new tab -- the local offline copy (works with no
+// network) when this device has one cached, falling back to the Drive
+// viewer link otherwise. The tab is opened SYNCHRONOUSLY, before the async
+// cache lookup, and then redirected once we know the URL -- opening it only
+// after the `await` below would lose the click's "user activation" and get
+// popup-blocked on Safari/iPad. noopener isn't available on the two-argument
+// form that returns a reference, so `tab.opener = null` achieves the same
+// thing. Top-level (not a closure inside renderTripsyEventsListImpl) so
+// callers outside that render pass -- e.g. the Preview overlay's saved-draft
+// picker -- can reuse it too.
+async function openDriveFileInNewTab(driveFileId) {
+  const tab = window.open('', '_blank');
+  if (tab) tab.opener = null;
+  try {
+    const cached = await getTripsyOfflineDoc(driveFileId);
+    if (cached && cached.blob) {
+      const url = URL.createObjectURL(cached.blob);
+      if (tab) tab.location.href = url; else window.open(url, '_blank', 'noopener');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return;
+    }
+  } catch (e) {
+    console.error('Reading offline doc cache failed, falling back to Drive:', e);
+  }
+  const driveUrl = `https://drive.google.com/file/d/${driveFileId}/view`;
+  if (tab) tab.location.href = driveUrl; else window.open(driveUrl, '_blank', 'noopener');
+}
+
 // ---- Offline doc cache (Tripsy attachments) ----
 // A per-device IndexedDB store of raw file blobs, keyed by driveFileId,
 // entirely separate from driveData -- caching/purging a copy here never
@@ -1756,6 +1785,26 @@ const Store = {
     } catch (e) {
       console.error('Store.renameTripsyAttachment failed:', e);
       return false;
+    }
+  },
+  // Generated itinerary PDFs (see tripsyPersistGeneratedPdf) -- same
+  // metadata-in-driveData/bytes-in-their-own-Drive-file shape as
+  // tripsyAttachments above, so Preview can offer a saved draft back later
+  // instead of only ever showing the live, always-current itinerary.
+  async listTripsyGeneratedPdfs(tripKey) {
+    return (driveData.tripsyGeneratedPdfs || [])
+      .filter(p => p.tripKey === tripKey)
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  },
+  async saveTripsyGeneratedPdf(entry) {
+    try {
+      if (!driveData.tripsyGeneratedPdfs) driveData.tripsyGeneratedPdfs = [];
+      driveData.tripsyGeneratedPdfs.push(entry);
+      await persistDriveData();
+      return { ok: true };
+    } catch (e) {
+      console.error('Store.saveTripsyGeneratedPdf failed:', e);
+      return { ok: false, error: e.message || String(e) };
     }
   },
   // `keepOffline` is the one shared, cross-device marker for "this doc
@@ -12160,6 +12209,33 @@ function drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay
   return y;
 }
 
+// Uploads the just-generated PDF to Drive (same uploadBlobToDrive pipeline
+// tripsyAttachments uses, index.html:1171) and records it in
+// driveData.tripsyGeneratedPdfs, so Preview can offer it back later as a
+// saved draft instead of only ever showing the live, always-current
+// itinerary. Best-effort: a Drive failure here must never take down the
+// (already-succeeded) local doc.save() download, so this only logs and
+// never throws.
+async function tripsyPersistGeneratedPdf(trip, tripKey, doc, fileName) {
+  try {
+    const blob = doc.output('blob');
+    const driveFileId = await uploadBlobToDrive(blob, fileName, 'application/pdf');
+    await Store.saveTripsyGeneratedPdf({
+      id: crypto.randomUUID(),
+      tripKey,
+      tripName: trip.name,
+      fileName,
+      driveFileId,
+      mimeType: 'application/pdf',
+      sizeBytes: blob.size,
+      createdAt: new Date().toISOString(),
+      createdBy: currentUserEmail,
+    });
+  } catch (e) {
+    console.error('tripsyPersistGeneratedPdf failed:', e);
+  }
+}
+
 // Real vector-text PDF for the "Create PDF" menu item when a trip has no
 // generated narrative yet -- a plain day-by-day list (same content/shape as
 // buildTripsyPrintHtml's own Part 1 "Summary" section) with NO cover photo,
@@ -12183,7 +12259,9 @@ async function buildTripsySimplePdf(tripKey) {
   drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, y, item => tripsySummaryRowFallbackText(item));
 
   const safeName = (trip.name || 'Itinerary').replace(/[/\\:*?"<>|]/g, '-').trim();
-  doc.save(`${safeName} - ${dateRangeText || 'Itinerary'}.pdf`);
+  const fileName = `${safeName} - ${dateRangeText || 'Itinerary'}.pdf`;
+  doc.save(fileName);
+  await tripsyPersistGeneratedPdf(trip, tripKey, doc, fileName);
   return true;
 }
 
@@ -12328,7 +12406,9 @@ async function buildTripsyItineraryPdf(tripKey) {
   }
 
   const safeName = (trip.name || 'Itinerary').replace(/[/\\:*?"<>|]/g, '-').trim();
-  doc.save(`${safeName} - ${dateRangeText || 'Itinerary'}.pdf`);
+  const fileName = `${safeName} - ${dateRangeText || 'Itinerary'}.pdf`;
+  doc.save(fileName);
+  await tripsyPersistGeneratedPdf(trip, tripKey, doc, fileName);
   return true;
 }
 
@@ -13170,7 +13250,7 @@ async function runTripsyUpdateComparison(tripKey, file) {
 // HTML to the real print flow directly (openTripsyItineraryPrintView is
 // NOT called again), so previewing then printing never re-fetches photos
 // or re-reads the narrative cache a second time.
-async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
+async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPicker } = {}) {
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return;
 
@@ -13910,6 +13990,20 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView } = {}) {
     }
   }
 
+  // Multiple saved PDF drafts for this trip (see tripsyPersistGeneratedPdf)
+  // means there's an actual choice to make -- let the owner pick a specific
+  // saved draft to open, or fall through to the live, always-current view.
+  // Skipped entirely (straight to the live view, same as before this
+  // existed) when there are 0 or 1 drafts, since there's nothing to choose
+  // between yet.
+  if (!skipDraftPicker) {
+    const drafts = await Store.listTripsyGeneratedPdfs(tripKey);
+    if (drafts.length >= 2) {
+      renderTripsyPdfDraftPicker(overlay, tripKey, trip, drafts);
+      return;
+    }
+  }
+
   const printBtn = overlay.querySelector('#tripsy-preview-print-btn');
   const content = overlay.querySelector('#tripsy-preview-content');
   // Show the overlay (and a loading note) IMMEDIATELY rather than only after
@@ -14025,6 +14119,59 @@ async function renderTripsyNarrativeSelectionScreen(overlay, tripKey, trip) {
       genBtn.disabled = false;
       statusEl.textContent = '';
     }
+  });
+}
+
+// Shown instead of the live itinerary when this trip has 2+ saved PDF
+// drafts (see tripsyPersistGeneratedPdf/Store.listTripsyGeneratedPdfs) --
+// lets the owner pick a specific past export to open, or fall through to
+// the always-current live view. Modeled on
+// renderTripsyNarrativeSelectionScreen just above for visual/structural
+// consistency (same heading style, same content.innerHTML + hide-print-
+// button + overlay.style.display='flex' pattern, listeners wired
+// immediately after the innerHTML assignment). Opening a draft does NOT
+// close this screen -- it opens in a separate tab (openDriveFileInNewTab),
+// so the owner can open more than one, or still choose to view live
+// afterward.
+function renderTripsyPdfDraftPicker(overlay, tripKey, trip, drafts) {
+  const content = overlay.querySelector('#tripsy-preview-content');
+  const draftRowHtml = draft => {
+    const when = draft.createdAt
+      ? new Date(draft.createdAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+      : '';
+    return `
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-top:1px solid var(--line);">
+        <div style="min-width:0;">
+          <div style="font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${esc(draft.fileName)}">📄 ${esc(draft.fileName)}</div>
+          ${when ? `<div style="font-size:11.5px; color:var(--muted); margin-top:2px;">Generated ${esc(when)}</div>` : ''}
+        </div>
+        <button type="button" class="btn" data-tripsy-open-pdf-draft data-drive-file-id="${esc(draft.driveFileId)}" style="flex-shrink:0;">Open</button>
+      </div>
+    `;
+  };
+
+  content.innerHTML = `
+    <div style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber); margin-bottom:6px;">Choose an Itinerary</div>
+    <div style="font-size:13px; color:var(--muted); margin-bottom:16px;">
+      This trip has ${drafts.length} saved PDF exports. Open a specific one below, or view the live itinerary (always reflects the current trip data).
+    </div>
+    <button type="button" class="btn primary" data-tripsy-view-live-itinerary style="width:100%; margin-bottom:4px;">View Live Itinerary</button>
+    <div>
+      ${drafts.map(draftRowHtml).join('')}
+    </div>
+  `;
+
+  const printBtn = overlay.querySelector('#tripsy-preview-print-btn');
+  if (printBtn) printBtn.style.display = 'none';
+  overlay.style.display = 'flex';
+
+  content.querySelector('[data-tripsy-view-live-itinerary]').addEventListener('click', () => {
+    previewTripsyItinerary(tripKey, { skipDraftPicker: true });
+  });
+  content.querySelectorAll('[data-tripsy-open-pdf-draft]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openDriveFileInNewTab(btn.dataset.driveFileId);
+    });
   });
 }
 
@@ -14667,11 +14814,11 @@ async function renderTripsyEventsListImpl() {
       <div style="position:relative;">
         <button class="btn" data-tripsy-itinerary-menu-toggle data-key="${esc(trip.key)}" title="Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🧭</button>
         <div data-tripsy-itinerary-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-          <button class="btn" data-tripsy-itinerary-create-toggle data-key="${esc(trip.key)}" style="display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px;">
-            <span style="font-size:16px; flex-shrink:0; width:20px; display:inline-flex; align-items:center; justify-content:center;">✨</span><span style="flex:1;">Create</span><span data-tripsy-itinerary-create-caret style="font-size:11px; color:var(--muted); transition:transform 0.15s;">▸</span>
+          ${isOwner ? menuListButtonHtml(`data-tripsy-generate-panel-toggle data-key="${esc(trip.key)}"`, '✨', 'Create') : ''}
+          <button class="btn" data-tripsy-itinerary-modify-toggle data-key="${esc(trip.key)}" style="display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px;">
+            <span style="font-size:16px; flex-shrink:0; width:20px; display:inline-flex; align-items:center; justify-content:center;">🔧</span><span style="flex:1;">Modify</span><span data-tripsy-itinerary-modify-caret style="font-size:11px; color:var(--muted); transition:transform 0.15s;">▸</span>
           </button>
-          <div data-tripsy-itinerary-create-submenu="${esc(trip.key)}" style="display:none; padding-left:14px;">
-            ${isOwner ? menuListButtonHtml(`data-tripsy-generate-panel-toggle data-key="${esc(trip.key)}"`, '📝', 'Generate') : ''}
+          <div data-tripsy-itinerary-modify-submenu="${esc(trip.key)}" style="display:none; padding-left:14px;">
             ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '👀', 'Preview')}
             ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', 'Update') : ''}
           </div>
@@ -14866,14 +15013,18 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
-  // Generate (owner-only, first row of the Itinerary dropdown) -- opens a
+  // Create (owner-only, first row of the Itinerary dropdown) -- opens a
   // read-only status panel listing every Detailed Itinerary section (day
   // headers, indented events under each) with a checkbox showing whether
   // that section currently has narrative text and a green checkmark badge
   // if it's been approved. Wired separately from the synchronous Preview/
   // Print/PDF handlers above/below since building its content means
   // fetching the narrative cache first -- there's nothing to show until
-  // that resolves, unlike those, which just navigate immediately.
+  // that resolves, unlike those, which just navigate immediately. Every
+  // section here reads/writes narrativeCache (Store.getTripsyNarrativeCache,
+  // Drive-backed via driveData), so nothing generated is ever lost between
+  // visits -- reopening Create later shows exactly what was left checked/
+  // approved last time, ready to pick up from.
   container.querySelectorAll("[data-tripsy-generate-panel-toggle]").forEach(btn => {
     btn.addEventListener("click", async e => {
       e.stopPropagation();
@@ -14897,7 +15048,8 @@ async function renderTripsyEventsListImpl() {
         const { effectiveTrip, dayKeys, summaryByDay } = await buildTripsyPrintDayData(trip);
         const narrativeCache = await Store.getTripsyNarrativeCache();
         const sections = tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByDay, narrativeCache);
-        panel.innerHTML = tripsyGeneratePanelSectionsHtml(sections);
+        const titleHtml = `<div style="padding:4px 4px 8px; font-size:13px; font-weight:700; color:var(--text); border-bottom:1px solid var(--line); margin-bottom:4px;">${esc(trip.name)}</div>`;
+        panel.innerHTML = titleHtml + tripsyGeneratePanelSectionsHtml(sections);
         // offsetWidth is 0 before the first paint at display:block, same as
         // wireTripsyHeaderMenuToggle's own re-calc below -- redo the left
         // position now that the panel has real (post-content) width.
@@ -15104,17 +15256,16 @@ async function renderTripsyEventsListImpl() {
   wireTripsyHeaderMenuToggle("[data-tripsy-itinerary-menu-toggle]", "data-tripsy-itinerary-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-trip-menu-toggle]", "data-tripsy-trip-menu");
 
-  // "Create" row inside the Itinerary dropdown expands in place (Generate /
-  // Preview / Update indented beneath it) rather than opening a second
-  // fixed-position flyout -- toggling it must NOT call
-  // closeAllTripsyTripPanels, since that would close the itinerary dropdown
-  // it lives inside.
-  container.querySelectorAll("[data-tripsy-itinerary-create-toggle]").forEach(btn => {
+  // "Modify" row inside the Itinerary dropdown expands in place (Preview /
+  // Update indented beneath it) rather than opening a second fixed-position
+  // flyout -- toggling it must NOT call closeAllTripsyTripPanels, since
+  // that would close the itinerary dropdown it lives inside.
+  container.querySelectorAll("[data-tripsy-itinerary-modify-toggle]").forEach(btn => {
     btn.addEventListener("click", e => {
       e.stopPropagation();
       const tripKey = btn.dataset.key;
-      const submenu = container.querySelector(`[data-tripsy-itinerary-create-submenu="${tripKey}"]`);
-      const caret = btn.querySelector("[data-tripsy-itinerary-create-caret]");
+      const submenu = container.querySelector(`[data-tripsy-itinerary-modify-submenu="${tripKey}"]`);
+      const caret = btn.querySelector("[data-tripsy-itinerary-modify-caret]");
       if (!submenu) return;
       const isOpen = submenu.style.display !== "none";
       submenu.style.display = isOpen ? "none" : "block";
@@ -15403,36 +15554,13 @@ async function renderTripsyEventsListImpl() {
     _tripsyTripPanelsOutsideClickBound = true;
   }
 
-  // Called when the filename itself is clicked. Opens the
-  // local offline copy (works with no network) when this device has one
-  // cached, falling back to the Drive viewer link otherwise. The tab is
-  // opened SYNCHRONOUSLY here, before the async cache lookup, and then
-  // redirected once we know the URL -- opening it only after the `await`
-  // below would lose the click's "user activation" and get popup-blocked
-  // on Safari/iPad. noopener isn't available on the two-argument form that
-  // returns a reference, so `tab.opener = null` achieves the same thing.
-  const openTripsyAttachment = async driveFileId => {
-    const tab = window.open('', '_blank');
-    if (tab) tab.opener = null;
-    try {
-      const cached = await getTripsyOfflineDoc(driveFileId);
-      if (cached && cached.blob) {
-        const url = URL.createObjectURL(cached.blob);
-        if (tab) tab.location.href = url; else window.open(url, '_blank', 'noopener');
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
-        return;
-      }
-    } catch (e) {
-      console.error('Reading offline doc cache failed, falling back to Drive:', e);
-    }
-    const driveUrl = `https://drive.google.com/file/d/${driveFileId}/view`;
-    if (tab) tab.location.href = driveUrl; else window.open(driveUrl, '_blank', 'noopener');
-  };
-
+  // Called when the filename itself is clicked -- see the top-level
+  // openDriveFileInNewTab for the actual open logic (shared with the
+  // Preview overlay's saved-draft picker).
   container.querySelectorAll("[data-tripsy-open-attachment]").forEach(el => {
     el.addEventListener("click", e => {
       e.stopPropagation();
-      openTripsyAttachment(el.dataset.driveFileId);
+      openDriveFileInNewTab(el.dataset.driveFileId);
     });
   });
 

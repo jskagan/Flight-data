@@ -70,6 +70,9 @@ driveData = {
   tripsyPendingChanges: [...],     // queued edit/delete/create changes awaiting push to Tripsy
   tripsyAttachments: [...],        // metadata for docs attached to a trip/event (bytes live in
                                     // their own separate Drive file, not inlined here)
+  tripsyGeneratedPdfs: [...],      // metadata for saved "Generate PDF" exports (same separate-
+                                    // Drive-file-for-bytes shape as tripsyAttachments), so Preview
+                                    // can offer a past export back when a trip has more than one
   tripsyParseProposals: [...],     // draft events extracted from a flagged attachment or a
                                     // forwarded confirmation email, awaiting owner review
   tripsyEmailIntake: [...],        // raw forwarded confirmation emails the app found in Gmail,
