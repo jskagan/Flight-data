@@ -232,9 +232,18 @@ that catches drift between them.
   (`renderTripsyAttachPanel`, `index.html:7777`; metadata in `driveData.tripsyAttachments`, actual
   bytes uploaded to their own separate Drive file rather than inlined into the shared JSON) and
   optionally flag it "for parsing into trip data." Nothing in the browser reads that flag on its
-  own — a separate, on-demand-only Claude Code runbook
-  (`~/.claude/scheduled-tasks/tripsy-pdf-parse/RUN_NOW.md`, triggered by asking to "process flagged
-  Tripsy docs"; deliberately not scheduled) reads the flagged file and extracts event fields.
+  own; the parsing is headless and automatic, mirroring the email-intake pipeline below (as of
+  2026-07-22 — previously it was desktop/browser-only). The **`tripsy-trips-refresh` cloud routine**
+  (step 1c) reads `flight-log-data.json` for attachments with `purpose:'parse'` and
+  `parseStatus:'pending'`, downloads each flagged file straight from Drive via its Drive connector
+  (`download_file_content` — the full-scope connector *can* read these app-uploaded attachments,
+  despite older task-doc claims to the contrary), extracts event fields, and writes a
+  `tripsy-doc-proposals.json` relay the app drains on its next open (`drainTripsyDocProposals` →
+  `Store.applyDrainedDocProposals`). So flagged documents parse with NO browser or desktop — the
+  whole flow works from an iPad (upload+flag → cloud parses 3×/day → review/import). A browser-driven
+  fallback still exists for on-demand desktop parsing
+  (`~/.claude/scheduled-tasks/tripsy-pdf-parse/RUN_NOW.md`, "process flagged Tripsy docs") but is no
+  longer the only path.
   Independently, there's an **email-intake pipeline** for confirmations the owner forwards to
   `kaganworldtravel@gmail.com`. The scan (`scanTripsyEmailIntake`) searches the *owner's own* Sent
   folder for `to:` that address, so it works whether or not that address is actually a separate
