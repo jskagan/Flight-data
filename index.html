@@ -9665,6 +9665,68 @@ function tripsyTimelineDetailLines(ev) {
 // feedback: everything reads better fully in-line) -- every row gets the
 // SAME uniform left offset, from .tripsy-tl-row's own padding-left, so
 // times line up under the comma in the day header above (e.g. "Tue,").
+// Sanity check (per-trip "Check lodging"): for each night of a trip -- its first day
+// through the night before its last day -- is there a hosting (hotel) covering it?
+// Effective hostings = the trip's synced hostings PLUS any pending create-hosting
+// changes queued for it. Returns the ordered night day-keys and the subset with no
+// lodging. Advisory only (an overnight flight or an unlogged stay is a legit gap).
+function tripsyLodgingGaps(trip, pendingChanges) {
+  const events = trip.events || [];
+  const days = events.map(e => tripsyDayKey(e.start) || tripsyDayKey(e.end)).filter(Boolean).sort();
+  const firstDay = tripsyDayKey(trip.start) || days[0] || null;
+  const lastDay = tripsyDayKey(trip.end) || days[days.length - 1] || null;
+  if (!firstDay || !lastDay || firstDay >= lastDay) return { nights: [], gaps: [] };
+  const hostings = events
+    .filter(e => e.tripsyRaw && e.tripsyRaw.resource === 'hosting')
+    .map(e => ({ ci: tripsyDayKey(e.start), co: tripsyDayKey(e.end) }));
+  (pendingChanges || []).forEach(c => {
+    if (c.type === 'create_event' && c.tripsyResource === 'hosting' && c.tripKey === trip.key && c.fields) {
+      hostings.push({ ci: tripsyDayKey(c.fields.startsAt), co: tripsyDayKey(c.fields.endsAt) });
+    }
+  });
+  // Sleep every night from the first day up to (not including) the last day (depart then).
+  const nights = tripsyDayKeyRange(firstDay, lastDay).slice(0, -1);
+  // A hosting covers night D if check-in <= D < check-out; with no check-out it covers
+  // only its check-in night.
+  const covers = (h, night) => h.ci && h.ci <= night && (h.co ? h.co > night : h.ci === night);
+  const gaps = nights.filter(night => !hostings.some(h => covers(h, night)));
+  return { nights, gaps };
+}
+
+// Advisory dialog for the per-trip lodging check.
+function showTripsyLodgingCheckDialog(trip, result) {
+  const { nights, gaps } = result;
+  let body;
+  if (!nights.length) {
+    body = `<div style="font-size:13px; color:var(--muted);">Not enough dated events on this trip to check nightly lodging.</div>`;
+  } else if (!gaps.length) {
+    body = `<div style="font-size:14px; color:var(--home-green); font-weight:600;">✓ All ${nights.length} night${nights.length === 1 ? '' : 's'} have lodging.</div>`;
+  } else {
+    body = `
+      <div style="font-size:13px; color:var(--text); margin-bottom:10px;"><b style="color:var(--amber);">${gaps.length} of ${nights.length} night${nights.length === 1 ? '' : 's'} with no lodging listed:</b></div>
+      <ul style="margin:0 0 12px 20px; padding:0; font-size:13px; line-height:1.7;">
+        ${gaps.map(g => `<li>Night of ${esc(tripsyDayHeaderLabel(g))}</li>`).join('')}
+      </ul>
+      <div style="font-size:11px; color:var(--muted); line-height:1.5;">Advisory only — an overnight flight, or a night you're staying somewhere without a logged hotel, won't count as lodging.</div>`;
+  }
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10002; display:flex; align-items:center; justify-content:center; padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; max-width:420px; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+      <div style="font-size:15px; font-weight:700; color:var(--text); margin-bottom:4px;">🛏️ Lodging check</div>
+      <div style="font-size:12px; color:var(--muted); margin-bottom:14px;">${esc(trip.name)}</div>
+      ${body}
+      <div style="display:flex; justify-content:flex-end; margin-top:18px;">
+        <button data-lc-close class="btn primary" style="font-size:13px;">Close</button>
+      </div>
+    </div>`;
+  const close = () => overlay.remove();
+  overlay.addEventListener('click', e => { e.stopPropagation(); if (e.target === overlay) close(); });
+  overlay.querySelector('[data-lc-close]').addEventListener('click', close);
+  document.body.appendChild(overlay);
+  overlay.querySelector('[data-lc-close]').focus();
+}
+
 function tripsyTimelineRowHtml(spec) {
   const {
     dotColor, dotGlyph, dotImageB64, timeLabel,
@@ -15852,6 +15914,7 @@ async function renderTripsyEventsListImpl() {
         <button class="btn" data-tripsy-trip-menu-toggle data-key="${esc(trip.key)}" title="Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">⚙️</button>
         <div data-tripsy-trip-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${isOwner ? menuListButtonHtml(`data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}"`, '✏️', 'Edit') : ''}
+          ${menuListButtonHtml(`data-tripsy-check-lodging data-key="${esc(trip.key)}"`, '🛏️', 'Check lodging')}
           ${menuListButtonHtml(`data-tripsy-hide-trip data-key="${esc(trip.key)}"`, '🙈', 'Hide')}
           ${isOwner ? menuListButtonHtml(`data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete') : ''}
         </div>
@@ -16260,6 +16323,16 @@ async function renderTripsyEventsListImpl() {
       const hiddenPanel = document.getElementById("tripsy-hidden-panel");
       if (hiddenPanel && hiddenPanel.style.display !== "none") renderTripsyHiddenTripsPanelContent();
       if (!(await pending)) toast("Could not hide this trip — storage error. Please try again.", "error");
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-check-lodging]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      closeAllTripsyTripPanels();
+      const trip = (tripsyDecryptedTrips || []).find(t => t.key === btn.dataset.key);
+      if (!trip) return;
+      const pending = isOwner ? await Store.listTripsyPendingChanges() : [];
+      showTripsyLodgingCheckDialog(trip, tripsyLodgingGaps(trip, pending));
     });
   });
 
