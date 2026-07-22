@@ -1796,15 +1796,30 @@ const Store = {
       // item again before it's applied) replaces the earlier entry rather
       // than piling up duplicates.
       driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(c => c.id !== change.id);
-      // An edit queued twice for the same event (or trip) should amend the
-      // existing pending edit rather than pile up duplicates that would
-      // otherwise get applied in some arbitrary order later.
+      // An edit queued twice for the same event (or trip) AMENDS the existing
+      // pending edit -- this edit's changed fields are merged ONTO the earlier
+      // one's, not replaced wholesale. The Save handler diffs each edit against
+      // the current EFFECTIVE raw (snapshot + any already-pending edit), so a
+      // field this edit left untouched (e.g. a start/end date an earlier edit
+      // set, when a later edit only changed the title) isn't in change.changes
+      // at all -- replacing outright would silently drop it, which is exactly
+      // the bug this merge fixes. Any field this edit DID change (including one
+      // cleared back to empty) still wins, since the diff captured that
+      // explicitly and it lands last in the spread.
       if (change.type === 'edit_event') {
+        const existingEdit = driveData.tripsyPendingChanges.find(
+          c => c.type === 'edit_event' && c.eventKey === change.eventKey
+        );
+        if (existingEdit) change = { ...change, changes: { ...existingEdit.changes, ...change.changes } };
         driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
           c => !(c.type === 'edit_event' && c.eventKey === change.eventKey)
         );
       }
       if (change.type === 'edit_trip') {
+        const existingEdit = driveData.tripsyPendingChanges.find(
+          c => c.type === 'edit_trip' && c.tripKey === change.tripKey
+        );
+        if (existingEdit) change = { ...change, changes: { ...existingEdit.changes, ...change.changes } };
         driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
           c => !(c.type === 'edit_trip' && c.tripKey === change.tripKey)
         );
@@ -15767,7 +15782,9 @@ async function renderTripsyEventsListImpl() {
       // one shared panel when clicked.
       const viewAttr = (eventKey && !isPendingDelete) ? `data-tripsy-view-event="${esc(eventKey)}" style="cursor:pointer;"` : '';
       // Transportation's title is the route (dep -> arr), matching the
-      // reference -- every other type's title is just its summary/name.
+      // reference; a restaurant-category activity's title is meal-labeled
+      // ("Dinner at Ivy") via tripsyItineraryEventTitle, same as the Detailed
+      // Itinerary -- every other type's title is just its summary/name.
       // Flights additionally get their company + flight number appended
       // after the route, same as tripsyRawToDisplay's own summary field --
       // ev.location itself never carries company/number (it's just the dep
@@ -15788,7 +15805,7 @@ async function renderTripsyEventsListImpl() {
       const routeTitle = (shortRoute && ev.tripsyRaw.resource === 'transportation'
           && !['airplane', 'roadtrip', 'cruise'].includes(ev.tripsyRaw.category))
         ? `${tripsySlugToLabel(ev.tripsyRaw.category) || 'Transportation'} ${shortRoute.includes('→') ? 'from' : 'to'} ${shortRoute}`
-        : (shortRoute || ev.summary);
+        : (shortRoute || tripsyItineraryEventTitle(ev));
       const flightCompanyNumber = isFlightRow ? `${ev.tripsyRaw.company || ''} ${ev.tripsyRaw.transportNumber || ''}`.trim() : '';
       const title = (isFlightRow && flightCompanyNumber && routeTitle !== flightCompanyNumber) ? `${routeTitle} • ${flightCompanyNumber}` : routeTitle;
       const statusBadge = [
