@@ -996,6 +996,12 @@
 const DRIVE_DATA_FILENAME = 'flight-log-data.json';
 let driveAccessToken = null;
 let driveFileId = null;
+// headRevisionId of the loaded flight-log-data.json, for optimistic concurrency:
+// if it changed on Drive since we loaded/last saved (another device or tab wrote),
+// our next save detects it and reloads that change instead of silently overwriting
+// it. (Drive returns no ETag on the media download and ignores If-Match on the
+// upload endpoint, so the head revision id is the workable staleness signal here.)
+let driveDataRevision = null;
 let driveData = null; // in-memory: { invoices: [...], report: {...}|null }
 
 async function driveApiFetch(url, options = {}) {
@@ -1057,7 +1063,26 @@ async function listDriveFilePermissions(fileId) {
   return (json.permissions || []).filter(p => p.type === 'user' && p.emailAddress);
 }
 
+// Fetches the file's current headRevisionId -- the id of its latest content
+// revision, which Drive bumps on every write. persistDriveData compares this
+// before each save to detect that another device/tab wrote since we loaded, so
+// it reloads their change instead of clobbering it.
+async function fetchDriveHeadRevision(fileId) {
+  try {
+    const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=headRevisionId`);
+    const json = await res.json();
+    return json.headRevisionId || null;
+  } catch (e) {
+    console.error('fetchDriveHeadRevision failed:', e);
+    return null;
+  }
+}
+
 async function loadDriveDataFile(fileId) {
+  // Capture the revision BEFORE downloading: if another device writes during the
+  // download, we'd rather store a slightly-stale revision (a safe spurious
+  // conflict on the next save) than a newer one that masks a real overwrite.
+  driveDataRevision = await fetchDriveHeadRevision(fileId);
   const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
   const text = await res.text();
   if (!text.trim()) return { invoices: [], report: null };
@@ -1127,28 +1152,34 @@ async function createDriveDataFile(data) {
 // unlimited resumable path only when it doesn't -- so a future return to a
 // large file degrades gracefully instead of failing outright.
 const DRIVE_SIMPLE_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
+// Returns the new headRevisionId of the file after the write (requested via the
+// ?fields= param on the upload), so persistDriveData can advance our stored
+// revision without a separate follow-up GET.
 async function updateDriveDataFile(fileId, data) {
   const body = JSON.stringify(data);
   if (new Blob([body]).size <= DRIVE_SIMPLE_UPLOAD_MAX_BYTES) {
-    await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+    const res = await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=headRevisionId`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json; charset=UTF-8' },
       body,
     });
-    return;
+    const json = await res.json().catch(() => ({}));
+    return json.headRevisionId || null;
   }
-  const startRes = await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable`, {
+  const startRes = await driveApiFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable&fields=headRevisionId`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json; charset=UTF-8' },
     body: JSON.stringify({}),
   });
   const uploadUrl = startRes.headers.get('Location');
   if (!uploadUrl) throw new Error('Drive resumable upload did not return a session URL');
-  await driveApiFetch(uploadUrl, {
+  const putRes = await driveApiFetch(uploadUrl, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body,
   });
+  const json = await putRes.json().catch(() => ({}));
+  return json.headRevisionId || null;
 }
 
 // Uploads an arbitrary binary file (e.g. a document attached to a Tripsy
@@ -1387,10 +1418,45 @@ async function reconcileTripsyOfflineDocs() {
 }
 
 async function persistDriveData() {
-  if (driveFileId) {
-    await updateDriveDataFile(driveFileId, driveData);
-  } else {
+  if (!driveFileId) {
     driveFileId = await createDriveDataFile(driveData);
+    driveDataRevision = await fetchDriveHeadRevision(driveFileId);
+    return;
+  }
+  // Optimistic concurrency: if the file's head revision changed since we loaded
+  // or last saved, another device/tab wrote -- reload their change and re-render
+  // instead of overwriting it. A null driveDataRevision means we don't have a
+  // baseline yet, so skip the guard for this one write and re-establish it below.
+  if (driveDataRevision) {
+    const currentRev = await fetchDriveHeadRevision(driveFileId);
+    if (currentRev && currentRev !== driveDataRevision) {
+      await handleDriveWriteConflict();
+      const conflict = new Error('CONFLICT_RELOADED');
+      conflict.conflict = true;
+      throw conflict;
+    }
+  }
+  const newRev = await updateDriveDataFile(driveFileId, driveData);
+  driveDataRevision = newRev || await fetchDriveHeadRevision(driveFileId);
+}
+
+// Another device/tab wrote flight-log-data.json since we loaded it. Reload the
+// current remote state (this also refreshes driveDataRevision), tell the owner,
+// and re-render the current view so their screen reflects the merged reality
+// rather than the change we just declined to overwrite.
+async function handleDriveWriteConflict() {
+  try {
+    driveData = await loadDriveDataFile(driveFileId);
+  } catch (e) {
+    console.error('conflict reload failed:', e);
+  }
+  try {
+    toast('Your data was updated on another device — reloaded. Please re-apply your last change if it is missing.', 'error');
+  } catch (e) { /* toast is best-effort */ }
+  try {
+    if (typeof currentView !== 'undefined' && currentView) navigate(currentView);
+  } catch (e) {
+    console.error('conflict re-render failed:', e);
   }
 }
 
