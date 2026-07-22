@@ -283,6 +283,30 @@ that catches drift between them.
   potential conflict is still unresolved (see the per-trip badge note above). Owner-only.
   `tripsyEmailsAwaitingParseCount()` reads `driveData.tripsyEmailIntake` (entries not yet
   `parsedAt`) to drive the yellow "N forwarded emails waiting to be parsed" reason.
+  One yellow reason is transient rather than driven off `driveData`: `tripsyInFlightWrites`
+  (module-level, never persisted — there's no way to represent "a write is in progress" in the data
+  model, only "queued" or not once it finishes) tracks a Drive write actually in flight right now.
+  This (and the failed-write tracking below) lives inside `Store.queueTripsyChange` itself, generically
+  — every Tripsy change, from anywhere in the app, funnels through that one function, so wrapping it
+  there covers all of them at once rather than each caller instrumenting its own call: the badge goes
+  yellow the instant ANY change is queued (matters most for actions like the Update page's "Add Event"
+  that resolve their row optimistically, fading out before the write actually finishes — without this
+  the badge would give no sign the save hadn't landed yet), for exactly as long as that one
+  `persistDriveData()` round-trip takes. `tripsyBeginInFlightWrite`/`tripsyEndInFlightWrite` add/remove
+  an entry and immediately refresh the badge; this reason renders as plain (non-clickable) text in the
+  panel, since there's nowhere to navigate to for "still saving." A write that genuinely FAILS is a
+  separate, similarly transient/in-memory `tripsyFailedWrites` list, but unlike `tripsyInFlightWrites`
+  it does NOT auto-clear: it turns the badge red — outranking even a `pushConfirmationFailed` change,
+  and combining with one if both are present — and each entry renders its own "Write Failed" block (red
+  label, a human description built from `TRIPSY_PENDING_CHANGE_LABEL[change.type]` plus
+  `change.eventSummary`/`change.tripName`, and its own Dismiss button) that stays listed until the
+  owner explicitly dismisses it (`tripsyRecordFailedWrite`/`tripsyDismissFailedWrite`). A failed write
+  also rolls `driveData.tripsyPendingChanges`/`tripsyUpdatePages` back to exactly how they looked
+  before that call (snapshotted before any mutation, restored in the `catch`) — every mutation inside
+  `queueTripsyChange` REPLACES those arrays rather than mutating in place, and the change was already
+  pushed into them before the `persistDriveData()` call that actually failed, so without this rollback
+  a failed write still left the change sitting in memory looking successfully queued once the red
+  banner was dismissed.
 - **Categories**: flight / transportation / hotel / dining / concert / tour / other, derived from
   Tripsy's own activity/transportation type slugs at refresh time (see `tripsy-trips-refresh`'s own
   category-mapping step for the exact rules) — unlike the old TripIt integration this replaced,
@@ -291,7 +315,17 @@ that catches drift between them.
   change (see above) rather than touching the locally-decrypted snapshot directly — the edit only
   becomes real once a refresh applies it, at which point the next snapshot pull reflects it
   natively (there's no separate client-side override layer to reconcile, unlike TripIt's old
-  `ev.overrides` model).
+  `ev.overrides` model). Saving is optimistic: `renderTripsyEditPanel`'s Save handler (the one form
+  behind the timeline's own Edit button, the Add-item panel, and a pending-create item's Edit) closes
+  the panel and fires `onClose` immediately, then does the (geocode, for a new activity, plus) actual
+  `Store.queueTripsyChange` write in the background — so queuing one change never delays the owner
+  from immediately opening and saving another, anywhere in the app. The surrounding timeline isn't
+  re-rendered until that write actually succeeds; if it fails instead, this SAME panel node reopens
+  pre-filled with exactly what was typed (not the original values) plus an error toast, so nothing
+  is lost. `renderTripsyEditTripPanel`'s Save does the same. The one exception is the Review Parsed
+  Docs page's inline "Modify New"/"Modify Existing" conflict editors, which pass a `createOptions.onSave`
+  callback instead of writing directly — that's a different feature's own async flow (with its own
+  `rerender()`/`ctx.overrides` bookkeeping) and stays blocking.
 - **Display times are the event's own local time, not the viewer's**: event start/end are stored
   as literal local-time digits (no real UTC offset) by the refresh task, and read back out verbatim
   by `parseTripLocalParts`/`formatTripTime` (`index.html:6235` area) rather than being
@@ -304,15 +338,23 @@ that catches drift between them.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's Itinerary → Modify → Update menu, which calls
   `compareTripsyItineraryPdf` and shows a row per PDF/Tripsy difference (match/conflict/pdf_only/
-  tripsy_only) for the owner to Accept/Ignore/Modify/Add/Delete one at a time
+  tripsy_only) for the owner to Accept/Ignore/Modify/Add/Delete one at a time — a `pdf_only` row's
+  "Modify New" combines Add Event's instant `create_event` queue with immediately opening that new
+  pending item's own edit form (the same one the timeline's pencil icon on a pending-create row
+  opens), pre-filled with whatever Claude already extracted, rather than requiring a separate Add
+  then a separate Edit (`handleTripsyUpdateModifyNew`, `index.html:13621` area)
   (`runTripsyUpdateComparison`, `index.html:13634` area). The result is saved to
   `driveData.tripsyUpdatePages` (one entry per trip, `Store.getTripsyUpdatePage`/
   `saveTripsyUpdatePage`/`deleteTripsyUpdatePage`) the moment it's generated, so closing the overlay
   or reloading never loses it — clicking Update again on a trip with a saved page resumes straight
   into it (`showTripsyUpdatePage`) instead of asking for another upload; "Upload New PDF" in the
-  overlay toolbar starts a fresh comparison on purpose, which supersedes it. The page is deleted
-  automatically in exactly two cases: **(1)** every row has been resolved (Accepted/Added/Deleted/
-  Ignored/Dismissed — `persistTripsyUpdatePageState`, called after each), or **(2)** the owner edits
+  overlay toolbar starts a fresh comparison on purpose, which supersedes it. A "Show/Hide Matches"
+  toggle next to it hides `match`-status rows by default (`tripsyUpdateShowMatches`, a personal
+  per-session display preference, never persisted) so the owner sees only actual differences; it
+  resets to hidden every time a comparison is freshly generated or resumed
+  (`tripsyUpdateResetShowMatches`). The page is deleted
+  automatically in exactly two cases: **(1)** every row has been resolved (Accepted/Added/Modified-
+  New/Deleted/Ignored/Dismissed — `persistTripsyUpdatePageState`, called after each), or **(2)** the owner edits
   or deletes one of the specific events the page references through some path *other than* the
   Update page's own actions (the per-event Edit panel, the timeline's Delete button, doc/email-parse
   import, etc.) — that snapshot is now stale, so `Store.queueTripsyChange` drops the page rather than

@@ -1708,7 +1708,28 @@ const Store = {
   async listTripsyPendingChanges() {
     return [...(driveData.tripsyPendingChanges || [])];
   },
+  // Every Tripsy change funnels through here -- the single write this whole
+  // pipeline makes to Drive -- so this is also where the top-right status
+  // badge's in-flight/failed-write tracking lives, generically, rather than
+  // each caller wrapping its own call (see tripsyBeginInFlightWrite's own
+  // comment for why that tracking exists at all): the badge goes yellow the
+  // instant ANY change is queued, for exactly as long as this write takes,
+  // and goes red with a "Write Failed: <action>" reason (kept until the
+  // owner dismisses it) if it doesn't land. `change.eventSummary`/
+  // `change.tripName` and TRIPSY_PENDING_CHANGE_LABEL[change.type] give a
+  // human description regardless of which caller queued it.
   async queueTripsyChange(change) {
+    const writeLabel = `${TRIPSY_PENDING_CHANGE_LABEL[change.type] || change.type}: ${change.eventSummary || change.tripName || ''}`.trim();
+    const writeId = tripsyBeginInFlightWrite(writeLabel);
+    // Snapshotted so a failed persistDriveData() below can roll the
+    // in-memory queue back to exactly how it looked before this call --
+    // every mutation from here on REPLACES these arrays rather than
+    // mutating them in place, so restoring the original references undoes
+    // all of it in one step. Without this, a failed write still left the
+    // change sitting in memory looking successfully queued, which
+    // contradicted the red "Write Failed" badge right next to it.
+    const rollbackPendingChanges = driveData.tripsyPendingChanges;
+    const rollbackUpdatePages = driveData.tripsyUpdatePages;
     try {
       if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
       // Stamp with the snapshot version live at queue time -- lets the
@@ -1766,7 +1787,12 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.queueTripsyChange failed:', e);
+      driveData.tripsyPendingChanges = rollbackPendingChanges;
+      driveData.tripsyUpdatePages = rollbackUpdatePages;
+      tripsyRecordFailedWrite(writeLabel);
       return false;
+    } finally {
+      tripsyEndInFlightWrite(writeId);
     }
   },
   async cancelTripsyChange(changeId) {
@@ -8062,20 +8088,50 @@ function tripsySeatLabel(raw) {
   return `Seat: ${raw.seatClass || raw.seatNumber}`;
 }
 
+// Shortens one Tripsy departure/arrival description down to just its
+// leading venue/place name (the part before the first comma) -- e.g.
+// "Fiumicino Airport, Via dell'Aeroporto di Fiumicino, 00054 Fiumicino RM,
+// Italy" -> "Fiumicino Airport". Used anywhere a location needs to serve
+// as (or be part of) an event TITLE rather than a detail/meta line, so a
+// title never trails off into a street address, postal code, or country
+// name -- the full description is always still shown separately wherever
+// that's wanted (ev.location, the meta lines built from it).
+function tripsyShortenPlaceDescription(desc) {
+  return desc ? desc.split(',')[0].trim() : desc;
+}
+
+// Shortens an already-joined ev.location route string ("A, full address →
+// B, full address", or just one side) down to venue names only, via
+// tripsyShortenPlaceDescription on each side -- for the My Trips timeline's
+// title (the one place that wants ev.location's plain arrow-route phrasing
+// rather than ev.summary's "Car from X to Y" sentence, per the timeline's
+// own comment) without ever trailing a title off into a postal code or
+// country name. Works on ev.location directly (rather than a field added to
+// tripsyRawToDisplay) so it applies uniformly whether this event's display
+// fields came from a fresh tripsyRawToDisplay call (a pending edit) or
+// straight from the encrypted snapshot (the common case, precomputed by
+// tools/build_tripsy_snapshot.py, which never runs this JS function at all).
+function tripsyShortenRouteLocation(location) {
+  if (!location) return location;
+  const arrowIdx = location.indexOf(' → ');
+  if (arrowIdx === -1) return tripsyShortenPlaceDescription(location);
+  return `${tripsyShortenPlaceDescription(location.slice(0, arrowIdx))} → ${tripsyShortenPlaceDescription(location.slice(arrowIdx + 3))}`;
+}
+
 // Route-based transportation title -- names the specific mode (Car,
 // Train, ...) plus its route instead of a bare, uninformative
 // "Transportation" that told the owner nothing on the itinerary, or (now
 // that this also wins over a company name whenever there's a route) an
 // overly specific operator name like "Bluetick Chauffeur Services" that
-// says who's driving but not where. dep/arr are shortened to just their
-// leading venue/place name (the part before the first comma) for the
-// title -- "Car from Soho Farmhouse to Brown's Hotel", not the entire
-// formatted address -- since the full description is already shown
+// says who's driving but not where. dep/arr are shortened
+// (tripsyShortenPlaceDescription) to just their leading venue/place name
+// for the title -- "Car from Soho Farmhouse to Brown's Hotel", not the
+// entire formatted address -- since the full description is already shown
 // separately in ev.location.
 function tripsyTransportationFallbackSummary(raw, dep, arr) {
   const type = raw.category === 'airplane' ? 'Flight' : (tripsySlugToLabel(raw.category) || 'Transportation');
-  const shortDep = dep ? dep.split(',')[0].trim() : dep;
-  const shortArr = arr ? arr.split(',')[0].trim() : arr;
+  const shortDep = tripsyShortenPlaceDescription(dep);
+  const shortArr = tripsyShortenPlaceDescription(arr);
   if (shortDep && shortArr) return `${type} from ${shortDep} to ${shortArr}`;
   if (shortDep) return `${type} from ${shortDep}`;
   if (shortArr) return `${type} to ${shortArr}`;
@@ -8141,6 +8197,17 @@ function tripsyRawToDisplay(resource, raw) {
   return {
     type: isFlight ? 'flight' : 'transportation',
     summary,
+    // Full description, deliberately unshortened -- every caller besides
+    // the My Trips timeline's own title (tripsyShortenRouteLocation, used
+    // at that one call site instead of a field added here) uses this as a
+    // detail/meta line, where the full address is exactly what's wanted.
+    // NOT computing a shortened variant here: for an event with no pending
+    // edit, `location` comes straight from the encrypted snapshot (built by
+    // tools/build_tripsy_snapshot.py) rather than a fresh call to this
+    // function -- a field only this JS function knew how to compute would
+    // silently be missing on every un-edited event, the vast majority of
+    // them. Deriving the short form from `location` itself at the one
+    // point of use works uniformly for both cases instead.
     location: dep && arr ? `${dep} → ${arr}` : (dep || arr || null),
     notes: raw.notes || null,
     start: raw.departureAt,
@@ -8525,7 +8592,6 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
       if (finalCategory === 'airplane' && finalCompany) addTripsyCustomAirline(finalCompany);
     }
 
-    let ok;
     if (createOptions) {
       // Create mode: there's no baseline to diff against yet, so every
       // non-empty field the user filled in becomes part of the new item.
@@ -8547,17 +8613,39 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
       // values handed back so it can route them through its own
       // import-with-these-fields logic (same destination-trip/create_trip
       // handling as "Import as-is", just with these fields instead of the
-      // originally-extracted ones).
+      // originally-extracted ones). That's a different feature's own async
+      // flow, not a direct Store.queueTripsyChange call this function
+      // controls, so it stays blocking here -- unlike the two paths below.
       if (createOptions.onSave) {
-        // "Modify then import" -- hands fields back to the review-page import
-        // path, which geocodes activities itself; don't double-geocode here.
-        ok = await createOptions.onSave(newFields);
-      } else {
+        const ok = await createOptions.onSave(newFields);
+        if (!ok) toast("Could not save changes — storage error. Please try again.", "error");
+        panel.style.display = "none";
+        panel.innerHTML = "";
+        renderTripsyEventsList();
+        updateTripsyPendingWarningBadge();
+        if (onClose) onClose();
+        return;
+      }
+      // Optimistic: close the panel and call onClose right away, same as
+      // Exit/no-op-Save above, rather than leaving the panel open and Save
+      // disabled for the whole geocode + Drive round-trip -- the owner can
+      // move straight on to another action while both continue in the
+      // background (surfaced on the status badge via
+      // Store.queueTripsyChange's own in-flight/failed tracking, per
+      // explicit request). The surrounding timeline isn't re-rendered until
+      // the write actually succeeds, so on failure this SAME panel node is
+      // still safe to reopen, pre-filled with exactly what was typed (not
+      // blanked back to the original) so nothing is lost.
+      panel.style.display = "none";
+      panel.innerHTML = "";
+      positionTripsyTimelineConnectors();
+      if (onClose) onClose();
+      (async () => {
         // Geocode a new activity's address now (Places), so its create carries
         // lat/long and no refresh has to geocode. Best-effort: if it doesn't
         // resolve, it queues without coords and shows as "needs a location".
         await tripsyAddCoordsToActivityFields(raw.resource, newFields);
-        ok = await Store.queueTripsyChange({
+        const ok = await Store.queueTripsyChange({
           id: createOptions.pendingChangeId,
           type: 'create_event',
           createdAt: new Date().toISOString(),
@@ -8567,24 +8655,42 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
           eventSummary: newFields.name || newFields.company || tripsySlugToLabel(newFields.category) || 'New item',
           fields: newFields,
         });
-      }
-    } else {
-      const changes = {};
-      for (const f of fields) {
-        const newVal = f.kind === 'datetime' ? tripsyReadDateTimeField(panel, f.key) : panel.querySelector(`[data-tripsy-edit-field="${f.key}"]`).value.trim();
-        const oldVal = raw[f.key] || '';
-        if (newVal !== oldVal) changes[f.key] = newVal || null;
-      }
-      if (Object.keys(changes).length === 0) {
-        panel.style.display = "none";
-        panel.innerHTML = "";
-        panel.dataset.mode = "";
-        setTripsyEditIconActive(tripsyEventKey(raw), false);
-        positionTripsyTimelineConnectors();
-        if (onClose) onClose();
-        return;
-      }
-      ok = await Store.queueTripsyChange({
+        if (ok) {
+          renderTripsyEventsList();
+          updateTripsyPendingWarningBadge();
+        } else {
+          toast("Could not save changes — storage error. Please try again.", "error");
+          renderTripsyEditPanel(panel, { ...tripsyBlankRaw(raw.resource, raw.category), ...newFields }, tripKey, tripName, eventSummary, createOptions, onClose, source);
+          panel.style.display = "block";
+        }
+      })();
+      return;
+    }
+
+    const changes = {};
+    for (const f of fields) {
+      const newVal = f.kind === 'datetime' ? tripsyReadDateTimeField(panel, f.key) : panel.querySelector(`[data-tripsy-edit-field="${f.key}"]`).value.trim();
+      const oldVal = raw[f.key] || '';
+      if (newVal !== oldVal) changes[f.key] = newVal || null;
+    }
+    if (Object.keys(changes).length === 0) {
+      panel.style.display = "none";
+      panel.innerHTML = "";
+      panel.dataset.mode = "";
+      setTripsyEditIconActive(tripsyEventKey(raw), false);
+      positionTripsyTimelineConnectors();
+      if (onClose) onClose();
+      return;
+    }
+    // Optimistic, same reasoning as the create-mode branch above.
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    panel.dataset.mode = "";
+    setTripsyEditIconActive(tripsyEventKey(raw), false);
+    positionTripsyTimelineConnectors();
+    if (onClose) onClose();
+    (async () => {
+      const ok = await Store.queueTripsyChange({
         id: crypto.randomUUID(),
         type: 'edit_event',
         createdAt: new Date().toISOString(),
@@ -8596,13 +8702,15 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
         changes,
         ...(source ? { source } : {}),
       });
-    }
-    if (!ok) toast("Could not save changes — storage error. Please try again.", "error");
-    panel.style.display = "none";
-    panel.innerHTML = "";
-    renderTripsyEventsList();
-    updateTripsyPendingWarningBadge();
-    if (onClose) onClose();
+      if (ok) {
+        renderTripsyEventsList();
+        updateTripsyPendingWarningBadge();
+      } else {
+        toast("Could not save changes — storage error. Please try again.", "error");
+        renderTripsyEditPanel(panel, { ...raw, ...changes }, tripKey, tripName, eventSummary, createOptions, onClose, source);
+        panel.style.display = "block";
+      }
+    })();
   });
 }
 
@@ -8678,20 +8786,31 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
       panel.innerHTML = "";
       return;
     }
-    const ok = await Store.queueTripsyChange({
-      id: crypto.randomUUID(),
-      type: 'edit_trip',
-      createdAt: new Date().toISOString(),
-      tripKey: trip.key,
-      tripName: trip.name,
-      tripsyTripId: tripsyTripIdFromKey(trip.key),
-      changes,
-    });
-    if (!ok) toast("Could not save changes — storage error. Please try again.", "error");
+    // Optimistic, same reasoning as renderTripsyEditPanel's own Save above:
+    // close immediately so the owner can move on, write in the background
+    // (surfaced on the status badge), reopen this same panel pre-filled
+    // with the edited values if it actually fails.
     panel.style.display = "none";
     panel.innerHTML = "";
-    renderTripsyEventsList();
-    updateTripsyPendingWarningBadge();
+    (async () => {
+      const ok = await Store.queueTripsyChange({
+        id: crypto.randomUUID(),
+        type: 'edit_trip',
+        createdAt: new Date().toISOString(),
+        tripKey: trip.key,
+        tripName: trip.name,
+        tripsyTripId: tripsyTripIdFromKey(trip.key),
+        changes,
+      });
+      if (ok) {
+        renderTripsyEventsList();
+        updateTripsyPendingWarningBadge();
+      } else {
+        toast("Could not save changes — storage error. Please try again.", "error");
+        renderTripsyEditTripPanel(panel, trip, { ...effectiveTrip, ...changes });
+        panel.style.display = "block";
+      }
+    })();
   });
 }
 
@@ -13148,6 +13267,12 @@ let tripsyUpdateOverlayTripKey = null;
 // can show "Day N" via tripsyDayNumberFromTripStart, same as the Generate
 // panel already does.
 let tripsyUpdateTripStartDayKey = null;
+// Personal, per-session display toggle for the "Show/Hide Matches" button
+// (index.html toolbar) -- defaults false (matches hidden) every time a
+// comparison is freshly generated or resumed, same as the button always
+// starting on "Show Matches". Not persisted to driveData: it's a view
+// preference over whatever's currently in tripsyUpdateRows, not data.
+let tripsyUpdateShowMatches = false;
 
 // The set of existing-event keys a comparison's rows reference (conflict,
 // match, and tripsy_only rows all carry one; pdf_only rows don't, since
@@ -13184,6 +13309,16 @@ async function persistTripsyUpdatePageState() {
 // into the overlay -- no file/re-comparison needed -- so reopening "Update"
 // on a trip that already has unresolved rows resumes exactly where the
 // owner left off instead of demanding a fresh PDF upload.
+// Resets the "Show/Hide Matches" toggle back to its default (matches
+// hidden) every time a comparison is freshly generated or resumed, so the
+// button never opens on a stale "Hide Matches" label left over from some
+// earlier trip's session.
+function tripsyUpdateResetShowMatches(overlay) {
+  tripsyUpdateShowMatches = false;
+  const btn = overlay.querySelector('#tripsy-update-showmatches-btn');
+  if (btn) btn.textContent = 'Show Matches';
+}
+
 function showTripsyUpdatePage(page) {
   const overlay = getOrCreateTripsyUpdateOverlay();
   const titleEl = overlay.querySelector('[data-tripsy-update-title]');
@@ -13193,6 +13328,7 @@ function showTripsyUpdatePage(page) {
   tripsyUpdateRows = page.rows;
   if (titleEl) titleEl.textContent = `Update comparison for ${page.tripName}`;
   overlay.style.display = 'flex';
+  tripsyUpdateResetShowMatches(overlay);
   renderTripsyUpdateOverlayContent();
   if (content && !content.innerHTML.trim()) {
     content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Nothing left to review here.</div>`;
@@ -13278,6 +13414,7 @@ function tripsyUpdateRowHtml(row) {
   } else if (row.status === 'pdf_only') {
     buttonsHtml = `
       <button type="button" class="tripsy-update-btn tu-primary" data-tripsy-update-add data-row-idx="${row._idx}">Add Event</button>
+      <button type="button" class="tripsy-update-btn" data-tripsy-update-modify-new data-row-idx="${row._idx}">Modify New</button>
       <button type="button" class="tripsy-update-btn" data-tripsy-update-ignore data-row-idx="${row._idx}">Ignore</button>
     `;
   } else {
@@ -13382,6 +13519,7 @@ function getOrCreateTripsyUpdateOverlay() {
     <div class="tripsy-update-toolbar">
       <div class="tripsy-update-toolbar-title" data-tripsy-update-title></div>
       <button class="tripsy-update-btn" id="tripsy-update-newpdf-btn">Upload New PDF</button>
+      <button class="tripsy-update-btn" id="tripsy-update-showmatches-btn">Show Matches</button>
       <button class="tripsy-update-btn" id="tripsy-update-close-btn">Close</button>
     </div>
     <div class="tripsy-update-paper" id="tripsy-update-content"></div>
@@ -13402,6 +13540,15 @@ function getOrCreateTripsyUpdateOverlay() {
     input.value = '';
     input.click();
   });
+  // Match rows are hidden by default (tripsyUpdateShowMatches, reset false
+  // on every fresh generate/resume) -- the owner usually only cares about
+  // actual differences. Toggling just re-renders the same tripsyUpdateRows
+  // with the new filter; no data changes.
+  overlay.querySelector('#tripsy-update-showmatches-btn').addEventListener('click', () => {
+    tripsyUpdateShowMatches = !tripsyUpdateShowMatches;
+    overlay.querySelector('#tripsy-update-showmatches-btn').textContent = tripsyUpdateShowMatches ? 'Hide Matches' : 'Show Matches';
+    renderTripsyUpdateOverlayContent();
+  });
   // Click-outside-to-close: same pattern as #tripsy-preview-overlay -- a
   // click landing directly on the fixed backdrop (never on the toolbar or
   // paper, both descendants) means it was outside the actual document.
@@ -13419,8 +13566,12 @@ function renderTripsyUpdateOverlayContent() {
   // data-row-idx lookups by array index never shift -- but a full re-render
   // (e.g. loading a saved page back in via showTripsyUpdatePage) must skip
   // them, same as tripsyUpdateResolveEntry's direct DOM removal already
-  // does for the common in-session case.
-  const openRows = tripsyUpdateRows.filter(r => !r._actionState);
+  // does for the common in-session case. "match" rows are further hidden
+  // by default (tripsyUpdateShowMatches) -- the owner usually only cares
+  // about actual differences; a day whose only rows are matches simply
+  // won't appear as its own section once they're filtered out here, since
+  // renderTripsyUpdateOverlayRows only ever groups the rows it's handed.
+  const openRows = tripsyUpdateRows.filter(r => !r._actionState && (tripsyUpdateShowMatches || r.status !== 'match'));
   content.innerHTML = openRows.length ? renderTripsyUpdateOverlayRows(openRows) : '';
 }
 
@@ -13457,8 +13608,9 @@ function wireTripsyUpdateOverlayButtons(overlay) {
     const ignoreBtn = e.target.closest('[data-tripsy-update-ignore]');
     const modifyEl = e.target.closest('[data-tripsy-update-modify]');
     const addBtn = e.target.closest('[data-tripsy-update-add]');
+    const modifyNewBtn = e.target.closest('[data-tripsy-update-modify-new]');
     const deleteBtn = e.target.closest('[data-tripsy-update-delete]');
-    const anyBtn = retryBtn || dismissBtn || acceptBtn || ignoreBtn || modifyEl || addBtn || deleteBtn;
+    const anyBtn = retryBtn || dismissBtn || acceptBtn || ignoreBtn || modifyEl || addBtn || modifyNewBtn || deleteBtn;
     if (!anyBtn) return;
 
     if (retryBtn) {
@@ -13480,6 +13632,7 @@ function wireTripsyUpdateOverlayButtons(overlay) {
     if (acceptBtn) return handleTripsyUpdateAccept(row, acceptBtn);
     if (ignoreBtn) return handleTripsyUpdateIgnore(row, ignoreBtn);
     if (addBtn) return handleTripsyUpdateAdd(row, addBtn);
+    if (modifyNewBtn) return handleTripsyUpdateModifyNew(row, modifyNewBtn);
     if (deleteBtn) return handleTripsyUpdateDelete(row, deleteBtn);
   });
 }
@@ -13488,18 +13641,21 @@ function wireTripsyUpdateOverlayButtons(overlay) {
 // row's field_corrections, exactly mirroring the shape renderTripsyEditPanel's
 // own Save button queues (index.html ~8086), just without opening that
 // form at all -- a deliberate one-click action, per explicit request.
-// flow actually takes effect rather than being silently discarded.
+// Optimistic: the row fades out immediately (matching Dismiss/Ignore's
+// instant feel) rather than sitting disabled for the full Drive round-trip
+// behind Store.queueTripsyChange -- on failure the row comes back via a
+// full re-render (renderTripsyUpdateOverlayContent) plus an error toast.
 async function handleTripsyUpdateAccept(row, btn) {
   const found = row.matched_event_key ? findTripsyRawByKey(row.matched_event_key) : null;
   if (!found) { toast('Could not find the matching event. Please try again.', 'error'); return; }
-  btn.disabled = true;
+  const changes = buildTripsyRowChangePayload(row, found.raw);
+  if (!Object.keys(changes).length) {
+    toast('Nothing to update for this event.', 'error');
+    return;
+  }
+  row._actionState = 'queued';
+  tripsyUpdateResolveEntry(btn);
   try {
-    const changes = buildTripsyRowChangePayload(row, found.raw);
-    if (!Object.keys(changes).length) {
-      toast('Nothing to update for this event.', 'error');
-      btn.disabled = false;
-      return;
-    }
     const ok = await Store.queueTripsyChange({
       id: crypto.randomUUID(),
       type: 'edit_event',
@@ -13513,17 +13669,16 @@ async function handleTripsyUpdateAccept(row, btn) {
       changes,
       source: 'tripsy_update_page',
     });
-    if (!ok) { toast("Could not save changes — storage error. Please try again.", "error"); btn.disabled = false; return; }
-    row._actionState = 'queued';
-    tripsyUpdateResolveEntry(btn);
+    if (!ok) throw new Error('storage error');
     persistTripsyUpdatePageState();
     renderTripsyEventsList();
     updateTripsyPendingWarningBadge();
     toast('Update queued.', 'success');
   } catch (err) {
     console.error('Failed to queue Tripsy update accept:', err);
+    row._actionState = null;
+    renderTripsyUpdateOverlayContent();
     toast("Could not save changes — storage error. Please try again.", "error");
-    btn.disabled = false;
   }
 }
 
@@ -13576,15 +13731,21 @@ async function handleTripsyUpdateModify(row) {
 // row's field_corrections seeded onto a blank raw for the resource Claude
 // inferred, mirroring the Add-item panel's own create_event shape
 // (index.html ~8060), again as a deliberate one-click action rather than
-// opening the create form first.
+// opening the create form first. Optimistic, same as Accept above: the row
+// fades out immediately rather than waiting on the Drive round-trip, and
+// comes back with an error toast if the save actually fails. The top-right
+// status badge's in-flight/failed-write tracking lives inside
+// Store.queueTripsyChange itself (generic across every caller, not just
+// this one), so nothing extra is needed here for that.
 async function handleTripsyUpdateAdd(row, btn) {
   const tripKey = tripsyUpdateOverlayTripKey;
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return;
-  btn.disabled = true;
+  const fields = buildTripsyRowChangePayload(row, null);
+  const eventSummary = fields.name || fields.company || row.pdf_summary || 'New item';
+  row._actionState = 'queued';
+  tripsyUpdateResolveEntry(btn);
   try {
-    const fields = buildTripsyRowChangePayload(row, null);
-    const eventSummary = fields.name || fields.company || row.pdf_summary || 'New item';
     const ok = await Store.queueTripsyChange({
       id: crypto.randomUUID(),
       type: 'create_event',
@@ -13597,17 +13758,85 @@ async function handleTripsyUpdateAdd(row, btn) {
       fields,
       source: 'tripsy_update_page',
     });
-    if (!ok) { toast("Could not save changes — storage error. Please try again.", "error"); btn.disabled = false; return; }
-    row._actionState = 'queued';
-    tripsyUpdateResolveEntry(btn);
+    if (!ok) throw new Error('storage error');
     persistTripsyUpdatePageState();
     renderTripsyEventsList();
     updateTripsyPendingWarningBadge();
     toast('New event queued.', 'success');
   } catch (err) {
     console.error('Failed to queue Tripsy add event:', err);
+    row._actionState = null;
+    renderTripsyUpdateOverlayContent();
     toast("Could not save changes — storage error. Please try again.", "error");
-    btn.disabled = false;
+  }
+}
+
+// "Modify New" -- Add Event's instant create_event queue (same fields,
+// same optimistic row-resolve), immediately followed by jumping to that
+// new pending item's own edit form on the timeline -- the SAME inline
+// panel/shape the timeline's own pencil icon on a pending-create row opens
+// (data-tripsy-edit-pending-create, index.html ~16273), pre-filled with
+// whatever Claude already extracted rather than a blank form. The create
+// itself doesn't wait on the owner opening/saving that form -- it's
+// already queued (and will sync on the next refresh) even if they close
+// the edit panel without touching anything. Passes onClose so the Update
+// overlay reopens once they're done, same as Modify Existing.
+async function handleTripsyUpdateModifyNew(row, btn) {
+  const tripKey = tripsyUpdateOverlayTripKey;
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return;
+  const fields = buildTripsyRowChangePayload(row, null);
+  const eventSummary = fields.name || fields.company || row.pdf_summary || 'New item';
+  const pendingChangeId = crypto.randomUUID();
+  row._actionState = 'queued';
+  tripsyUpdateResolveEntry(btn);
+  const overlay = document.getElementById('tripsy-update-overlay');
+  try {
+    const ok = await Store.queueTripsyChange({
+      id: pendingChangeId,
+      type: 'create_event',
+      createdAt: new Date().toISOString(),
+      tripKey,
+      tripName: trip.name,
+      tripsyResource: row.resource,
+      tripsyTripId: tripsyTripIdFromKey(tripKey),
+      eventSummary,
+      fields,
+      source: 'tripsy_update_page',
+    });
+    if (!ok) throw new Error('storage error');
+    persistTripsyUpdatePageState();
+    updateTripsyPendingWarningBadge();
+    if (overlay) overlay.style.display = 'none';
+    if (isTripsyTripCollapsed(tripKey)) {
+      setTripsyTripCollapsed(tripKey, false);
+    }
+    await renderTripsyEventsList();
+    const container = document.getElementById('tripsy-card');
+    const panel = container && container.querySelector(`[data-tripsy-pending-panel="${CSS.escape(pendingChangeId)}"]`);
+    if (!panel) {
+      toast('New event queued -- open it from the timeline to edit.', 'success');
+      return;
+    }
+    const pending = await Store.listTripsyPendingChanges();
+    const change = pending.find(c => c.id === pendingChangeId);
+    const mergedRaw = { ...tripsyBlankRaw(row.resource, row.category), ...(change ? change.fields : fields) };
+    renderTripsyEditPanel(panel, mergedRaw, tripKey, trip.name, eventSummary, {
+      pendingChangeId,
+      tripsyTripId: tripsyTripIdFromKey(tripKey),
+    }, () => {
+      if (overlay) overlay.style.display = 'flex';
+    });
+    panel.dataset.mode = 'edit';
+    panel.style.display = 'block';
+    setTripsyEditIconActive(pendingChangeId, true);
+    const viewEl = container.querySelector(`[data-tripsy-edit-pending-create][data-change-id="${CSS.escape(pendingChangeId)}"]`);
+    (viewEl || panel).scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch (err) {
+    console.error('Failed to queue Tripsy modify-new event:', err);
+    row._actionState = null;
+    renderTripsyUpdateOverlayContent();
+    toast("Could not save changes — storage error. Please try again.", "error");
   }
 }
 
@@ -13616,13 +13845,17 @@ async function handleTripsyUpdateAdd(row, btn) {
 // from two places on a conflict row (the standalone Delete button, and the
 // Modify preview's Delete button) as well as tripsy_only rows' own Delete
 // -- all three carry the same data-tripsy-update-delete/data-row-idx pair,
-// so this one handler covers all of them.
+// so this one handler covers all of them. The confirm() dialog stays
+// blocking (it's a decision gate, not network latency) but once confirmed
+// this is optimistic like Accept/Add above: the row fades out immediately,
+// and comes back with an error toast if the save actually fails.
 async function handleTripsyUpdateDelete(row, btn) {
   const found = row.matched_event_key ? findTripsyRawByKey(row.matched_event_key) : null;
   if (!found) { toast('Could not find that event.', 'error'); return; }
   const confirmed = confirm(`Delete "${row.tripsy_summary}" from Tripsy? This can't be undone once it syncs.`);
   if (!confirmed) return;
-  btn.disabled = true;
+  row._actionState = 'queued';
+  tripsyUpdateResolveEntry(btn);
   try {
     const ok = await Store.queueTripsyChange({
       id: crypto.randomUUID(),
@@ -13636,17 +13869,16 @@ async function handleTripsyUpdateDelete(row, btn) {
       tripsyId: found.raw.id,
       source: 'tripsy_update_page',
     });
-    if (!ok) { toast("Could not queue deletion — storage error. Please try again.", "error"); btn.disabled = false; return; }
-    row._actionState = 'queued';
-    tripsyUpdateResolveEntry(btn);
+    if (!ok) throw new Error('storage error');
     persistTripsyUpdatePageState();
     renderTripsyEventsList();
     updateTripsyPendingWarningBadge();
     toast('Deletion queued.', 'success');
   } catch (err) {
     console.error('Failed to queue Tripsy delete:', err);
+    row._actionState = null;
+    renderTripsyUpdateOverlayContent();
     toast("Could not queue deletion — storage error. Please try again.", "error");
-    btn.disabled = false;
   }
 }
 
@@ -13667,6 +13899,7 @@ async function runTripsyUpdateComparison(tripKey, file) {
   if (titleEl) titleEl.textContent = `Comparing "${file.name}" against ${trip.name}`;
   content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Reading itinerary and comparing to Tripsy…</div>`;
   overlay.style.display = 'flex';
+  tripsyUpdateResetShowMatches(overlay);
   tripsyUpdateRows = [];
   try {
     const pdfBase64 = await tripsyFileToBase64(file);
@@ -15192,9 +15425,14 @@ async function renderTripsyEventsListImpl() {
       // -> arr string), so reusing ev.summary wholesale wouldn't work here
       // either: that has a different "Flight from X to Y" phrasing for the
       // no-pending-edit/precomputed-snapshot case, not the route-arrow one
-      // this timeline uses.
+      // this timeline uses. Shortened via tripsyShortenRouteLocation (venue
+      // names only), not ev.location's raw full description -- per explicit
+      // request, a title never trails off into a street address, postal
+      // code, or country name; the full description still shows in this
+      // row's own detail lines (tripsyTimelineDetailLines).
       const isFlightRow = ev.tripsyRaw.resource === 'transportation' && ev.tripsyRaw.category === 'airplane';
-      const routeTitle = (ev.tripsyRaw.resource === 'transportation' && ev.location) ? ev.location : ev.summary;
+      const shortRoute = ev.tripsyRaw.resource === 'transportation' ? tripsyShortenRouteLocation(ev.location) : null;
+      const routeTitle = shortRoute || ev.summary;
       const flightCompanyNumber = isFlightRow ? `${ev.tripsyRaw.company || ''} ${ev.tripsyRaw.transportNumber || ''}`.trim() : '';
       const title = (isFlightRow && flightCompanyNumber && routeTitle !== flightCompanyNumber) ? `${routeTitle} • ${flightCompanyNumber}` : routeTitle;
       const statusBadge = [
@@ -16612,6 +16850,52 @@ function tripsyParseConflictEventCount(proposals, trips, pendingChanges) {
   return count;
 }
 
+// Transient, in-memory-only tracking of a Drive write currently in flight
+// (never persisted -- there's no way to represent "in progress" in the
+// data model itself, only "queued" or not once the write finishes). Lets
+// an action whose row already resolved OPTIMISTICALLY (see e.g. Add Event
+// on the Update page, tripsyUpdateResolveEntry) still show a visible sign
+// on the top-right status badge that its Drive write hasn't actually
+// finished yet, rather than looking instantly, silently done.
+let tripsyInFlightWrites = [];
+
+function tripsyBeginInFlightWrite(label) {
+  const id = crypto.randomUUID();
+  tripsyInFlightWrites.push({ id, label });
+  updateTripsyStatusBadge();
+  return id;
+}
+
+function tripsyEndInFlightWrite(id) {
+  tripsyInFlightWrites = tripsyInFlightWrites.filter(w => w.id !== id);
+  updateTripsyStatusBadge();
+}
+
+// Transient, in-memory-only (same reasoning as tripsyInFlightWrites -- a
+// failed write never got saved to Drive, so there's nothing in driveData
+// itself to represent it) record of a write from the Update page that
+// genuinely failed. Unlike tripsyInFlightWrites this does NOT auto-clear:
+// per explicit request, it turns the badge red and stays there until the
+// owner explicitly dismisses it (tripsyDismissFailedWrite) from the status
+// panel -- reloading the page also clears it, since by then the failed
+// row is already back in front of the owner on the Update page itself.
+let tripsyFailedWrites = [];
+
+function tripsyRecordFailedWrite(label) {
+  const id = crypto.randomUUID();
+  tripsyFailedWrites.push({ id, label });
+  updateTripsyStatusBadge();
+  return id;
+}
+
+function tripsyDismissFailedWrite(id) {
+  tripsyFailedWrites = tripsyFailedWrites.filter(w => w.id !== id);
+  // updateTripsyStatusBadge already re-renders the panel itself if it's
+  // currently open (see its own tail), which it is here (the owner just
+  // clicked Dismiss inside it).
+  updateTripsyStatusBadge();
+}
+
 // Aggregates every "needs attention" signal across the Tripsy pipelines into
 // one of three prioritized states for the single top-right badge:
 //   RED    -- a queued change's push genuinely failed (pushConfirmationFailed).
@@ -16634,13 +16918,27 @@ async function computeTripsyStatus() {
     Store.listTripsyParseProposals(),
   ]);
 
-  // RED -- highest priority, a genuine failure.
+  // RED -- highest priority, a genuine failure. A write that failed from
+  // the Update page (see tripsyRecordFailedWrite) outranks even a
+  // pushConfirmationFailed change, since it's the more immediate problem
+  // (that Drive write never even landed) -- both can show at once, each
+  // as its own reason, and each write-failed one stays until the owner
+  // explicitly dismisses it (tripsyDismissFailedWrite), never on its own.
+  const red = tripsyFailedWrites.map(w => ({ kind: 'write-failed', id: w.id, label: w.label }));
   if (changes.some(c => c.pushConfirmationFailed)) {
-    return { state: 'red', reasons: [{ label: 'A Tripsy push could not be verified — re-run a refresh', view: 'utilitiestripsyrefresh' }] };
+    red.push({ label: 'A Tripsy push could not be verified — re-run a refresh', view: 'utilitiestripsyrefresh' });
   }
+  if (red.length) return { state: 'red', reasons: red };
 
   // YELLOW -- a Claude step is needed before anything else.
   const yellow = [];
+  // In-flight Drive writes (see tripsyBeginInFlightWrite) -- no `view`, so
+  // this renders as plain (non-clickable) text in the panel: there's
+  // nowhere to navigate to for "still saving," it just clears itself once
+  // the write finishes.
+  if (tripsyInFlightWrites.length) {
+    yellow.push({ label: tripsyInFlightWrites.length === 1 ? tripsyInFlightWrites[0].label : `${tripsyInFlightWrites.length} events being written to Drive…` });
+  }
   // "Waiting to push" = still in the queue and not itself the failed one caught
   // by the RED branch above. This is CONFIRMATION-based, not snapshot-timestamp
   // based: a refresh removes a change from the queue only once it explicitly
@@ -16695,7 +16993,7 @@ async function updateTripsyStatusBadge() {
   const badge = document.getElementById('tripsy-status-badge');
   if (!badge) return;
   const panel = document.getElementById('tripsy-status-panel');
-  const { state } = await computeTripsyStatus();
+  const { state, reasons } = await computeTripsyStatus();
   if (state === 'hidden') {
     badge.style.display = 'none';
     if (panel) panel.style.display = 'none';
@@ -16705,7 +17003,9 @@ async function updateTripsyStatusBadge() {
   badge.style.color = '';
   if (state === 'red') {
     badge.textContent = '🛑';
-    badge.title = 'A Tripsy push could not be verified — click for details';
+    badge.title = reasons.some(r => r.kind === 'write-failed')
+      ? 'A write failed — click for details'
+      : 'A Tripsy push could not be verified — click for details';
   } else if (state === 'yellow') {
     badge.textContent = '⚠️';
     badge.title = 'Claude has a step to run for My Trips — click to see what';
@@ -16762,17 +17062,32 @@ async function renderTripsyStatusPanel() {
     : 'Saved to your Drive file. A refresh is what reads the queue and pushes it on to Tripsy — run one to do it now.';
   panel.innerHTML = `
     <div style="font-family:var(--mono); font-size:13px; font-weight:700; color:${headingColor}; margin-bottom:6px;">${heading}</div>
-    ${reasons.map(r => `
+    ${reasons.map(r => r.kind === 'write-failed' ? `
+      <div style="padding:8px 6px; border-top:1px solid var(--line);">
+        <div style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--red, #c0392b); margin-bottom:3px;">Write Failed</div>
+        <div style="font-size:13px; color:var(--text); margin-bottom:8px;">${esc(r.label)}</div>
+        <button class="btn" data-tripsy-status-dismiss-write data-write-id="${esc(r.id)}" style="font-size:12px; padding:5px 12px;">Dismiss</button>
+      </div>
+    ` : r.view ? `
       <button class="btn" data-tripsy-status-go data-view="${esc(r.view)}" style="display:block; width:100%; text-align:left; background:none; border:none; padding:8px 6px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px; border-top:1px solid var(--line);">
         ${esc(r.label)} <span style="color:var(--muted);">›</span>
       </button>
       ${r.kind === 'changes-push' ? `<div style="font-size:11px; color:var(--muted); padding:0 6px 6px; line-height:1.5;">${esc(changesStageNote)}</div>` : ''}
+    ` : `
+      <div style="padding:8px 6px; border-top:1px solid var(--line); font-size:13px; color:var(--text);">${esc(r.label)}</div>
     `).join('')}
   `;
   panel.querySelectorAll('[data-tripsy-status-go]').forEach(btn => {
     btn.addEventListener('click', () => {
       panel.style.display = 'none';
       navigate(btn.dataset.view);
+    });
+  });
+  // Only this specific failed write clears -- per explicit request, it
+  // stays listed until the owner dismisses it themselves, never on its own.
+  panel.querySelectorAll('[data-tripsy-status-dismiss-write]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      tripsyDismissFailedWrite(btn.dataset.writeId);
     });
   });
   panel.style.display = 'block';
