@@ -2318,6 +2318,50 @@ const Store = {
       return { ok: false, staged: 0, marked: 0, error: e.message || String(e) };
     }
   },
+  // Applies a drained doc-proposals relay file in one write: stages each parsed
+  // document's proposals into tripsyParseProposals (skipping any attachment already
+  // drained on a prior pass) and flips the source attachment's parseStatus --
+  // 'staged' when it yielded reviewable events, terminal 'done' when it yielded
+  // nothing usable. `parsedDocs` is [{ attachmentId, status:'parsed'|'empty'|'error',
+  // errorReason?, proposals:[...] }]. Mirrors applyDrainedEmailProposals; it's the
+  // app side of the HEADLESS document-parse pipeline -- a refresh run reads the
+  // flagged file straight from Drive and writes this relay, so uploaded docs now
+  // parse with no browser, from any device (e.g. an iPad).
+  async applyDrainedDocProposals(parsedDocs) {
+    try {
+      if (!driveData.tripsyAttachments) driveData.tripsyAttachments = [];
+      if (!driveData.tripsyParseProposals) driveData.tripsyParseProposals = [];
+      let staged = 0, marked = 0;
+      const now = new Date().toISOString();
+      for (const pd of (parsedDocs || [])) {
+        if (!pd || !pd.attachmentId) continue;
+        const att = driveData.tripsyAttachments.find(a => a.id === pd.attachmentId);
+        // Skip if this attachment was already drained on a prior pass (its
+        // parseStatus advanced past 'pending').
+        if (att && att.parseStatus && att.parseStatus !== 'pending') continue;
+        const already = driveData.tripsyParseProposals.some(p => p.attachmentId === pd.attachmentId);
+        const hasEvents = Array.isArray(pd.proposals) && pd.proposals.some(p => (p.events || []).length);
+        if (!already && hasEvents) {
+          for (const proposal of pd.proposals) { driveData.tripsyParseProposals.push(proposal); staged++; }
+        }
+        if (att) {
+          if (hasEvents) {
+            att.parseStatus = 'staged'; // reviewable events waiting on the owner
+          } else {
+            att.parseStatus = 'done';   // nothing usable -> terminal, stops showing as pending
+            if (pd.status === 'error') att.parseError = pd.errorReason || true;
+          }
+          att.parsedAt = now;
+          marked++;
+        }
+      }
+      await persistDriveData();
+      return { ok: true, staged, marked };
+    } catch (e) {
+      console.error('Store.applyDrainedDocProposals failed:', e);
+      return { ok: false, staged: 0, marked: 0, error: e.message || String(e) };
+    }
+  },
   // The return leg of the headless push: a tripsy-trips-refresh run applies
   // queued changes to Tripsy's API (it can read this queue via its Drive
   // connector, but can't write flight-log-data.json), then reports per-change
@@ -3127,6 +3171,7 @@ function updateLastSyncedLabel(elId) {
 const TRIPSY_EMAIL_INTAKE_ADDRESS = 'kaganworldtravel@gmail.com';
 const TRIPSY_EMAIL_PROPOSALS_FILENAME = 'tripsy-email-proposals.json';
 const TRIPSY_APPLIED_CHANGES_FILENAME = 'tripsy-applied-changes.json';
+const TRIPSY_DOC_PROPOSALS_FILENAME = 'tripsy-doc-proposals.json';
 
 // Prefer an HTML part (richer), fall back to text/plain -- mirrors
 // findHtmlPartData but for the plain-text alternative some senders use.
@@ -3215,6 +3260,18 @@ async function drainTripsyEmailProposals() {
   await drainTripsyRelayFiles(TRIPSY_EMAIL_PROPOSALS_FILENAME, relay => Store.applyDrainedEmailProposals(relay.parsedEmails || []));
 }
 
+// Owner-only. Stages events a refresh run extracted from flagged DOCUMENT
+// attachments (proposals) into tripsyParseProposals for review, and flips each
+// source attachment's parse flag. Headless, browser-free counterpart to the old
+// in-tab doc-parse runbook: the refresh reads the flagged file from Drive directly
+// (verified 2026-07-22 -- the full-scope Drive connector can download app-uploaded
+// attachments), so uploaded docs now parse with no desktop/browser, from any
+// device (e.g. an iPad).
+async function drainTripsyDocProposals() {
+  if (!isOwner) return;
+  await drainTripsyRelayFiles(TRIPSY_DOC_PROPOSALS_FILENAME, relay => Store.applyDrainedDocProposals(relay.parsedDocs || []));
+}
+
 // Owner-only. Applies the per-change push results a refresh run reported --
 // clearing confirmed-applied changes from the queue (so their badge flag stops
 // showing), flagging unverified ones red, leaving failed ones to retry. This is
@@ -3255,6 +3312,7 @@ async function syncTripsyRelays() {
     ]);
     await drainTripsyAppliedChanges();
     await drainTripsyEmailProposals();
+    await drainTripsyDocProposals();
     await scanTripsyEmailIntake();
     // computeTripsyStatus can only spot a per-trip parse conflict if the
     // decrypted trips are there to date-match proposals against -- with
