@@ -437,6 +437,14 @@
      rendered dots via JS rather than hardcoded here. */
   .tripsy-tl-trip { position:relative; }
   .tripsy-tl-connector { position:absolute; width:3px; background:rgba(255,255,255,0.85); z-index:0; display:none; }
+  /* On phones, cap the Tripsy dropdown menus/panels to the viewport width so their
+     inline min-widths can't run off-screen (they're position:fixed; JS handles the
+     vertical fit + internal scroll -- see positionTripsyFixedMenu). */
+  @media (max-width: 500px) {
+    [data-tripsy-document-menu], [data-tripsy-attachments-menu], [data-tripsy-itinerary-menu],
+    [data-tripsy-trip-menu], [data-tripsy-sort-menu], [data-tripsy-generate-panel],
+    [data-tripsy-add-item-menu] { min-width: 0 !important; max-width: calc(100vw - 16px) !important; }
+  }
 
   .btn {
     font-family: var(--sans); font-weight: 600; font-size: 13.5px; padding: 9px 16px;
@@ -1362,12 +1370,23 @@ async function downloadDriveFileBlob(driveFileId) {
 // thing. Top-level (not a closure inside renderTripsyEventsListImpl) so
 // callers outside that render pass -- e.g. the Preview overlay's saved-draft
 // picker -- can reuse it too.
+// Which MIME types a browser renders INLINE in a tab (vs. just downloading). A blob
+// URL renders PDFs/images/text inline, but for an Office doc (.docx/.xlsx/...) it only
+// downloads -- so those go to Google Drive's viewer instead, which renders them.
+function tripsyBrowserCanRenderInline(mimeType) {
+  const t = (mimeType || '').toLowerCase();
+  return t === 'application/pdf' || t.startsWith('image/') || t.startsWith('text/');
+}
+
 async function openDriveFileInNewTab(driveFileId) {
   const tab = window.open('', '_blank');
   if (tab) tab.opener = null;
   try {
     const cached = await getTripsyOfflineDoc(driveFileId);
-    if (cached && cached.blob) {
+    // Use the offline blob when it renders inline (PDF/image) or when we're offline and
+    // it's the only copy. For an Office doc while online, fall through to the Drive
+    // viewer below, which renders it in the tab instead of downloading it.
+    if (cached && cached.blob && (tripsyBrowserCanRenderInline(cached.blob.type) || !navigator.onLine)) {
       const url = URL.createObjectURL(cached.blob);
       if (tab) tab.location.href = url; else window.open(url, '_blank', 'noopener');
       setTimeout(() => URL.revokeObjectURL(url), 60000);
@@ -9665,6 +9684,38 @@ function tripsyTimelineDetailLines(ev) {
 // feedback: everything reads better fully in-line) -- every row gets the
 // SAME uniform left offset, from .tripsy-tl-row's own padding-left, so
 // times line up under the comma in the day header above (e.g. "Tue,").
+// Position a fixed dropdown menu under `btn`, clamped inside the viewport and scrolling
+// internally if it's too tall -- so a long menu (e.g. a trip's Docs list) stays fully
+// reachable on a small phone screen instead of running off-screen. It's position:fixed,
+// so page scrolling can't reach it; opens upward when there's more room above.
+function positionTripsyFixedMenu(btn, menu) {
+  positionTripsyFixedMenuAtRect(btn.getBoundingClientRect(), menu);
+}
+// Same, but anchored to a pre-captured rect -- for menus whose trigger button gets
+// hidden as the menu opens (e.g. the Generate panel's button lives in the Itinerary
+// dropdown, which closeAllTripsyTripPanels hides), so re-measuring it would give 0.
+// Width is capped to the viewport by a small-screen CSS rule (see the media query), so
+// offsetWidth already fits; this only handles position + vertical fit/scroll.
+function positionTripsyFixedMenuAtRect(rect, menu) {
+  menu.style.top = menu.style.bottom = menu.style.maxHeight = '';
+  menu.style.overflowY = 'auto';
+  menu.style.display = 'block';
+  const vw = window.innerWidth, vh = window.innerHeight, margin = 8;
+  // Right-align to the anchor, clamped inside the viewport (either edge).
+  menu.style.left = `${Math.max(margin, Math.min(rect.right - menu.offsetWidth, vw - menu.offsetWidth - margin))}px`;
+  // Open below by default; if it'd overflow the bottom and there's more room above, open
+  // upward. Cap the height to the available space and scroll internally (it's
+  // position:fixed, so page scrolling can't otherwise reach an off-screen part).
+  const spaceBelow = vh - rect.bottom - margin, spaceAbove = rect.top - margin;
+  if (menu.offsetHeight <= spaceBelow || spaceBelow >= spaceAbove) {
+    menu.style.top = `${rect.bottom + 6}px`;
+    menu.style.maxHeight = `${Math.max(80, spaceBelow)}px`;
+  } else {
+    menu.style.bottom = `${vh - rect.top + 6}px`;
+    menu.style.maxHeight = `${Math.max(80, spaceAbove)}px`;
+  }
+}
+
 // Sanity check (per-trip "Check lodging"): for each night of a trip -- its first day
 // through the night before its last day -- is there a hosting (hotel) covering it?
 // Effective hostings = the trip's synced hostings PLUS any pending create-hosting
@@ -16118,19 +16169,15 @@ async function renderTripsyEventsListImpl() {
       const trip = allTrips.find(t => t.key === tripKey);
       if (!trip) return;
       panel.innerHTML = `<div style="padding:8px; font-size:12px; color:var(--muted);">Loading…</div>`;
-      panel.style.top = `${rect.bottom + 6}px`;
-      panel.style.left = `${Math.max(8, rect.right - 320)}px`;
-      panel.style.display = "block";
+      positionTripsyFixedMenuAtRect(rect, panel);
       try {
         const { effectiveTrip, dayKeys, summaryByDay } = await buildTripsyPrintDayData(trip);
         const narrativeCache = await Store.getTripsyNarrativeCache();
         const sections = tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByDay, narrativeCache);
         const titleHtml = `<div style="padding:4px 4px 8px; font-size:13px; font-weight:700; color:var(--text); border-bottom:1px solid var(--line); margin-bottom:4px;">${esc(trip.name)}</div>`;
         panel.innerHTML = titleHtml + tripsyGeneratePanelSectionsHtml(sections);
-        // offsetWidth is 0 before the first paint at display:block, same as
-        // wireTripsyHeaderMenuToggle's own re-calc below -- redo the left
-        // position now that the panel has real (post-content) width.
-        panel.style.left = `${Math.max(8, rect.right - panel.offsetWidth)}px`;
+        // Re-position now that the real (post-content) size is known.
+        positionTripsyFixedMenuAtRect(rect, panel);
       } catch (err) {
         console.error('Failed to load itinerary sections for Generate panel:', err);
         panel.innerHTML = `<div style="padding:8px; font-size:12px; color:#B33;">Could not load itinerary sections. Please try again.</div>`;
@@ -16356,16 +16403,7 @@ async function renderTripsyEventsListImpl() {
         if (!menu) return;
         const wasOpen = menu.style.display !== "none";
         closeAllTripsyTripPanels();
-        if (!wasOpen) {
-          const rect = btn.getBoundingClientRect();
-          menu.style.top = `${rect.bottom + 6}px`;
-          menu.style.left = `${rect.right - menu.offsetWidth}px`;
-          menu.style.display = "block";
-          // offsetWidth is 0 before the first paint at display:block -- redo
-          // the left calc now that the menu actually has a real width, so
-          // it stays right-aligned to the button instead of drifting left.
-          menu.style.left = `${rect.right - menu.offsetWidth}px`;
-        }
+        if (!wasOpen) positionTripsyFixedMenu(btn, menu);
       });
     });
   };
@@ -16567,16 +16605,7 @@ async function renderTripsyEventsListImpl() {
       if (!menu) return;
       const wasOpen = menu.style.display !== "none";
       closeAllTripsyTripPanels();
-      if (!wasOpen) {
-        const rect = btn.getBoundingClientRect();
-        menu.style.top = `${rect.bottom + 6}px`;
-        menu.style.left = `${rect.right - menu.offsetWidth}px`;
-        menu.style.display = "block";
-        // offsetWidth is 0 before the first paint at display:block -- redo
-        // the left calc now that the menu actually has a real width, so it
-        // stays right-aligned to the button instead of drifting left.
-        menu.style.left = `${rect.right - menu.offsetWidth}px`;
-      }
+      if (!wasOpen) positionTripsyFixedMenu(btn, menu);
     });
   });
 
@@ -16590,13 +16619,7 @@ async function renderTripsyEventsListImpl() {
       if (!menu) return;
       const wasOpen = menu.style.display !== "none";
       closeAllTripsyTripPanels();
-      if (!wasOpen) {
-        const rect = btn.getBoundingClientRect();
-        menu.style.top = `${rect.bottom + 6}px`;
-        menu.style.left = `${rect.right - menu.offsetWidth}px`;
-        menu.style.display = "block";
-        menu.style.left = `${rect.right - menu.offsetWidth}px`;
-      }
+      if (!wasOpen) positionTripsyFixedMenu(btn, menu);
     });
   });
   // The dropdown's own "Sort" button -- collects whichever type checkboxes
