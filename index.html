@@ -2343,6 +2343,26 @@ const Store = {
       return false;
     }
   },
+  // Backs the Itinerary dropdown's Create-becomes-Delete button -- every
+  // cache entry for this trip in one shot (intro/summary/day::*/
+  // eventblurb::*, all keyed "<tripKey>::..."), one persistDriveData() call
+  // rather than looping deleteTripsyNarrativeSection per key.
+  async deleteAllTripsyNarrativeForTrip(tripKey) {
+    try {
+      const cache = driveData.tripsyNarrativeCache;
+      if (!cache) return true;
+      const prefix = `${tripKey}::`;
+      let changed = false;
+      for (const key of Object.keys(cache)) {
+        if (key.startsWith(prefix)) { delete cache[key]; changed = true; }
+      }
+      if (changed) await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.deleteAllTripsyNarrativeForTrip failed:', e);
+      return false;
+    }
+  },
   // Backs the "Approved" button/badge toggle on a day or event narrative
   // section -- a sibling flag on the cache entry (not inside content), so
   // approving never touches the actual generated/custom text. Only ever
@@ -14437,6 +14457,12 @@ async function renderTripsyEventsListImpl() {
   }
 
   const pendingChanges = isOwner ? await Store.listTripsyPendingChanges() : [];
+  // Fetched once for every trip card below (not per-card) -- drives the
+  // Itinerary dropdown's Create/Delete swap: once a trip has ANY generated
+  // narrative, "Create" becomes "Delete" (same hasAnyNarrative check
+  // previewTripsyItinerary itself uses to decide whether to show its
+  // first-time section picker).
+  const itineraryNarrativeCache = isOwner ? await Store.getTripsyNarrativeCache() : null;
   // Available to every viewer, not just isOwner -- a reference doc is
   // useful to anyone with view access; only the attach/delete buttons
   // themselves are owner-gated below.
@@ -14799,6 +14825,15 @@ async function renderTripsyEventsListImpl() {
         <span style="font-size:16px; flex-shrink:0; width:20px; display:inline-flex; align-items:center; justify-content:center;">${icon}</span><span>${esc(label)}</span>
       </button>
     `;
+    // Once a trip has ANY generated narrative, "Create" becomes "Delete" --
+    // same hasAnyNarrative check previewTripsyItinerary uses to decide
+    // whether to show its own first-time section picker, so the two stay
+    // in lockstep (a trip Preview considers "generated" is exactly the one
+    // this button considers deletable).
+    const hasGeneratedNarrative = !!(itineraryNarrativeCache && (
+      itineraryNarrativeCache[`${trip.key}::intro`] ||
+      Object.keys(itineraryNarrativeCache).some(k => k.startsWith(`${trip.key}::day::`))
+    ));
     // Preview/Print merged into one "Itinerary" dropdown -- available to
     // every viewer, same as before. For the owner, Preview is also where
     // narrative generation/editing lives (the first-time section picker, or
@@ -14814,7 +14849,10 @@ async function renderTripsyEventsListImpl() {
       <div style="position:relative;">
         <button class="btn" data-tripsy-itinerary-menu-toggle data-key="${esc(trip.key)}" title="Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🧭</button>
         <div data-tripsy-itinerary-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-          ${isOwner ? menuListButtonHtml(`data-tripsy-generate-panel-toggle data-key="${esc(trip.key)}"`, '✨', 'Create') : ''}
+          ${isOwner ? (hasGeneratedNarrative
+            ? menuListButtonHtml(`data-tripsy-delete-generated-itinerary data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete')
+            : menuListButtonHtml(`data-tripsy-generate-panel-toggle data-key="${esc(trip.key)}"`, '✨', 'Create')
+          ) : ''}
           <button class="btn" data-tripsy-itinerary-modify-toggle data-key="${esc(trip.key)}" style="display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px;">
             <span style="font-size:16px; flex-shrink:0; width:20px; display:inline-flex; align-items:center; justify-content:center;">🔧</span><span style="flex:1;">Modify</span><span data-tripsy-itinerary-modify-caret style="font-size:11px; color:var(--muted); transition:transform 0.15s;">▸</span>
           </button>
@@ -15058,6 +15096,30 @@ async function renderTripsyEventsListImpl() {
         console.error('Failed to load itinerary sections for Generate panel:', err);
         panel.innerHTML = `<div style="padding:8px; font-size:12px; color:#B33;">Could not load itinerary sections. Please try again.</div>`;
       }
+    });
+  });
+
+  // Delete (owner-only) -- replaces Create once a trip has ANY generated
+  // narrative (see hasGeneratedNarrative above). Clears every cache entry
+  // for this trip in one shot (Store.deleteAllTripsyNarrativeForTrip), then
+  // re-renders -- hasGeneratedNarrative recomputes false on the next pass,
+  // which is what actually swaps the button back to Create; there's no
+  // separate flag to reset. Purely local/reversible-by-regenerating (the
+  // narrative cache, not a live Tripsy record), so this is a plain confirm()
+  // rather than the pending-changes queue the real trip/event Delete
+  // buttons go through.
+  container.querySelectorAll("[data-tripsy-delete-generated-itinerary]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const tripKey = btn.dataset.key;
+      const tripName = btn.dataset.name;
+      if (!confirm(`Delete the generated itinerary for "${tripName}"? This removes every AI-written and custom narrative section for this trip -- you can generate it again afterward.`)) return;
+      closeAllTripsyTripPanels();
+      btn.disabled = true;
+      const ok = await Store.deleteAllTripsyNarrativeForTrip(tripKey);
+      if (!ok) { toast("Could not delete the generated itinerary — storage error. Please try again.", "error"); btn.disabled = false; return; }
+      toast("Generated itinerary deleted.");
+      renderTripsyEventsList();
     });
   });
 
