@@ -949,32 +949,6 @@
   .tripsy-update-btn:active { transform: translateY(1px); }
   .tripsy-update-btn.tu-primary { background: var(--tu-btn-primary-bg); color: var(--tu-btn-primary-ink); border-color: transparent; }
   .tripsy-update-btn.tu-danger  { background: var(--tu-btn-danger-bg); color: var(--tu-btn-danger-ink); border-color: var(--tu-btn-danger-ink); }
-  /* Modify Existing's two follow-on states, toggled in place inside the
-     same action row: an inline edit form (one field per row.field_corrections
-     entry), then a preview of the result with its own Approve/Edit/Delete
-     decision. Only one of .tripsy-update-actions / -edit-box / -preview-box
-     is visible at a time. */
-  .tripsy-update-edit-box, .tripsy-update-preview-box { display: none; flex-direction: column; gap: 10px; max-width: 460px; }
-  .tripsy-update-edit-box.tu-open, .tripsy-update-preview-box.tu-open { display: flex; }
-  .tripsy-update-edit-field { display: flex; flex-direction: column; gap: 3px; }
-  .tripsy-update-edit-field label {
-    font-family: 'Avenir Next', sans-serif; font-size: 10px; letter-spacing: 0.07em;
-    text-transform: uppercase; color: var(--tu-ink-soft); font-weight: 700;
-  }
-  .tripsy-update-edit-field input {
-    font-family: 'Iowan Old Style', Georgia, serif; font-size: 13.6px; color: var(--tu-ink);
-    background: var(--tu-paper-raised); border: 1px solid var(--tu-btn-border); border-radius: 6px;
-    padding: 7px 9px; width: 100%;
-  }
-  .tripsy-update-edit-field input:focus { outline: 2px solid var(--tu-navy); outline-offset: 1px; }
-  .tripsy-update-preview-label {
-    font-family: 'Avenir Next', sans-serif; font-size: 10px; letter-spacing: 0.07em;
-    text-transform: uppercase; color: var(--tu-ink-soft); font-weight: 700;
-  }
-  .tripsy-update-preview-text {
-    font-size: 13.6px; background: var(--tu-paper-raised); border: 1px solid var(--tu-rule);
-    border-radius: 6px; padding: 9px 11px;
-  }
   /* Any resolved entry (dismissed, actioned, approved, deleted) fades and
      collapses out of the list rather than leaving a static "Queued" label
      behind -- see tripsyUpdateResolveEntry. */
@@ -8372,7 +8346,12 @@ function tripsyWireEditFormChangeDetection(panel, saveDataAttr, fieldSelector) {
 // { pendingChangeId, tripsyTripId } when this panel is instead adding a new
 // item that doesn't exist in Tripsy yet -- see addTripsyItem, which opens
 // this same form pre-filled with a blank record and the chosen category.
-function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, createOptions) {
+// onClose (optional) fires once, right after the panel is actually closed --
+// whether that's the Exit/Cancel button, or Save (both the no-changes early
+// return and the real save-success path). Used by callers that need to
+// return somewhere else once this form is done, e.g. the Update overlay's
+// Modify Existing reopening itself after this panel closes.
+function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, createOptions, onClose) {
   const fields = TRIPSY_EDIT_FIELDS[raw.resource] || [];
   // A fresh id per render (not tied to the event's own id, which doesn't
   // exist yet in create mode) so multiple panels open at once never
@@ -8473,6 +8452,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     panel.dataset.mode = "";
     setTripsyEditIconActive(tripsyEventKey(raw), false);
     positionTripsyTimelineConnectors();
+    if (onClose) onClose();
   });
 
   panel.querySelector("[data-tripsy-edit-save]").addEventListener("click", async () => {
@@ -8501,6 +8481,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
         panel.style.display = "none";
         panel.innerHTML = "";
         positionTripsyTimelineConnectors();
+        if (onClose) onClose();
         return;
       }
       // The doc-parse review page's "Modify then import" flow sets onSave
@@ -8543,6 +8524,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
         panel.dataset.mode = "";
         setTripsyEditIconActive(tripsyEventKey(raw), false);
         positionTripsyTimelineConnectors();
+        if (onClose) onClose();
         return;
       }
       ok = await Store.queueTripsyChange({
@@ -8562,6 +8544,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     panel.innerHTML = "";
     renderTripsyEventsList();
     updateTripsyPendingWarningBadge();
+    if (onClose) onClose();
   });
 }
 
@@ -13166,7 +13149,7 @@ function tripsyUpdateRowHtml(row) {
     buttonsHtml = `
       <button type="button" class="tripsy-update-btn tu-primary" data-tripsy-update-accept data-row-idx="${row._idx}">Accept Update</button>
       <button type="button" class="tripsy-update-btn" data-tripsy-update-ignore data-row-idx="${row._idx}">Ignore Update</button>
-      <button type="button" class="tripsy-update-btn" data-tripsy-update-modify-inline data-row-idx="${row._idx}">Modify Existing</button>
+      <button type="button" class="tripsy-update-btn" data-tripsy-update-modify data-row-idx="${row._idx}">Modify Existing</button>
     `;
   } else if (row.status === 'pdf_only') {
     buttonsHtml = `
@@ -13180,33 +13163,6 @@ function tripsyUpdateRowHtml(row) {
     `;
   }
 
-  // The inline edit/preview flow only applies to conflict rows -- pdf_only
-  // has no existing event to edit, tripsy_only has no PDF-suggested values
-  // to edit toward, match has nothing to change at all.
-  const editPreviewHtml = row.status === 'conflict' ? `
-    <div class="tripsy-update-edit-box" data-tripsy-update-edit-box>
-      ${(row.field_corrections || []).map((c, i) => `
-        <div class="tripsy-update-edit-field">
-          <label>${esc(tripsyUpdateFieldLabel(c.field_key))}</label>
-          <input type="text" data-tripsy-update-edit-input data-field-idx="${i}" value="${esc(c.new_value)}">
-        </div>
-      `).join('')}
-      <div class="tripsy-update-actions">
-        <button type="button" class="tripsy-update-btn tu-primary" data-tripsy-update-save-edit data-row-idx="${row._idx}">Save Changes</button>
-        <button type="button" class="tripsy-update-btn" data-tripsy-update-cancel-edit data-row-idx="${row._idx}">Cancel</button>
-      </div>
-    </div>
-    <div class="tripsy-update-preview-box" data-tripsy-update-preview-box>
-      <span class="tripsy-update-preview-label">Will become</span>
-      <div class="tripsy-update-preview-text" data-tripsy-update-preview-text></div>
-      <div class="tripsy-update-actions">
-        <button type="button" class="tripsy-update-btn tu-primary" data-tripsy-update-approve-edit data-row-idx="${row._idx}">Approve</button>
-        <button type="button" class="tripsy-update-btn" data-tripsy-update-back-to-edit data-row-idx="${row._idx}">Edit</button>
-        <button type="button" class="tripsy-update-btn tu-danger" data-tripsy-update-delete data-row-idx="${row._idx}">Delete</button>
-      </div>
-    </div>
-  ` : '';
-
   return `
     <tr class="tripsy-update-entry" data-tripsy-update-row data-row-idx="${row._idx}">
       ${tripsySide}
@@ -13216,7 +13172,6 @@ function tripsyUpdateRowHtml(row) {
     <tr class="tripsy-update-actions-row" data-row-idx="${row._idx}">
       <td colspan="3">
         <div class="tripsy-update-actions" data-tripsy-update-actions>${buttonsHtml}</div>
-        ${editPreviewHtml}
       </td>
     </tr>
   `;
@@ -13358,15 +13313,9 @@ function wireTripsyUpdateOverlayButtons(overlay) {
     const acceptBtn = e.target.closest('[data-tripsy-update-accept]');
     const ignoreBtn = e.target.closest('[data-tripsy-update-ignore]');
     const modifyEl = e.target.closest('[data-tripsy-update-modify]');
-    const modifyInlineBtn = e.target.closest('[data-tripsy-update-modify-inline]');
-    const saveEditBtn = e.target.closest('[data-tripsy-update-save-edit]');
-    const cancelEditBtn = e.target.closest('[data-tripsy-update-cancel-edit]');
-    const approveEditBtn = e.target.closest('[data-tripsy-update-approve-edit]');
-    const backToEditBtn = e.target.closest('[data-tripsy-update-back-to-edit]');
     const addBtn = e.target.closest('[data-tripsy-update-add]');
     const deleteBtn = e.target.closest('[data-tripsy-update-delete]');
-    const anyBtn = retryBtn || dismissBtn || acceptBtn || ignoreBtn || modifyEl || modifyInlineBtn
-      || saveEditBtn || cancelEditBtn || approveEditBtn || backToEditBtn || addBtn || deleteBtn;
+    const anyBtn = retryBtn || dismissBtn || acceptBtn || ignoreBtn || modifyEl || addBtn || deleteBtn;
     if (!anyBtn) return;
 
     if (retryBtn) {
@@ -13383,77 +13332,22 @@ function wireTripsyUpdateOverlayButtons(overlay) {
     if (dismissBtn) return tripsyUpdateResolveEntry(dismissBtn);
     if (acceptBtn) return handleTripsyUpdateAccept(row, acceptBtn);
     if (ignoreBtn) return handleTripsyUpdateIgnore(row, ignoreBtn);
-    if (modifyInlineBtn) return tripsyUpdateShowEditBox(modifyInlineBtn);
-    if (saveEditBtn) return tripsyUpdateSaveEdit(row, saveEditBtn);
-    if (cancelEditBtn) return tripsyUpdateCancelEdit(cancelEditBtn);
-    if (approveEditBtn) return handleTripsyUpdateAccept(row, approveEditBtn, { useEditedCorrections: true });
-    if (backToEditBtn) return tripsyUpdateBackToEdit(backToEditBtn);
     if (addBtn) return handleTripsyUpdateAdd(row, addBtn);
     if (deleteBtn) return handleTripsyUpdateDelete(row, deleteBtn);
   });
 }
 
-// "Modify Existing" -- expands the inline edit form in place (one input per
-// row.field_corrections entry) instead of the button-row. Distinct from the
-// Tripsy-side hyperlink (data-tripsy-update-modify/handleTripsyUpdateModify),
-// which still jumps to the real full edit panel elsewhere on the page.
-function tripsyUpdateShowEditBox(btn) {
-  const actionsRow = btn.closest('tr.tripsy-update-actions-row');
-  actionsRow.querySelector('[data-tripsy-update-actions]').style.display = 'none';
-  actionsRow.querySelector('[data-tripsy-update-edit-box]').classList.add('tu-open');
-}
-
-function tripsyUpdateCancelEdit(btn) {
-  const actionsRow = btn.closest('tr.tripsy-update-actions-row');
-  actionsRow.querySelector('[data-tripsy-update-edit-box]').classList.remove('tu-open');
-  actionsRow.querySelector('[data-tripsy-update-actions]').style.display = 'flex';
-}
-
-// Reads each edited input back into row._editedCorrections (a working copy
-// of row.field_corrections with new_value replaced by whatever the owner
-// typed), renders a preview line per field, and shows the Approve/Edit/
-// Delete decision -- mirrors the approved mockup's saveEdit, but built from
-// the row's real fields instead of a hardcoded title+time pair, since a
-// real conflict can be flagged on any field.
-function tripsyUpdateSaveEdit(row, btn) {
-  const actionsRow = btn.closest('tr.tripsy-update-actions-row');
-  const editBox = actionsRow.querySelector('[data-tripsy-update-edit-box]');
-  const inputs = [...editBox.querySelectorAll('[data-tripsy-update-edit-input]')];
-  const original = row.field_corrections || [];
-  row._editedCorrections = original.map((c, i) => {
-    const input = inputs.find(el => Number(el.dataset.fieldIdx) === i);
-    return { field_key: c.field_key, new_value: input ? input.value.trim() : c.new_value };
-  });
-  const previewBox = actionsRow.querySelector('[data-tripsy-update-preview-box]');
-  previewBox.querySelector('[data-tripsy-update-preview-text]').innerHTML = row._editedCorrections
-    .map(c => `<div>${esc(tripsyUpdateFieldLabel(c.field_key))}: <b>${esc(c.new_value)}</b></div>`)
-    .join('');
-  editBox.classList.remove('tu-open');
-  previewBox.classList.add('tu-open');
-}
-
-function tripsyUpdateBackToEdit(btn) {
-  const actionsRow = btn.closest('tr.tripsy-update-actions-row');
-  actionsRow.querySelector('[data-tripsy-update-preview-box]').classList.remove('tu-open');
-  actionsRow.querySelector('[data-tripsy-update-edit-box]').classList.add('tu-open');
-}
-
-// "Accept Update" (and, with useEditedCorrections, the Modify preview's
-// "Approve") -- queues an edit_event pending change built from the row's
-// field_corrections, exactly mirroring the shape renderTripsyEditPanel's
+// "Accept Update" -- queues an edit_event pending change built from the
+// row's field_corrections, exactly mirroring the shape renderTripsyEditPanel's
 // own Save button queues (index.html ~8086), just without opening that
 // form at all -- a deliberate one-click action, per explicit request.
-// useEditedCorrections reads row._editedCorrections (set by
-// tripsyUpdateSaveEdit) instead of the original Claude-suggested
-// row.field_corrections, so an owner's inline tweak in the Modify Existing
 // flow actually takes effect rather than being silently discarded.
-async function handleTripsyUpdateAccept(row, btn, { useEditedCorrections } = {}) {
+async function handleTripsyUpdateAccept(row, btn) {
   const found = row.matched_event_key ? findTripsyRawByKey(row.matched_event_key) : null;
   if (!found) { toast('Could not find the matching event. Please try again.', 'error'); return; }
   btn.disabled = true;
   try {
-    const payloadRow = useEditedCorrections ? { ...row, field_corrections: row._editedCorrections || row.field_corrections } : row;
-    const changes = buildTripsyRowChangePayload(payloadRow, found.raw);
+    const changes = buildTripsyRowChangePayload(row, found.raw);
     if (!Object.keys(changes).length) {
       toast('Nothing to update for this event.', 'error');
       btn.disabled = false;
@@ -13493,10 +13387,13 @@ function handleTripsyUpdateIgnore(row, btn) {
   tripsyUpdateResolveEntry(btn);
 }
 
-// "Modify Existing" / clicking the Tripsy-side hyperlink -- closes the
-// overlay and opens the SAME edit panel the timeline's own Edit button
-// opens (exact lookup/merge/render sequence as that handler), then
-// prepends just this row's diff summary above the form and scrolls to it.
+// "Modify Existing" (both the button and the Tripsy-side hyperlink trigger
+// this same handler) -- hides the Update overlay and opens the SAME edit
+// panel the timeline's own Edit button opens (exact lookup/merge/render
+// sequence as that handler), prepends just this row's diff summary above
+// the form, and scrolls to it. Passes onClose so the Update overlay
+// reopens -- with its rows exactly as the owner left them -- once the
+// owner hits Save or Cancel/Exit on that form, per explicit request.
 async function handleTripsyUpdateModify(row) {
   const eventKey = row.matched_event_key;
   if (!eventKey) return;
@@ -13515,7 +13412,9 @@ async function handleTripsyUpdateModify(row) {
   const editChange = pending.find(c => c.type === 'edit_event' && c.eventKey === eventKey);
   const effectiveRaw = editChange ? { ...found.raw, ...editChange.changes } : found.raw;
   const display = tripsyRawToDisplay(effectiveRaw.resource, effectiveRaw);
-  renderTripsyEditPanel(panel, effectiveRaw, found.tripKey, found.tripName, display.summary);
+  renderTripsyEditPanel(panel, effectiveRaw, found.tripKey, found.tripName, display.summary, null, () => {
+    if (overlay) overlay.style.display = 'flex';
+  });
   panel.style.display = 'block';
   panel.insertAdjacentHTML('afterbegin', tripsyUpdateDiffSummaryHtml(row));
   const viewEl = container.querySelector(`[data-tripsy-view-event="${CSS.escape(eventKey)}"]`);
