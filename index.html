@@ -8557,6 +8557,66 @@ function tripsyWireEditFormChangeDetection(panel, saveDataAttr, fieldSelector) {
     el.addEventListener('input', updateVisibility);
     el.addEventListener('change', updateVisibility);
   });
+  // Expose an unsaved-changes check + which Save button to trigger, so the close
+  // guards (Cancel/exit and click-away) can offer Save/Discard before dropping edits.
+  panel._tripsyIsDirty = () => inputs.some(el => el.value !== initialValues.get(el));
+  panel._tripsySaveAttr = saveDataAttr;
+  panel.dataset.tripsyChangeTracked = '1';
+}
+
+// Save / Discard / Keep-editing dialog for the unsaved-changes guard on the Tripsy
+// edit panels. Resolves to 'save' | 'discard' | 'cancel'.
+function tripsyConfirmDiscardChanges() {
+  return new Promise(resolve => {
+    _tripsyDiscardDialogOpen = true;
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10002; display:flex; align-items:center; justify-content:center; padding:20px;';
+    overlay.innerHTML = `
+      <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; max-width:400px; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+        <div style="font-size:15px; font-weight:700; color:var(--text); margin-bottom:8px;">Unsaved changes</div>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:20px; line-height:1.45;">You have edits that haven't been saved. Save them or discard them?</div>
+        <div style="display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;">
+          <button data-dc="cancel" class="btn" style="font-size:13px;">Keep editing</button>
+          <button data-dc="discard" class="btn" style="font-size:13px; border-color:var(--red); color:var(--red);">Discard</button>
+          <button data-dc="save" class="btn primary" style="font-size:13px;">Save</button>
+        </div>
+      </div>`;
+    const finish = v => { overlay.remove(); _tripsyDiscardDialogOpen = false; resolve(v); };
+    overlay.addEventListener('click', e => {
+      e.stopPropagation(); // don't let the click reach the click-away closer
+      if (e.target === overlay) finish('cancel');
+    });
+    overlay.querySelectorAll('[data-dc]').forEach(b => b.addEventListener('click', () => finish(b.dataset.dc)));
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-dc="save"]').focus();
+  });
+}
+
+// The first open, change-tracked Tripsy edit panel with unsaved edits that a
+// CLICK-AWAY would actually close, or null. Only panels in TRIPSY_TRIP_PANEL_SELECTORS
+// (e.g. the Edit-Trip panel) are closed by the outside-click handler; the per-event
+// edit panel is NOT (it stays open on an outside click, and is guarded by its own ✕),
+// so it must be excluded here -- otherwise clicking a field inside it, which counts as
+// "outside" those selectors, would spuriously trigger the dialog.
+function tripsyFirstDirtyPanel() {
+  const card = document.getElementById('tripsy-card');
+  if (!card) return null;
+  for (const p of card.querySelectorAll('[data-tripsy-change-tracked]')) {
+    if (!TRIPSY_TRIP_PANEL_SELECTORS.some(sel => p.matches(sel))) continue;
+    if (p.offsetParent !== null && typeof p._tripsyIsDirty === 'function' && p._tripsyIsDirty()) return p;
+  }
+  return null;
+}
+
+// Shared close guard: if `panel` has unsaved edits, ask first. Returns true if the
+// caller should proceed with the close, false to abort it. Save routes through the
+// panel's own Save button (which closes on success); Keep-editing aborts.
+async function tripsyGuardPanelClose(panel) {
+  if (!panel || typeof panel._tripsyIsDirty !== 'function' || !panel._tripsyIsDirty()) return true;
+  const choice = await tripsyConfirmDiscardChanges();
+  if (choice === 'cancel') return false;
+  if (choice === 'save') { panel.querySelector(`[${panel._tripsySaveAttr}]`)?.click(); return false; }
+  return true; // discard
 }
 
 // Renders the inline edit form for one Tripsy-sourced event's raw fields
@@ -8690,7 +8750,8 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
   // register as a "change" the moment the form opens.
   tripsyWireEditFormChangeDetection(panel, 'data-tripsy-edit-save', '[data-tripsy-edit-field], [data-tripsy-edit-field-date], [data-tripsy-edit-field-time]');
 
-  panel.querySelector("[data-tripsy-edit-exit]").addEventListener("click", () => {
+  panel.querySelector("[data-tripsy-edit-exit]").addEventListener("click", async () => {
+    if (!(await tripsyGuardPanelClose(panel))) return;
     panel.style.display = "none";
     panel.innerHTML = "";
     panel.dataset.mode = "";
@@ -8887,7 +8948,8 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
     attachPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
   });
 
-  panel.querySelector("[data-tripsy-edit-trip-cancel]").addEventListener("click", () => {
+  panel.querySelector("[data-tripsy-edit-trip-cancel]").addEventListener("click", async () => {
+    if (!(await tripsyGuardPanelClose(panel))) return;
     panel.style.display = "none";
     panel.innerHTML = "";
   });
@@ -15197,6 +15259,9 @@ let _tripsyTripPanelsOutsideClickBound = false;
 // are still in flight so the reconciling re-render runs once, after they all settle.
 let _tripsyParseImportChain = Promise.resolve();
 let _tripsyParseImportPending = 0;
+// True while the "unsaved changes" Save/Discard dialog is up, so the click-away
+// closer ignores clicks on the dialog itself instead of stacking another one.
+let _tripsyDiscardDialogOpen = false;
 
 // Every trip-header dropdown/panel that opens on click (Add-item type menu,
 // Add-item create form, Edit Trip form, Attach-doc form, Docs list) --
@@ -16474,9 +16539,13 @@ async function renderTripsyEventsListImpl() {
   // opening their target), is treated as "inside" so this doesn't
   // immediately undo what that click just opened.
   if (!_tripsyTripPanelsOutsideClickBound) {
-    document.addEventListener("click", e => {
+    document.addEventListener("click", async e => {
+      if (_tripsyDiscardDialogOpen) return; // ignore clicks on the Save/Discard dialog itself
       const insideSelectors = [...TRIPSY_TRIP_PANEL_SELECTORS, ...TRIPSY_TRIP_PANEL_TRIGGER_SELECTORS];
       if (insideSelectors.some(sel => e.target.closest(sel))) return;
+      // Clicking away from an open edit panel with unsaved edits -> ask first.
+      const dirty = tripsyFirstDirtyPanel();
+      if (dirty && !(await tripsyGuardPanelClose(dirty))) return;
       closeAllTripsyTripPanels();
     });
     _tripsyTripPanelsOutsideClickBound = true;
