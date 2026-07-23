@@ -15402,29 +15402,36 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
       }
 
       if (approveBtn) {
-        approveBtn.disabled = true;
-        try {
-          const ok = await Store.setTripsyNarrativeApproved(`${tripKey}::day::${dayKey}`, true);
-          if (!ok) { toast('Could not mark as approved. Please try again.', 'error'); return; }
-          tripsyUpdateDayNarrativeControls(previewContent, dayKey, true);
-        } catch (err) {
-          console.error('Failed to approve day narrative:', err);
-          toast('Could not mark as approved. Please try again.', 'error');
-        } finally {
-          approveBtn.disabled = false;
-        }
+        // Optimistic: flip to the Approved badge in place immediately, persist
+        // in the background, revert the badge + toast if the Drive write fails.
+        tripsyUpdateDayNarrativeControls(previewContent, dayKey, true);
+        (async () => {
+          try {
+            const ok = await Store.setTripsyNarrativeApproved(`${tripKey}::day::${dayKey}`, true);
+            if (!ok) { tripsyUpdateDayNarrativeControls(previewContent, dayKey, false); toast('Could not mark as approved. Please try again.', 'error'); }
+          } catch (err) {
+            console.error('Failed to approve day narrative:', err);
+            tripsyUpdateDayNarrativeControls(previewContent, dayKey, false);
+            toast('Could not mark as approved. Please try again.', 'error');
+          }
+        })();
         return;
       }
 
       if (unapproveBtn) {
-        try {
-          const ok = await Store.setTripsyNarrativeApproved(`${tripKey}::day::${dayKey}`, false);
-          if (!ok) { toast('Could not un-approve. Please try again.', 'error'); return; }
-          tripsyUpdateDayNarrativeControls(previewContent, dayKey, false);
-        } catch (err) {
-          console.error('Failed to un-approve day narrative:', err);
-          toast('Could not un-approve. Please try again.', 'error');
-        }
+        // Optimistic swap (see the approve branch): bring the buttons back
+        // immediately, persist in the background, revert on failure.
+        tripsyUpdateDayNarrativeControls(previewContent, dayKey, false);
+        (async () => {
+          try {
+            const ok = await Store.setTripsyNarrativeApproved(`${tripKey}::day::${dayKey}`, false);
+            if (!ok) { tripsyUpdateDayNarrativeControls(previewContent, dayKey, true); toast('Could not un-approve. Please try again.', 'error'); }
+          } catch (err) {
+            console.error('Failed to un-approve day narrative:', err);
+            tripsyUpdateDayNarrativeControls(previewContent, dayKey, true);
+            toast('Could not un-approve. Please try again.', 'error');
+          }
+        })();
         return;
       }
 
@@ -15661,53 +15668,57 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
       }
 
       if (approveBtn) {
-        approveBtn.disabled = true;
-        try {
-          const cache = await Store.getTripsyNarrativeCache();
-          const existingEntry = cache[cacheKey];
-          let ok;
-          if (existingEntry) {
-            ok = await Store.setTripsyNarrativeApproved(cacheKey, true);
-          } else {
-            // No individual override yet -- the blurb showing on this card
-            // is inherited from the whole-day narrative. Approving
-            // snapshots exactly what's currently displayed into its own
-            // override (same "freeze the text" move Delete already makes
-            // for this case), marked approved from the start.
-            const displayedBlurb = section.dataset.displayedBlurb || '';
-            const { summaryByDay } = await buildTripsyPrintDayData(trip);
-            const allItems = [...summaryByDay.values()].flat();
-            const item = allItems.find(it => tripsySummaryRowKey(it) === rowKey);
-            const promptData = item ? tripsySummaryRowPromptData(item) : { row_key: rowKey };
-            ok = await Store.saveTripsyNarrativeSections({
-              [cacheKey]: { content: { blurb: displayedBlurb }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString(), approved: true },
-            });
+        // Optimistic: flip just this event's controls to the Approved badge in
+        // place immediately (the card body is unchanged, so no need to rebuild
+        // the whole preview -- the slow part), then persist in the background.
+        // If the Drive write fails, revert the badge and toast.
+        tripsyUpdateEventNarrativeControls(previewContent, rowKey, true);
+        (async () => {
+          try {
+            const cache = await Store.getTripsyNarrativeCache();
+            const existingEntry = cache[cacheKey];
+            let ok;
+            if (existingEntry) {
+              ok = await Store.setTripsyNarrativeApproved(cacheKey, true);
+            } else {
+              // No individual override yet -- the blurb showing on this card
+              // is inherited from the whole-day narrative. Approving
+              // snapshots exactly what's currently displayed into its own
+              // override (same "freeze the text" move Delete already makes
+              // for this case), marked approved from the start.
+              const displayedBlurb = section.dataset.displayedBlurb || '';
+              const { summaryByDay } = await buildTripsyPrintDayData(trip);
+              const allItems = [...summaryByDay.values()].flat();
+              const item = allItems.find(it => tripsySummaryRowKey(it) === rowKey);
+              const promptData = item ? tripsySummaryRowPromptData(item) : { row_key: rowKey };
+              ok = await Store.saveTripsyNarrativeSections({
+                [cacheKey]: { content: { blurb: displayedBlurb }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString(), approved: true },
+              });
+            }
+            if (!ok) { tripsyUpdateEventNarrativeControls(previewContent, rowKey, false); toast('Could not mark as approved. Please try again.', 'error'); }
+          } catch (err) {
+            console.error('Failed to approve event note:', err);
+            tripsyUpdateEventNarrativeControls(previewContent, rowKey, false);
+            toast('Could not mark as approved. Please try again.', 'error');
           }
-          if (!ok) { toast('Could not mark as approved. Please try again.', 'error'); return; }
-          // Flip just this event's controls to the Approved badge in place --
-          // the card body is unchanged, so no need to rebuild the whole
-          // preview (which re-downloads every photo and is the slow part).
-          tripsyUpdateEventNarrativeControls(previewContent, rowKey, true);
-        } catch (err) {
-          console.error('Failed to approve event note:', err);
-          toast('Could not mark as approved. Please try again.', 'error');
-        } finally {
-          approveBtn.disabled = false;
-        }
+        })();
         return;
       }
 
       if (unapproveBtn) {
-        try {
-          const ok = await Store.setTripsyNarrativeApproved(cacheKey, false);
-          if (!ok) { toast('Could not un-approve. Please try again.', 'error'); return; }
-          // In-place controls swap (see the approve branch) rather than a full
-          // preview rebuild -- un-approve only brings the buttons back.
-          tripsyUpdateEventNarrativeControls(previewContent, rowKey, false);
-        } catch (err) {
-          console.error('Failed to un-approve event note:', err);
-          toast('Could not un-approve. Please try again.', 'error');
-        }
+        // Optimistic swap (see the approve branch): bring the buttons back
+        // immediately, persist in the background, revert on failure.
+        tripsyUpdateEventNarrativeControls(previewContent, rowKey, false);
+        (async () => {
+          try {
+            const ok = await Store.setTripsyNarrativeApproved(cacheKey, false);
+            if (!ok) { tripsyUpdateEventNarrativeControls(previewContent, rowKey, true); toast('Could not un-approve. Please try again.', 'error'); }
+          } catch (err) {
+            console.error('Failed to un-approve event note:', err);
+            tripsyUpdateEventNarrativeControls(previewContent, rowKey, true);
+            toast('Could not un-approve. Please try again.', 'error');
+          }
+        })();
         return;
       }
 
