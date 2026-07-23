@@ -8616,6 +8616,31 @@ const TRIPSY_DATETIME_FIELD_COUNTERPARTS = {
   transportation: [['departureAt', 'arrivalAt']],
 };
 
+// Returns a human error string if the edit form has an end/arrival that's
+// before its start/departure, else null. An earlier calendar DATE is never
+// valid (any resource). An earlier TIME on the same date is invalid for a
+// stay or activity, but is deliberately allowed for transportation: times are
+// stored as literal local wall-clock (see CLAUDE.md), so a westbound flight
+// crossing time zones / the date line can genuinely land at an earlier clock
+// time the same day than it left. Used to hard-block the Save.
+function tripsyEditDateOrderError(panel, resource) {
+  const pairs = TRIPSY_DATETIME_FIELD_COUNTERPARTS[resource] || [];
+  const labels = resource === 'transportation'
+    ? ['departure', 'arrival']
+    : (resource === 'hosting' ? ['check-in', 'check-out'] : ['start', 'end']);
+  for (const [startKey, endKey] of pairs) {
+    const start = tripsyReadDateTimeField(panel, startKey); // 'YYYY-MM-DDTHH:MM:SS' or ''
+    const end = tripsyReadDateTimeField(panel, endKey);
+    if (!start || !end) continue;
+    const startDate = start.slice(0, 10), endDate = end.slice(0, 10);
+    if (endDate < startDate) return `The ${labels[1]} date can't be before the ${labels[0]} date.`;
+    if (resource !== 'transportation' && endDate === startDate && end < start) {
+      return `The ${labels[1]} time can't be before the ${labels[0]} time.`;
+    }
+  }
+  return null;
+}
+
 // Hides the Save/Cancel row (tripsyEditActionButtonsHtml's own wrapping
 // div, found via the Save button's parentElement) until the owner
 // actually changes a field -- a freshly-opened edit form has nothing yet
@@ -8865,6 +8890,16 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
   panel.querySelector("[data-tripsy-edit-save]").addEventListener("click", async () => {
     const saveBtn = panel.querySelector("[data-tripsy-edit-save]");
     saveBtn.disabled = true;
+
+    // Hard-block an end/arrival that's before its start/departure (see
+    // tripsyEditDateOrderError for the timezone-aware rule) -- keep the panel
+    // open, re-enable Save, and tell the owner what to fix.
+    const orderErr = tripsyEditDateOrderError(panel, raw.resource);
+    if (orderErr) {
+      toast(orderErr, 'error');
+      saveBtn.disabled = false;
+      return;
+    }
 
     // A newly-typed airline (Type currently Airplane, Company not already
     // a known suggestion) gets remembered for next time, regardless of
@@ -9844,18 +9879,27 @@ function tripsyPlacesLikelySame(a, b) {
   return ta.some(w => tb.includes(w));
 }
 
-// Sanity check (per-trip "Check transportation"): when the trip moves between
-// two DIFFERENT lodgings (check out of one, check into the next), is there any
-// transportation logged in the window between them? Effective events include
-// pending create_event hostings/transportation queued for the trip. Deliberately
-// does NOT fuzzy-match a transport's arrival place against the next departure
-// place (free-text addresses make that far too false-positive-prone) -- it only
-// asks whether SOME transport spans each hotel change. Advisory only: a leg you
-// drove yourself and never logged is a legitimate "gap".
+// Sanity check (per-trip "Check transportation"). Returns every "move" that
+// should have transportation, covered or not, in two flavors:
+//   (1) Stay-to-stay: the trip moves between two DIFFERENT lodgings (check out
+//       of one, check into the next) -- is there ANY transport (flight included)
+//       spanning the gap between them?
+//   (2) Airport transfer: a flight arrives the same day you check into a lodging
+//       (airport -> hotel), or departs the same day you check out (hotel ->
+//       airport) -- is there GROUND transport that day between the hotel and the
+//       airport? For connecting flights the same day, the transfer pairs with the
+//       last arrival / first departure (the one nearest the hotel). "Same day"
+//       stands in for "same location": matching free-text airport names to hotel
+//       names is far too false-positive-prone, whereas checking in the day you
+//       land is a reliable signal you're in that airport's city.
+// Effective events include pending create_event hostings/transportation queued
+// for the trip. Advisory only: a leg you drove yourself and never logged is a
+// legitimate "gap".
 function tripsyTransportationGaps(trip, pendingChanges) {
   const events = trip.events || [];
   const lodgings = [];
-  const transports = [];
+  const transports = []; // every transport leg (flights included), for stay moves
+  const flights = [];    // flights only, with airports + full timestamps, for transfers
   const addLodging = (name, ciIso, coIso) => {
     const ci = tripsyDayKey(ciIso);
     if (!ci) return; // needs a date to place it in the chain
@@ -9865,23 +9909,42 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     const dep = tripsyDayKey(depIso) || tripsyDayKey(arrIso);
     if (dep) transports.push({ dep, arr: tripsyDayKey(arrIso) || dep, category: category || null });
   };
+  const addFlight = (depIso, arrIso, depDesc, arrDesc) => {
+    const depDay = tripsyDayKey(depIso), arrDay = tripsyDayKey(arrIso);
+    if (!depDay && !arrDay) return;
+    flights.push({
+      depIso: depIso || arrIso || '', arrIso: arrIso || depIso || '',
+      depDay: depDay || arrDay, arrDay: arrDay || depDay,
+      depDesc: depDesc || '', arrDesc: arrDesc || '',
+    });
+  };
   events.forEach(e => {
     const r = e.tripsyRaw;
     if (!r) return;
     if (r.resource === 'hosting') addLodging(r.name || e.summary, e.start, e.end);
-    else if (r.resource === 'transportation') addTransport(e.start, e.end, r.category);
+    else if (r.resource === 'transportation') {
+      addTransport(e.start, e.end, r.category);
+      if (r.category === 'airplane') addFlight(e.start, e.end, r.departureDescription, r.arrivalDescription);
+    }
   });
   (pendingChanges || []).forEach(c => {
     if (c.type !== 'create_event' || c.tripKey !== trip.key || !c.fields) return;
     if (c.tripsyResource === 'hosting') addLodging(c.fields.name, c.fields.startsAt, c.fields.endsAt);
-    else if (c.tripsyResource === 'transportation') addTransport(c.fields.departureAt, c.fields.arrivalAt, c.fields.category);
+    else if (c.tripsyResource === 'transportation') {
+      addTransport(c.fields.departureAt, c.fields.arrivalAt, c.fields.category);
+      if (c.fields.category === 'airplane') addFlight(c.fields.departureAt, c.fields.arrivalAt, c.fields.departureDescription, c.fields.arrivalDescription);
+    }
   });
   // Human label for a transportation leg's method (Flight/Train/Ferry/etc).
   const methodLabel = cat => cat === 'airplane' ? 'Flight' : (tripsySlugToLabel(cat) || 'Transportation');
+  const dedupMethods = list => [...new Set(list.map(t => methodLabel(t.category)).filter(Boolean))].join(' / ');
+  const ground = transports.filter(t => t.category !== 'airplane'); // an airport transfer is a non-flight leg
+
   lodgings.sort((a, b) => a.ci.localeCompare(b.ci));
   let moves = 0;
-  const gaps = [];
-  const allMoves = []; // every move between distinct stays, covered or not
+  const allMoves = []; // every move (stay-to-stay + airport transfer), covered or not
+
+  // (1) Stay-to-stay moves.
   for (let i = 0; i + 1 < lodgings.length; i++) {
     const A = lodgings[i], B = lodgings[i + 1];
     if (tripsyPlacesLikelySame(A.name, B.name)) continue; // same place -> no move
@@ -9891,13 +9954,33 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     // A transport spans the move if its [departure, arrival] day range overlaps
     // the checkout->next-checkin window at all.
     const covering = transports.filter(t => t.dep <= windowEnd && t.arr >= windowStart);
-    const covered = covering.length > 0;
-    // Method(s) of the covering leg(s), de-duped -- shown in the report's third
-    // column for a move that has transportation.
-    const method = [...new Set(covering.map(t => methodLabel(t.category)).filter(Boolean))].join(' / ');
-    allMoves.push({ from: A.name, to: B.name, day: windowStart, covered, method });
-    if (!covered) gaps.push({ from: A.name, to: B.name, day: windowStart });
+    allMoves.push({ from: A.name, to: B.name, day: windowStart, covered: covering.length > 0, method: dedupMethods(covering), kind: 'stay' });
   }
+
+  // (2) Airport transfers (hotel <-> airport, on a same-day flight).
+  const airportLabel = desc => String(desc || '').trim() || 'Airport';
+  const seen = new Set();
+  const addTransfer = (from, to, day, key) => {
+    if (!day || seen.has(key)) return;
+    seen.add(key);
+    const covering = ground.filter(t => t.dep <= day && t.arr >= day); // ground transport that day
+    allMoves.push({ from, to, day, covered: covering.length > 0, method: dedupMethods(covering), kind: 'transfer' });
+  };
+  lodgings.forEach(l => {
+    const arrFlights = flights.filter(f => f.arrDay === l.ci); // land the day you check in
+    if (arrFlights.length) {
+      const f = arrFlights.reduce((a, b) => (b.arrIso > a.arrIso ? b : a)); // last to land
+      addTransfer(airportLabel(f.arrDesc), l.name, l.ci, `arr:${l.ci}:${l.name}`);
+    }
+    const depFlights = flights.filter(f => f.depDay === l.co); // leave the day you check out
+    if (depFlights.length) {
+      const f = depFlights.reduce((a, b) => (b.depIso < a.depIso ? b : a)); // first to leave
+      addTransfer(l.name, airportLabel(f.depDesc), l.co, `dep:${l.co}:${l.name}`);
+    }
+  });
+
+  allMoves.sort((a, b) => (a.day || '').localeCompare(b.day || ''));
+  const gaps = allMoves.filter(m => !m.covered).map(m => ({ from: m.from, to: m.to, day: m.day }));
   return { moves, gaps, allMoves };
 }
 
@@ -9998,13 +10081,14 @@ async function showTripsyVerifyTravelDialog(trip) {
     : (!lodging.gaps.length
         ? okLine(`All ${lodging.nights.length} night${lodging.nights.length === 1 ? '' : 's'} have lodging.`)
         : lodging.gaps.map(dayKey => gapRow(tripsyDayHeaderLabel(dayKey), 'No lodging listed', dayKey)).join(''));
-  // Every move between distinct stays, in two groups: missing transportation
-  // first (third column a "?"), then moves that have it (third column shows
-  // the method). Both groups' rows jump to the date in My Trips when tapped.
+  // Every move (stay-to-stay + airport transfer), in two groups: missing
+  // transportation first (third column a "?"), then moves that have it (third
+  // column shows the method). Both groups' rows jump to the date in My Trips
+  // when tapped.
   const missingMoves = transport.allMoves.filter(m => !m.covered);
   const coveredMoves = transport.allMoves.filter(m => m.covered);
-  const transportBody = !transport.moves
-    ? muted('Not enough dated lodgings to check transportation between stays.')
+  const transportBody = !transport.allMoves.length
+    ? muted('Not enough dated lodgings or flights to check transportation.')
     : `
       ${subLabel(`Missing transportation${missingMoves.length ? ` (${missingMoves.length})` : ''}`)}
       ${missingMoves.length
@@ -10037,36 +10121,6 @@ async function showTripsyVerifyTravelDialog(trip) {
     overlay.remove();
     if (day) tripsyGoToTripDay(trip.key, day);
   }));
-  document.body.appendChild(overlay);
-}
-
-// Open the Add-item edit form (in a modal) for a gap the verify report found,
-// prefilled with the date (and, for transport, origin/destination). The form's
-// own Save/Cancel and unsaved-changes guard apply; a backdrop click routes
-// through that guard (Save/Discard/Keep-editing). On close (save or cancel) the
-// verify report reopens -- after a short delay so an optimistic Save's queued
-// create is in the in-memory pending list, so the gap it fills shows resolved.
-function openTripsyVerifyGapEdit(trip, kind, gap) {
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.62); z-index:10003; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch;';
-  overlay.innerHTML = `<div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; max-width:660px; width:100%; box-shadow:0 16px 48px rgba(0,0,0,0.55);"><div data-tvv-edit-panel></div></div>`;
-  const panel = overlay.querySelector('[data-tvv-edit-panel]');
-  let prefill, label;
-  if (kind === 'lodging') {
-    prefill = { ...tripsyBlankRaw('hosting', null), startsAt: gap.day ? `${gap.day}T15:00:00` : null };
-    label = 'Lodging';
-  } else {
-    prefill = { ...tripsyBlankRaw('transportation', 'car'), departureAt: gap.day ? `${gap.day}T09:00:00` : null, departureDescription: gap.from || null, arrivalDescription: gap.to || null };
-    label = 'Ground Transportation';
-  }
-  const back = () => { overlay.remove(); setTimeout(() => showTripsyVerifyTravelDialog(trip), 350); };
-  renderTripsyEditPanel(panel, prefill, trip.key, trip.name, label, {
-    pendingChangeId: crypto.randomUUID(),
-    tripsyTripId: tripsyTripIdFromKey(trip.key),
-  }, back);
-  panel.style.display = 'block';
-  // Backdrop click -> the panel's own guarded Exit (Save/Discard/Keep-editing).
-  overlay.addEventListener('click', e => { if (e.target === overlay) { const exit = panel.querySelector('[data-tripsy-edit-exit]'); if (exit) exit.click(); } });
   document.body.appendChild(overlay);
 }
 
@@ -19728,6 +19782,12 @@ async function renderTravelView(chosenTripKey) {
 
   const decrypted = await ensureTripsyDecrypted();
   if (!decrypted) { main.innerHTML = shell('Travel View', `<div class="empty-state">Trip data is locked on this device — open <b>My Trips</b> once to unlock, then reload.</div>`); wireExit(); return; }
+  // Load the P/S reservations Travel View weaves in next to flights. My Trips
+  // lazy-loads these too, but entering Travel View directly (the sign-in button)
+  // skips that page, so load them here rather than depend on My Trips having run.
+  if (!tripsyPsReservations) {
+    try { tripsyPsReservations = await Store.listReservations(); } catch (e) { tripsyPsReservations = []; }
+  }
   // Pick the trip: an explicitly-chosen one (from the picker below), else the
   // default candidate(s) -- current/nearest-upcoming. More than one candidate
   // (overlapping current trips, or two starting the same soonest day) -> let the
