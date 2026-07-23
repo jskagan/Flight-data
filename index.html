@@ -11348,6 +11348,19 @@ async function tripsyRunGeneratePanelUpdate(panel, tripKey) {
       }
     }
 
+    // Pre-fetch this trip's place photos NOW, as part of Create, so a later
+    // Preview/Print/PDF renders instantly from cache instead of downloading
+    // (and uploading) every photo on first open. buildTripsyPrintHtml is the
+    // exact same path those views use, so running it here (result discarded)
+    // populates the photo cache with identical keys, and it flushes that cache
+    // to Drive itself. Best-effort: a photo that can't be fetched now just
+    // falls back to the render-time fetch later, and a photo the owner later
+    // curates in Preview still overrides it. Only when this apply actually
+    // generated narrative (skip a delete-only pass -- deletes add no places).
+    if (includeIntro || dayKeysToGenerate.length || eventRowKeysToGenerate.length) {
+      try { await buildTripsyPrintHtml(tripKey); } catch (err) { console.error('Photo pre-fetch after generate failed:', err); }
+    }
+
     toast(hadError ? 'Some sections could not be updated — see console for details.' : 'Itinerary sections updated.', hadError ? 'error' : 'success');
 
     const narrativeCache = await Store.getTripsyNarrativeCache();
@@ -16059,19 +16072,26 @@ async function renderTripsyEventsListImpl() {
       <div style="position:relative;">
         <button class="btn" data-tripsy-itinerary-menu-toggle data-key="${esc(trip.key)}" title="Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🧭</button>
         <div data-tripsy-itinerary-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-          ${isOwner ? (hasGeneratedNarrative
-            ? menuListButtonHtml(`data-tripsy-delete-generated-itinerary data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete')
-            : menuListButtonHtml(`data-tripsy-generate-panel-toggle data-key="${esc(trip.key)}"`, '✨', 'Create')
-          ) : ''}
-          <button class="btn" data-tripsy-itinerary-modify-toggle data-key="${esc(trip.key)}" style="display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px;">
-            <span style="font-size:16px; flex-shrink:0; width:20px; display:inline-flex; align-items:center; justify-content:center;">🔧</span><span style="flex:1;">Modify</span><span data-tripsy-itinerary-modify-caret style="font-size:11px; color:var(--muted); transition:transform 0.15s;">▸</span>
-          </button>
-          <div data-tripsy-itinerary-modify-submenu="${esc(trip.key)}" style="display:none; padding-left:14px;">
-            ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '👀', 'Preview')}
-            ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', hasPendingUpdatePage ? 'Resume Update' : 'Update') : ''}
-          </div>
-          ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
-          ${menuListButtonHtml(`data-tripsy-create-pdf-itinerary data-key="${esc(trip.key)}"`, '📄', 'Generate PDF')}
+          ${(() => {
+            // Create/Delete are the two states of one owner-only button:
+            // Create leads the menu; once a narrative exists it becomes Delete
+            // and moves to the very bottom (per explicit request). Preview
+            // (labeled "Edit") and Update are now top-level rather than nested
+            // under a "Modify" submenu, which was removed.
+            const createOrDelete = isOwner
+              ? (hasGeneratedNarrative
+                ? menuListButtonHtml(`data-tripsy-delete-generated-itinerary data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete')
+                : menuListButtonHtml(`data-tripsy-generate-panel-toggle data-key="${esc(trip.key)}"`, '✨', 'Create'))
+              : '';
+            return `
+              ${hasGeneratedNarrative ? '' : createOrDelete}
+              ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '✏️', 'Edit')}
+              ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', hasPendingUpdatePage ? 'Resume Update' : 'Update') : ''}
+              ${menuListButtonHtml(`data-tripsy-create-pdf-itinerary data-key="${esc(trip.key)}"`, '📄', 'Generate PDF')}
+              ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
+              ${hasGeneratedNarrative ? createOrDelete : ''}
+            `;
+          })()}
         </div>
         <div data-tripsy-generate-panel="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:280px; max-width:380px; max-height:70vh; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.4);"></div>
       </div>
@@ -16542,23 +16562,6 @@ async function renderTripsyEventsListImpl() {
   wireTripsyHeaderMenuToggle("[data-tripsy-document-menu-toggle]", "data-tripsy-document-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-itinerary-menu-toggle]", "data-tripsy-itinerary-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-trip-menu-toggle]", "data-tripsy-trip-menu");
-
-  // "Modify" row inside the Itinerary dropdown expands in place (Preview /
-  // Update indented beneath it) rather than opening a second fixed-position
-  // flyout -- toggling it must NOT call closeAllTripsyTripPanels, since
-  // that would close the itinerary dropdown it lives inside.
-  container.querySelectorAll("[data-tripsy-itinerary-modify-toggle]").forEach(btn => {
-    btn.addEventListener("click", e => {
-      e.stopPropagation();
-      const tripKey = btn.dataset.key;
-      const submenu = container.querySelector(`[data-tripsy-itinerary-modify-submenu="${tripKey}"]`);
-      const caret = btn.querySelector("[data-tripsy-itinerary-modify-caret]");
-      if (!submenu) return;
-      const isOpen = submenu.style.display !== "none";
-      submenu.style.display = isOpen ? "none" : "block";
-      if (caret) caret.style.transform = isOpen ? "" : "rotate(90deg)";
-    });
-  });
 
   // Per-doc offline toggle inside the Document dropdown (tripsyDocumentMenuRowHtml)
   // -- sets/clears the shared keepOffline flag for just this one doc, then
