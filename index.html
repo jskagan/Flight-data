@@ -19012,12 +19012,12 @@ function ensureTravelViewStyles() {
     .tv-titlerow { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin:2px 0 14px; }
     .tv-title { font-size:26px; font-weight:800; color:var(--text); line-height:1.15; }
     .tv-close { flex-shrink:0; width:36px; height:36px; border-radius:50%; border:1px solid var(--line); background:var(--panel-2); color:var(--text); font-size:16px; cursor:pointer; display:flex; align-items:center; justify-content:center; }
-    .tv-strip { display:flex; gap:2px; overflow-x:auto; padding:6px 0 12px; -webkit-overflow-scrolling:touch; border-bottom:1px solid var(--line); margin-bottom:6px; }
+    .tv-strip { display:flex; gap:2px; overflow-x:auto; padding:8px 0 6px; margin-top:6px; -webkit-overflow-scrolling:touch; border-top:1px solid var(--line); }
     .tv-strip::-webkit-scrollbar { display:none; }
     .tv-daycell { flex:0 0 auto; min-width:42px; text-align:center; padding:2px 4px; cursor:pointer; border:none; background:none; }
     .tv-dow { font-size:10px; font-weight:700; letter-spacing:0.04em; color:var(--muted); }
-    .tv-datenum { font-size:15px; font-weight:700; color:var(--text); width:28px; height:28px; line-height:28px; margin:2px auto 3px; border-radius:50%; }
-    .tv-datenum.tv-today { background:var(--amber); color:#1a1206; }
+    .tv-datenum { font-size:15px; font-weight:700; color:var(--text); width:28px; height:28px; line-height:28px; margin:2px auto 3px; border-radius:50%; transition:background 0.12s; }
+    .tv-daycell.tv-cal-active .tv-datenum { background:var(--amber); color:#1a1206; }
     .tv-dots { display:flex; gap:2px; justify-content:center; min-height:6px; }
     .tv-dot { width:5px; height:5px; border-radius:50%; display:inline-block; }
     .tv-daysec { scroll-margin-top:var(--tv-topbar-h, 92px); }
@@ -19132,9 +19132,9 @@ async function renderTravelView() {
     const num = Number(dayKey.split('-')[2]);
     const evs = eventsByDay.get(dayKey) || [];
     const dots = evs.slice(0, 6).map(ev => `<span class="tv-dot" style="background:${tripsyTimelineDotColor(ev)};"></span>`).join('');
-    return `<button class="tv-daycell" data-tv-scroll="${esc(dayKey)}">
+    return `<button class="tv-daycell" data-tv-cal-date="${esc(dayKey)}">
       <div class="tv-dow">${esc(dow)}</div>
-      <div class="tv-datenum${dayKey === todayKey ? ' tv-today' : ''}">${num}</div>
+      <div class="tv-datenum">${num}</div>
       <div class="tv-dots">${dots}</div>
     </button>`;
   };
@@ -19209,19 +19209,66 @@ async function renderTravelView() {
     <div class="tv-topbar">
       <div class="tv-month">${esc(monthYear)}</div>
       <div class="tv-titlerow"><div class="tv-title">${esc(trip.name || 'Trip')}</div>${closeBtnHtml}</div>
+      ${allDays.some(k => k !== 'undated') ? stripHtml : ''}
     </div>
-    ${allDays.some(k => k !== 'undated') ? stripHtml : ''}
     ${bodyDays || `<div class="empty-state" style="margin-top:16px;">No events on this trip yet.</div>`}
   `);
   wireExit();
   armMeasure();
-  // Tap a day in the strip -> smooth-scroll to that day's section (if present).
-  main.querySelectorAll('[data-tv-scroll]').forEach(cell => {
-    cell.addEventListener('click', () => {
-      const target = document.getElementById(`tv-day-${cell.dataset.tvScroll}`);
-      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
-  });
+
+  // ---- Two-way calendar <-> itinerary sync ----
+  // The frozen calendar tracks the date of the topmost visible event, tapping a
+  // date brings that day's first event to the top, and dragging the calendar
+  // scrolls the itinerary to match. Each direction guards the other with a
+  // "consume one programmatic scroll event" flag so the two never loop: an
+  // instant scrollLeft/scrollBy we trigger fires exactly one scroll event, which
+  // the handler swallows instead of syncing back.
+  const root = main.querySelector('.tv-root');
+  const strip = main.querySelector('.tv-strip');
+  const sectionDays = allDays.filter(k => document.getElementById(`tv-day-${k}`));
+  if (root && strip && sectionDays.length) {
+    const topbarH = () => parseFloat(getComputedStyle(root).getPropertyValue('--tv-topbar-h')) || 92;
+    let calProgrammatic = false, itinProgrammatic = false, rafPending = 0;
+    const cellFor = day => strip.querySelector(`[data-tv-cal-date="${CSS.escape(day)}"]`);
+    const setActiveDate = day => strip.querySelectorAll('.tv-daycell').forEach(c => c.classList.toggle('tv-cal-active', c.dataset.tvCalDate === day));
+    const centerCalOn = day => {
+      const cell = cellFor(day); if (!cell) return;
+      const target = Math.max(0, Math.min(cell.offsetLeft - strip.clientWidth / 2 + cell.offsetWidth / 2, strip.scrollWidth - strip.clientWidth));
+      if (Math.abs(strip.scrollLeft - target) < 1) return;
+      calProgrammatic = true; strip.scrollLeft = target;
+    };
+    // Day whose section currently sits at the top of the usable area (just below
+    // the frozen header + calendar) -- the last section scrolled to/past that line.
+    const currentTopDay = () => {
+      const line = topbarH() + 2; let found = sectionDays[0];
+      for (const k of sectionDays) { const s = document.getElementById(`tv-day-${k}`); if (s && s.getBoundingClientRect().top <= line) found = k; else break; }
+      return found;
+    };
+    const scrollItineraryTo = (day, smooth) => {
+      const sec = document.getElementById(`tv-day-${day}`); if (!sec) return;
+      const delta = sec.getBoundingClientRect().top - topbarH();
+      if (Math.abs(delta) < 1) return;
+      itinProgrammatic = true; root.scrollBy({ top: delta, behavior: smooth ? 'smooth' : 'auto' });
+    };
+    // Calendar date nearest the strip's horizontal centre (the focus date while dragging it).
+    const calCenterDay = () => {
+      const centre = strip.scrollLeft + strip.clientWidth / 2; let best = null, bestD = Infinity;
+      strip.querySelectorAll('.tv-daycell').forEach(c => { const dd = Math.abs((c.offsetLeft + c.offsetWidth / 2) - centre); if (dd < bestD) { bestD = dd; best = c.dataset.tvCalDate; } });
+      return best;
+    };
+    root.addEventListener('scroll', () => {
+      if (itinProgrammatic) { itinProgrammatic = false; return; }
+      if (rafPending) return;
+      rafPending = requestAnimationFrame(() => { rafPending = 0; const day = currentTopDay(); if (day) { setActiveDate(day); centerCalOn(day); } });
+    }, { passive: true });
+    strip.addEventListener('scroll', () => {
+      if (calProgrammatic) { calProgrammatic = false; return; }
+      const day = calCenterDay(); if (day) { setActiveDate(day); scrollItineraryTo(day, false); }
+    }, { passive: true });
+    strip.querySelectorAll('.tv-daycell').forEach(cell => cell.addEventListener('click', () => { const day = cell.dataset.tvCalDate; setActiveDate(day); scrollItineraryTo(day, true); }));
+    // Initial state: highlight + centre on the day currently at the top.
+    const initDay = currentTopDay(); if (initDay) { setActiveDate(initDay); centerCalOn(initDay); }
+  }
 }
 
 async function renderHome() {
