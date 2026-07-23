@@ -4299,6 +4299,10 @@ async function navigate(view, param) {
   const previousView = currentView;
   currentView = view;
   setActiveNav(view, param);
+  // Lock the page behind Travel View's full-screen layer so an overscroll bounce
+  // can't chain into it (an iOS Safari freeze at the list's top/bottom). Cleared
+  // automatically whenever we navigate to any other view.
+  document.documentElement.classList.toggle('travel-view-open', view === 'travelview');
   // Entering Reports from somewhere else (not just switching between its
   // own Totals/Kagan/Lopata or Hours/Legs/Flight Log sub-views) forces a
   // fresh recompute -- important now that data is shared across multiple
@@ -18998,6 +19002,32 @@ function tripsyGuessCity(address) {
 // frozen header's measured height.
 let _tvResizeHandler = null;
 
+// Best-effort haptic pulse when the Travel View selected date changes. The
+// Vibration API covers Android/Chrome. iOS Safari has no Vibration API; toggling
+// a hidden `<input switch>` via a label click is the one known way to elicit a
+// light system haptic there (iOS 17.4+). The control is kept in-viewport at zero
+// size and blurred right after, so focusing it can't scroll the page. All
+// best-effort -- a silent no-op where unsupported.
+let _tvHapticEl = null;
+function tvHaptic() {
+  try { if (navigator.vibrate) navigator.vibrate(8); } catch (e) { /* unsupported */ }
+  try {
+    if (!_tvHapticEl) {
+      const label = document.createElement('label');
+      label.setAttribute('aria-hidden', 'true');
+      label.style.cssText = 'position:fixed; top:0; left:0; width:0; height:0; opacity:0; pointer-events:none; overflow:hidden;';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.tabIndex = -1; cb.setAttribute('switch', '');
+      label.appendChild(cb);
+      (document.body || document.documentElement).appendChild(label);
+      _tvHapticEl = label;
+    }
+    _tvHapticEl.click();
+    const input = _tvHapticEl.querySelector('input');
+    if (input) input.blur();
+  } catch (e) { /* unsupported */ }
+}
+
 // One-time scoped CSS for Travel View -- injected on first render so the whole
 // feature stays self-contained here rather than spread into the main stylesheet.
 function ensureTravelViewStyles() {
@@ -19005,7 +19035,8 @@ function ensureTravelViewStyles() {
   const style = document.createElement('style');
   style.id = 'tv-styles';
   style.textContent = `
-    .tv-root { position:fixed; inset:0; z-index:9998; overflow-y:auto; -webkit-overflow-scrolling:touch; background:var(--bg); }
+    html.travel-view-open, html.travel-view-open body { overflow:hidden !important; height:100%; }
+    .tv-root { position:fixed; inset:0; z-index:9998; overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; background:var(--bg); }
     .tv-inner { max-width:560px; margin:0 auto; padding:0 14px 48px; }
     .tv-topbar { position:sticky; top:0; z-index:3; background:var(--bg); padding:12px 0 8px; }
     .tv-month { font-size:13px; color:var(--muted); font-weight:600; letter-spacing:0.02em; }
@@ -19236,26 +19267,23 @@ async function renderTravelView() {
     if (ev) showTripsyTravelEventDetail(ev);
   });
 
-  // ---- Two-way calendar <-> itinerary sync ----
-  // The frozen calendar tracks the date of the topmost visible event, tapping a
-  // date brings that day's first event to the top, and dragging the calendar
-  // scrolls the itinerary to match. Each direction guards the other with a
-  // "consume one programmatic scroll event" flag so the two never loop: an
-  // instant scrollLeft/scrollBy we trigger fires exactly one scroll event, which
-  // the handler swallows instead of syncing back.
+  // ---- Calendar <-> itinerary link ----
+  // The selected date changes ONLY on a date tap or a vertical scroll of the
+  // events list (following the topmost visible day / the adjacent date bar).
+  // Scrolling the calendar strip horizontally just browses dates -- it never
+  // changes the selection or moves the itinerary. Every selection change buzzes
+  // once (tvHaptic).
   const root = main.querySelector('.tv-root');
   const strip = main.querySelector('.tv-strip');
   const sectionDays = allDays.filter(k => document.getElementById(`tv-day-${k}`));
   if (root && strip && sectionDays.length) {
     const topbarH = () => parseFloat(getComputedStyle(root).getPropertyValue('--tv-topbar-h')) || 92;
-    let calProgrammatic = false, itinProgrammatic = false, rafPending = 0;
+    let rafPending = 0, itinLockUntil = 0, selectedDay = null;
     const cellFor = day => strip.querySelector(`[data-tv-cal-date="${CSS.escape(day)}"]`);
     const setActiveDate = day => strip.querySelectorAll('.tv-daycell').forEach(c => c.classList.toggle('tv-cal-active', c.dataset.tvCalDate === day));
-    // Keep the highlighted date VISIBLE rather than forcibly centered -- only
-    // nudge the calendar when that date drifts within ~one cell of an edge, and
-    // only far enough to bring it back into view. Letting it drift freely the
-    // rest of the time is what stops the calendar from fighting a manual drag
-    // (the "blink" -- the old centre-on-every-scroll behaviour).
+    // Keep the highlighted date visible (drift OK) -- nudge the calendar only when
+    // it nears an edge. Since scrolling the calendar never changes the selection,
+    // this can move the strip freely with nothing to guard against.
     const keepCalDateVisible = day => {
       const cell = cellFor(day); if (!cell) return;
       const margin = cell.offsetWidth + 4;
@@ -19264,12 +19292,10 @@ async function renderTravelView() {
       let target = strip.scrollLeft;
       if (left - margin < viewL) target = left - margin;
       else if (right + margin > viewR) target = right + margin - strip.clientWidth;
-      target = Math.max(0, Math.min(target, strip.scrollWidth - strip.clientWidth));
-      if (Math.abs(strip.scrollLeft - target) < 1) return;
-      calProgrammatic = true; strip.scrollLeft = target;
+      strip.scrollLeft = Math.max(0, Math.min(target, strip.scrollWidth - strip.clientWidth));
     };
-    // Day whose section currently sits at the top of the usable area (just below
-    // the frozen header + calendar) -- the last section scrolled to/past that line.
+    // Day whose section sits at the top of the usable area (just below the frozen
+    // header + calendar) -- the adjacent date bar the selection should match.
     const currentTopDay = () => {
       const line = topbarH() + 2; let found = sectionDays[0];
       for (const k of sectionDays) { const s = document.getElementById(`tv-day-${k}`); if (s && s.getBoundingClientRect().top <= line) found = k; else break; }
@@ -19279,41 +19305,31 @@ async function renderTravelView() {
       const sec = document.getElementById(`tv-day-${day}`); if (!sec) return;
       const delta = sec.getBoundingClientRect().top - topbarH();
       if (Math.abs(delta) < 1) return;
-      itinProgrammatic = true; root.scrollBy({ top: delta, behavior: smooth ? 'smooth' : 'auto' });
+      itinLockUntil = Date.now() + 800; // ignore the scroll this triggers while it animates
+      root.scrollBy({ top: delta, behavior: smooth ? 'smooth' : 'auto' });
     };
-    // Calendar date nearest the strip's horizontal centre (the focus date while dragging it).
-    const calCenterDay = () => {
-      const centre = strip.scrollLeft + strip.clientWidth / 2; let best = null, bestD = Infinity;
-      strip.querySelectorAll('.tv-daycell').forEach(c => { const dd = Math.abs((c.offsetLeft + c.offsetWidth / 2) - centre); if (dd < bestD) { bestD = dd; best = c.dataset.tvCalDate; } });
-      return best;
+    // Change the selection: highlight, keep in view, and buzz -- only on an actual change.
+    const selectDate = (day, keepVisible) => {
+      if (!day || day === selectedDay) return;
+      selectedDay = day; setActiveDate(day);
+      if (keepVisible) keepCalDateVisible(day);
+      tvHaptic();
     };
-    let stripRaf = 0, lastFocusDay = null;
-    // Itinerary scroll -> highlight the topmost day and keep it in view (drift OK).
+    // Vertical scroll of the events list -> selection follows the topmost day.
     root.addEventListener('scroll', () => {
-      if (itinProgrammatic) { itinProgrammatic = false; return; }
+      if (Date.now() < itinLockUntil) return;
       if (rafPending) return;
-      rafPending = requestAnimationFrame(() => {
-        rafPending = 0;
-        const day = currentTopDay(); if (!day) return;
-        lastFocusDay = day; setActiveDate(day); keepCalDateVisible(day);
-      });
+      rafPending = requestAnimationFrame(() => { rafPending = 0; selectDate(currentTopDay(), true); });
     }, { passive: true });
-    // Calendar drag -> move the itinerary only when the centred date actually
-    // changes to a new day (rAF-coalesced), so it steps day-by-day instead of
-    // re-scrolling on every pixel of a momentum drag.
-    strip.addEventListener('scroll', () => {
-      if (calProgrammatic) { calProgrammatic = false; return; }
-      if (stripRaf) return;
-      stripRaf = requestAnimationFrame(() => {
-        stripRaf = 0;
-        const day = calCenterDay();
-        if (!day || day === lastFocusDay) return;
-        lastFocusDay = day; setActiveDate(day); scrollItineraryTo(day, false);
-      });
-    }, { passive: true });
-    strip.querySelectorAll('.tv-daycell').forEach(cell => cell.addEventListener('click', () => { const day = cell.dataset.tvCalDate; lastFocusDay = day; setActiveDate(day); scrollItineraryTo(day, true); }));
-    // Initial state: highlight the top day and bring it into view (not centred).
-    const initDay = currentTopDay(); if (initDay) { lastFocusDay = initDay; setActiveDate(initDay); keepCalDateVisible(initDay); }
+    // Tap a date -> select it and scroll the itinerary to that day's first event.
+    strip.querySelectorAll('.tv-daycell').forEach(cell => cell.addEventListener('click', () => {
+      const day = cell.dataset.tvCalDate;
+      selectDate(day, false);
+      scrollItineraryTo(day, true);
+    }));
+    // Initial state: highlight the top day and bring it into view -- no buzz on load.
+    const initDay = currentTopDay();
+    if (initDay) { selectedDay = initDay; setActiveDate(initDay); keepCalDateVisible(initDay); }
   }
 }
 
