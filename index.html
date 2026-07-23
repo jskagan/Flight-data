@@ -691,6 +691,19 @@
   .tp-row-time { width: 62px; flex-shrink: 0; font-family: var(--mono); font-size: 12px; font-weight: 700; color: #8A5A12; white-space: nowrap; }
   .tp-row-text { font-size: 13px; color: #1A222C; }
   .tp-section-break { break-before: page; }
+  /* "Travel Information" page: Date | Details reference tables for transportation
+     and lodging (buildTripsyPrintHtml). */
+  .tp-ti-section { margin-top: 26px; }
+  .tp-ti-section-title { font-family: var(--mono); font-size: 19px; font-weight: 700; color: #1A222C; border-bottom: 2px solid #1A222C; padding-bottom: 6px; margin-bottom: 4px; }
+  .tp-ti-table { display: grid; grid-template-columns: 130px 1fr; }
+  .tp-ti-head { display: contents; }
+  .tp-ti-head > div { font-family: var(--mono); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #667; padding: 8px 10px 6px; border-bottom: 1px solid #bbb; }
+  .tp-ti-row { display: contents; }
+  .tp-ti-date { font-family: var(--mono); font-weight: 700; font-size: 13px; color: #1A222C; padding: 10px; border-bottom: 1px solid #e4e4e4; }
+  .tp-ti-details { padding: 10px; border-bottom: 1px solid #e4e4e4; }
+  .tp-ti-title { font-weight: 700; font-size: 14px; color: #1A222C; }
+  .tp-ti-meta { font-size: 12px; color: #556; margin-top: 2px; }
+  .tp-ti-empty { font-size: 13px; color: #777; font-style: italic; padding: 10px; }
   /* Solid full-width divider bar between days in Part 2 (Detailed
      Itinerary) -- day number left, actual date centered, that day's
      city/cities right-justified (tripsyDetailedDayDividerHtml). Same navy
@@ -13061,10 +13074,64 @@ async function buildTripsyPrintHtml(tripKey) {
     try { await persistDriveData(); } catch (e) { console.error('buildTripsyPrintHtml: failed to persist photo cache:', e); }
   }
 
+  // ---- "Travel Information" page: Date | Details reference tables of every
+  // transportation leg and every lodging, with the same factual info the Detailed
+  // Itinerary cards show but no photos or narrative. Multi-day events (split into
+  // begin/end halves for the day views) are listed once (skip the '-end' half).
+  const tiDateCell = (startIso, endIso) => {
+    const s = tripsyDayKey(startIso); if (!s) return '';
+    const e = tripsyDayKey(endIso);
+    return (e && e !== s) ? `${tripsySummaryDayTileDate(s)} – ${tripsySummaryDayTileDate(e)}` : tripsySummaryDayTileDate(s);
+  };
+  const tiSeen = new Set();
+  const tiEvents = [];
+  for (const items of summaryByDay.values()) {
+    for (const it of items) {
+      if (!it.ev || !it.ev.tripsyRaw || it.ev._splitHalf === 'end') continue;
+      const k = tripsyEventKey(it.ev.tripsyRaw) || it.ev.id;
+      if (tiSeen.has(k)) continue; tiSeen.add(k);
+      tiEvents.push(it.ev);
+    }
+  }
+  const tiByStart = (a, b) => new Date(a.start || 0) - new Date(b.start || 0);
+  const tiTransport = tiEvents.filter(ev => ev.tripsyRaw.resource === 'transportation').sort(tiByStart);
+  const tiLodging = tiEvents.filter(ev => ev.tripsyRaw.resource === 'hosting').sort(tiByStart);
+  const tiTransportDetails = ev => {
+    const raw = ev.tripsyRaw;
+    const timeMetaLine = tripsyTransportationTimeLine(ev);
+    const companyMetaLine = ev.location && raw.company && raw.category !== 'airplane' ? `${raw.company}${raw.transportNumber ? ' ' + raw.transportNumber : ''}` : null;
+    const meta = [ev.location, companyMetaLine, raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null, tripsySeatLabel(raw), raw.vehicleDescription || null, raw.departureTerminal ? `Terminal ${raw.departureTerminal}` : null].filter(Boolean);
+    return `<div class="tp-ti-title">${esc(ev.summary)}</div>${timeMetaLine ? `<div class="tp-ti-meta" style="font-weight:700;">${esc(timeMetaLine)}</div>` : ''}${meta.map(m => `<div class="tp-ti-meta">${esc(m)}</div>`).join('')}`;
+  };
+  const tiLodgingDetails = ev => {
+    const raw = ev.tripsyRaw;
+    const ci = formatTripTime(ev.start), co = formatTripTime(ev.end);
+    const meta = [ci ? `Check-in: ${ci}` : null, co ? `Check-out: ${co}` : null, raw.address || null, raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null, raw.phone || null, raw.website || null].filter(Boolean);
+    return `<div class="tp-ti-title">${esc(raw.name || ev.summary)}</div>${meta.map(m => `<div class="tp-ti-meta">${esc(m)}</div>`).join('')}`;
+  };
+  const tiTable = (rows, detailsFn, emptyMsg) => rows.length ? `
+    <div class="tp-ti-table">
+      <div class="tp-ti-head"><div>Date</div><div>Details</div></div>
+      ${rows.map(ev => `<div class="tp-ti-row"><div class="tp-ti-date">${esc(tiDateCell(ev.start, ev.end))}</div><div class="tp-ti-details">${detailsFn(ev)}</div></div>`).join('')}
+    </div>` : `<div class="tp-ti-empty">${esc(emptyMsg)}</div>`;
+  const travelInfoHtml = `
+    <div class="tp-section-break">
+      ${tripsyCoverHeaderHtml(headerDestination, headerDateRange, 'Travel Information', headerBackgroundPhotoUrl)}
+      <div class="tp-ti-section">
+        <div class="tp-ti-section-title">Transportation</div>
+        ${tiTable(tiTransport, tiTransportDetails, 'No transportation on this trip.')}
+      </div>
+      <div class="tp-ti-section">
+        <div class="tp-ti-section-title">Lodgings</div>
+        ${tiTable(tiLodging, tiLodgingDetails, 'No lodging on this trip.')}
+      </div>
+    </div>`;
+
   return `
     ${headerHtml}
     ${summaryHtml}
     ${part2Html}
+    ${travelInfoHtml}
   `;
 }
 
@@ -19055,8 +19122,11 @@ function ensureTravelViewStyles() {
     .tv-dayhead-city { font-family:var(--mono); font-size:13px; font-weight:400; color:#c9b3ec; opacity:0.8; }
     .tv-dayhead-ord { font-size:12px; font-weight:600; color:#c9b3ec; opacity:0.9; flex-shrink:0; }
     .tv-lodging { display:flex; align-items:center; gap:8px; background:rgba(150,110,220,0.16); border:1px solid rgba(150,110,220,0.4); color:#c9b3ec; border-radius:8px; padding:7px 12px; font-size:13px; font-weight:600; margin:8px 0 4px; }
-    .tv-events { position:relative; margin-bottom:16px; }
-    .tv-events::before { content:''; position:absolute; left:16px; top:var(--tv-spine-top, 0px); height:var(--tv-spine-height, 0px); width:2px; background:rgba(255,255,255,0.32); border-radius:1px; }
+    .tv-events { margin-bottom:16px; }
+    /* One continuous connector line for the whole trip, behind the icons and
+       behind the sticky date bars (which are z-index:2 and paint in front). */
+    .tv-timeline { position:relative; }
+    .tv-timeline::before { content:''; position:absolute; left:16px; top:var(--tv-spine-top, 0px); height:var(--tv-spine-height, 0px); width:2px; background:rgba(255,255,255,0.32); border-radius:1px; z-index:0; }
     .tv-row { position:relative; display:flex; gap:12px; align-items:flex-start; padding:11px 0; cursor:pointer; }
     .tv-row:active { opacity:0.7; }
     .tv-icon { flex-shrink:0; width:34px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:16px; position:relative; z-index:1; box-shadow:0 0 0 3px var(--bg); }
@@ -19389,30 +19459,30 @@ async function renderTravelView(chosenTripKey) {
       ${categories.length ? `<div class="tv-filter-row" id="tv-filter-row" style="display:none;">${catChipsHtml}</div>` : ''}
       ${allDays.some(k => k !== 'undated') ? stripHtml : ''}
     </div>
-    ${bodyDays || `<div class="empty-state" style="margin-top:16px;">No events on this trip yet.</div>`}
+    <div class="tv-timeline">${bodyDays || `<div class="empty-state" style="margin-top:16px;">No events on this trip yet.</div>`}</div>
   `);
   wireExit();
   armMeasure();
 
-  // Draw each day's connector spine to span exactly from its FIRST visible icon's
-  // centre to its LAST visible icon's centre; a day with a single (or no) visible
-  // event gets no bar. Recomputed after filtering, since that changes which rows
-  // (icons) are visible.
-  const updateSpines = () => {
-    main.querySelectorAll('.tv-events').forEach(container => {
-      const icons = [...container.querySelectorAll('.tv-row')]
-        .filter(r => r.style.display !== 'none')
-        .map(r => r.querySelector('.tv-icon')).filter(Boolean);
-      if (icons.length < 2) { container.style.setProperty('--tv-spine-height', '0px'); return; }
-      const cTop = container.getBoundingClientRect().top;
-      const f = icons[0].getBoundingClientRect(), l = icons[icons.length - 1].getBoundingClientRect();
-      const top = (f.top + f.height / 2) - cTop;
-      const bottom = (l.top + l.height / 2) - cTop;
-      container.style.setProperty('--tv-spine-top', `${Math.round(top)}px`);
-      container.style.setProperty('--tv-spine-height', `${Math.max(0, Math.round(bottom - top))}px`);
-    });
+  // Draw ONE continuous connector line for the whole trip, from the first visible
+  // icon's centre to the last visible icon's centre. The sticky date bars sit in
+  // front of it (z-index). Recomputed after filtering, since that changes which
+  // rows (icons) are visible.
+  const updateSpine = () => {
+    const timeline = main.querySelector('.tv-timeline');
+    if (!timeline) return;
+    const icons = [...timeline.querySelectorAll('.tv-row')]
+      .filter(r => r.style.display !== 'none')
+      .map(r => r.querySelector('.tv-icon')).filter(Boolean);
+    if (icons.length < 2) { timeline.style.setProperty('--tv-spine-height', '0px'); return; }
+    const tTop = timeline.getBoundingClientRect().top;
+    const f = icons[0].getBoundingClientRect(), l = icons[icons.length - 1].getBoundingClientRect();
+    const top = (f.top + f.height / 2) - tTop;
+    const bottom = (l.top + l.height / 2) - tTop;
+    timeline.style.setProperty('--tv-spine-top', `${Math.round(top)}px`);
+    timeline.style.setProperty('--tv-spine-height', `${Math.max(0, Math.round(bottom - top))}px`);
   };
-  updateSpines();
+  updateSpine();
 
   // Tap an event -> open its detail modal (returns to Travel View on close/away).
   const tvRootEl = main.querySelector('.tv-root');
@@ -19447,7 +19517,7 @@ async function renderTravelView(chosenTripKey) {
       });
       sec.style.display = any ? '' : 'none';
     });
-    updateSpines(); // visible-row set changed -> redraw each day's spine
+    updateSpine(); // visible-row set changed -> redraw the trip connector line
   };
   // De-select/close the category filter (reset to showing all categories), same
   // as pressing the filter button to exit it.
