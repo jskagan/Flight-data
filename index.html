@@ -18993,6 +18993,11 @@ function tripsyGuessCity(address) {
   return parts.length ? parts[parts.length - 1] : '';
 }
 
+// Kept module-scope so re-rendering Travel View replaces (not stacks) the
+// resize listener that keeps the sticky day-headers' offset in sync with the
+// frozen header's measured height.
+let _tvResizeHandler = null;
+
 // One-time scoped CSS for Travel View -- injected on first render so the whole
 // feature stays self-contained here rather than spread into the main stylesheet.
 function ensureTravelViewStyles() {
@@ -19000,7 +19005,9 @@ function ensureTravelViewStyles() {
   const style = document.createElement('style');
   style.id = 'tv-styles';
   style.textContent = `
-    .tv-root { max-width:560px; margin:0 auto; padding:6px 10px 40px; }
+    .tv-root { position:fixed; inset:0; z-index:9998; overflow-y:auto; -webkit-overflow-scrolling:touch; background:var(--bg); }
+    .tv-inner { max-width:560px; margin:0 auto; padding:0 14px 48px; }
+    .tv-topbar { position:sticky; top:0; z-index:3; background:var(--bg); padding:12px 0 8px; }
     .tv-month { font-size:13px; color:var(--muted); font-weight:600; letter-spacing:0.02em; }
     .tv-titlerow { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin:2px 0 14px; }
     .tv-title { font-size:26px; font-weight:800; color:var(--text); line-height:1.15; }
@@ -19013,7 +19020,8 @@ function ensureTravelViewStyles() {
     .tv-datenum.tv-today { background:var(--amber); color:#1a1206; }
     .tv-dots { display:flex; gap:2px; justify-content:center; min-height:6px; }
     .tv-dot { width:5px; height:5px; border-radius:50%; display:inline-block; }
-    .tv-dayhead { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin:22px 0 4px; }
+    .tv-daysec { scroll-margin-top:var(--tv-topbar-h, 92px); }
+    .tv-dayhead { position:sticky; top:var(--tv-topbar-h, 92px); z-index:2; background:var(--bg); display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:14px 0 6px; }
     .tv-dayhead-main { font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.03em; color:var(--muted); }
     .tv-dayhead-city { font-family:var(--mono); font-size:13px; font-weight:400; color:var(--muted); opacity:0.85; }
     .tv-dayhead-ord { font-size:12px; color:var(--muted); flex-shrink:0; }
@@ -19046,14 +19054,27 @@ function ensureTravelViewStyles() {
 async function renderTravelView() {
   ensureTravelViewStyles();
   const exit = () => { saveTravelViewPref(false); navigate('home'); };
-  const wrap = inner => `<div class="tv-root">${inner}</div>`;
+  const wrap = inner => `<div class="tv-root"><div class="tv-inner">${inner}</div></div>`;
   const wireExit = () => { const b = document.getElementById('tv-exit'); if (b) b.addEventListener('click', exit); };
   const closeBtnHtml = `<button class="tv-close" id="tv-exit" title="Exit Travel View">✕</button>`;
+  // Sync the sticky day-headers' top offset to the frozen header's real height
+  // (title can wrap), and keep it correct across orientation changes.
+  const measureTopbar = () => {
+    const root = main.querySelector('.tv-root'), topbar = main.querySelector('.tv-topbar');
+    if (root && topbar) root.style.setProperty('--tv-topbar-h', `${Math.round(topbar.getBoundingClientRect().height)}px`);
+  };
+  const armMeasure = () => {
+    measureTopbar();
+    if (_tvResizeHandler) window.removeEventListener('resize', _tvResizeHandler);
+    _tvResizeHandler = measureTopbar;
+    window.addEventListener('resize', measureTopbar);
+  };
   const shell = (title, body) => wrap(`
-    <div class="tv-titlerow"><div class="tv-title">${esc(title)}</div>${closeBtnHtml}</div>
+    <div class="tv-topbar"><div class="tv-titlerow"><div class="tv-title">${esc(title)}</div>${closeBtnHtml}</div></div>
     ${body}`);
 
-  main.innerHTML = wrap(`<div class="empty-state">Loading your trip…</div>`);
+  main.innerHTML = shell('Travel View', `<div class="empty-state">Loading your trip…</div>`);
+  wireExit(); armMeasure();
 
   const decrypted = await ensureTripsyDecrypted();
   if (!decrypted) { main.innerHTML = shell('Travel View', `<div class="empty-state">Trip data is locked on this device — open <b>My Trips</b> once to unlock, then reload.</div>`); wireExit(); return; }
@@ -19176,7 +19197,7 @@ async function renderTravelView() {
     const ord = dayKey === 'undated' ? '' : ordinal(tripsyDayNumberFromTripStart(dayKey, tripStartKey));
     const banner = dayKey === 'undated' ? null : lodgingBannerFor(dayKey);
     return `
-      <div id="tv-day-${esc(dayKey)}">
+      <div class="tv-daysec" id="tv-day-${esc(dayKey)}">
         <div class="tv-dayhead"><span><span class="tv-dayhead-main">${esc(headMain)}</span>${city ? `<span class="tv-dayhead-city"> in ${esc(city)}</span>` : ''}</span>${ord ? `<span class="tv-dayhead-ord">${esc(ord)}</span>` : ''}</div>
         ${banner ? `<div class="tv-lodging">🛏 ${esc(banner.name)}</div>` : ''}
         ${evs.length ? `<div class="tv-events">${evs.map(rowHtml).join('')}</div>` : ''}
@@ -19185,12 +19206,15 @@ async function renderTravelView() {
 
   const bodyDays = allDays.map(daySectionHtml).filter(Boolean).join('');
   main.innerHTML = wrap(`
-    <div class="tv-month">${esc(monthYear)}</div>
-    <div class="tv-titlerow"><div class="tv-title">${esc(trip.name || 'Trip')}</div>${closeBtnHtml}</div>
+    <div class="tv-topbar">
+      <div class="tv-month">${esc(monthYear)}</div>
+      <div class="tv-titlerow"><div class="tv-title">${esc(trip.name || 'Trip')}</div>${closeBtnHtml}</div>
+    </div>
     ${allDays.some(k => k !== 'undated') ? stripHtml : ''}
     ${bodyDays || `<div class="empty-state" style="margin-top:16px;">No events on this trip yet.</div>`}
   `);
   wireExit();
+  armMeasure();
   // Tap a day in the strip -> smooth-scroll to that day's section (if present).
   main.querySelectorAll('[data-tv-scroll]').forEach(cell => {
     cell.addEventListener('click', () => {
