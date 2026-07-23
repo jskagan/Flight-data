@@ -9861,24 +9861,27 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     if (!ci) return; // needs a date to place it in the chain
     lodgings.push({ name: name || 'Lodging', ci, co: tripsyDayKey(coIso) || ci });
   };
-  const addTransport = (depIso, arrIso) => {
+  const addTransport = (depIso, arrIso, category) => {
     const dep = tripsyDayKey(depIso) || tripsyDayKey(arrIso);
-    if (dep) transports.push({ dep, arr: tripsyDayKey(arrIso) || dep });
+    if (dep) transports.push({ dep, arr: tripsyDayKey(arrIso) || dep, category: category || null });
   };
   events.forEach(e => {
     const r = e.tripsyRaw;
     if (!r) return;
     if (r.resource === 'hosting') addLodging(r.name || e.summary, e.start, e.end);
-    else if (r.resource === 'transportation') addTransport(e.start, e.end);
+    else if (r.resource === 'transportation') addTransport(e.start, e.end, r.category);
   });
   (pendingChanges || []).forEach(c => {
     if (c.type !== 'create_event' || c.tripKey !== trip.key || !c.fields) return;
     if (c.tripsyResource === 'hosting') addLodging(c.fields.name, c.fields.startsAt, c.fields.endsAt);
-    else if (c.tripsyResource === 'transportation') addTransport(c.fields.departureAt, c.fields.arrivalAt);
+    else if (c.tripsyResource === 'transportation') addTransport(c.fields.departureAt, c.fields.arrivalAt, c.fields.category);
   });
+  // Human label for a transportation leg's method (Flight/Train/Ferry/etc).
+  const methodLabel = cat => cat === 'airplane' ? 'Flight' : (tripsySlugToLabel(cat) || 'Transportation');
   lodgings.sort((a, b) => a.ci.localeCompare(b.ci));
   let moves = 0;
   const gaps = [];
+  const allMoves = []; // every move between distinct stays, covered or not
   for (let i = 0; i + 1 < lodgings.length; i++) {
     const A = lodgings[i], B = lodgings[i + 1];
     if (tripsyPlacesLikelySame(A.name, B.name)) continue; // same place -> no move
@@ -9887,10 +9890,15 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     moves++;
     // A transport spans the move if its [departure, arrival] day range overlaps
     // the checkout->next-checkin window at all.
-    const covered = transports.some(t => t.dep <= windowEnd && t.arr >= windowStart);
+    const covering = transports.filter(t => t.dep <= windowEnd && t.arr >= windowStart);
+    const covered = covering.length > 0;
+    // Method(s) of the covering leg(s), de-duped -- shown in the report's third
+    // column for a move that has transportation.
+    const method = [...new Set(covering.map(t => methodLabel(t.category)).filter(Boolean))].join(' / ');
+    allMoves.push({ from: A.name, to: B.name, day: windowStart, covered, method });
     if (!covered) gaps.push({ from: A.name, to: B.name, day: windowStart });
   }
-  return { moves, gaps };
+  return { moves, gaps, allMoves };
 }
 
 // Advisory dialog for the per-trip transportation check.
@@ -9927,31 +9935,85 @@ function showTripsyTransportationCheckDialog(trip, result) {
   overlay.querySelector('[data-tc-close]').focus();
 }
 
+// Jump the My Trips timeline to a given day of a trip: expand the trip if it's
+// collapsed, (re-)render the list, then scroll the closest day-header anchor
+// (data-tt-trip/data-tt-day) into view and briefly flash it. Used by the Verify
+// Travel Details report -- tapping any row goes to that date. A date with no
+// events of its own (e.g. a lodging-gap night) has no header, so we fall to the
+// nearest one by calendar day.
+async function tripsyGoToTripDay(tripKey, dayKey) {
+  setTripsyTripCollapsed(tripKey, false);
+  if (currentView !== 'tripsytrips') await navigate('tripsytrips');
+  else await renderTripsyTrips();
+  const toIdx = k => { const [y, m, d] = (k || '').split('-').map(Number); return (y && m && d) ? Math.round(Date.UTC(y, m - 1, d) / 86400000) : null; };
+  const targetIdx = toIdx(dayKey);
+  setTimeout(() => {
+    const headers = [...document.querySelectorAll('[data-tt-day]')].filter(el => el.dataset.ttTrip === tripKey);
+    let target = null, best = Infinity;
+    if (targetIdx != null) headers.forEach(el => {
+      const idx = toIdx(el.dataset.ttDay);
+      if (idx == null) return;
+      const d = Math.abs(idx - targetIdx);
+      if (d < best) { best = d; target = el; }
+    });
+    if (!target) target = headers[0] || [...document.querySelectorAll('[data-tripsy-connector-trip]')].find(el => el.dataset.tripsyConnectorTrip === tripKey);
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const prev = target.style.boxShadow;
+    target.style.transition = 'box-shadow 0.2s ease';
+    target.style.boxShadow = '0 0 0 2px var(--amber)';
+    setTimeout(() => { target.style.boxShadow = prev; }, 1500);
+  }, 60);
+}
+
 // "Verify Travel Details" -- combines the lodging + transportation gap checks
-// into one report with two sections. Each missing item lists its date and what's
-// missing, and is tappable to open a prefilled Add form for it (see
-// openTripsyVerifyGapEdit). Advisory, same caveats as the individual checks.
+// into one report with two sections. Lodging lists nights with no stay; the
+// transportation section lists every move between stays in two groups (missing
+// first, then those with a method). Tapping any row jumps to that date in the
+// My Trips timeline (tripsyGoToTripDay). Advisory, same caveats as the checks.
 async function showTripsyVerifyTravelDialog(trip) {
   const pending = isOwner ? await Store.listTripsyPendingChanges() : [];
   const lodging = tripsyLodgingGaps(trip, pending);          // { nights, gaps:[dayKey] }
   const transport = tripsyTransportationGaps(trip, pending); // { moves, gaps:[{from,to,day}] }
-  const gapRow = (dateText, descText, attrs) => `
-    <button class="tvv-gap" ${attrs} style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
+  // Two-column row (lodging): date + description. Tapping jumps to that date
+  // in the My Trips timeline (see tripsyGoToTripDay).
+  const gapRow = (dateText, descText, dayKey) => `
+    <button class="tvv-gap" data-tvv-day="${esc(dayKey || '')}" style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
       <span style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--amber); flex-shrink:0; min-width:104px;">${esc(dateText || '')}</span>
       <span style="font-size:13px;">${esc(descText)}</span>
     </button>`;
+  // Three-column row (transportation move): date | origin -> destination |
+  // third column (a "?" when transportation is missing, else the method).
+  const moveRow = (dayKey, from, to, third, thirdColor) => `
+    <button class="tvv-gap" data-tvv-day="${esc(dayKey || '')}" style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
+      <span style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--amber); flex-shrink:0; min-width:104px;">${esc(dayKey ? tripsyDayHeaderLabel(dayKey) : '')}</span>
+      <span style="font-size:13px; flex:1;">${esc(from)} <span style="color:var(--muted);">→</span> ${esc(to)}</span>
+      <span style="font-size:12px; font-weight:700; color:${thirdColor}; flex-shrink:0; text-align:right; min-width:44px;">${esc(third)}</span>
+    </button>`;
   const okLine = txt => `<div style="font-size:13px; color:var(--home-green); font-weight:600;">✓ ${esc(txt)}</div>`;
   const muted = txt => `<div style="font-size:13px; color:var(--muted);">${esc(txt)}</div>`;
+  const subLabel = txt => `<div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin:2px 0 7px;">${esc(txt)}</div>`;
   const lodgingBody = !lodging.nights.length
     ? muted('Not enough dated events to check nightly lodging.')
     : (!lodging.gaps.length
         ? okLine(`All ${lodging.nights.length} night${lodging.nights.length === 1 ? '' : 's'} have lodging.`)
-        : lodging.gaps.map(dayKey => gapRow(tripsyDayHeaderLabel(dayKey), 'No lodging listed', `data-tvv-kind="lodging" data-tvv-day="${esc(dayKey)}"`)).join(''));
+        : lodging.gaps.map(dayKey => gapRow(tripsyDayHeaderLabel(dayKey), 'No lodging listed', dayKey)).join(''));
+  // Every move between distinct stays, in two groups: missing transportation
+  // first (third column a "?"), then moves that have it (third column shows
+  // the method). Both groups' rows jump to the date in My Trips when tapped.
+  const missingMoves = transport.allMoves.filter(m => !m.covered);
+  const coveredMoves = transport.allMoves.filter(m => m.covered);
   const transportBody = !transport.moves
     ? muted('Not enough dated lodgings to check transportation between stays.')
-    : (!transport.gaps.length
-        ? okLine(`All ${transport.moves} move${transport.moves === 1 ? '' : 's'} between stays have transportation.`)
-        : transport.gaps.map(g => gapRow(g.day ? tripsyDayHeaderLabel(g.day) : '', `No transportation: ${g.from} → ${g.to}`, `data-tvv-kind="transport" data-tvv-day="${esc(g.day || '')}" data-tvv-from="${esc(g.from || '')}" data-tvv-to="${esc(g.to || '')}"`)).join(''));
+    : `
+      ${subLabel(`Missing transportation${missingMoves.length ? ` (${missingMoves.length})` : ''}`)}
+      ${missingMoves.length
+        ? missingMoves.map(m => moveRow(m.day, m.from, m.to, '?', 'var(--amber)')).join('')
+        : okLine('None — every move has transportation.')}
+      ${subLabel(`Has transportation${coveredMoves.length ? ` (${coveredMoves.length})` : ''}`)}
+      ${coveredMoves.length
+        ? coveredMoves.map(m => moveRow(m.day, m.from, m.to, m.method || '✓', 'var(--home-green)')).join('')
+        : muted('None.')}`;
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10002; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch;';
   overlay.innerHTML = `
@@ -9965,14 +10027,15 @@ async function showTripsyVerifyTravelDialog(trip) {
       ${lodgingBody}
       <div style="font-family:var(--mono); font-size:14px; font-weight:700; color:var(--amber); border-bottom:1px solid var(--line); padding-bottom:6px; margin:22px 0 10px;">🚗 Transportation</div>
       ${transportBody}
-      <div style="font-size:11px; color:var(--muted); line-height:1.5; margin-top:16px;">Advisory — tap any item to add the missing lodging or transportation. A stay or leg you didn't log will show as a gap.</div>
+      <div style="font-size:11px; color:var(--muted); line-height:1.5; margin-top:16px;">Advisory — tap any row to jump to that date in My Trips. A stay or leg you didn't log will show as a gap.</div>
     </div>`;
   const close = () => overlay.remove();
   overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
   overlay.querySelector('[data-tvv-close]').addEventListener('click', close);
-  overlay.querySelectorAll('[data-tvv-kind]').forEach(btn => btn.addEventListener('click', () => {
+  overlay.querySelectorAll('[data-tvv-day]').forEach(btn => btn.addEventListener('click', () => {
+    const day = btn.dataset.tvvDay;
     overlay.remove();
-    openTripsyVerifyGapEdit(trip, btn.dataset.tvvKind, { day: btn.dataset.tvvDay, from: btn.dataset.tvvFrom, to: btn.dataset.tvvTo });
+    if (day) tripsyGoToTripDay(trip.key, day);
   }));
   document.body.appendChild(overlay);
 }
@@ -16643,7 +16706,9 @@ async function renderTripsyEventsListImpl() {
     const dayHeaderHtml = dayKey => {
       const dayNum = tripsyDayNumberFromTripStart(dayKey, tlTripStartDayKey);
       const dayNumHtml = (dayNum != null && dayNum >= 1) ? `<span style="opacity:0.85;">Day ${dayNum}</span>` : '';
-      return `<div style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}</span>${dayNumHtml}</div>`;
+      // data-tt-trip/data-tt-day are the scroll anchors the Verify Travel
+      // Details report jumps to (tripsyGoToTripDay).
+      return `<div data-tt-trip="${esc(trip.key)}" data-tt-day="${esc(dayKey)}" style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}</span>${dayNumHtml}</div>`;
     };
     const timelineHtml = collapsed ? '' : `<div class="tripsy-tl-trip" data-tripsy-connector-trip="${esc(trip.key)}">${[
       ...dayGroups.map(g => `${dayHeaderHtml(g.dayKey)}${renderTimelineGroup(g.items)}`),
