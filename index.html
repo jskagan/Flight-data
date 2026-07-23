@@ -19002,30 +19002,12 @@ function tripsyGuessCity(address) {
 // frozen header's measured height.
 let _tvResizeHandler = null;
 
-// Best-effort haptic pulse when the Travel View selected date changes. The
-// Vibration API covers Android/Chrome. iOS Safari has no Vibration API; toggling
-// a hidden `<input switch>` via a label click is the one known way to elicit a
-// light system haptic there (iOS 17.4+). The control is kept in-viewport at zero
-// size and blurred right after, so focusing it can't scroll the page. All
-// best-effort -- a silent no-op where unsupported.
-let _tvHapticEl = null;
+// Haptic pulse when the Travel View selected date changes. Uses the Vibration
+// API only (Android/Chrome). iOS Safari has no web haptic API and no reliable
+// workaround (the hidden-<input switch> trick doesn't fire from script / during
+// a scroll and was removed), so this is simply a silent no-op on iOS.
 function tvHaptic() {
   try { if (navigator.vibrate) navigator.vibrate(8); } catch (e) { /* unsupported */ }
-  try {
-    if (!_tvHapticEl) {
-      const label = document.createElement('label');
-      label.setAttribute('aria-hidden', 'true');
-      label.style.cssText = 'position:fixed; top:0; left:0; width:0; height:0; opacity:0; pointer-events:none; overflow:hidden;';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.tabIndex = -1; cb.setAttribute('switch', '');
-      label.appendChild(cb);
-      (document.body || document.documentElement).appendChild(label);
-      _tvHapticEl = label;
-    }
-    _tvHapticEl.click();
-    const input = _tvHapticEl.querySelector('input');
-    if (input) input.blur();
-  } catch (e) { /* unsupported */ }
 }
 
 // One-time scoped CSS for Travel View -- injected on first render so the whole
@@ -19044,6 +19026,14 @@ function ensureTravelViewStyles() {
     .tv-title { font-size:26px; font-weight:800; color:var(--text); line-height:1.15; }
     .tv-close { flex-shrink:0; width:36px; height:36px; border-radius:8px; border:1.5px solid #e02424; background:var(--panel-2); color:#e02424; font-size:19px; font-weight:800; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
     .tv-close:hover { background:rgba(224,36,36,0.12); }
+    .tv-head-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+    .tv-iconbtn { flex-shrink:0; width:36px; height:36px; border-radius:8px; border:1px solid var(--line); background:var(--panel-2); color:var(--text); font-size:15px; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+    .tv-iconbtn.tv-active { border-color:var(--amber); color:var(--amber); }
+    .tv-searchbar { display:flex; gap:8px; align-items:center; margin-top:10px; }
+    .tv-search-input { flex:1; min-width:0; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px 12px; color:var(--text); font-size:14px; }
+    .tv-filter-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .tv-cat-chip { padding:5px 12px; border-radius:14px; border:1px solid var(--line); background:var(--panel-2); color:var(--muted); font-size:12px; font-weight:600; cursor:pointer; }
+    .tv-cat-chip.tv-on { background:var(--amber); color:#1a1206; border-color:var(--amber); }
     .tv-strip { display:flex; gap:2px; overflow-x:auto; padding:8px 0 6px; margin-top:6px; -webkit-overflow-scrolling:touch; border-top:1px solid var(--line); }
     .tv-strip::-webkit-scrollbar { display:none; }
     .tv-daycell { flex:0 0 auto; min-width:42px; text-align:center; padding:2px 4px; cursor:pointer; border:none; background:none; }
@@ -19179,6 +19169,13 @@ async function renderTravelView() {
 
   const monthYear = firstDay ? partsOf(firstDay).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }) : '';
 
+  // Category chips for the header filter -- the distinct event-type labels on this
+  // trip (Flight/Lodging/Dining/…), all selected to start.
+  const categories = [...new Set(expanded.map(ev => tripsyEventTypeLabel(ev) || 'Other'))].sort();
+  const tvSelectedCats = new Set(categories);
+  const catChipsHtml = categories.map(c => `<button class="tv-cat-chip tv-on" data-tv-cat-chip="${esc(c)}">${esc(c)}</button>`).join('');
+  const TV_FUNNEL_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>`;
+
   // ---- Day strip (horizontal) ----
   const stripCellHtml = dayKey => {
     if (dayKey === 'undated') return '';
@@ -19219,8 +19216,10 @@ async function renderTravelView() {
     if (t) rightHtml = `<div class="tv-time">${esc(t)}</div>`;
     const bg = tripsyTimelineDotColor(ev);
     const glyph = tripsyTimelineDotIcon(ev);
+    const cat = tripsyEventTypeLabel(ev) || 'Other';
+    const searchText = `${title || ''} ${subtitle || ''} ${ev.location || ''} ${(ev.tripsyRaw && ev.tripsyRaw.notes) || ''}`.toLowerCase();
     return `
-      <div class="tv-row" data-tv-ev="${esc(ev.id)}">
+      <div class="tv-row" data-tv-ev="${esc(ev.id)}" data-tv-cat="${esc(cat)}" data-tv-text="${esc(searchText)}">
         <div class="tv-icon" style="background:${bg};">${esc(glyph)}</div>
         <div class="tv-body">
           <div class="tv-evtitle">${esc(title || 'Event')}</div>
@@ -19250,7 +19249,19 @@ async function renderTravelView() {
   main.innerHTML = wrap(`
     <div class="tv-topbar">
       <div class="tv-month">${esc(monthYear)}</div>
-      <div class="tv-titlerow"><div class="tv-title">${esc(trip.name || 'Trip')}</div>${closeBtnHtml}</div>
+      <div class="tv-titlerow">
+        <div class="tv-title">${esc(trip.name || 'Trip')}</div>
+        <div class="tv-head-actions">
+          <button class="tv-iconbtn" id="tv-search-btn" title="Search">🔍</button>
+          ${categories.length ? `<button class="tv-iconbtn" id="tv-filter-btn" title="Filter by category">${TV_FUNNEL_SVG}</button>` : ''}
+          ${closeBtnHtml}
+        </div>
+      </div>
+      <div class="tv-searchbar" id="tv-searchbar" style="display:none;">
+        <input type="text" class="tv-search-input" id="tv-search-input" placeholder="Search events…" autocomplete="off">
+        <button class="tv-iconbtn" id="tv-search-clear" title="Clear">✕</button>
+      </div>
+      ${categories.length ? `<div class="tv-filter-row" id="tv-filter-row" style="display:none;">${catChipsHtml}</div>` : ''}
       ${allDays.some(k => k !== 'undated') ? stripHtml : ''}
     </div>
     ${bodyDays || `<div class="empty-state" style="margin-top:16px;">No events on this trip yet.</div>`}
@@ -19267,6 +19278,51 @@ async function renderTravelView() {
     if (ev) showTripsyTravelEventDetail(ev);
   });
 
+  // ---- Search + category filter ----
+  // Live-filters the event rows by search text (title/subtitle/location/notes)
+  // AND the selected category chips; a day section with no visible row is hidden.
+  // The calendar strip still shows all days (its dots reflect the full trip).
+  const searchBtn = main.querySelector('#tv-search-btn');
+  const filterBtn = main.querySelector('#tv-filter-btn');
+  const searchbar = main.querySelector('#tv-searchbar');
+  const searchInput = main.querySelector('#tv-search-input');
+  const searchClear = main.querySelector('#tv-search-clear');
+  const filterRow = main.querySelector('#tv-filter-row');
+  const applyFilter = () => {
+    const q = (searchInput && searchInput.value || '').trim().toLowerCase();
+    main.querySelectorAll('.tv-daysec').forEach(sec => {
+      let any = false;
+      sec.querySelectorAll('.tv-row').forEach(row => {
+        const show = (!q || (row.dataset.tvText || '').includes(q)) && tvSelectedCats.has(row.dataset.tvCat);
+        row.style.display = show ? '' : 'none';
+        if (show) any = true;
+      });
+      sec.style.display = any ? '' : 'none';
+    });
+  };
+  if (searchBtn) searchBtn.addEventListener('click', () => {
+    const show = searchbar.style.display === 'none';
+    searchbar.style.display = show ? 'flex' : 'none';
+    searchBtn.classList.toggle('tv-active', show);
+    measureTopbar();
+    if (show) searchInput.focus(); else { searchInput.value = ''; applyFilter(); }
+  });
+  if (searchInput) searchInput.addEventListener('input', applyFilter);
+  if (searchClear) searchClear.addEventListener('click', () => { searchInput.value = ''; applyFilter(); searchInput.focus(); });
+  if (filterBtn) filterBtn.addEventListener('click', () => {
+    const show = filterRow.style.display === 'none';
+    filterRow.style.display = show ? 'flex' : 'none';
+    filterBtn.classList.toggle('tv-active', show);
+    measureTopbar();
+  });
+  main.querySelectorAll('[data-tv-cat-chip]').forEach(chip => chip.addEventListener('click', () => {
+    const c = chip.dataset.tvCatChip;
+    if (tvSelectedCats.has(c)) tvSelectedCats.delete(c); else tvSelectedCats.add(c);
+    chip.classList.toggle('tv-on', tvSelectedCats.has(c));
+    filterBtn.classList.toggle('tv-active', tvSelectedCats.size !== categories.length || filterRow.style.display !== 'none');
+    applyFilter();
+  }));
+
   // ---- Calendar <-> itinerary link ----
   // The selected date changes ONLY on a date tap or a vertical scroll of the
   // events list (following the topmost visible day / the adjacent date bar).
@@ -19281,25 +19337,46 @@ async function renderTravelView() {
     let rafPending = 0, itinLockUntil = 0, selectedDay = null;
     const cellFor = day => strip.querySelector(`[data-tv-cal-date="${CSS.escape(day)}"]`);
     const setActiveDate = day => strip.querySelectorAll('.tv-daycell').forEach(c => c.classList.toggle('tv-cal-active', c.dataset.tvCalDate === day));
-    // Keep the highlighted date visible (drift OK) -- nudge the calendar only when
-    // it nears an edge. Since scrolling the calendar never changes the selection,
-    // this can move the strip freely with nothing to guard against.
-    const keepCalDateVisible = day => {
-      const cell = cellFor(day); if (!cell) return;
-      const margin = cell.offsetWidth + 4;
-      const left = cell.offsetLeft, right = cell.offsetLeft + cell.offsetWidth;
-      const viewL = strip.scrollLeft, viewR = strip.scrollLeft + strip.clientWidth;
-      let target = strip.scrollLeft;
-      if (left - margin < viewL) target = left - margin;
-      else if (right + margin > viewR) target = right + margin - strip.clientWidth;
-      strip.scrollLeft = Math.max(0, Math.min(target, strip.scrollWidth - strip.clientWidth));
+    // Calendar positioning: keep the selected date at ~the 4th/5th visible slot.
+    // While scrolling, the highlight may DRIFT within the 3rd-6th slots (kept
+    // on-screen but not re-centred on every change); ~0.5s after the last change
+    // it smooth-snaps back to the 4th/5th slot. The first/last few days of the
+    // trip stay at their natural edge slots (scrollLeft clamps to 0 / max).
+    let recenterTimer = 0;
+    const strideOf = cell => cell.offsetWidth + 2; // cell width + the .tv-strip gap
+    // 1-indexed fractional slot of a cell within the visible strip (1 = leftmost).
+    const slotOf = cell => (cell.offsetLeft - strip.scrollLeft) / strideOf(cell) + 1;
+    const clampLeft = x => Math.max(0, Math.min(x, strip.scrollWidth - strip.clientWidth));
+    // During scroll: if the highlight drifts past the 3rd/6th slot, instantly pin
+    // it to that edge slot so it never scrolls off-screen (no re-centring yet).
+    const keepInDeadZone = () => {
+      const cell = cellFor(selectedDay); if (!cell) return;
+      const stride = strideOf(cell), pos = slotOf(cell);
+      let target = null;
+      if (pos < 3) target = cell.offsetLeft - 2 * stride;      // pin to 3rd slot
+      else if (pos > 6) target = cell.offsetLeft - 5 * stride; // pin to 6th slot
+      if (target == null) return;
+      target = clampLeft(target);
+      if (Math.abs(strip.scrollLeft - target) >= 1) strip.scrollLeft = target;
+    };
+    // Smooth-scroll the selected date back toward the 4th/5th slot (3.5 cells in).
+    const recenterCal = (smooth = true) => {
+      const cell = cellFor(selectedDay); if (!cell) return;
+      const target = clampLeft(cell.offsetLeft - 3.5 * strideOf(cell));
+      if (Math.abs(strip.scrollLeft - target) < 1) return;
+      strip.scrollTo({ left: target, behavior: smooth ? 'smooth' : 'auto' });
     };
     // Day whose section sits at the top of the usable area (just below the frozen
     // header + calendar) -- the adjacent date bar the selection should match.
     const currentTopDay = () => {
-      const line = topbarH() + 2; let found = sectionDays[0];
-      for (const k of sectionDays) { const s = document.getElementById(`tv-day-${k}`); if (s && s.getBoundingClientRect().top <= line) found = k; else break; }
-      return found;
+      const line = topbarH() + 2; let found = null, firstVisible = null;
+      for (const k of sectionDays) {
+        const s = document.getElementById(`tv-day-${k}`);
+        if (!s || s.offsetParent === null) continue; // skip filtered-out (hidden) days
+        if (!firstVisible) firstVisible = k;
+        if (s.getBoundingClientRect().top <= line) found = k;
+      }
+      return found || firstVisible;
     };
     const scrollItineraryTo = (day, smooth) => {
       const sec = document.getElementById(`tv-day-${day}`); if (!sec) return;
@@ -19308,28 +19385,31 @@ async function renderTravelView() {
       itinLockUntil = Date.now() + 800; // ignore the scroll this triggers while it animates
       root.scrollBy({ top: delta, behavior: smooth ? 'smooth' : 'auto' });
     };
-    // Change the selection: highlight, keep in view, and buzz -- only on an actual change.
-    const selectDate = (day, keepVisible) => {
+    // Change the selection: highlight, buzz, keep the highlight on-screen now, and
+    // (re)schedule the debounced ~0.5s snap-back to the 4th/5th slot.
+    const selectDate = day => {
       if (!day || day === selectedDay) return;
       selectedDay = day; setActiveDate(day);
-      if (keepVisible) keepCalDateVisible(day);
       tvHaptic();
+      keepInDeadZone();
+      clearTimeout(recenterTimer);
+      recenterTimer = setTimeout(() => recenterCal(true), 500);
     };
     // Vertical scroll of the events list -> selection follows the topmost day.
     root.addEventListener('scroll', () => {
       if (Date.now() < itinLockUntil) return;
       if (rafPending) return;
-      rafPending = requestAnimationFrame(() => { rafPending = 0; selectDate(currentTopDay(), true); });
+      rafPending = requestAnimationFrame(() => { rafPending = 0; selectDate(currentTopDay()); });
     }, { passive: true });
     // Tap a date -> select it and scroll the itinerary to that day's first event.
     strip.querySelectorAll('.tv-daycell').forEach(cell => cell.addEventListener('click', () => {
       const day = cell.dataset.tvCalDate;
-      selectDate(day, false);
+      selectDate(day);
       scrollItineraryTo(day, true);
     }));
-    // Initial state: highlight the top day and bring it into view -- no buzz on load.
+    // Initial state: highlight the top day and place it (no buzz, no animation).
     const initDay = currentTopDay();
-    if (initDay) { selectedDay = initDay; setActiveDate(initDay); keepCalDateVisible(initDay); }
+    if (initDay) { selectedDay = initDay; setActiveDate(initDay); recenterCal(false); }
   }
 }
 
