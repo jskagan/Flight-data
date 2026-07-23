@@ -19028,18 +19028,49 @@ function ensureTravelViewStyles() {
     .tv-dayhead-ord { font-size:12px; color:var(--muted); flex-shrink:0; }
     .tv-lodging { display:flex; align-items:center; gap:8px; background:rgba(150,110,220,0.16); border:1px solid rgba(150,110,220,0.4); color:#c9b3ec; border-radius:8px; padding:7px 12px; font-size:13px; font-weight:600; margin:8px 0 4px; }
     .tv-events { position:relative; }
-    .tv-events::before { content:''; position:absolute; left:22px; top:24px; bottom:24px; width:2px; background:var(--line); }
-    .tv-row { position:relative; display:flex; gap:14px; align-items:flex-start; padding:12px 0; }
-    .tv-icon { flex-shrink:0; width:46px; height:46px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:22px; position:relative; z-index:1; box-shadow:0 0 0 4px var(--bg); }
-    .tv-body { flex:1; min-width:0; padding-top:4px; }
-    .tv-evtitle { font-size:16px; font-weight:700; color:var(--text); line-height:1.25; }
+    .tv-events::before { content:''; position:absolute; left:16px; top:22px; bottom:22px; width:2px; background:var(--line); }
+    .tv-row { position:relative; display:flex; gap:12px; align-items:flex-start; padding:11px 0; cursor:pointer; }
+    .tv-row:active { opacity:0.7; }
+    .tv-icon { flex-shrink:0; width:34px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:16px; position:relative; z-index:1; box-shadow:0 0 0 3px var(--bg); }
+    .tv-body { flex:1; min-width:0; padding-top:1px; }
+    .tv-evtitle { font-size:15px; font-weight:700; color:var(--text); line-height:1.3; }
     .tv-evsub { font-size:13px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .tv-right { flex-shrink:0; text-align:right; padding-top:4px; }
+    .tv-right { flex-shrink:0; text-align:right; padding-top:1px; }
     .tv-time { font-family:var(--mono); font-size:13px; font-weight:700; color:var(--amber); white-space:nowrap; }
     .tv-route { font-size:12px; color:var(--muted); line-height:1.5; white-space:nowrap; }
     .tv-note { font-size:12px; color:var(--muted); }
   `;
   document.head.appendChild(style);
+}
+
+// Full-detail modal for one Travel View event -- reuses the same field-grouped
+// read-only view My Trips uses (renderTripsyViewPanel), in a centered overlay
+// above the Travel View layer. Its own ✕ (or a click on the backdrop) removes
+// the overlay, dropping the user straight back onto Travel View underneath.
+function showTripsyTravelEventDetail(ev) {
+  const raw = ev && ev.tripsyRaw;
+  if (!raw) return;
+  const title = ev.summary || 'Event';
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.62); z-index:10001; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; max-width:560px; width:100%; box-shadow:0 16px 48px rgba(0,0,0,0.55);">
+      <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px;">
+        <div style="font-size:19px; font-weight:800; color:var(--text); line-height:1.2;">${esc(title)}</div>
+        <button class="tv-close" data-tv-detail-close title="Close">✕</button>
+      </div>
+      <div data-tv-detail-body></div>
+    </div>`;
+  const body = overlay.querySelector('[data-tv-detail-body]');
+  renderTripsyViewPanel(body, raw, title, null);
+  body.style.display = 'block';
+  // renderTripsyViewPanel adds its own Close row -- hide it; the modal's ✕ is the control.
+  const innerClose = body.querySelector('[data-tripsy-view-close]');
+  if (innerClose && innerClose.parentElement) innerClose.parentElement.style.display = 'none';
+  const close = () => overlay.remove();
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  overlay.querySelector('[data-tv-detail-close]').addEventListener('click', close);
+  document.body.appendChild(overlay);
 }
 
 // Phone-friendly reader that opens straight to the current trip when the
@@ -19094,6 +19125,7 @@ async function renderTravelView() {
   // each half lands on its own day; group by day; keep day order chronological.
   const expanded = expandMultiDayTripsyEvents((trip.events || []).filter(ev => ev && ev.start))
     .sort((a, b) => new Date(a.start || 0) - new Date(b.start || 0));
+  const eventById = new Map(expanded.map(ev => [ev.id, ev])); // for the tap-to-detail lookup
   const eventsByDay = new Map();
   for (const ev of expanded) { const k = tripsyDayKey(ev.start) || 'undated'; if (!eventsByDay.has(k)) eventsByDay.set(k, []); eventsByDay.get(k).push(ev); }
 
@@ -19175,7 +19207,7 @@ async function renderTravelView() {
     const bg = tripsyTimelineDotColor(ev);
     const glyph = tripsyTimelineDotIcon(ev);
     return `
-      <div class="tv-row">
+      <div class="tv-row" data-tv-ev="${esc(ev.id)}">
         <div class="tv-icon" style="background:${bg};">${esc(glyph)}</div>
         <div class="tv-body">
           <div class="tv-evtitle">${esc(title || 'Event')}</div>
@@ -19216,6 +19248,15 @@ async function renderTravelView() {
   `);
   wireExit();
   armMeasure();
+
+  // Tap an event -> open its detail modal (returns to Travel View on close/away).
+  const tvRootEl = main.querySelector('.tv-root');
+  if (tvRootEl) tvRootEl.addEventListener('click', e => {
+    const row = e.target.closest('[data-tv-ev]');
+    if (!row) return;
+    const ev = eventById.get(row.dataset.tvEv);
+    if (ev) showTripsyTravelEventDetail(ev);
+  });
 
   // ---- Two-way calendar <-> itinerary sync ----
   // The frozen calendar tracks the date of the topmost visible event, tapping a
