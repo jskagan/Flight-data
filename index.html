@@ -11555,7 +11555,7 @@ function tripsyEventControlsInnerHtml(isApproved, wantsGenerate, hasBlurb) {
           : `<button type="button" class="btn" data-tripsy-event-narrative-generate>Generate</button>`)
       : (hasBlurb ? `<button type="button" class="btn" data-tripsy-event-narrative-delete>Delete</button>` : '')}
     <button type="button" class="btn" data-tripsy-event-narrative-custom-toggle>Custom Note</button>
-    ${hasBlurb ? `<button type="button" class="btn" data-tripsy-event-narrative-approve>Approved</button>` : ''}
+    <button type="button" class="btn" data-tripsy-event-narrative-approve>Approved</button>
   `;
 }
 // Flip an event's controls between the "Approved" badge and the button set in
@@ -11705,7 +11705,10 @@ function tripsyEventNarrativeControlsHtml(rowKey, eventEntry, wantsGenerate, has
   // means anything once an individual entry exists at all, which the
   // Approve click handler guarantees by snapshotting an inherited blurb
   // into one first (same "freeze the text" move Delete already makes).
-  const isApproved = hasBlurb && !!(eventEntry && eventEntry.approved);
+  // Approval is per-entry and no longer requires blurb content -- every card can
+  // be marked Approved. Approving a content-less card snapshots an empty override
+  // marked approved (see the approve handler), same "freeze it" move as a blurb.
+  const isApproved = !!(eventEntry && eventEntry.approved);
   return `
     <div class="tp-narrative-section" data-tripsy-event-narrative-section data-row-key="${esc(rowKey)}" data-displayed-blurb="${esc(displayedBlurb || '')}" data-wants-generate="${wantsGenerate ? '1' : '0'}" data-has-blurb="${hasBlurb ? '1' : '0'}">
       <div class="tp-narrative-controls">
@@ -13078,18 +13081,17 @@ async function buildTripsyPrintHtml(tripKey) {
   // transportation leg and every lodging, with the same factual info the Detailed
   // Itinerary cards show but no photos or narrative. Multi-day events (split into
   // begin/end halves for the day views) are listed once (skip the '-end' half).
-  const tiDateCell = (startIso, endIso) => {
-    const s = tripsyDayKey(startIso); if (!s) return '';
-    const e = tripsyDayKey(endIso);
-    return (e && e !== s) ? `${tripsySummaryDayTileDate(s)} – ${tripsySummaryDayTileDate(e)}` : tripsySummaryDayTileDate(s);
-  };
-  // Raw check-in/check-out (or departure/arrival) dates -- ev.start/end is null on
-  // the "begin" half of a multi-day split, so use the raw fields for the full range.
+  // Date cell (safe HTML). Multi-day events put the second date on a second line
+  // under the first. Uses the raw check-in/check-out (or departure/arrival) dates,
+  // since ev.start/end is null on the "begin" half of a multi-day split.
   const tiDateFor = ev => {
     const r = ev.tripsyRaw;
-    if (r.resource === 'hosting') return tiDateCell(r.startsAt, r.endsAt);
-    if (r.resource === 'transportation') return tiDateCell(r.departureAt, r.arrivalAt);
-    return tiDateCell(ev.start, ev.end);
+    const start = r.resource === 'hosting' ? r.startsAt : (r.resource === 'transportation' ? r.departureAt : ev.start);
+    const end = r.resource === 'hosting' ? r.endsAt : (r.resource === 'transportation' ? r.arrivalAt : ev.end);
+    const s = tripsyDayKey(start); if (!s) return '';
+    const e = tripsyDayKey(end);
+    const d1 = esc(tripsySummaryDayTileDate(s));
+    return (e && e !== s) ? `${d1}<br>${esc(tripsySummaryDayTileDate(e))}` : d1;
   };
   const tiSeen = new Set();
   const tiEvents = [];
@@ -13120,7 +13122,7 @@ async function buildTripsyPrintHtml(tripKey) {
   const tiTable = (rows, detailsFn, emptyMsg) => rows.length ? `
     <div class="tp-ti-table">
       <div class="tp-ti-head"><div>Date</div><div>Details</div></div>
-      ${rows.map(ev => `<div class="tp-ti-row"><div class="tp-ti-date">${esc(tiDateFor(ev))}</div><div class="tp-ti-details">${detailsFn(ev)}</div></div>`).join('')}
+      ${rows.map(ev => `<div class="tp-ti-row"><div class="tp-ti-date">${tiDateFor(ev)}</div><div class="tp-ti-details">${detailsFn(ev)}</div></div>`).join('')}
     </div>` : `<div class="tp-ti-empty">${esc(emptyMsg)}</div>`;
   const travelInfoHtml = `
     <div class="tp-section-break">
@@ -13466,7 +13468,8 @@ function drawTripsyTravelInfoPdf(doc, summaryByDay) {
   const dateCell = (startIso, endIso) => {
     const s = tripsyDayKey(startIso); if (!s) return '';
     const e = tripsyDayKey(endIso);
-    return (e && e !== s) ? `${dayTileDate(s)} - ${dayTileDate(e)}` : dayTileDate(s);
+    // Multi-day: second date on its own line under the first (splitTextToSize keeps \n).
+    return (e && e !== s) ? `${dayTileDate(s)}\n${dayTileDate(e)}` : dayTileDate(s);
   };
   // Use the raw check-in/check-out (or departure/arrival) dates -- ev.start/end is
   // null on the check-in "begin" half of a multi-day split, which would show only
