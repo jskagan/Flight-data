@@ -9798,6 +9798,105 @@ function showTripsyLodgingCheckDialog(trip, result) {
   overlay.querySelector('[data-lc-close]').focus();
 }
 
+// Loose "these two place names probably refer to the same lodging" test, used
+// ONLY to suppress a transportation-gap flag between consecutive stays (e.g. a
+// hotel split across two booking records, or a re-booking). Errs toward "same":
+// a false "same" merely drops one advisory check, whereas a false "different"
+// would cry wolf about a move that never happened.
+const TRIPSY_PLACE_STOPWORDS = new Set(['the', 'and', 'hotel', 'hotels', 'inn', 'resort', 'house', 'farmhouse', 'lodge', 'suite', 'suites', 'spa', 'check', 'checkin', 'grand', 'club', 'estate', 'town']);
+function tripsyPlaceTokens(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ')
+    .filter(w => w.length >= 3 && !TRIPSY_PLACE_STOPWORDS.has(w));
+}
+function tripsyPlacesLikelySame(a, b) {
+  const ta = tripsyPlaceTokens(a), tb = tripsyPlaceTokens(b);
+  if (!ta.length || !tb.length) return false;
+  return ta.some(w => tb.includes(w));
+}
+
+// Sanity check (per-trip "Check transportation"): when the trip moves between
+// two DIFFERENT lodgings (check out of one, check into the next), is there any
+// transportation logged in the window between them? Effective events include
+// pending create_event hostings/transportation queued for the trip. Deliberately
+// does NOT fuzzy-match a transport's arrival place against the next departure
+// place (free-text addresses make that far too false-positive-prone) -- it only
+// asks whether SOME transport spans each hotel change. Advisory only: a leg you
+// drove yourself and never logged is a legitimate "gap".
+function tripsyTransportationGaps(trip, pendingChanges) {
+  const events = trip.events || [];
+  const lodgings = [];
+  const transports = [];
+  const addLodging = (name, ciIso, coIso) => {
+    const ci = tripsyDayKey(ciIso);
+    if (!ci) return; // needs a date to place it in the chain
+    lodgings.push({ name: name || 'Lodging', ci, co: tripsyDayKey(coIso) || ci });
+  };
+  const addTransport = (depIso, arrIso) => {
+    const dep = tripsyDayKey(depIso) || tripsyDayKey(arrIso);
+    if (dep) transports.push({ dep, arr: tripsyDayKey(arrIso) || dep });
+  };
+  events.forEach(e => {
+    const r = e.tripsyRaw;
+    if (!r) return;
+    if (r.resource === 'hosting') addLodging(r.name || e.summary, e.start, e.end);
+    else if (r.resource === 'transportation') addTransport(e.start, e.end);
+  });
+  (pendingChanges || []).forEach(c => {
+    if (c.type !== 'create_event' || c.tripKey !== trip.key || !c.fields) return;
+    if (c.tripsyResource === 'hosting') addLodging(c.fields.name, c.fields.startsAt, c.fields.endsAt);
+    else if (c.tripsyResource === 'transportation') addTransport(c.fields.departureAt, c.fields.arrivalAt);
+  });
+  lodgings.sort((a, b) => a.ci.localeCompare(b.ci));
+  let moves = 0;
+  const gaps = [];
+  for (let i = 0; i + 1 < lodgings.length; i++) {
+    const A = lodgings[i], B = lodgings[i + 1];
+    if (tripsyPlacesLikelySame(A.name, B.name)) continue; // same place -> no move
+    const windowStart = A.co || A.ci, windowEnd = B.ci;
+    if (windowEnd < windowStart) continue; // overlapping stays, not a clean move
+    moves++;
+    // A transport spans the move if its [departure, arrival] day range overlaps
+    // the checkout->next-checkin window at all.
+    const covered = transports.some(t => t.dep <= windowEnd && t.arr >= windowStart);
+    if (!covered) gaps.push({ from: A.name, to: B.name, day: windowStart });
+  }
+  return { moves, gaps };
+}
+
+// Advisory dialog for the per-trip transportation check.
+function showTripsyTransportationCheckDialog(trip, result) {
+  const { moves, gaps } = result;
+  let body;
+  if (!moves) {
+    body = `<div style="font-size:13px; color:var(--muted);">Not enough dated lodgings on this trip to check transportation between stays.</div>`;
+  } else if (!gaps.length) {
+    body = `<div style="font-size:14px; color:var(--home-green); font-weight:600;">✓ All ${moves} move${moves === 1 ? '' : 's'} between stays have transportation logged.</div>`;
+  } else {
+    body = `
+      <div style="font-size:13px; color:var(--text); margin-bottom:10px;"><b style="color:var(--amber);">${gaps.length} of ${moves} move${moves === 1 ? '' : 's'} between stays with no transportation logged:</b></div>
+      <ul style="margin:0 0 12px 20px; padding:0; font-size:13px; line-height:1.7;">
+        ${gaps.map(g => `<li>${esc(g.from)} → ${esc(g.to)}${g.day ? ` <span style="color:var(--muted);">(around ${esc(tripsyDayHeaderLabel(g.day))})</span>` : ''}</li>`).join('')}
+      </ul>
+      <div style="font-size:11px; color:var(--muted); line-height:1.5;">Advisory only — a leg you drove yourself (or otherwise didn't log) won't count as transportation, and this only checks moves between logged stays.</div>`;
+  }
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10002; display:flex; align-items:center; justify-content:center; padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; max-width:440px; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+      <div style="font-size:15px; font-weight:700; color:var(--text); margin-bottom:4px;">🚗 Transportation check</div>
+      <div style="font-size:12px; color:var(--muted); margin-bottom:14px;">${esc(trip.name)}</div>
+      ${body}
+      <div style="display:flex; justify-content:flex-end; margin-top:18px;">
+        <button data-tc-close class="btn primary" style="font-size:13px;">Close</button>
+      </div>
+    </div>`;
+  const close = () => overlay.remove();
+  overlay.addEventListener('click', e => { e.stopPropagation(); if (e.target === overlay) close(); });
+  overlay.querySelector('[data-tc-close]').addEventListener('click', close);
+  document.body.appendChild(overlay);
+  overlay.querySelector('[data-tc-close]').focus();
+}
+
 function tripsyTimelineRowHtml(spec) {
   const {
     dotColor, dotGlyph, dotImageB64, timeLabel,
@@ -15988,6 +16087,7 @@ async function renderTripsyEventsListImpl() {
         <div data-tripsy-trip-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${isOwner ? menuListButtonHtml(`data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}"`, '✏️', 'Edit') : ''}
           ${menuListButtonHtml(`data-tripsy-check-lodging data-key="${esc(trip.key)}"`, '🛏️', 'Check lodging')}
+          ${menuListButtonHtml(`data-tripsy-check-transportation data-key="${esc(trip.key)}"`, '🚗', 'Check transportation')}
           ${menuListButtonHtml(`data-tripsy-hide-trip data-key="${esc(trip.key)}"`, '🙈', 'Hide')}
           ${isOwner ? menuListButtonHtml(`data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete') : ''}
         </div>
@@ -16402,6 +16502,16 @@ async function renderTripsyEventsListImpl() {
       if (!trip) return;
       const pending = isOwner ? await Store.listTripsyPendingChanges() : [];
       showTripsyLodgingCheckDialog(trip, tripsyLodgingGaps(trip, pending));
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-check-transportation]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      closeAllTripsyTripPanels();
+      const trip = (tripsyDecryptedTrips || []).find(t => t.key === btn.dataset.key);
+      if (!trip) return;
+      const pending = isOwner ? await Store.listTripsyPendingChanges() : [];
+      showTripsyTransportationCheckDialog(trip, tripsyTransportationGaps(trip, pending));
     });
   });
 
