@@ -19069,9 +19069,10 @@ function ensureTravelViewStyles() {
 // above the Travel View layer. Its own ✕ (or a click on the backdrop) removes
 // the overlay, dropping the user straight back onto Travel View underneath.
 function showTripsyTravelEventDetail(ev) {
+  const isPs = !!(ev && ev._ps);
   const raw = ev && ev.tripsyRaw;
-  if (!raw) return;
-  const title = ev.summary || 'Event';
+  if (!isPs && !raw) return;
+  const title = isPs ? `P/S Reservation${ev.psRes.experience ? ' • ' + ev.psRes.experience : ''}` : (ev.summary || 'Event');
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.62); z-index:10001; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch;';
   overlay.innerHTML = `
@@ -19083,7 +19084,8 @@ function showTripsyTravelEventDetail(ev) {
       <div data-tv-detail-body></div>
     </div>`;
   const body = overlay.querySelector('[data-tv-detail-body]');
-  renderTripsyViewPanel(body, raw, title, null);
+  if (isPs) renderTripsyPsReservationViewPanel(body, ev.psRes, { ev: ev.psFlight, direction: ev.psDirection, driftReason: ev.psDriftReason });
+  else renderTripsyViewPanel(body, raw, title, null);
   body.style.display = 'block';
   // renderTripsyViewPanel adds its own Close row -- hide it; the modal's ✕ is the control.
   const innerClose = body.querySelector('[data-tripsy-view-close]');
@@ -19145,9 +19147,24 @@ async function renderTravelView() {
   // each half lands on its own day; group by day; keep day order chronological.
   const expanded = expandMultiDayTripsyEvents((trip.events || []).filter(ev => ev && ev.start))
     .sort((a, b) => new Date(a.start || 0) - new Date(b.start || 0));
-  const eventById = new Map(expanded.map(ev => [ev.id, ev])); // for the tap-to-detail lookup
+  // P/S reservations aren't Tripsy events -- weave each matched one in next to its
+  // flight (before it for a departure lounge, after it for arrival), same as the
+  // My Trips timeline and the printed itinerary do.
+  const withPs = [];
+  for (const ev of expanded) {
+    const psMatch = findMatchingTripsyPsReservation(ev);
+    const psEv = psMatch ? {
+      _ps: true, psRes: psMatch.reservation, psDirection: psMatch.direction, psDriftReason: psMatch.driftReason,
+      psFlight: ev, start: ev.start,
+      id: `ps-${psMatch.reservation.reservationNumber || 'x'}-${psMatch.direction}`,
+    } : null;
+    if (psEv && psMatch.direction === 'before') withPs.push(psEv);
+    withPs.push(ev);
+    if (psEv && psMatch.direction === 'after') withPs.push(psEv);
+  }
+  const eventById = new Map(withPs.map(ev => [ev.id, ev])); // for the tap-to-detail lookup
   const eventsByDay = new Map();
-  for (const ev of expanded) { const k = tripsyDayKey(ev.start) || 'undated'; if (!eventsByDay.has(k)) eventsByDay.set(k, []); eventsByDay.get(k).push(ev); }
+  for (const ev of withPs) { const k = tripsyDayKey(ev.start) || 'undated'; if (!eventsByDay.has(k)) eventsByDay.set(k, []); eventsByDay.get(k).push(ev); }
 
   const firstDay = tripsyDayKey(trip.start) || [...eventsByDay.keys()].filter(k => k !== 'undated').sort()[0] || null;
   const lastDay = tripsyDayKey(trip.end) || [...eventsByDay.keys()].filter(k => k !== 'undated').sort().pop() || firstDay;
@@ -19183,7 +19200,7 @@ async function renderTravelView() {
     const dow = dt.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' }).toUpperCase();
     const num = Number(dayKey.split('-')[2]);
     const evs = eventsByDay.get(dayKey) || [];
-    const dots = evs.slice(0, 6).map(ev => `<span class="tv-dot" style="background:${tripsyTimelineDotColor(ev)};"></span>`).join('');
+    const dots = evs.slice(0, 6).map(ev => `<span class="tv-dot" style="background:${ev._ps ? '#1E3A5C' : tripsyTimelineDotColor(ev)};"></span>`).join('');
     return `<button class="tv-daycell" data-tv-cal-date="${esc(dayKey)}">
       <div class="tv-dow">${esc(dow)}</div>
       <div class="tv-datenum">${num}</div>
@@ -19192,8 +19209,30 @@ async function renderTravelView() {
   };
   const stripHtml = `<div class="tv-strip">${allDays.map(stripCellHtml).join('')}</div>`;
 
+  // A matched P/S reservation row (navy dot with the LAX P/S icon), styled like
+  // the other rows: title + a direction subtitle + its own time on the right.
+  const psRowHtml = ps => {
+    const res = ps.psRes;
+    const { timeLabel } = tripsyPsReservationTimeLabel(res, ps.psFlight, ps.psDirection, ps.psDriftReason);
+    const title = `P/S Reservation${res.experience ? ' • ' + res.experience : ''}`;
+    const subtitle = ps.psDirection === 'before'
+      ? (timeLabel ? `Arrive by ${timeLabel}` : 'The Private Suite')
+      : (res.arrivalAirport ? `Arrival${timeLabel ? ' • ' + timeLabel : ''} • ${res.arrivalAirport}` : 'The Private Suite');
+    const searchText = `${title} ${subtitle} p/s private suite ${res.experience || ''}`.toLowerCase();
+    return `
+      <div class="tv-row" data-tv-ev="${esc(ps.id)}" data-tv-cat="Flight" data-tv-text="${esc(searchText)}">
+        <div class="tv-icon" style="background:#1E3A5C;"><img src="data:image/png;base64,${LAX_NAV_ICON_B64}" style="max-width:22px; max-height:15px; width:auto; height:auto;" alt=""></div>
+        <div class="tv-body">
+          <div class="tv-evtitle">${esc(title)}</div>
+          ${subtitle ? `<div class="tv-evsub">${esc(subtitle)}</div>` : ''}
+        </div>
+        <div class="tv-right">${timeLabel ? `<div class="tv-time">${esc(timeLabel)}</div>` : ''}</div>
+      </div>`;
+  };
+
   // ---- One event row ----
   const rowHtml = ev => {
+    if (ev._ps) return psRowHtml(ev);
     const raw = ev.tripsyRaw || {};
     const isHotel = raw.resource === 'hosting';
     let title, subtitle;
@@ -19313,14 +19352,27 @@ async function renderTravelView() {
     const show = filterRow.style.display === 'none';
     filterRow.style.display = show ? 'flex' : 'none';
     filterBtn.classList.toggle('tv-active', show);
+    if (show) {
+      // Opening the filter: start with everything OFF -- the user opts in to the
+      // categories they want to see.
+      tvSelectedCats.clear();
+      main.querySelectorAll('[data-tv-cat-chip]').forEach(c => c.classList.remove('tv-on'));
+    } else {
+      // Exiting the filter: show all events again.
+      categories.forEach(c => tvSelectedCats.add(c));
+      main.querySelectorAll('[data-tv-cat-chip]').forEach(c => c.classList.add('tv-on'));
+    }
     measureTopbar();
+    applyFilter();
   });
   main.querySelectorAll('[data-tv-cat-chip]').forEach(chip => chip.addEventListener('click', () => {
     const c = chip.dataset.tvCatChip;
     if (tvSelectedCats.has(c)) tvSelectedCats.delete(c); else tvSelectedCats.add(c);
     chip.classList.toggle('tv-on', tvSelectedCats.has(c));
     filterBtn.classList.toggle('tv-active', tvSelectedCats.size !== categories.length || filterRow.style.display !== 'none');
-    applyFilter();
+    // Defer the reflow-heavy list filtering by a frame so the chip's colour
+    // change paints immediately instead of waiting on applyFilter to finish.
+    requestAnimationFrame(() => requestAnimationFrame(applyFilter));
   }));
 
   // ---- Calendar <-> itinerary link ----
