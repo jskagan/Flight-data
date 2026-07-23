@@ -992,6 +992,10 @@
     <input type="checkbox" id="remember-me-checkbox" checked style="width:16px; height:16px; cursor:pointer;">
     Remember me on this device
   </label>
+  <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted); cursor:pointer;">
+    <input type="checkbox" id="travel-view-checkbox" style="width:16px; height:16px; cursor:pointer;">
+    Travel View — open straight to the current trip
+  </label>
   <button id="signin-btn" class="btn primary" style="padding:12px 24px; font-size:14px;">Sign in with Google</button>
   <div id="signin-status" style="color:var(--muted); font-size:13px; min-height:20px;"></div>
   <div style="color:var(--muted); font-size:11px; max-width:380px;">
@@ -4326,6 +4330,7 @@ async function navigate(view, param) {
     else if (view === "utilitiesparsingdocs") await renderUtilitiesParsingDocs();
     else if (view === "utilitiesitineraryphotos") await renderUtilitiesItineraryPhotos();
     else if (view === "passengers") await renderPassengerReport(param || "totals");
+    else if (view === "travelview") await renderTravelView();
   } catch (e) {
     // Catch-all so a bug in one view shows a visible error instead of an
     // infinite "Loading…" -- individual views may also handle their own
@@ -11359,6 +11364,9 @@ async function tripsyRunGeneratePanelUpdate(panel, tripKey) {
     // generated narrative (skip a delete-only pass -- deletes add no places).
     if (includeIntro || dayKeysToGenerate.length || eventRowKeysToGenerate.length) {
       try { await buildTripsyPrintHtml(tripKey); } catch (err) { console.error('Photo pre-fetch after generate failed:', err); }
+      // Record the itinerary's baseline (acknowledge current events) so a later
+      // edit/add/Update is detected as a change against this generated state.
+      try { await tripsyRecordItineraryBaseline((tripsyDecryptedTrips || []).find(t => t.key === tripKey)); } catch (err) { console.error('Itinerary baseline record failed:', err); }
     }
 
     toast(hadError ? 'Some sections could not be updated — see console for details.' : 'Itinerary sections updated.', hadError ? 'error' : 'success');
@@ -11731,6 +11739,163 @@ function tripsyContentFingerprint(obj) {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16);
+}
+
+// ---- Itinerary change tracking: "Edit" warning + regenerate-changes dialog ----
+// When events are added or modified (manual edits, imports, or the Update flow)
+// after an itinerary was generated, its narrative/photos go stale for those
+// events. We snapshot a per-event content fingerprint at generation time (a
+// `${tripKey}::itinbaseline` narrative-cache entry) and compare the trip's
+// current effective events against it: an event with no baseline entry is
+// "added", one whose fingerprint changed is "modified". The baseline is cleared
+// with the rest of a trip's narrative on Delete (deleteAllTripsyNarrativeForTrip
+// matches the `${tripKey}::` prefix) and reset whenever the itinerary is
+// generated/acknowledged (initial Create, the selection screen, the dialog's
+// Continue), so acknowledged events -- even ones deliberately left ungenerated
+// -- don't keep warning until they change again.
+const TRIPSY_ITIN_BASELINE_SUFFIX = '::itinbaseline';
+function tripsyItineraryEventKey(ev) {
+  // Real events key on resource:id; a pending-create (no Tripsy id yet) keys on
+  // its synthetic `pending-create-<changeId>` id so multiple creates stay distinct.
+  return (ev.tripsyRaw && ev.tripsyRaw.id != null) ? tripsyEventKey(ev.tripsyRaw) : ev.id;
+}
+function tripsyItineraryEventFingerprint(ev) {
+  const r = ev.tripsyRaw || {};
+  return tripsyContentFingerprint({
+    summary: ev.summary || '', start: ev.start || '', end: ev.end || '',
+    location: ev.location || '', notes: ev.notes || '',
+    resource: r.resource || '', category: r.category || '',
+    company: r.company || '', transportNumber: r.transportNumber || '',
+    confirmation: r.confirmation || '', address: r.address || '',
+  });
+}
+// The current effective itinerary events -- UNEXPANDED (one entry per underlying
+// event, real start+end intact, so a multi-day stay is one thing and a
+// check-out-date edit is still caught). Mirrors buildTripsyPrintDayData's own
+// event construction (effective + visible + pending creates).
+async function tripsyItineraryEventList(trip) {
+  const pendingChanges = isOwner ? await Store.listTripsyPendingChanges() : [];
+  const effectiveEvents = trip.events.map(ev => getEffectiveTripsyEvent(ev, pendingChanges));
+  const visibleEvents = effectiveEvents.filter(ev => !isTripsyEventEffectivelyHidden(ev) && !ev._pendingDeleteId);
+  const pendingCreateEvents = pendingChanges.filter(c => c.type === 'create_event' && c.tripKey === trip.key).map(c => {
+    const raw = { ...tripsyBlankRaw(c.tripsyResource, null), ...c.fields };
+    return { ...tripsyRawToDisplay(c.tripsyResource, raw), id: `pending-create-${c.id}`, tripsyRaw: raw };
+  });
+  return [...visibleEvents, ...pendingCreateEvents];
+}
+function tripsyItineraryBaselineFromEvents(events) {
+  const fp = {};
+  for (const ev of events) fp[tripsyItineraryEventKey(ev)] = tripsyItineraryEventFingerprint(ev);
+  return { fp, recordedAt: new Date().toISOString() };
+}
+// Reset the baseline to exactly the current itinerary events -- the "acknowledge
+// current state" step. Owner-only (only the owner can write driveData).
+async function tripsyRecordItineraryBaseline(trip) {
+  if (!isOwner || !trip) return;
+  const events = await tripsyItineraryEventList(trip);
+  await Store.saveTripsyNarrativeSections({ [`${trip.key}${TRIPSY_ITIN_BASELINE_SUFFIX}`]: tripsyItineraryBaselineFromEvents(events) });
+}
+// Added/modified events since the baseline, each { ev, key, changeType }. Empty
+// when there's no generated itinerary or nothing changed. With allowBackfill,
+// a pre-existing itinerary that never had a baseline adopts its current state as
+// the baseline (so it starts clean and warns only on the NEXT change) -- done
+// only on an actual user action (Edit click), never during render.
+async function tripsyItineraryChangedEvents(trip, narrativeCache, { allowBackfill = false } = {}) {
+  if (!isOwner || !trip) return [];
+  const cache = narrativeCache || await Store.getTripsyNarrativeCache();
+  const hasNarrative = !!(cache[`${trip.key}::intro`] || Object.keys(cache).some(k => k.startsWith(`${trip.key}::day::`)));
+  if (!hasNarrative) return [];
+  const baseline = cache[`${trip.key}${TRIPSY_ITIN_BASELINE_SUFFIX}`];
+  if (!baseline || !baseline.fp) {
+    if (allowBackfill) { try { await tripsyRecordItineraryBaseline(trip); } catch (e) { console.error('Itinerary baseline backfill failed:', e); } }
+    return [];
+  }
+  const events = await tripsyItineraryEventList(trip);
+  const changed = [];
+  for (const ev of events) {
+    const key = tripsyItineraryEventKey(ev);
+    const fp = tripsyItineraryEventFingerprint(ev);
+    if (!(key in baseline.fp)) changed.push({ ev, key, changeType: 'added' });
+    else if (baseline.fp[key] !== fp) changed.push({ ev, key, changeType: 'modified' });
+  }
+  return changed;
+}
+// Dialog shown when the owner clicks itinerary "Edit" and there are added/
+// modified events: date-grouped, one row per changed event with a "Generate"
+// checkbox, and Continue. On Continue, each checked event's DAY is regenerated
+// (place write-ups come per-day -- same unit the first-run selection screen
+// uses) plus its photos, the baseline is reset (acknowledging every listed
+// event, checked or not), and the Edit/Preview overlay opens.
+async function showTripsyItineraryChangesDialog(trip, changedEvents) {
+  const byDay = new Map();
+  for (const c of changedEvents) {
+    const dayKey = tripsyDayKey(c.ev.start) || 'undated';
+    if (!byDay.has(dayKey)) byDay.set(dayKey, []);
+    byDay.get(dayKey).push(c);
+  }
+  const orderedDayKeys = [...byDay.keys()].sort((a, b) => a === 'undated' ? 1 : b === 'undated' ? -1 : a.localeCompare(b));
+  const rowHtml = c => {
+    const time = formatTripTime(c.ev.start);
+    const tag = c.changeType === 'added' ? 'New' : 'Modified';
+    const dayKey = tripsyDayKey(c.ev.start) || 'undated';
+    return `
+      <label style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:5px 0; cursor:pointer;">
+        <span style="font-size:13px; min-width:0;">${time ? `<span style="font-family:var(--mono); color:var(--amber); margin-right:6px;">${esc(time)}</span>` : ''}${esc(c.ev.summary || 'Event')}<span style="color:var(--muted); font-size:11px; margin-left:6px;">(${tag})</span></span>
+        <input type="checkbox" data-tripsy-itin-change data-day-key="${esc(dayKey)}" checked style="flex-shrink:0; width:16px; height:16px;">
+      </label>`;
+  };
+  const dayBlock = dayKey => `
+    <div style="margin-bottom:14px;">
+      <div style="font-family:var(--mono); font-weight:700; font-size:13px; color:var(--amber); padding:4px 0; border-bottom:1px solid var(--line); margin-bottom:4px;">${esc(dayKey === 'undated' ? 'Undated' : tripsyDayHeaderLabel(dayKey))}</div>
+      ${byDay.get(dayKey).map(rowHtml).join('')}
+    </div>`;
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10002; display:flex; align-items:center; justify-content:center; padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; max-width:520px; width:100%; max-height:82vh; overflow-y:auto; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+      <div style="font-size:15px; font-weight:700; color:var(--text); margin-bottom:4px;">Itinerary changes</div>
+      <div style="font-size:12px; color:var(--muted); margin-bottom:6px;">${esc(trip.name)}</div>
+      <div style="font-size:12px; color:var(--muted); margin-bottom:14px; line-height:1.45;">These events were added or changed since the itinerary was generated. Check <b>Generate</b> to (re)write content and fetch photos for them — same rules as when the itinerary was first created. Unchecked events are left as they are.</div>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 0 6px; border-bottom:1px solid var(--line); margin-bottom:8px;">
+        <span style="font-size:11px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; color:var(--muted);">Event</span>
+        <span style="font-size:11px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; color:var(--muted);">Generate</span>
+      </div>
+      ${orderedDayKeys.map(dayBlock).join('')}
+      <div data-icd-status style="font-size:12px; color:var(--muted); margin:8px 0 0;"></div>
+      <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+        <button data-icd-cancel class="btn" style="font-size:13px;">Cancel</button>
+        <button data-icd-continue class="btn primary" style="font-size:13px;">Continue</button>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', e => { e.stopPropagation(); if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('[data-icd-cancel]').addEventListener('click', () => overlay.remove());
+  overlay.querySelector('[data-icd-continue]').addEventListener('click', async () => {
+    const contBtn = overlay.querySelector('[data-icd-continue]');
+    const status = overlay.querySelector('[data-icd-status]');
+    contBtn.disabled = true;
+    status.textContent = 'Generating…';
+    try {
+      const checkedDayKeys = [...new Set([...overlay.querySelectorAll('[data-tripsy-itin-change]:checked')].map(cb => cb.dataset.dayKey))];
+      if (checkedDayKeys.length) {
+        const { effectiveTrip, dayKeys, byDay: pdByDay, summaryByDay } = await buildTripsyPrintDayData(trip);
+        await tripsyGenerateNarrativeSections(trip.key, effectiveTrip, dayKeys, pdByDay, summaryByDay, { includeIntro: false, includeSummary: true, dayKeysToGenerate: checkedDayKeys });
+        await buildTripsyPrintHtml(trip.key); // pre-fetch photos for the (re)generated days, same as Create
+      }
+      // Acknowledge every listed event (checked ones regenerated, unchecked left
+      // as-is), so the warning clears until something changes again.
+      await tripsyRecordItineraryBaseline(trip);
+      const warnEl = document.querySelector(`[data-tripsy-itin-warning="${CSS.escape(trip.key)}"]`);
+      if (warnEl) warnEl.style.display = 'none'; // clear the ▲ now (no timeline re-render happens here)
+      overlay.remove();
+      await previewTripsyItinerary(trip.key, { forceGeneratedView: true });
+    } catch (e) {
+      console.error('Itinerary changes generation failed:', e);
+      status.textContent = 'Could not generate — see console for details.';
+      contBtn.disabled = false;
+    }
+  });
+  document.body.appendChild(overlay);
+  overlay.querySelector('[data-icd-continue]').focus();
 }
 
 // Calls the Claude API directly from the browser (anthropic-dangerous-
@@ -15316,6 +15481,7 @@ async function renderTripsyNarrativeSelectionScreen(overlay, tripKey, trip) {
     statusEl.textContent = 'Generating…';
     try {
       await tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, { includeIntro: true, includeSummary: true, dayKeysToGenerate: checkedDayKeys });
+      await tripsyRecordItineraryBaseline(trip); // acknowledge current events as the itinerary's baseline
       await previewTripsyItinerary(tripKey, { forceGeneratedView: true });
     } catch (e) {
       console.error('Narrative generation failed:', e);
@@ -16038,9 +16204,9 @@ async function renderTripsyEventsListImpl() {
     // (printer, page) carry their own padding. Centering every icon in a
     // 20px box guarantees consistent space before the label on every device,
     // and lines the labels up in a neat column across all the menu rows.
-    const menuListButtonHtml = (attrs, icon, label) => `
+    const menuListButtonHtml = (attrs, icon, label, trailing = '') => `
       <button class="btn" ${attrs} style="display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px;">
-        <span style="font-size:16px; flex-shrink:0; width:20px; display:inline-flex; align-items:center; justify-content:center;">${icon}</span><span>${esc(label)}</span>
+        <span style="font-size:16px; flex-shrink:0; width:20px; display:inline-flex; align-items:center; justify-content:center;">${icon}</span><span>${esc(label)}</span>${trailing}
       </button>
     `;
     // Once a trip has ANY generated narrative, "Create" becomes "Delete" --
@@ -16085,7 +16251,7 @@ async function renderTripsyEventsListImpl() {
               : '';
             return `
               ${hasGeneratedNarrative ? '' : createOrDelete}
-              ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '✏️', 'Edit')}
+              ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '✏️', 'Edit', `<span data-tripsy-itin-warning="${esc(trip.key)}" title="Events changed since this itinerary was generated" style="display:none; margin-left:auto; color:#e02424; font-size:13px; line-height:1;">▲</span>`)}
               ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', hasPendingUpdatePage ? 'Resume Update' : 'Update') : ''}
               ${menuListButtonHtml(`data-tripsy-create-pdf-itinerary data-key="${esc(trip.key)}"`, '📄', 'Generate PDF')}
               ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
@@ -16493,7 +16659,18 @@ async function renderTripsyEventsListImpl() {
       btn.disabled = true;
       iconSpan.textContent = '⏳';
       try {
-        await previewTripsyItinerary(btn.dataset.key);
+        // If events were added/modified since this itinerary was generated,
+        // route through the changes dialog (regenerate the changed events, same
+        // rules as Create) before opening the Edit/Preview overlay. Otherwise
+        // open Preview directly. Backfills a baseline for a pre-existing
+        // itinerary on this first Edit click so future changes are tracked.
+        const trip = (tripsyDecryptedTrips || []).find(t => t.key === btn.dataset.key);
+        const changed = trip ? await tripsyItineraryChangedEvents(trip, null, { allowBackfill: true }) : [];
+        if (trip && changed.length) {
+          await showTripsyItineraryChangesDialog(trip, changed);
+        } else {
+          await previewTripsyItinerary(btn.dataset.key);
+        }
       } catch (err) {
         console.error('previewTripsyItinerary failed:', err);
         toast("Could not build the itinerary preview. Please try again.", "error");
@@ -16562,6 +16739,25 @@ async function renderTripsyEventsListImpl() {
   wireTripsyHeaderMenuToggle("[data-tripsy-document-menu-toggle]", "data-tripsy-document-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-itinerary-menu-toggle]", "data-tripsy-itinerary-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-trip-menu-toggle]", "data-tripsy-trip-menu");
+
+  // Reveal the red ▲ next to each trip's itinerary "Edit" when that trip's
+  // generated itinerary has added/modified events since it was last generated.
+  // Async + best-effort (never a Drive write here -- allowBackfill defaults off),
+  // so it never blocks the timeline render; the span sits hidden in the menu HTML
+  // until this flips it on.
+  if (isOwner) {
+    (async () => {
+      const cache = await Store.getTripsyNarrativeCache();
+      for (const trip of (tripsyDecryptedTrips || [])) {
+        const warnEl = container.querySelector(`[data-tripsy-itin-warning="${CSS.escape(trip.key)}"]`);
+        if (!warnEl) continue;
+        try {
+          const changed = await tripsyItineraryChangedEvents(trip, cache);
+          warnEl.style.display = changed.length ? 'inline-flex' : 'none';
+        } catch (e) { /* leave hidden */ }
+      }
+    })();
+  }
 
   // Per-doc offline toggle inside the Document dropdown (tripsyDocumentMenuRowHtml)
   // -- sets/clears the shared keepOffline flag for just this one doc, then
@@ -18746,6 +18942,106 @@ async function getUpcomingReservations() {
   return upcoming;
 }
 
+// Picks the single "current" trip for Travel View: a trip in progress today
+// (start <= today <= end) wins; else the nearest upcoming trip; else the most
+// recent past one. Day-key string compares (all 'YYYY-MM-DD') -- "today" is
+// built from LOCAL date parts, matching how trip/event dates are stored as
+// local wallclock (see parseTripLocalParts), so it doesn't slip a day near
+// UTC midnight. Hidden trips are excluded.
+function tripsyPickCurrentTrip(trips) {
+  const visible = (trips || []).filter(t => !isTripsyTripEffectivelyHidden(t) && t.start);
+  if (!visible.length) return null;
+  const d = new Date();
+  const todayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const startKey = t => tripsyDayKey(t.start) || '';
+  const endKey = t => tripsyDayKey(t.end) || startKey(t);
+  const inProgress = visible
+    .filter(t => startKey(t) && startKey(t) <= todayKey && todayKey <= endKey(t))
+    .sort((a, b) => startKey(a).localeCompare(startKey(b)));
+  if (inProgress.length) return inProgress[0];
+  const upcoming = visible
+    .filter(t => startKey(t) > todayKey)
+    .sort((a, b) => startKey(a).localeCompare(startKey(b)));
+  if (upcoming.length) return upcoming[0];
+  return visible.slice().sort((a, b) => startKey(b).localeCompare(startKey(a)))[0] || null;
+}
+
+// SCAFFOLD (per request -- the reader UI itself is to be built out separately):
+// a phone-friendly landing view that opens straight to the current trip when
+// the sign-in screen's "Travel View" box is checked (see loadTravelViewPref /
+// completeSignIn). It decrypts the Tripsy snapshot like the Home "Upcoming
+// Trips" card does, picks the current trip, and shows its events day-by-day in
+// large readable type, with an "Exit Travel View" escape hatch so it's never a
+// trapped mode. Deliberately minimal -- flesh out the event rows/layout here.
+async function renderTravelView() {
+  const exitBarHtml = `
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px;">
+      <div style="font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--amber);">Travel View</div>
+      <button class="btn" id="travel-view-exit" style="font-size:13px;">Exit Travel View</button>
+    </div>`;
+  const wrap = inner => `<div style="max-width:640px; margin:0 auto; padding:8px 4px;">${exitBarHtml}${inner}</div>`;
+  const wireExit = () => {
+    const btn = document.getElementById('travel-view-exit');
+    if (btn) btn.addEventListener('click', () => { saveTravelViewPref(false); navigate('home'); });
+  };
+
+  main.innerHTML = wrap(`<div class="empty-state">Loading your trip…</div>`);
+  wireExit();
+
+  const decrypted = await ensureTripsyDecrypted();
+  if (!decrypted) {
+    main.innerHTML = wrap(`<div class="empty-state">Trip data is locked on this device — open <b>My Trips</b> once to unlock, then reload.</div>`);
+    wireExit();
+    return;
+  }
+
+  const trip = tripsyPickCurrentTrip(decrypted);
+  if (!trip) {
+    main.innerHTML = wrap(`<div class="empty-state">No trips found to show.</div>`);
+    wireExit();
+    return;
+  }
+
+  // Chronological, day-grouped events (simple: no multi-day split/layover
+  // handling -- that's for the fuller build-out). Only events with a start.
+  const events = (trip.events || []).filter(ev => ev && ev.start).slice()
+    .sort((a, b) => new Date(a.start) - new Date(b.start));
+  const byDay = new Map();
+  const dayOrder = [];
+  for (const ev of events) {
+    const dayKey = tripsyDayKey(ev.start) || 'undated';
+    if (!byDay.has(dayKey)) { byDay.set(dayKey, []); dayOrder.push(dayKey); }
+    byDay.get(dayKey).push(ev);
+  }
+
+  const eventRowHtml = ev => {
+    const time = formatTripTime(ev.start);
+    const loc = ev.location ? `<div style="font-size:14px; color:var(--muted); margin-top:2px;">${esc(ev.location)}</div>` : '';
+    return `
+      <div style="padding:12px 0; border-bottom:1px solid var(--line);">
+        <div style="display:flex; gap:12px; align-items:baseline;">
+          ${time ? `<div style="font-family:var(--mono); font-size:15px; font-weight:700; color:var(--amber); flex-shrink:0; min-width:74px;">${esc(time)}</div>` : `<div style="min-width:74px; flex-shrink:0;"></div>`}
+          <div style="font-size:17px; font-weight:600; color:var(--text); line-height:1.3;">${esc(ev.summary || 'Event')}</div>
+        </div>
+        ${loc ? `<div style="padding-left:86px;">${loc}</div>` : ''}
+      </div>`;
+  };
+  const dayBlockHtml = dayKey => `
+    <div style="margin-top:20px;">
+      <div style="font-family:var(--mono); font-size:15px; font-weight:700; color:var(--text); background:var(--panel-2); padding:8px 12px; border-radius:8px;">${esc(dayKey === 'undated' ? 'Undated' : tripsyDayHeaderLabel(dayKey))}</div>
+      ${byDay.get(dayKey).map(eventRowHtml).join('')}
+    </div>`;
+
+  main.innerHTML = wrap(`
+    <div style="margin-bottom:6px;">
+      <div style="font-size:26px; font-weight:800; color:var(--text); line-height:1.2;">${esc(trip.name || 'Trip')}</div>
+      <div style="font-size:15px; color:var(--muted); margin-top:4px;">${esc(formatTripDateRange(trip.start, trip.end))}${trip.location ? ` &nbsp;·&nbsp; ${esc(trip.location)}` : ''}</div>
+    </div>
+    ${dayOrder.length ? dayOrder.map(dayBlockHtml).join('') : `<div class="empty-state" style="margin-top:16px;">No events on this trip yet.</div>`}
+  `);
+  wireExit();
+}
+
 async function renderHome() {
   main.innerHTML = `
     <div style="margin-bottom:24px;">
@@ -19108,6 +19404,18 @@ function loadScopeTierHint() {
 function saveScopeTierHint(tier) {
   try { localStorage.setItem(SCOPE_TIER_KEY, tier); } catch (e) { /* ignore */ }
 }
+// "Travel View" is a per-device display preference (like the sign-in
+// "Remember me" toggle and isTripsyTripCollapsed) -- stored in localStorage,
+// NOT in the shared Drive data file, since it's about how THIS phone opens the
+// app, not shared app state. When on, completeSignIn() routes straight to the
+// current trip's readable view instead of the Home dashboard.
+const TRAVEL_VIEW_KEY = 'flightlog_travel_view';
+function loadTravelViewPref() {
+  try { return localStorage.getItem(TRAVEL_VIEW_KEY) === '1'; } catch (e) { return false; }
+}
+function saveTravelViewPref(on) {
+  try { localStorage.setItem(TRAVEL_VIEW_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
+}
 // The one account allowed to upload/edit/delete -- everyone else who
 // signs in gets read-only access to the same shared data. Real
 // enforcement also happens at the Google Drive permission level (share
@@ -19215,6 +19523,15 @@ async function completeSignIn() {
     document.getElementById('signin-gate').style.display = 'none';
     document.getElementById('app-root').style.display = '';
 
+    // Travel View: if this device opted in on the sign-in screen, swap the
+    // just-rendered Home dashboard for the readable current-trip view. Done
+    // here (not instead of renderHome above) so the normal app shell is fully
+    // set up and the user can still navigate elsewhere -- it's a landing view,
+    // not a locked mode. Best-effort: any failure just leaves Home showing.
+    if (loadTravelViewPref()) {
+      try { await navigate('travelview'); } catch (e) { console.error('Travel View startup routing failed (non-fatal):', e); }
+    }
+
     // Fire-and-forget: shows cached data immediately above, then quietly
     // refreshes PS Reservations/Balance/Trips in the background and
     // updates whichever page is on-screen once each finishes.
@@ -19251,6 +19568,16 @@ function initGoogleAuth() {
   // sign-in screen now.
   document.getElementById('splash-screen').style.display = 'none';
   document.getElementById('signin-gate').style.display = 'flex';
+
+  // Reflect this device's saved Travel View preference in its checkbox, and
+  // persist any change immediately -- so it takes effect on the NEXT load even
+  // if the user is signing in via the cached-token fast path (which never
+  // shows this screen and just reads loadTravelViewPref() at startup).
+  const travelViewCheckbox = document.getElementById('travel-view-checkbox');
+  if (travelViewCheckbox) {
+    travelViewCheckbox.checked = loadTravelViewPref();
+    travelViewCheckbox.addEventListener('change', () => saveTravelViewPref(travelViewCheckbox.checked));
+  }
 
   // Default to the full scope when this device has no hint yet (a fresh
   // device, or the first sign-in after this scope split shipped) so
