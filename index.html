@@ -14824,7 +14824,122 @@ async function runTripsyUpdateComparison(tripKey, file) {
 // HTML to the real print flow directly (openTripsyItineraryPrintView is
 // NOT called again), so previewing then printing never re-fetches photos
 // or re-reads the narrative cache a second time.
-async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPicker } = {}) {
+// Fired when the Preview overlay is closed, if it was opened with an onExit
+// callback (e.g. from the Itinerary Status page, to return there). Module-scope
+// because the overlay's close handlers are wired once, on first creation.
+let _tripsyPreviewExitCallback = null;
+
+function ensureTripsyStatusStyles() {
+  if (document.getElementById('tst-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'tst-styles';
+  style.textContent = `
+    .tst-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10002; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+    .tst-card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; max-width:640px; width:100%; box-shadow:0 16px 48px rgba(0,0,0,0.55); }
+    .tst-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px; }
+    .tst-title { font-size:18px; font-weight:800; color:var(--text); }
+    .tst-sub { font-size:12px; color:var(--muted); margin-top:2px; }
+    .tst-close { width:34px; height:34px; border-radius:8px; border:1px solid var(--line); background:var(--panel-2); color:var(--text); font-size:16px; cursor:pointer; flex-shrink:0; }
+    .tst-colhead { display:grid; grid-template-columns:1fr 62px 62px 66px; gap:6px; padding:6px 8px; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:var(--muted); }
+    .tst-colhead > div:not(:first-child) { text-align:center; }
+    .tst-datehead { font-family:var(--mono); font-size:12px; font-weight:700; color:var(--amber); padding:14px 8px 4px; }
+    .tst-row { display:grid; grid-template-columns:1fr 62px 62px 66px; gap:6px; align-items:center; padding:2px 8px; border-radius:6px; }
+    .tst-row.tst-approved { background:rgba(42,157,79,0.16); }
+    .tst-name { text-align:left; background:none; border:none; color:var(--text); font-size:13px; padding:8px 0; cursor:pointer; text-decoration:underline dotted; text-underline-offset:2px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .tst-cell { display:flex; justify-content:center; }
+    .tst-box { width:18px; height:18px; border-radius:4px; border:1.5px solid var(--line); display:flex; align-items:center; justify-content:center; font-size:12px; color:transparent; }
+    .tst-box.tst-on { background:#2a9d4f; border-color:#2a9d4f; color:#fff; }
+    .tst-na { color:var(--muted); opacity:0.5; }
+  `;
+  document.head.appendChild(style);
+}
+
+// Whether an event currently has a (non-skipped) cached photo. Transportation
+// keys are exact; place (hosting/activity) photos are matched by the
+// name|address|title prefix (the full key also encodes a location hint we don't
+// recompute here). driveData.tripsyPlacePhotoCache is the in-memory map.
+function tripsyEventHasPhoto(ev, photoCache) {
+  const raw = ev && ev.tripsyRaw; if (!raw) return false;
+  if (raw.resource === 'transportation') {
+    const e = photoCache[tripsyTransportationPhotoCacheKey(raw.company || '', raw.category || '')];
+    return !!(e && e.driveFileId && !e.skipped);
+  }
+  if (raw.resource === 'hosting' || raw.resource === 'activity') {
+    const prefix = `${raw.name || ev.summary || ''}|${raw.address || ''}|${ev.summary || ''}|`.trim().toLowerCase();
+    return Object.entries(photoCache).some(([k, e]) => k.startsWith(prefix) && e && e.driveFileId && !e.skipped);
+  }
+  return false;
+}
+
+// Itinerary Status data: Overview + per-day (a "Summary of <Month D>" row plus
+// each event by name), each with narrative/photo/approved state and its Part 2
+// anchor id. Reuses tripsyGeneratePanelSections for narrative/approved; photo is
+// only meaningful for place/transport events (null = no photo column).
+async function tripsyBuildItineraryStatus(trip) {
+  const { effectiveTrip, dayKeys, summaryByDay } = await buildTripsyPrintDayData(trip);
+  const narrativeCache = await Store.getTripsyNarrativeCache();
+  const sections = tripsyGeneratePanelSections(trip.key, effectiveTrip, dayKeys, summaryByDay, narrativeCache);
+  const photoCache = driveData.tripsyPlacePhotoCache || {};
+  const itemByRowKey = new Map();
+  for (const items of summaryByDay.values()) for (const it of items) { const rk = tripsySummaryRowKey(it); if (rk) itemByRowKey.set(rk, it); }
+  const photoFor = rowKey => {
+    const it = itemByRowKey.get(rowKey);
+    if (!it || it.psReservation || !it.ev || !it.ev.tripsyRaw) return null;
+    if (!['hosting', 'activity', 'transportation'].includes(it.ev.tripsyRaw.resource)) return null;
+    return tripsyEventHasPhoto(it.ev, photoCache);
+  };
+  const monthDay = dayKey => { const [y, m, d] = dayKey.split('-').map(Number); return tripPartsToUtcDate({ year: y, month: m, day: d }).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'UTC' }); };
+  const dateHead = dayKey => dayKey === 'undated' ? 'Undated' : tripPartsToUtcDate({ year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)) }).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+  const days = sections.days.map(day => ({
+    dateLabel: dateHead(day.dayKey),
+    summary: { label: day.dayKey === 'undated' ? 'Summary (undated)' : `Summary of ${monthDay(day.dayKey)}`, anchor: `tp-detail-day-${day.dayKey}`, narrative: day.hasNarrative, approved: day.approved, photo: null },
+    events: day.events.map(ev => ({ label: ev.label, anchor: `tp-detail-event-${ev.rowKey}`, narrative: ev.hasNarrative, approved: ev.approved, photo: photoFor(ev.rowKey) })),
+  }));
+  return { overview: { label: 'Trip Overview', anchor: 'tp-detail-overview', narrative: sections.overview.hasNarrative, approved: sections.overview.approved, photo: null }, days };
+}
+
+// The Itinerary Status page -- read-only overview of every section's
+// narrative/photo/approved state, grouped by date, approved rows tinted green.
+// Clicking a section name opens the Edit (Preview) screen at that section and
+// returns here when it's closed.
+async function showTripsyItineraryStatus(trip) {
+  ensureTripsyStatusStyles();
+  const status = await tripsyBuildItineraryStatus(trip);
+  const box = on => `<span class="tst-box${on ? ' tst-on' : ''}">${on ? '✓' : ''}</span>`;
+  const cell = v => `<div class="tst-cell">${v === null ? '<span class="tst-na">—</span>' : box(v)}</div>`;
+  const rowHtml = sec => `<div class="tst-row${sec.approved ? ' tst-approved' : ''}">
+      <button class="tst-name" data-tst-goto="${esc(sec.anchor)}" title="${esc(sec.label)}">${esc(sec.label)}</button>
+      ${cell(sec.narrative)}${cell(sec.photo)}${cell(sec.approved)}
+    </div>`;
+  const daysHtml = status.days.map(day => `
+    <div class="tst-datehead">${esc(day.dateLabel)}</div>
+    ${rowHtml(day.summary)}
+    ${day.events.map(rowHtml).join('')}`).join('');
+  const overlay = document.createElement('div');
+  overlay.className = 'tst-overlay';
+  overlay.innerHTML = `
+    <div class="tst-card">
+      <div class="tst-head">
+        <div><div class="tst-title">Itinerary Status</div><div class="tst-sub">${esc(trip.name || 'Trip')}</div></div>
+        <button class="tst-close" data-tst-close title="Close">✕</button>
+      </div>
+      <div class="tst-colhead"><div>Section</div><div>Narrative</div><div>Photo</div><div>Approved</div></div>
+      ${rowHtml(status.overview)}
+      ${daysHtml}
+    </div>`;
+  const close = () => overlay.remove();
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  overlay.querySelector('[data-tst-close]').addEventListener('click', close);
+  overlay.querySelectorAll('[data-tst-goto]').forEach(btn => btn.addEventListener('click', () => {
+    const anchor = btn.dataset.tstGoto;
+    overlay.remove();
+    previewTripsyItinerary(trip.key, { forceGeneratedView: true, scrollToId: anchor, onExit: () => showTripsyItineraryStatus(trip) });
+  }));
+  document.body.appendChild(overlay);
+}
+
+async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPicker, scrollToId, onExit } = {}) {
+  _tripsyPreviewExitCallback = onExit || null;
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return;
 
@@ -14842,6 +14957,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
     document.body.appendChild(overlay);
     overlay.querySelector('#tripsy-preview-close-btn').addEventListener('click', () => {
       overlay.style.display = 'none';
+      const cb = _tripsyPreviewExitCallback; _tripsyPreviewExitCallback = null; if (cb) cb();
     });
     // Click-outside-to-close: the overlay itself is the fixed, full-screen
     // flex container (dark backdrop + padding around the toolbar/paper),
@@ -14850,7 +14966,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
     // means the click was in that surrounding backdrop/padding area, i.e.
     // outside the actual document.
     overlay.addEventListener('click', e => {
-      if (e.target === overlay) overlay.style.display = 'none';
+      if (e.target === overlay) { overlay.style.display = 'none'; const cb = _tripsyPreviewExitCallback; _tripsyPreviewExitCallback = null; if (cb) cb(); }
     });
     overlay.querySelector('#tripsy-preview-print-btn').addEventListener('click', async () => {
       const currentHtml = overlay.querySelector('#tripsy-preview-content').innerHTML;
@@ -15596,6 +15712,8 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
   if (html == null) { if (!wasOpen) overlay.style.display = 'none'; return; }
   content.innerHTML = html;
   if (printBtn) printBtn.style.display = '';
+  // Jump to a specific section (from the Itinerary Status page).
+  if (scrollToId) { const target = content.querySelector(`#${CSS.escape(scrollToId)}`); if (target) target.scrollIntoView({ block: 'start' }); }
 }
 
 // First-time Preview flow (owner only): shown instead of the (as yet
@@ -16457,6 +16575,7 @@ async function renderTripsyEventsListImpl() {
             return `
               ${hasGeneratedNarrative ? '' : createOrDelete}
               ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '✏️', 'Edit', `<span data-tripsy-itin-warning="${esc(trip.key)}" title="Events changed since this itinerary was generated" style="display:none; margin-left:auto; color:#e02424; font-size:13px; line-height:1;">▲</span>`)}
+              ${menuListButtonHtml(`data-tripsy-status-itinerary data-key="${esc(trip.key)}"`, '📋', 'Status')}
               ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', hasPendingUpdatePage ? 'Resume Update' : 'Update') : ''}
               ${menuListButtonHtml(`data-tripsy-create-pdf-itinerary data-key="${esc(trip.key)}"`, '📄', 'Generate PDF')}
               ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
@@ -16882,6 +17001,26 @@ async function renderTripsyEventsListImpl() {
       } finally {
         btn.disabled = false;
         iconSpan.textContent = originalIcon;
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-tripsy-status-itinerary]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      closeAllTripsyTripPanels();
+      const trip = (tripsyDecryptedTrips || []).find(t => t.key === btn.dataset.key);
+      if (!trip) return;
+      const iconSpan = btn.querySelector('span');
+      const originalIcon = iconSpan ? iconSpan.textContent : '';
+      if (iconSpan) iconSpan.textContent = '⏳';
+      try {
+        await showTripsyItineraryStatus(trip);
+      } catch (err) {
+        console.error('showTripsyItineraryStatus failed:', err);
+        toast("Could not build the itinerary status. Please try again.", "error");
+      } finally {
+        if (iconSpan) iconSpan.textContent = originalIcon;
       }
     });
   });
