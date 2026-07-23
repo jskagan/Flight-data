@@ -9919,6 +9919,86 @@ function showTripsyTransportationCheckDialog(trip, result) {
   overlay.querySelector('[data-tc-close]').focus();
 }
 
+// "Verify Travel Details" -- combines the lodging + transportation gap checks
+// into one report with two sections. Each missing item lists its date and what's
+// missing, and is tappable to open a prefilled Add form for it (see
+// openTripsyVerifyGapEdit). Advisory, same caveats as the individual checks.
+async function showTripsyVerifyTravelDialog(trip) {
+  const pending = isOwner ? await Store.listTripsyPendingChanges() : [];
+  const lodging = tripsyLodgingGaps(trip, pending);          // { nights, gaps:[dayKey] }
+  const transport = tripsyTransportationGaps(trip, pending); // { moves, gaps:[{from,to,day}] }
+  const gapRow = (dateText, descText, attrs) => `
+    <button class="tvv-gap" ${attrs} style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
+      <span style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--amber); flex-shrink:0; min-width:104px;">${esc(dateText || '')}</span>
+      <span style="font-size:13px;">${esc(descText)}</span>
+    </button>`;
+  const okLine = txt => `<div style="font-size:13px; color:var(--home-green); font-weight:600;">✓ ${esc(txt)}</div>`;
+  const muted = txt => `<div style="font-size:13px; color:var(--muted);">${esc(txt)}</div>`;
+  const lodgingBody = !lodging.nights.length
+    ? muted('Not enough dated events to check nightly lodging.')
+    : (!lodging.gaps.length
+        ? okLine(`All ${lodging.nights.length} night${lodging.nights.length === 1 ? '' : 's'} have lodging.`)
+        : lodging.gaps.map(dayKey => gapRow(tripsyDayHeaderLabel(dayKey), 'No lodging listed', `data-tvv-kind="lodging" data-tvv-day="${esc(dayKey)}"`)).join(''));
+  const transportBody = !transport.moves
+    ? muted('Not enough dated lodgings to check transportation between stays.')
+    : (!transport.gaps.length
+        ? okLine(`All ${transport.moves} move${transport.moves === 1 ? '' : 's'} between stays have transportation.`)
+        : transport.gaps.map(g => gapRow(g.day ? tripsyDayHeaderLabel(g.day) : '', `No transportation: ${g.from} → ${g.to}`, `data-tvv-kind="transport" data-tvv-day="${esc(g.day || '')}" data-tvv-from="${esc(g.from || '')}" data-tvv-to="${esc(g.to || '')}"`)).join(''));
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10002; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; max-width:480px; width:100%; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+      <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
+        <div style="font-size:16px; font-weight:800; color:var(--text);">✅ Verify Travel Details</div>
+        <button data-tvv-close title="Close" style="width:32px; height:32px; border-radius:8px; border:1px solid var(--line); background:var(--panel-2); color:var(--text); font-size:15px; cursor:pointer; flex-shrink:0;">✕</button>
+      </div>
+      <div style="font-size:12px; color:var(--muted); margin:2px 0 18px;">${esc(trip.name)}</div>
+      <div style="font-family:var(--mono); font-size:14px; font-weight:700; color:var(--amber); border-bottom:1px solid var(--line); padding-bottom:6px; margin-bottom:10px;">🛏️ Lodging</div>
+      ${lodgingBody}
+      <div style="font-family:var(--mono); font-size:14px; font-weight:700; color:var(--amber); border-bottom:1px solid var(--line); padding-bottom:6px; margin:22px 0 10px;">🚗 Transportation</div>
+      ${transportBody}
+      <div style="font-size:11px; color:var(--muted); line-height:1.5; margin-top:16px;">Advisory — tap any item to add the missing lodging or transportation. A stay or leg you didn't log will show as a gap.</div>
+    </div>`;
+  const close = () => overlay.remove();
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  overlay.querySelector('[data-tvv-close]').addEventListener('click', close);
+  overlay.querySelectorAll('[data-tvv-kind]').forEach(btn => btn.addEventListener('click', () => {
+    overlay.remove();
+    openTripsyVerifyGapEdit(trip, btn.dataset.tvvKind, { day: btn.dataset.tvvDay, from: btn.dataset.tvvFrom, to: btn.dataset.tvvTo });
+  }));
+  document.body.appendChild(overlay);
+}
+
+// Open the Add-item edit form (in a modal) for a gap the verify report found,
+// prefilled with the date (and, for transport, origin/destination). The form's
+// own Save/Cancel and unsaved-changes guard apply; a backdrop click routes
+// through that guard (Save/Discard/Keep-editing). On close (save or cancel) the
+// verify report reopens -- after a short delay so an optimistic Save's queued
+// create is in the in-memory pending list, so the gap it fills shows resolved.
+function openTripsyVerifyGapEdit(trip, kind, gap) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.62); z-index:10003; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch;';
+  overlay.innerHTML = `<div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; max-width:660px; width:100%; box-shadow:0 16px 48px rgba(0,0,0,0.55);"><div data-tvv-edit-panel></div></div>`;
+  const panel = overlay.querySelector('[data-tvv-edit-panel]');
+  let prefill, label;
+  if (kind === 'lodging') {
+    prefill = { ...tripsyBlankRaw('hosting', null), startsAt: gap.day ? `${gap.day}T15:00:00` : null };
+    label = 'Lodging';
+  } else {
+    prefill = { ...tripsyBlankRaw('transportation', 'car'), departureAt: gap.day ? `${gap.day}T09:00:00` : null, departureDescription: gap.from || null, arrivalDescription: gap.to || null };
+    label = 'Ground Transportation';
+  }
+  const back = () => { overlay.remove(); setTimeout(() => showTripsyVerifyTravelDialog(trip), 350); };
+  renderTripsyEditPanel(panel, prefill, trip.key, trip.name, label, {
+    pendingChangeId: crypto.randomUUID(),
+    tripsyTripId: tripsyTripIdFromKey(trip.key),
+  }, back);
+  panel.style.display = 'block';
+  // Backdrop click -> the panel's own guarded Exit (Save/Discard/Keep-editing).
+  overlay.addEventListener('click', e => { if (e.target === overlay) { const exit = panel.querySelector('[data-tripsy-edit-exit]'); if (exit) exit.click(); } });
+  document.body.appendChild(overlay);
+}
+
 function tripsyTimelineRowHtml(spec) {
   const {
     dotColor, dotGlyph, dotImageB64, timeLabel,
@@ -16595,11 +16675,10 @@ async function renderTripsyEventsListImpl() {
       <div style="position:relative;">
         <button class="btn" data-tripsy-trip-menu-toggle data-key="${esc(trip.key)}" title="Trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">⚙️</button>
         <div data-tripsy-trip-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-          ${isOwner ? menuListButtonHtml(`data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}"`, '✏️', 'Edit') : ''}
-          ${menuListButtonHtml(`data-tripsy-check-lodging data-key="${esc(trip.key)}"`, '🛏️', 'Check lodging')}
-          ${menuListButtonHtml(`data-tripsy-check-transportation data-key="${esc(trip.key)}"`, '🚗', 'Check transportation')}
-          ${menuListButtonHtml(`data-tripsy-hide-trip data-key="${esc(trip.key)}"`, '🙈', 'Hide')}
-          ${isOwner ? menuListButtonHtml(`data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete') : ''}
+          ${isOwner ? menuListButtonHtml(`data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}"`, '✏️', 'Edit Details') : ''}
+          ${menuListButtonHtml(`data-tripsy-verify-travel data-key="${esc(trip.key)}"`, '✅', 'Verify Travel Details')}
+          ${menuListButtonHtml(`data-tripsy-hide-trip data-key="${esc(trip.key)}"`, '🙈', 'Hide Trip')}
+          ${isOwner ? menuListButtonHtml(`data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete Trip') : ''}
         </div>
       </div>
     `, 'Trip') : '';
@@ -17036,23 +17115,11 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
-  container.querySelectorAll("[data-tripsy-check-lodging]").forEach(btn => {
+  container.querySelectorAll("[data-tripsy-verify-travel]").forEach(btn => {
     btn.addEventListener("click", async () => {
       closeAllTripsyTripPanels();
       const trip = (tripsyDecryptedTrips || []).find(t => t.key === btn.dataset.key);
-      if (!trip) return;
-      const pending = isOwner ? await Store.listTripsyPendingChanges() : [];
-      showTripsyLodgingCheckDialog(trip, tripsyLodgingGaps(trip, pending));
-    });
-  });
-
-  container.querySelectorAll("[data-tripsy-check-transportation]").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      closeAllTripsyTripPanels();
-      const trip = (tripsyDecryptedTrips || []).find(t => t.key === btn.dataset.key);
-      if (!trip) return;
-      const pending = isOwner ? await Store.listTripsyPendingChanges() : [];
-      showTripsyTransportationCheckDialog(trip, tripsyTransportationGaps(trip, pending));
+      if (trip) await showTripsyVerifyTravelDialog(trip);
     });
   });
 
