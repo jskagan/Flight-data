@@ -13083,6 +13083,14 @@ async function buildTripsyPrintHtml(tripKey) {
     const e = tripsyDayKey(endIso);
     return (e && e !== s) ? `${tripsySummaryDayTileDate(s)} – ${tripsySummaryDayTileDate(e)}` : tripsySummaryDayTileDate(s);
   };
+  // Raw check-in/check-out (or departure/arrival) dates -- ev.start/end is null on
+  // the "begin" half of a multi-day split, so use the raw fields for the full range.
+  const tiDateFor = ev => {
+    const r = ev.tripsyRaw;
+    if (r.resource === 'hosting') return tiDateCell(r.startsAt, r.endsAt);
+    if (r.resource === 'transportation') return tiDateCell(r.departureAt, r.arrivalAt);
+    return tiDateCell(ev.start, ev.end);
+  };
   const tiSeen = new Set();
   const tiEvents = [];
   for (const items of summaryByDay.values()) {
@@ -13112,7 +13120,7 @@ async function buildTripsyPrintHtml(tripKey) {
   const tiTable = (rows, detailsFn, emptyMsg) => rows.length ? `
     <div class="tp-ti-table">
       <div class="tp-ti-head"><div>Date</div><div>Details</div></div>
-      ${rows.map(ev => `<div class="tp-ti-row"><div class="tp-ti-date">${esc(tiDateCell(ev.start, ev.end))}</div><div class="tp-ti-details">${detailsFn(ev)}</div></div>`).join('')}
+      ${rows.map(ev => `<div class="tp-ti-row"><div class="tp-ti-date">${esc(tiDateFor(ev))}</div><div class="tp-ti-details">${detailsFn(ev)}</div></div>`).join('')}
     </div>` : `<div class="tp-ti-empty">${esc(emptyMsg)}</div>`;
   const travelInfoHtml = `
     <div class="tp-section-break">
@@ -13391,6 +13399,9 @@ async function buildTripsySimplePdf(tripKey) {
   const y = drawTripsyPdfHeaderText(doc, headerDestination, dateRangeText, TRIPSY_PDF_MARGIN);
   drawTripsyDaySummaryBlocksPdf(doc, effectiveTrip, dayKeys, summaryByDay, y, item => tripsySummaryRowFallbackText(item));
 
+  // ---- Travel Information page(s) ----
+  drawTripsyTravelInfoPdf(doc, summaryByDay);
+
   const safeName = (trip.name || 'Itinerary').replace(/[/\\:*?"<>|]/g, '-').trim();
   const fileName = `${safeName} - ${dateRangeText || 'Itinerary'}.pdf`;
   doc.save(fileName);
@@ -13437,6 +13448,123 @@ async function tripsyBlobUrlToDataUrl(objectUrl) {
 // is accepted rather than re-implementing that search-for-an-alternate
 // logic), and the cover photo draws as a plain banner image above the
 // header text rather than a gradient-tinted background behind it.
+// "Travel Information" page(s) for the PDF export -- Date | Details reference
+// tables of every transportation leg and lodging, mirroring buildTripsyPrintHtml's
+// HTML version. Non-Latin-1 glyphs (arrows, en-dashes, bullets) are sanitized to
+// ASCII since jsPDF's core-14 fonts are WinAnsi-only. Shared by the rich and the
+// simple/no-narrative PDF builders.
+function drawTripsyTravelInfoPdf(doc, summaryByDay) {
+  const PAGE_W = doc.internal.pageSize.getWidth();
+  const PAGE_H = doc.internal.pageSize.getHeight();
+  const MARGIN = TRIPSY_PDF_MARGIN;
+  const CONTENT_W = PAGE_W - MARGIN * 2;
+  const DATE_W = 92, COL_GAP = 12;
+  const DETAILS_X = MARGIN + DATE_W + COL_GAP;
+  const DETAILS_W = CONTENT_W - DATE_W - COL_GAP;
+  const pdfSafe = s => String(s == null ? '' : s).replace(/→/g, '->').replace(/[–—]/g, '-').replace(/•/g, '-').replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/…/g, '...');
+  const dayTileDate = dayKey => tripPartsToUtcDate({ year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)) }).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const dateCell = (startIso, endIso) => {
+    const s = tripsyDayKey(startIso); if (!s) return '';
+    const e = tripsyDayKey(endIso);
+    return (e && e !== s) ? `${dayTileDate(s)} - ${dayTileDate(e)}` : dayTileDate(s);
+  };
+  // Use the raw check-in/check-out (or departure/arrival) dates -- ev.start/end is
+  // null on the check-in "begin" half of a multi-day split, which would show only
+  // the arrival date instead of the full arrive-to-depart range.
+  const dateFor = ev => {
+    const r = ev.tripsyRaw;
+    if (r.resource === 'hosting') return dateCell(r.startsAt, r.endsAt);
+    if (r.resource === 'transportation') return dateCell(r.departureAt, r.arrivalAt);
+    return dateCell(ev.start, ev.end);
+  };
+
+  const seen = new Set(), events = [];
+  for (const items of summaryByDay.values()) {
+    for (const it of items) {
+      if (!it.ev || !it.ev.tripsyRaw || it.ev._splitHalf === 'end') continue;
+      const k = tripsyEventKey(it.ev.tripsyRaw) || it.ev.id;
+      if (seen.has(k)) continue; seen.add(k); events.push(it.ev);
+    }
+  }
+  const byStart = (a, b) => new Date(a.start || 0) - new Date(b.start || 0);
+  const transport = events.filter(ev => ev.tripsyRaw.resource === 'transportation').sort(byStart);
+  const lodging = events.filter(ev => ev.tripsyRaw.resource === 'hosting').sort(byStart);
+
+  const transportBlocks = ev => {
+    const raw = ev.tripsyRaw;
+    const time = tripsyTransportationTimeLine(ev);
+    const company = ev.location && raw.company && raw.category !== 'airplane' ? `${raw.company}${raw.transportNumber ? ' ' + raw.transportNumber : ''}` : null;
+    const meta = [ev.location, company, raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null, tripsySeatLabel(raw), raw.vehicleDescription || null, raw.departureTerminal ? `Terminal ${raw.departureTerminal}` : null].filter(Boolean);
+    const blocks = [{ text: ev.summary, bold: true, size: 11, color: TRIPSY_PDF_NAVY }];
+    if (time) blocks.push({ text: time, bold: true, size: 9, color: TRIPSY_PDF_NAVY });
+    meta.forEach(m => blocks.push({ text: m, bold: false, size: 9, color: TRIPSY_PDF_META_TEXT }));
+    return blocks;
+  };
+  const lodgingBlocks = ev => {
+    const raw = ev.tripsyRaw;
+    const ci = formatTripTime(ev.start), co = formatTripTime(ev.end);
+    const meta = [ci ? `Check-in: ${ci}` : null, co ? `Check-out: ${co}` : null, raw.address || null, raw.confirmation ? `Confirmation #: ${raw.confirmation}` : null, raw.phone || null, raw.website || null].filter(Boolean);
+    const blocks = [{ text: raw.name || ev.summary, bold: true, size: 11, color: TRIPSY_PDF_NAVY }];
+    meta.forEach(m => blocks.push({ text: m, bold: false, size: 9, color: TRIPSY_PDF_META_TEXT }));
+    return blocks;
+  };
+
+  doc.addPage();
+  let y = MARGIN;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.setTextColor(TRIPSY_PDF_NAVY);
+  doc.text('Travel Information', PAGE_W / 2, y + 8, { align: 'center' });
+  y += 18;
+  doc.setDrawColor(TRIPSY_PDF_AMBER); doc.setLineWidth(1.5); doc.line(MARGIN, y, PAGE_W - MARGIN, y);
+  y += 26;
+
+  const drawTableHeader = () => {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(TRIPSY_PDF_META_TEXT);
+    doc.text('DATE', MARGIN, y); doc.text('DETAILS', DETAILS_X, y);
+    y += 5;
+    doc.setDrawColor(TRIPSY_PDF_BORDER); doc.setLineWidth(0.75); doc.line(MARGIN, y, PAGE_W - MARGIN, y);
+    y += 13;
+  };
+  const drawSection = (title, rows, blocksFn, emptyMsg) => {
+    if (y + 46 > PAGE_H - MARGIN) { doc.addPage(); y = MARGIN; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.setTextColor(TRIPSY_PDF_NAVY);
+    doc.text(title, MARGIN, y + 4);
+    y += 10;
+    doc.setDrawColor(TRIPSY_PDF_NAVY); doc.setLineWidth(1); doc.line(MARGIN, y, PAGE_W - MARGIN, y);
+    y += 16;
+    if (!rows.length) {
+      doc.setFont('helvetica', 'italic'); doc.setFontSize(9); doc.setTextColor(TRIPSY_PDF_EMPTY_TEXT);
+      doc.text(emptyMsg, MARGIN, y); y += 24; return;
+    }
+    drawTableHeader();
+    for (const ev of rows) {
+      const rendered = blocksFn(ev).map(b => {
+        doc.setFont('helvetica', b.bold ? 'bold' : 'normal'); doc.setFontSize(b.size);
+        return { ...b, lines: doc.splitTextToSize(pdfSafe(b.text), DETAILS_W), lh: b.size + 3 };
+      });
+      const detailsH = rendered.reduce((s, b) => s + b.lines.length * b.lh + 2, 0);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9);
+      const dateLines = doc.splitTextToSize(pdfSafe(dateFor(ev)), DATE_W);
+      const rowH = Math.max(detailsH, dateLines.length * 12) + 12;
+      if (y + rowH > PAGE_H - MARGIN) { doc.addPage(); y = MARGIN; drawTableHeader(); }
+      const top = y;
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(TRIPSY_PDF_NAVY);
+      let dy = top + 9; dateLines.forEach(l => { doc.text(l, MARGIN, dy); dy += 12; });
+      let ty = top + 9;
+      rendered.forEach(b => {
+        doc.setFont('helvetica', b.bold ? 'bold' : 'normal'); doc.setFontSize(b.size); doc.setTextColor(b.color);
+        b.lines.forEach(l => { doc.text(l, DETAILS_X, ty); ty += b.lh; });
+        ty += 2;
+      });
+      y = top + rowH;
+      doc.setDrawColor('#E4E4E4'); doc.setLineWidth(0.5); doc.line(MARGIN, y - 6, PAGE_W - MARGIN, y - 6);
+    }
+    y += 12;
+  };
+
+  drawSection('Transportation', transport, transportBlocks, 'No transportation on this trip.');
+  drawSection('Lodgings', lodging, lodgingBlocks, 'No lodging on this trip.');
+}
+
 async function buildTripsyItineraryPdf(tripKey) {
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return null;
@@ -13523,6 +13651,9 @@ async function buildTripsyItineraryPdf(tripKey) {
   await drawTripsyDetailedItineraryPdf(doc, {
     effectiveTrip, dayKeys, placesByDay, placeEvents, summaryByDay, narrative, narrativeCache, tripKey, summaryBlurbByKey,
   }, y, part2DayTargets);
+
+  // ---- Travel Information page(s) ----
+  drawTripsyTravelInfoPdf(doc, summaryByDay);
 
   // Wire up each Part 1 day block as an internal PDF link jumping straight
   // to that same day's divider in Part 2 -- has to happen after both parts
