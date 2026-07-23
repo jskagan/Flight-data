@@ -18952,22 +18952,24 @@ async function getUpcomingReservations() {
 // built from LOCAL date parts, matching how trip/event dates are stored as
 // local wallclock (see parseTripLocalParts), so it doesn't slip a day near
 // UTC midnight. Hidden trips are excluded.
-function tripsyPickCurrentTrip(trips) {
+// Candidate trips for Travel View's default: the in-progress trip(s) (today
+// within [start, end]); failing that, the nearest upcoming trip(s) (all tied on
+// the soonest start date); failing that, the single most recent past trip.
+// Returns an array so the caller can prompt when more than one qualifies (e.g.
+// overlapping current trips, or two trips starting the same soonest day).
+function tripsyTravelTripCandidates(trips) {
   const visible = (trips || []).filter(t => !isTripsyTripEffectivelyHidden(t) && t.start);
-  if (!visible.length) return null;
+  if (!visible.length) return [];
   const d = new Date();
   const todayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const startKey = t => tripsyDayKey(t.start) || '';
   const endKey = t => tripsyDayKey(t.end) || startKey(t);
-  const inProgress = visible
-    .filter(t => startKey(t) && startKey(t) <= todayKey && todayKey <= endKey(t))
-    .sort((a, b) => startKey(a).localeCompare(startKey(b)));
-  if (inProgress.length) return inProgress[0];
-  const upcoming = visible
-    .filter(t => startKey(t) > todayKey)
-    .sort((a, b) => startKey(a).localeCompare(startKey(b)));
-  if (upcoming.length) return upcoming[0];
-  return visible.slice().sort((a, b) => startKey(b).localeCompare(startKey(a)))[0] || null;
+  const byStart = (a, b) => startKey(a).localeCompare(startKey(b));
+  const inProgress = visible.filter(t => startKey(t) <= todayKey && todayKey <= endKey(t)).sort(byStart);
+  if (inProgress.length) return inProgress;
+  const upcoming = visible.filter(t => startKey(t) > todayKey).sort(byStart);
+  if (upcoming.length) { const soonest = startKey(upcoming[0]); return upcoming.filter(t => startKey(t) === soonest); }
+  return [visible.slice().sort((a, b) => startKey(b).localeCompare(startKey(a)))[0]];
 }
 
 // Best-effort "which city is this" from a free-text address, for Travel View's
@@ -19023,7 +19025,7 @@ function ensureTravelViewStyles() {
     .tv-topbar { position:sticky; top:0; z-index:3; background:var(--bg); padding:12px 0 8px; }
     .tv-month { font-size:13px; color:var(--muted); font-weight:600; letter-spacing:0.02em; }
     .tv-titlerow { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin:2px 0 14px; }
-    .tv-title { font-size:26px; font-weight:800; color:var(--text); line-height:1.15; }
+    .tv-title { flex:1; min-width:0; font-size:26px; font-weight:800; color:var(--text); line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .tv-close { flex-shrink:0; width:36px; height:36px; border-radius:8px; border:1.5px solid #e02424; background:var(--panel-2); color:#e02424; font-size:19px; font-weight:800; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
     .tv-close:hover { background:rgba(224,36,36,0.12); }
     .tv-head-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
@@ -19056,7 +19058,13 @@ function ensureTravelViewStyles() {
     .tv-body { flex:1; min-width:0; padding-top:1px; }
     .tv-evtitle { font-size:15px; font-weight:700; color:var(--text); line-height:1.3; }
     .tv-evsub { font-size:13px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .tv-right { flex-shrink:0; text-align:right; padding-top:1px; }
+    .tv-right { flex-shrink:0; display:flex; flex-direction:column; align-items:flex-end; gap:3px; padding-top:1px; }
+    .tv-docbtn { background:none; border:none; padding:0; font-size:17px; line-height:1; cursor:pointer; }
+    .tv-trip-pick { display:flex; flex-direction:column; align-items:flex-start; gap:3px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:10px; padding:14px 16px; cursor:pointer; }
+    .tv-trip-pick:active { opacity:0.7; }
+    .tv-trip-pick-name { font-size:16px; font-weight:700; color:var(--text); }
+    .tv-trip-pick-dates { font-size:13px; color:var(--muted); }
+    .tv-doc-item:active { opacity:0.6; }
     .tv-time { font-family:var(--mono); font-size:13px; font-weight:700; color:var(--amber); white-space:nowrap; }
     .tv-route { font-size:12px; color:var(--muted); line-height:1.5; white-space:nowrap; }
     .tv-note { font-size:12px; color:var(--muted); }
@@ -19096,17 +19104,42 @@ function showTripsyTravelEventDetail(ev) {
   document.body.appendChild(overlay);
 }
 
+// Open an event's attached document(s) from Travel View: one -> open it straight
+// away; several -> a small pick-list overlay, each opening on tap.
+function showTripsyTravelDocs(atts) {
+  if (!atts || !atts.length) return;
+  if (atts.length === 1) { openDriveFileInNewTab(atts[0].driveFileId); return; }
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.62); z-index:10001; display:flex; align-items:center; justify-content:center; padding:24px 14px;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; max-width:440px; width:100%; box-shadow:0 16px 48px rgba(0,0,0,0.55);">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
+        <div style="font-size:16px; font-weight:800; color:var(--text);">Attached documents</div>
+        <button class="tv-close" data-tv-docs-close title="Close">✕</button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:2px;">
+        ${atts.map(a => `<button class="tv-doc-item" data-drive-file-id="${esc(a.driveFileId)}" style="display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; padding:11px 8px; border-radius:8px; cursor:pointer; color:var(--text); font-size:14px;">📄 <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(a.fileName || 'Document')}</span></button>`).join('')}
+      </div>
+    </div>`;
+  const close = () => overlay.remove();
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  overlay.querySelector('[data-tv-docs-close]').addEventListener('click', close);
+  overlay.querySelectorAll('.tv-doc-item').forEach(b => b.addEventListener('click', () => { openDriveFileInNewTab(b.dataset.driveFileId); close(); }));
+  document.body.appendChild(overlay);
+}
+
 // Phone-friendly reader that opens straight to the current trip when the
 // sign-in screen's "Travel View" box is checked (see loadTravelViewPref /
 // completeSignIn). Decrypts the Tripsy snapshot like Home's "Upcoming Trips"
-// card, picks the current trip (tripsyPickCurrentTrip), and lays it out as a
+// card, picks the current/nearest trip (tripsyTravelTripCandidates, prompting if
+// more than one qualifies), and lays it out as a
 // clean single-trip timeline modeled on the Tripsy app: month + big title + a
 // ✕ that exits, a horizontally-scrollable day strip with per-day event dots,
 // then a day-by-day timeline with category-icon circles on a connecting spine,
 // lodging banners, day ordinals, titles/subtitles, and times. Reuses the My
 // Trips timeline's own dot-color/icon/detail-line helpers so it stays visually
 // consistent. Never a trapped mode -- the ✕ clears the pref and returns Home.
-async function renderTravelView() {
+async function renderTravelView(chosenTripKey) {
   ensureTravelViewStyles();
   const exit = () => { saveTravelViewPref(false); navigate('home'); };
   const wrap = inner => `<div class="tv-root"><div class="tv-inner">${inner}</div></div>`;
@@ -19133,8 +19166,28 @@ async function renderTravelView() {
 
   const decrypted = await ensureTripsyDecrypted();
   if (!decrypted) { main.innerHTML = shell('Travel View', `<div class="empty-state">Trip data is locked on this device — open <b>My Trips</b> once to unlock, then reload.</div>`); wireExit(); return; }
-  const trip = tripsyPickCurrentTrip(decrypted);
-  if (!trip) { main.innerHTML = shell('Travel View', `<div class="empty-state">No trips found to show.</div>`); wireExit(); return; }
+  // Pick the trip: an explicitly-chosen one (from the picker below), else the
+  // default candidate(s) -- current/nearest-upcoming. More than one candidate
+  // (overlapping current trips, or two starting the same soonest day) -> let the
+  // owner choose.
+  let trip = chosenTripKey ? decrypted.find(t => t.key === chosenTripKey && !isTripsyTripEffectivelyHidden(t)) : null;
+  if (!trip) {
+    const candidates = tripsyTravelTripCandidates(decrypted);
+    if (!candidates.length) { main.innerHTML = shell('Travel View', `<div class="empty-state">No trips found to show.</div>`); wireExit(); return; }
+    if (candidates.length > 1) {
+      main.innerHTML = shell('Travel View', `
+        <div style="margin-top:6px;">
+          <div style="font-size:14px; color:var(--muted); margin-bottom:16px; line-height:1.45;">More than one trip is happening or coming up right now — which would you like to open?</div>
+          <div style="display:flex; flex-direction:column; gap:10px;">
+            ${candidates.map(t => `<button class="tv-trip-pick" data-trip-key="${esc(t.key)}"><span class="tv-trip-pick-name">${esc(t.name || 'Trip')}</span><span class="tv-trip-pick-dates">${esc(formatTripDateRange(t.start, t.end))}</span></button>`).join('')}
+          </div>
+        </div>`);
+      wireExit();
+      main.querySelectorAll('[data-trip-key]').forEach(b => b.addEventListener('click', () => renderTravelView(b.dataset.tripKey)));
+      return;
+    }
+    trip = candidates[0];
+  }
 
   // Ordinal ("1st"), compact uppercase day header ("TUE, AUGUST 4"), and the
   // month/year label -- all off the literal dayKey, no timezone reinterpretation.
@@ -19142,6 +19195,18 @@ async function renderTravelView() {
   const dayHeader = dayKey => partsOf(dayKey).toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', timeZone: 'UTC' }).toUpperCase();
   const d = new Date();
   const todayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  // Event-scoped document attachments, keyed by eventKey ("resource:id") like the
+  // My Trips timeline, so an event with attached docs can show a doc icon.
+  const attByEvent = new Map();
+  try {
+    for (const a of (await Store.listTripsyAttachments())) {
+      if (a.scope === 'event' && a.eventKey) {
+        if (!attByEvent.has(a.eventKey)) attByEvent.set(a.eventKey, []);
+        attByEvent.get(a.eventKey).push(a);
+      }
+    }
+  } catch (e) { console.error('Travel View: attachments load failed', e); }
 
   // Split multi-day stays/legs into check-in/check-out halves like My Trips, so
   // each half lands on its own day; group by day; keep day order chronological.
@@ -19175,13 +19240,25 @@ async function renderTravelView() {
   const hostings = (trip.events || []).filter(e => e.tripsyRaw && e.tripsyRaw.resource === 'hosting')
     .map(e => ({ address: e.tripsyRaw.address || e.location || '', ci: tripsyDayKey(e.start), co: tripsyDayKey(e.end) }))
     .filter(h => h.ci);
-  // The city you woke up in on a given day = the lodging covering the night
-  // before (check-in strictly before D, check-out on or after D). Used for the
-  // day header's "in <city>" label; blank on arrival/travel days with no such
-  // stay (per the "from that morning" rule -- we don't fabricate one from flights).
-  const morningCityFor = day => {
-    const h = hostings.find(h => h.ci < day && h.co && h.co >= day);
-    return h ? tripsyGuessCity(h.address) : '';
+  const transports = (trip.events || []).filter(e => e.tripsyRaw && e.tripsyRaw.resource === 'transportation')
+    .map(e => {
+      const route = tripsyShortenRouteLocation(e.location || '') || (e.location || '');
+      const [origin, destination] = route.includes('→') ? route.split('→').map(s => s.trim()) : [route, ''];
+      return { dep: tripsyDayKey(e.start), arr: tripsyDayKey(e.end), typeLabel: tripsyEventTypeLabel(e) || 'Transportation', origin, destination };
+    }).filter(t => t.dep);
+  // Day-header location label:
+  // 1) The current lodging's city -- the latest hosting checked into on/before
+  //    this day that hasn't been checked out of yet (check-out after this day, or
+  //    none). Shown as "in <city>".
+  // 2) Otherwise, a transportation leg mid-journey on this day (departed on/before
+  //    AND still arriving after this day) -- shown as "<Type> from <origin> → <dest>".
+  const dayLocationFor = day => {
+    const current = hostings.filter(h => h.ci <= day && (!h.co || h.co > day))
+      .sort((a, b) => a.ci.localeCompare(b.ci)).pop();
+    if (current) { const c = tripsyGuessCity(current.address); return c ? `in ${c}` : ''; }
+    const transit = transports.find(t => t.arr && t.dep <= day && t.arr > day);
+    if (transit) return `${transit.typeLabel} from ${transit.origin}${transit.destination ? ` → ${transit.destination}` : ''}`;
+    return '';
   };
 
   const monthYear = firstDay ? partsOf(firstDay).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }) : '';
@@ -19257,6 +19334,10 @@ async function renderTravelView() {
     const glyph = tripsyTimelineDotIcon(ev);
     const cat = tripsyEventTypeLabel(ev) || 'Other';
     const searchText = `${title || ''} ${subtitle || ''} ${ev.location || ''} ${(ev.tripsyRaw && ev.tripsyRaw.notes) || ''}`.toLowerCase();
+    // Doc icon when this event has attached documents (opens it, or a menu if >1).
+    const evKey = (ev.tripsyRaw && ev.tripsyRaw.id != null) ? tripsyEventKey(ev.tripsyRaw) : null;
+    const atts = evKey ? (attByEvent.get(evKey) || []) : [];
+    const docBtn = atts.length ? `<button class="tv-docbtn" data-tv-doc="${esc(evKey)}" title="Attached document${atts.length > 1 ? 's' : ''}">📄</button>` : '';
     return `
       <div class="tv-row" data-tv-ev="${esc(ev.id)}" data-tv-cat="${esc(cat)}" data-tv-text="${esc(searchText)}">
         <div class="tv-icon" style="background:${bg};">${esc(glyph)}</div>
@@ -19264,7 +19345,7 @@ async function renderTravelView() {
           <div class="tv-evtitle">${esc(title || 'Event')}</div>
           ${subtitle ? `<div class="tv-evsub">${esc(subtitle)}</div>` : ''}
         </div>
-        <div class="tv-right">${rightHtml}</div>
+        <div class="tv-right">${rightHtml}${docBtn}</div>
       </div>`;
   };
 
@@ -19274,12 +19355,12 @@ async function renderTravelView() {
     const evs = eventsByDay.get(dayKey) || [];
     if (!evs.length) return '';
     const headMain = dayKey === 'undated' ? 'UNDATED' : dayHeader(dayKey);
-    const city = dayKey === 'undated' ? '' : morningCityFor(dayKey);
+    const loc = dayKey === 'undated' ? '' : dayLocationFor(dayKey);
     const dayNum = dayKey === 'undated' ? null : tripsyDayNumberFromTripStart(dayKey, tripStartKey);
     const dayLabel = dayNum != null ? `Day ${dayNum}` : '';
     return `
       <div class="tv-daysec" id="tv-day-${esc(dayKey)}">
-        <div class="tv-dayhead"><span><span class="tv-dayhead-main">${esc(headMain)}</span>${city ? `<span class="tv-dayhead-city"> in ${esc(city)}</span>` : ''}</span>${dayLabel ? `<span class="tv-dayhead-ord">${esc(dayLabel)}</span>` : ''}</div>
+        <div class="tv-dayhead"><span><span class="tv-dayhead-main">${esc(headMain)}</span>${loc ? `<span class="tv-dayhead-city"> ${esc(loc)}</span>` : ''}</span>${dayLabel ? `<span class="tv-dayhead-ord">${esc(dayLabel)}</span>` : ''}</div>
         <div class="tv-events">${evs.map(rowHtml).join('')}</div>
       </div>`;
   };
@@ -19311,6 +19392,9 @@ async function renderTravelView() {
   // Tap an event -> open its detail modal (returns to Travel View on close/away).
   const tvRootEl = main.querySelector('.tv-root');
   if (tvRootEl) tvRootEl.addEventListener('click', e => {
+    // Doc icon takes precedence over opening the event detail.
+    const docBtn = e.target.closest('[data-tv-doc]');
+    if (docBtn) { showTripsyTravelDocs(attByEvent.get(docBtn.dataset.tvDoc) || []); return; }
     const row = e.target.closest('[data-tv-ev]');
     if (!row) return;
     const ev = eventById.get(row.dataset.tvEv);
@@ -19409,7 +19493,9 @@ async function renderTravelView() {
       else if (pos > 6) target = cell.offsetLeft - 5 * stride; // pin to 6th slot
       if (target == null) return;
       target = clampLeft(target);
-      if (Math.abs(strip.scrollLeft - target) >= 1) strip.scrollLeft = target;
+      // Smooth (not instant) so the calendar eases along as the events scroll,
+      // rather than snapping a whole cell at once.
+      if (Math.abs(strip.scrollLeft - target) >= 1) strip.scrollTo({ left: target, behavior: 'smooth' });
     };
     // Smooth-scroll the selected date back toward the 4th/5th slot (3.5 cells in).
     const recenterCal = (smooth = true) => {
@@ -19459,9 +19545,15 @@ async function renderTravelView() {
       selectDate(day);
       scrollItineraryTo(day, true);
     }));
-    // Initial state: highlight the top day and place it (no buzz, no animation).
-    const initDay = currentTopDay();
-    if (initDay) { selectedDay = initDay; setActiveDate(initDay); recenterCal(false); }
+    // Initial state: if today falls within this trip, start on today's section
+    // (the first dated section on/after today); otherwise start at the top.
+    const todayInTrip = !!(firstDay && lastDay && todayKey >= firstDay && todayKey <= lastDay);
+    const datedSections = sectionDays.filter(k => k !== 'undated');
+    const initDay = (todayInTrip && (datedSections.find(k => k >= todayKey) || datedSections[datedSections.length - 1])) || currentTopDay();
+    if (initDay) {
+      selectedDay = initDay; setActiveDate(initDay); recenterCal(false);
+      if (todayInTrip) scrollItineraryTo(initDay, false); // jump to today's spot in the itinerary
+    }
   }
 }
 
