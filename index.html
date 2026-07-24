@@ -3363,43 +3363,51 @@ async function scanTripsyEmailIntake() {
   const refs = await gmailSearchAllMessages(query);
   const known = new Set((await Store.listTripsyEmailIntake()).map(e => e.id));
   const toFetch = refs.filter(m => !known.has(m.id));
-  const fetched = [];
-  const attachmentJobs = [];
-  for (const ref of toFetch) {
-    try {
-      const { entry, attachmentParts } = await fetchTripsyIntakeEmail(ref.id);
-      fetched.push(entry);
-      if (attachmentParts.length) attachmentJobs.push({ messageId: ref.id, parts: attachmentParts });
-    }
-    catch (e) { console.error('fetchTripsyIntakeEmail failed for', ref.id, e); }
-  }
-  const res = await Store.addTripsyEmailIntakeEntries(fetched);
-  // Capture any parseable attachments (a photo/PDF of a confirmation) as
-  // purpose:'parse' docs so step 1c reads them -- the email body alone is empty
-  // for an image-only confirmation. Best-effort, deduped by
-  // (sourceEmailId, gmailAttachmentId); scope:'email' keeps them off trip cards.
-  let attachmentsAdded = 0;
-  for (const job of attachmentJobs) {
-    for (const part of job.parts) {
+  // New emails to ingest = a real update in progress -> pulse the badge while we
+  // pull them in. A scan that found nothing new must NOT pulse (that's the
+  // no-op "check" case the owner didn't want pulsing).
+  if (toFetch.length) tripsyBeginActiveUpdate();
+  try {
+    const fetched = [];
+    const attachmentJobs = [];
+    for (const ref of toFetch) {
       try {
-        const dupe = (await Store.listTripsyAttachments()).some(a => a.sourceEmailId === job.messageId && a.gmailAttachmentId === part.gmailAttachmentId);
-        if (dupe) continue;
-        const bytes = await fetchGmailAttachmentBytes(job.messageId, part.gmailAttachmentId);
-        const driveFileId = await uploadBlobToDrive(new Blob([bytes], { type: part.mimeType }), part.fileName, part.mimeType);
-        const saved = await Store.saveTripsyAttachment({
-          id: crypto.randomUUID(),
-          scope: 'email', tripKey: null, eventKey: null,
-          fileName: part.fileName, driveFileId, mimeType: part.mimeType, sizeBytes: part.sizeBytes,
-          purpose: 'parse', parseStatus: 'pending',
-          uploadedAt: new Date().toISOString(), uploadedBy: currentUserEmail,
-          sourceEmailId: job.messageId, gmailAttachmentId: part.gmailAttachmentId,
-        });
-        if (saved.ok) attachmentsAdded++;
-      } catch (e) { console.error('Tripsy email attachment intake failed', job.messageId, part.gmailAttachmentId, e); }
+        const { entry, attachmentParts } = await fetchTripsyIntakeEmail(ref.id);
+        fetched.push(entry);
+        if (attachmentParts.length) attachmentJobs.push({ messageId: ref.id, parts: attachmentParts });
+      }
+      catch (e) { console.error('fetchTripsyIntakeEmail failed for', ref.id, e); }
     }
+    const res = await Store.addTripsyEmailIntakeEntries(fetched);
+    // Capture any parseable attachments (a photo/PDF of a confirmation) as
+    // purpose:'parse' docs so step 1c reads them -- the email body alone is empty
+    // for an image-only confirmation. Best-effort, deduped by
+    // (sourceEmailId, gmailAttachmentId); scope:'email' keeps them off trip cards.
+    let attachmentsAdded = 0;
+    for (const job of attachmentJobs) {
+      for (const part of job.parts) {
+        try {
+          const dupe = (await Store.listTripsyAttachments()).some(a => a.sourceEmailId === job.messageId && a.gmailAttachmentId === part.gmailAttachmentId);
+          if (dupe) continue;
+          const bytes = await fetchGmailAttachmentBytes(job.messageId, part.gmailAttachmentId);
+          const driveFileId = await uploadBlobToDrive(new Blob([bytes], { type: part.mimeType }), part.fileName, part.mimeType);
+          const saved = await Store.saveTripsyAttachment({
+            id: crypto.randomUUID(),
+            scope: 'email', tripKey: null, eventKey: null,
+            fileName: part.fileName, driveFileId, mimeType: part.mimeType, sizeBytes: part.sizeBytes,
+            purpose: 'parse', parseStatus: 'pending',
+            uploadedAt: new Date().toISOString(), uploadedBy: currentUserEmail,
+            sourceEmailId: job.messageId, gmailAttachmentId: part.gmailAttachmentId,
+          });
+          if (saved.ok) attachmentsAdded++;
+        } catch (e) { console.error('Tripsy email attachment intake failed', job.messageId, part.gmailAttachmentId, e); }
+      }
+    }
+    await Store.setSyncTimestamp('tripsyEmailScan', new Date().toISOString());
+    return { ok: res.ok, added: res.added || 0, attachmentsAdded };
+  } finally {
+    if (toFetch.length) tripsyEndActiveUpdate();
   }
-  await Store.setSyncTimestamp('tripsyEmailScan', new Date().toISOString());
-  return { ok: res.ok, added: res.added || 0, attachmentsAdded };
 }
 
 // Shared drain: find every Drive file named `filename`, hand its parsed JSON to
@@ -3411,17 +3419,24 @@ async function drainTripsyRelayFiles(filename, applyFn) {
   const q = encodeURIComponent(`name='${filename}' and trashed=false`);
   const listRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&spaces=drive`);
   const files = (await listRes.json()).files || [];
-  for (const f of files) {
-    try {
-      const contentRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`);
-      const text = await contentRes.text();
-      let relay;
-      try { relay = JSON.parse(text); } catch (e) { console.error('Tripsy relay not valid JSON, skipping', filename, f.id); continue; }
-      await applyFn(relay);
-      await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE' });
-    } catch (e) {
-      console.error('drainTripsyRelayFiles failed on', filename, f.id, e);
+  if (!files.length) return; // nothing to drain -> not an "update", no pulse
+  // A relay file is actually present -> real update landing; pulse the badge.
+  tripsyBeginActiveUpdate();
+  try {
+    for (const f of files) {
+      try {
+        const contentRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`);
+        const text = await contentRes.text();
+        let relay;
+        try { relay = JSON.parse(text); } catch (e) { console.error('Tripsy relay not valid JSON, skipping', filename, f.id); continue; }
+        await applyFn(relay);
+        await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'DELETE' });
+      } catch (e) {
+        console.error('drainTripsyRelayFiles failed on', filename, f.id, e);
+      }
     }
+  } finally {
+    tripsyEndActiveUpdate();
   }
 }
 
@@ -3469,7 +3484,6 @@ async function syncTripsyRelays() {
   if (!isOwner) return;
   if (tripsyRelaySyncInFlight) return;
   tripsyRelaySyncInFlight = true;
-  updateTripsyStatusBadge(); // start the "checking" pulse if the badge is yellow
   try {
     // Snapshot the trips-list-relevant state BEFORE the drains + silent decrypt so we
     // only rebuild the (expensive, full-page) trips list when something the list actually
@@ -3510,7 +3524,6 @@ async function syncTripsyRelays() {
     console.error('Tripsy relay sync failed:', e);
   } finally {
     tripsyRelaySyncInFlight = false;
-    updateTripsyStatusBadge(); // stop the "checking" pulse now the sync is done
   }
 }
 
@@ -18321,6 +18334,26 @@ function tripsyEndInFlightWrite(id) {
   updateTripsyStatusBadge();
 }
 
+// True "an update is actively being APPLIED right now" signal for the status
+// badge's spinning-🔄 pulse -- as opposed to a mere relay CHECK, which runs on
+// every badge click and is usually a no-op, so pulsing on it just read as click
+// feedback (the owner's complaint). Bumped only while real work is landing: a
+// relay drain that actually found file(s) to process, or new forwarded
+// emails/attachments being ingested. OR'd with tripsyInFlightWrites (a Drive
+// write genuinely in flight) to decide whether the badge pulses.
+let tripsyActiveUpdateCount = 0;
+function tripsyBeginActiveUpdate() {
+  tripsyActiveUpdateCount++;
+  updateTripsyStatusBadge();
+}
+function tripsyEndActiveUpdate() {
+  tripsyActiveUpdateCount = Math.max(0, tripsyActiveUpdateCount - 1);
+  updateTripsyStatusBadge();
+}
+function tripsyIsActivelyUpdating() {
+  return tripsyActiveUpdateCount > 0 || tripsyInFlightWrites.length > 0;
+}
+
 // Transient, in-memory-only (same reasoning as tripsyInFlightWrites -- a
 // failed write never got saved to Drive, so there's nothing in driveData
 // itself to represent it) record of a write from the Update page that
@@ -18444,6 +18477,22 @@ async function updateTripsyStatusBadge() {
   if (!badge) return;
   const panel = document.getElementById('tripsy-status-panel');
   const { state, reasons } = await computeTripsyStatus();
+  // Actively APPLYING an update right now (a relay drain processing found files,
+  // new emails/attachments being ingested, or a Drive write in flight) -> show a
+  // pulsing "syncing" glyph, ABOVE every other state (even 'hidden'), so it
+  // always reads as real work-in-progress. Deliberately NOT driven by the relay
+  // CHECK itself (tripsyRelaySyncInFlight), which runs on every badge click and
+  // is usually a no-op -- pulsing on that just looked like click feedback.
+  if (tripsyIsActivelyUpdating()) {
+    badge.style.display = '';
+    badge.style.color = '';
+    badge.textContent = '🔄';
+    badge.title = 'Updating…';
+    badge.classList.add('tripsy-badge-checking');
+    if (panel && panel.style.display === 'block') renderTripsyStatusPanel();
+    return;
+  }
+  badge.classList.remove('tripsy-badge-checking');
   if (state === 'hidden') {
     badge.style.display = 'none';
     if (panel) panel.style.display = 'none';
@@ -18451,29 +18500,17 @@ async function updateTripsyStatusBadge() {
   }
   badge.style.display = '';
   badge.style.color = '';
-  if (tripsyRelaySyncInFlight) {
-    // Actively checking for updates: show an unmistakable "syncing" glyph that
-    // pulses (not the static state icon), so it reads as work-in-progress
-    // rather than click feedback -- the visual twin of the panel's pulsing red
-    // "Checking for updates…" line. Reverts to the state icon below once the
-    // sync finishes (updateTripsyStatusBadge is called again from its finally).
-    badge.textContent = '🔄';
-    badge.title = 'Checking for updates…';
-    badge.classList.add('tripsy-badge-checking');
+  if (state === 'red') {
+    badge.textContent = '🛑';
+    badge.title = reasons.some(r => r.kind === 'write-failed')
+      ? 'A write failed — click for details'
+      : 'A Tripsy push could not be verified — click for details';
+  } else if (state === 'yellow') {
+    badge.textContent = '⚠️';
+    badge.title = 'Claude has a step to run for My Trips — click to see what';
   } else {
-    badge.classList.remove('tripsy-badge-checking');
-    if (state === 'red') {
-      badge.textContent = '🛑';
-      badge.title = reasons.some(r => r.kind === 'write-failed')
-        ? 'A write failed — click for details'
-        : 'A Tripsy push could not be verified — click for details';
-    } else if (state === 'yellow') {
-      badge.textContent = '⚠️';
-      badge.title = 'Claude has a step to run for My Trips — click to see what';
-    } else {
-      badge.textContent = '🟢';
-      badge.title = 'You have My Trips items to review — click to see';
-    }
+    badge.textContent = '🟢';
+    badge.title = 'You have My Trips items to review — click to see';
   }
   // If the panel is open while a background refresh changes the state, keep
   // its contents in sync.
