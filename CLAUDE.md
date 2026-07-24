@@ -245,9 +245,12 @@ that catches drift between them.
   (`~/.claude/scheduled-tasks/tripsy-pdf-parse/RUN_NOW.md`, "process flagged Tripsy docs") but is no
   longer the only path.
   Independently, there's an **email-intake pipeline** for confirmations the owner forwards to
-  `kaganworldtravel@gmail.com`. The scan (`scanTripsyEmailIntake`) searches the *owner's own* Sent
-  folder for `to:` that address, so it works whether or not that address is actually a separate
-  mailbox anyone reads — Gmail always keeps a Sent copy regardless of recipient. It's split so no
+  `kaganworldtravel@gmail.com`. The scan (`scanTripsyEmailIntake`) searches the owner's Gmail for
+  that address in *either* direction — `(to:kaganworldtravel@gmail.com OR from:kaganworldtravel@gmail.com)`
+  — so it catches both confirmations the owner forwarded *to* the alias (a Sent copy Gmail always
+  keeps, whether or not the alias is a separate mailbox) *and* ones the alias account forwarded back
+  *to* the owner's inbox. (It used to be `in:sent to:alias`, which silently missed the alias→owner
+  direction — a real reservation update was lost that way; dedup is per message-id.) It's split so no
   browser is ever needed: the **app** (on any device, owner only, in
   `runTripsyEmailIntake`/`scanTripsyEmailIntake`, `index.html:2515` area) searches Gmail
   for those forwards and appends each one's plain-text body to `driveData.tripsyEmailIntake`; the

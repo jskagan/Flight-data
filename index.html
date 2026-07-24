@@ -3248,9 +3248,10 @@ function updateLastSyncedLabel(elId) {
 }
 
 // ---- Tripsy email intake (forwarded-confirmation pipeline) ----
-// The owner forwards trip confirmations to kaganworldtravel@gmail.com;
-// the app finds them (in its own Sent folder) and hands them to a
-// tripsy-trips-refresh run to parse.
+// Trip confirmations are forwarded through kaganworldtravel@gmail.com; the app
+// finds them in EITHER direction -- ones the owner forwarded TO the alias, and
+// ones the alias account forwarded back to the owner's inbox -- and hands them
+// to a tripsy-trips-refresh run to parse.
 // See the Store.listTripsyEmailIntake comment for the full data flow.
 const TRIPSY_EMAIL_INTAKE_ADDRESS = 'kaganworldtravel@gmail.com';
 const TRIPSY_EMAIL_PROPOSALS_FILENAME = 'tripsy-email-proposals.json';
@@ -3287,9 +3288,14 @@ async function fetchTripsyIntakeEmail(messageId) {
   return { id: messageId, rfc822MessageId, subject, body, foundAt: new Date().toISOString(), parsedAt: null };
 }
 
-// Owner-only. Searches the Sent folder for emails forwarded to the Tripsy
-// intake alias since the last scan and appends new ones to
-// driveData.tripsyEmailIntake. Best-effort; caller wraps in try/catch.
+// Owner-only. Finds confirmation emails involving the Tripsy intake alias --
+// EITHER direction: ones the owner forwarded to it (to:alias, e.g. from the
+// Sent folder) AND ones forwarded from the alias account back to the owner's
+// inbox (from:alias). The old query was `in:sent to:alias`, which silently
+// missed anything the alias account forwarded TO the owner rather than the
+// owner forwarding TO the alias -- a real update was lost that way. Appends new
+// ones to driveData.tripsyEmailIntake; per-id dedup below prevents reprocessing.
+// Best-effort; caller wraps in try/catch.
 async function scanTripsyEmailIntake() {
   if (!isOwner) return { ok: true, added: 0 };
   const ts = (await Store.getSyncTimestamps()).tripsyEmailScan;
@@ -3300,7 +3306,7 @@ async function scanTripsyEmailIntake() {
     const days = Math.max(1, Math.ceil((Date.now() - new Date(ts).getTime()) / 86400000) + 1);
     dayClause = ` newer_than:${days}d`;
   }
-  const query = `in:sent to:${TRIPSY_EMAIL_INTAKE_ADDRESS}${dayClause}`;
+  const query = `(to:${TRIPSY_EMAIL_INTAKE_ADDRESS} OR from:${TRIPSY_EMAIL_INTAKE_ADDRESS})${dayClause}`;
   const refs = await gmailSearchAllMessages(query);
   const known = new Set((await Store.listTripsyEmailIntake()).map(e => e.id));
   const toFetch = refs.filter(m => !known.has(m.id));
