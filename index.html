@@ -9821,8 +9821,11 @@ function positionTripsyFixedMenuAtRect(rect, menu) {
 // Sanity check (per-trip "Check lodging"): for each night of a trip -- its first day
 // through the night before its last day -- is there a hosting (hotel) covering it?
 // Effective hostings = the trip's synced hostings PLUS any pending create-hosting
-// changes queued for it. Returns the ordered night day-keys and the subset with no
-// lodging. Advisory only (an overnight flight or an unlogged stay is a legit gap).
+// changes queued for it. A night spent aboard an OVERNIGHT transportation leg (one
+// that departs one day and arrives a later day -- a red-eye flight, sleeper train,
+// ferry) also needs no hotel, so it's not counted as a gap. Returns the ordered
+// night day-keys and the subset with no lodging. Advisory only (an unlogged stay is
+// a legit gap).
 function tripsyLodgingGaps(trip, pendingChanges) {
   const events = trip.events || [];
   const days = events.map(e => tripsyDayKey(e.start) || tripsyDayKey(e.end)).filter(Boolean).sort();
@@ -9832,17 +9835,29 @@ function tripsyLodgingGaps(trip, pendingChanges) {
   const hostings = events
     .filter(e => e.tripsyRaw && e.tripsyRaw.resource === 'hosting')
     .map(e => ({ ci: tripsyDayKey(e.start), co: tripsyDayKey(e.end) }));
+  // Overnight transportation legs (departure day before arrival day) -- the nights
+  // you're aboard them don't require lodging.
+  const overnightTransit = events
+    .filter(e => e.tripsyRaw && e.tripsyRaw.resource === 'transportation')
+    .map(e => ({ dep: tripsyDayKey(e.start), arr: tripsyDayKey(e.end) }))
+    .filter(t => t.dep && t.arr && t.dep < t.arr);
   (pendingChanges || []).forEach(c => {
-    if (c.type === 'create_event' && c.tripsyResource === 'hosting' && c.tripKey === trip.key && c.fields) {
+    if (c.type !== 'create_event' || c.tripKey !== trip.key || !c.fields) return;
+    if (c.tripsyResource === 'hosting') {
       hostings.push({ ci: tripsyDayKey(c.fields.startsAt), co: tripsyDayKey(c.fields.endsAt) });
+    } else if (c.tripsyResource === 'transportation') {
+      const dep = tripsyDayKey(c.fields.departureAt), arr = tripsyDayKey(c.fields.arrivalAt);
+      if (dep && arr && dep < arr) overnightTransit.push({ dep, arr });
     }
   });
   // Sleep every night from the first day up to (not including) the last day (depart then).
   const nights = tripsyDayKeyRange(firstDay, lastDay).slice(0, -1);
   // A hosting covers night D if check-in <= D < check-out; with no check-out it covers
-  // only its check-in night.
+  // only its check-in night. An overnight leg covers night D if it's aboard that night
+  // (departure day <= D < arrival day).
   const covers = (h, night) => h.ci && h.ci <= night && (h.co ? h.co > night : h.ci === night);
-  const gaps = nights.filter(night => !hostings.some(h => covers(h, night)));
+  const inTransit = night => overnightTransit.some(t => t.dep <= night && night < t.arr);
+  const gaps = nights.filter(night => !hostings.some(h => covers(h, night)) && !inTransit(night));
   return { nights, gaps };
 }
 
@@ -18359,21 +18374,30 @@ async function updateTripsyStatusBadge() {
   }
   badge.style.display = '';
   badge.style.color = '';
-  if (state === 'red') {
-    badge.textContent = '🛑';
-    badge.title = reasons.some(r => r.kind === 'write-failed')
-      ? 'A write failed — click for details'
-      : 'A Tripsy push could not be verified — click for details';
-  } else if (state === 'yellow') {
-    badge.textContent = '⚠️';
-    badge.title = 'Claude has a step to run for My Trips — click to see what';
+  if (tripsyRelaySyncInFlight) {
+    // Actively checking for updates: show an unmistakable "syncing" glyph that
+    // pulses (not the static state icon), so it reads as work-in-progress
+    // rather than click feedback -- the visual twin of the panel's pulsing red
+    // "Checking for updates…" line. Reverts to the state icon below once the
+    // sync finishes (updateTripsyStatusBadge is called again from its finally).
+    badge.textContent = '🔄';
+    badge.title = 'Checking for updates…';
+    badge.classList.add('tripsy-badge-checking');
   } else {
-    badge.textContent = '🟢';
-    badge.title = 'You have My Trips items to review — click to see';
+    badge.classList.remove('tripsy-badge-checking');
+    if (state === 'red') {
+      badge.textContent = '🛑';
+      badge.title = reasons.some(r => r.kind === 'write-failed')
+        ? 'A write failed — click for details'
+        : 'A Tripsy push could not be verified — click for details';
+    } else if (state === 'yellow') {
+      badge.textContent = '⚠️';
+      badge.title = 'Claude has a step to run for My Trips — click to see what';
+    } else {
+      badge.textContent = '🟢';
+      badge.title = 'You have My Trips items to review — click to see';
+    }
   }
-  // Pulse the yellow badge while the app is actively checking for updates
-  // (a relay sync in flight) -- a visible "working on it" cue.
-  badge.classList.toggle('tripsy-badge-checking', state === 'yellow' && tripsyRelaySyncInFlight);
   // If the panel is open while a background refresh changes the state, keep
   // its contents in sync.
   if (panel && panel.style.display === 'block') renderTripsyStatusPanel();
