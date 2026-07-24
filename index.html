@@ -10079,17 +10079,21 @@ async function showTripsyVerifyTravelDialog(trip) {
   const transport = tripsyTransportationGaps(trip, pending); // { moves, gaps:[{from,to,day}] }
   // Two-column row (lodging): date + description. Tapping jumps to that date
   // in the My Trips timeline (see tripsyGoToTripDay).
+  // A warning row (missing lodging/transport) carries data-tvv-kind so tapping
+  // opens the prefilled new-event form (openTripsyVerifyGapEdit); a satisfied
+  // row carries only data-tvv-day and just jumps to that date in My Trips.
   const gapRow = (dateText, descText, dayKey) => `
-    <button class="tvv-gap" data-tvv-day="${esc(dayKey || '')}" style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
+    <button class="tvv-gap" data-tvv-kind="lodging" data-tvv-day="${esc(dayKey || '')}" style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
       <span style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--amber); flex-shrink:0; min-width:104px;">${esc(dateText || '')}</span>
       <span style="font-size:13px;">${esc(descText)}</span>
     </button>`;
   // Three-column row (transportation move): date | origin -> destination |
-  // third column (a "?" when transportation is missing, else the method).
-  const moveRow = (dayKey, from, to, third, thirdColor) => `
-    <button class="tvv-gap" data-tvv-day="${esc(dayKey || '')}" style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
-      <span style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--amber); flex-shrink:0; min-width:104px;">${esc(dayKey ? tripsyDayHeaderLabel(dayKey) : '')}</span>
-      <span style="font-size:13px; flex:1;">${esc(from)} <span style="color:var(--muted);">→</span> ${esc(to)}</span>
+  // third column (a "?" when transportation is missing, else the method). A
+  // missing move (isWarning) carries kind/from/to for the prefilled Add form.
+  const moveRow = (m, third, thirdColor, isWarning) => `
+    <button class="tvv-gap" data-tvv-day="${esc(m.day || '')}"${isWarning ? ` data-tvv-kind="transport" data-tvv-from="${esc(m.from || '')}" data-tvv-to="${esc(m.to || '')}"` : ''} style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
+      <span style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--amber); flex-shrink:0; min-width:104px;">${esc(m.day ? tripsyDayHeaderLabel(m.day) : '')}</span>
+      <span style="font-size:13px; flex:1;">${esc(m.from)} <span style="color:var(--muted);">→</span> ${esc(m.to)}</span>
       <span style="font-size:12px; font-weight:700; color:${thirdColor}; flex-shrink:0; text-align:right; min-width:44px;">${esc(third)}</span>
     </button>`;
   const okLine = txt => `<div style="font-size:13px; color:var(--home-green); font-weight:600;">✓ ${esc(txt)}</div>`;
@@ -10111,11 +10115,11 @@ async function showTripsyVerifyTravelDialog(trip) {
     : `
       ${subLabel(`Missing transportation${missingMoves.length ? ` (${missingMoves.length})` : ''}`)}
       ${missingMoves.length
-        ? missingMoves.map(m => moveRow(m.day, m.from, m.to, '?', 'var(--amber)')).join('')
+        ? missingMoves.map(m => moveRow(m, '?', 'var(--amber)', true)).join('')
         : okLine('None — every move has transportation.')}
       ${subLabel(`Has transportation${coveredMoves.length ? ` (${coveredMoves.length})` : ''}`)}
       ${coveredMoves.length
-        ? coveredMoves.map(m => moveRow(m.day, m.from, m.to, m.method || '✓', 'var(--home-green)')).join('')
+        ? coveredMoves.map(m => moveRow(m, m.method || '✓', 'var(--home-green)', false)).join('')
         : muted('None.')}`;
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10002; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch;';
@@ -10130,16 +10134,54 @@ async function showTripsyVerifyTravelDialog(trip) {
       ${lodgingBody}
       <div style="font-family:var(--mono); font-size:14px; font-weight:700; color:var(--amber); border-bottom:1px solid var(--line); padding-bottom:6px; margin:22px 0 10px;">🚗 Transportation</div>
       ${transportBody}
-      <div style="font-size:11px; color:var(--muted); line-height:1.5; margin-top:16px;">Advisory — tap any row to jump to that date in My Trips. A stay or leg you didn't log will show as a gap.</div>
+      <div style="font-size:11px; color:var(--muted); line-height:1.5; margin-top:16px;">Advisory — tap a missing item to add it (prefilled), or a logged one to jump to that date in My Trips. A stay or leg you didn't log will show as a gap.</div>
     </div>`;
   const close = () => overlay.remove();
   overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
   overlay.querySelector('[data-tvv-close]').addEventListener('click', close);
   overlay.querySelectorAll('[data-tvv-day]').forEach(btn => btn.addEventListener('click', () => {
     const day = btn.dataset.tvvDay;
+    const kind = btn.dataset.tvvKind;
     overlay.remove();
-    if (day) tripsyGoToTripDay(trip.key, day);
+    // A warning row (kind set) opens the prefilled Add form to clear it; a
+    // satisfied row just jumps to that date in My Trips.
+    if (kind) openTripsyVerifyGapEdit(trip, kind, { day, from: btn.dataset.tvvFrom, to: btn.dataset.tvvTo });
+    else if (day) tripsyGoToTripDay(trip.key, day);
   }));
+  document.body.appendChild(overlay);
+}
+
+// Open the new-event (Add) form in a modal for a warning the verify report
+// found, prefilled with what's needed to clear it: for a lodging gap, an Add
+// Lodging form dated to that night; for a transportation gap, an Add
+// Transportation form with category Car (a ground transfer -- the most common
+// missing leg, and any transport clears the gap) dated to the gap day, with
+// its origin/destination filled from the move. The form's own Save/Cancel and
+// unsaved-changes guard apply; a backdrop click routes through that guard. On
+// close (save or cancel) the verify report reopens -- after a short delay so an
+// optimistic Save's queued create is in the in-memory pending list, so the gap
+// it fills shows resolved.
+function openTripsyVerifyGapEdit(trip, kind, gap) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.62); z-index:10003; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch;';
+  overlay.innerHTML = `<div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; max-width:660px; width:100%; box-shadow:0 16px 48px rgba(0,0,0,0.55);"><div data-tvv-edit-panel></div></div>`;
+  const panel = overlay.querySelector('[data-tvv-edit-panel]');
+  let prefill, label;
+  if (kind === 'lodging') {
+    prefill = { ...tripsyBlankRaw('hosting', null), startsAt: gap.day ? `${gap.day}T15:00:00` : null };
+    label = 'Lodging';
+  } else {
+    prefill = { ...tripsyBlankRaw('transportation', 'car'), departureAt: gap.day ? `${gap.day}T09:00:00` : null, departureDescription: gap.from || null, arrivalDescription: gap.to || null };
+    label = 'Transportation';
+  }
+  const back = () => { overlay.remove(); setTimeout(() => showTripsyVerifyTravelDialog(trip), 350); };
+  renderTripsyEditPanel(panel, prefill, trip.key, trip.name, label, {
+    pendingChangeId: crypto.randomUUID(),
+    tripsyTripId: tripsyTripIdFromKey(trip.key),
+  }, back);
+  panel.style.display = 'block';
+  // Backdrop click -> the panel's own guarded Exit (Save/Discard/Keep-editing).
+  overlay.addEventListener('click', e => { if (e.target === overlay) { const exit = panel.querySelector('[data-tripsy-edit-exit]'); if (exit) exit.click(); } });
   document.body.appendChild(overlay);
 }
 
