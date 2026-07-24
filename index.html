@@ -6902,6 +6902,7 @@ async function renderUtilitiesTripsyRefresh() {
           <button id="tripsy-open-routines-btn" class="btn primary" style="font-size:13px; padding:6px 14px;">Run Refresh</button>
           <span style="margin-left:10px; font-size:12px; color:var(--muted);">Starts the cloud refresh now; it republishes in a few minutes. <a href="https://claude.ai/code/routines" target="_blank" rel="noopener" style="color:var(--amber);">View runs ↗</a></span>
         </p>
+        <div id="tripsy-refresh-lifecycle" style="margin-top:10px;"></div>
         <div style="margin-top:12px; border:1px solid var(--amber); border-radius:8px; padding:10px 12px; background:rgba(227,164,56,0.08); font-size:12px;">
           <b style="color:var(--amber);">⚠️ Don't try to run a refresh from a plain iPad Claude Code session.</b>
           <div style="margin-top:4px;">Opening <b>claude.ai/code</b> on the iPad and telling it <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span> does <b>not</b> work like the Mac does: that session clones this repo from GitHub, but the refresh runbook lives only on your Mac and isn't in the repo, so it has <b>no procedure to follow</b> -- it won't reliably push your queued changes, parse flagged docs, or parse forwarded emails. From an iPad, always use <b>Run now</b> on the cloud routine above (that copy of the runbook is baked into the routine itself).</div>
@@ -6931,6 +6932,11 @@ async function renderUtilitiesTripsyRefresh() {
   document.getElementById('tripsy-check-now-btn').addEventListener('click', checkForFreshTripsySnapshot);
   const runRefreshBtn = document.getElementById('tripsy-open-routines-btn');
   if (runRefreshBtn) runRefreshBtn.addEventListener('click', () => runTripsyRefreshViaWorker(runRefreshBtn));
+  // Reflect any in-progress refresh, and (if one is running) resume watching for
+  // the republished snapshot -- covers reopening the page mid-refresh.
+  renderTripsyRefreshLifecycle();
+  const tripsyLc = tripsyRefreshLifecycleState();
+  if (tripsyLc && tripsyLc.state === 'running') { startTripsyRefreshPoll(); tripsyRefreshPollOnce(); }
   main.querySelectorAll("[data-nav]").forEach(el => {
     el.addEventListener("click", e => {
       e.preventDefault();
@@ -7672,7 +7678,12 @@ async function runTripsyRefreshViaWorker(triggerEl) {
       headers: { 'Content-Type': 'application/json', 'X-App-Secret': secret },
     });
     if (res.ok) {
-      toast('Refresh started — it runs in the cloud and republishes in a few minutes. Use "Check Now" once it lands.');
+      let sessionUrl = null;
+      try { const data = await res.json(); sessionUrl = (data && data.claude_code_session_url) || null; } catch (e) { /* body optional */ }
+      setTripsyRefreshRun({ firedAt: new Date().toISOString(), baseline: TRIPSY_SNAPSHOT_GENERATED_AT, sessionUrl });
+      renderTripsyRefreshLifecycle();
+      startTripsyRefreshPoll();
+      toast('Refresh started — track it on the Tripsy Refresh page. It republishes in a few minutes.');
     } else if (res.status === 401) {
       toast('Could not start the refresh: the app secret did not match the Worker. Check the "Tripsy Refresh Worker Secret" Drive file.', 'error');
     } else if (res.status === 429) {
@@ -7686,6 +7697,89 @@ async function runTripsyRefreshViaWorker(triggerEl) {
   } finally {
     tripsyRefreshFireInFlight = false;
     if (triggerEl && triggerEl.isConnected) { triggerEl.disabled = false; triggerEl.textContent = originalText; }
+  }
+}
+
+// ---- Snapshot-based refresh lifecycle (owner-only) ----
+// We can't poll the routine's own run status from the browser (no CORS-open
+// status API), but a completed refresh republishes this page with a newer
+// TRIPSY_SNAPSHOT_GENERATED_AT. So on fire we record the time + the snapshot we
+// were on, then watch the DEPLOYED page's snapshot constant advance past that
+// baseline. State is kept in localStorage so it survives reloads. Detects "a
+// refresh landed," not strictly "your run" -- a scheduled run that lands first
+// also satisfies it, which is fine (fresh data is fresh data).
+const TRIPSY_REFRESH_RUN_KEY = 'tripsyRefreshRun';
+const TRIPSY_REFRESH_TIMEOUT_MS = 15 * 60 * 1000;
+let tripsyRefreshPollTimer = null;
+
+function getTripsyRefreshRun() {
+  try { return JSON.parse(localStorage.getItem(TRIPSY_REFRESH_RUN_KEY) || 'null'); } catch (e) { return null; }
+}
+function setTripsyRefreshRun(run) {
+  try { localStorage.setItem(TRIPSY_REFRESH_RUN_KEY, JSON.stringify(run)); } catch (e) { /* ignore */ }
+}
+function clearTripsyRefreshRun() {
+  try { localStorage.removeItem(TRIPSY_REFRESH_RUN_KEY); } catch (e) { /* ignore */ }
+  if (tripsyRefreshPollTimer) { clearInterval(tripsyRefreshPollTimer); tripsyRefreshPollTimer = null; }
+}
+
+function tripsyRefreshLifecycleState() {
+  const run = getTripsyRefreshRun();
+  if (!run) return null;
+  // This tab already loaded a snapshot newer than the one we fired from -> the
+  // refresh landed and the user is now viewing the fresh data.
+  if (TRIPSY_SNAPSHOT_GENERATED_AT !== run.baseline) return { state: 'done-loaded', run };
+  if (run.deployedAt) return { state: 'landed', run };
+  if (Date.now() - Date.parse(run.firedAt) > TRIPSY_REFRESH_TIMEOUT_MS) return { state: 'timeout', run };
+  return { state: 'running', run };
+}
+
+// One poll: fetch the live page, compare its snapshot constant to our baseline.
+async function tripsyRefreshPollOnce() {
+  const run = getTripsyRefreshRun();
+  if (!run || run.deployedAt || TRIPSY_SNAPSHOT_GENERATED_AT !== run.baseline) { renderTripsyRefreshLifecycle(); return; }
+  try {
+    const res = await fetch(location.href, { cache: 'no-store' });
+    const m = (await res.text()).match(/const TRIPSY_SNAPSHOT_GENERATED_AT = '([^']*)';/);
+    if (m && m[1] !== run.baseline) { run.deployedAt = m[1]; setTripsyRefreshRun(run); }
+  } catch (e) { /* transient; next tick retries */ }
+  renderTripsyRefreshLifecycle();
+}
+
+function startTripsyRefreshPoll() {
+  if (tripsyRefreshPollTimer) return;
+  tripsyRefreshPollTimer = setInterval(() => {
+    const lc = tripsyRefreshLifecycleState();
+    if (!lc || lc.state !== 'running') { clearInterval(tripsyRefreshPollTimer); tripsyRefreshPollTimer = null; renderTripsyRefreshLifecycle(); return; }
+    tripsyRefreshPollOnce();
+  }, 45000);
+}
+
+// Renders the lifecycle line into #tripsy-refresh-lifecycle when that element is
+// on screen (the Tripsy Refresh page). No-op elsewhere, so a background poll
+// fired from the badge panel just updates localStorage silently.
+function renderTripsyRefreshLifecycle() {
+  const el = document.getElementById('tripsy-refresh-lifecycle');
+  if (!el) return;
+  const lc = tripsyRefreshLifecycleState();
+  if (!lc) { el.innerHTML = ''; return; }
+  const t = iso => { try { return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return iso || ''; } };
+  const runLink = lc.run.sessionUrl ? ` <a href="${esc(lc.run.sessionUrl)}" target="_blank" rel="noopener" style="color:var(--amber);">View run ↗</a>` : '';
+  const box = (border, html) => `<div style="border:1px solid ${border}; border-radius:8px; padding:10px 12px; font-size:12.5px; color:var(--text); line-height:1.5;">${html}</div>`;
+  const wireDismiss = () => { const d = el.querySelector('[data-tripsy-lifecycle-dismiss]'); if (d) d.addEventListener('click', e => { e.preventDefault(); clearTripsyRefreshRun(); renderTripsyRefreshLifecycle(); }); };
+  if (lc.state === 'running') {
+    el.innerHTML = box('var(--line)', `⏳ <b>Refresh started ${esc(t(lc.run.firedAt))}.</b> Waiting for the updated data to publish — usually a few minutes.${runLink}`);
+  } else if (lc.state === 'landed') {
+    el.innerHTML = box('var(--home-green)', `✅ <b>New data published ${esc(t(lc.run.deployedAt))}.</b> <a href="#" data-tripsy-lifecycle-reload style="color:var(--home-green); font-weight:700;">Reload to see it</a>.${runLink}`);
+    const rl = el.querySelector('[data-tripsy-lifecycle-reload]');
+    if (rl) rl.addEventListener('click', e => { e.preventDefault(); location.reload(); });
+  } else if (lc.state === 'done-loaded') {
+    el.innerHTML = box('var(--home-green)', `✅ <b>Refresh complete.</b> You're viewing the updated data. <a href="#" data-tripsy-lifecycle-dismiss style="color:var(--muted);">Dismiss</a>`);
+    wireDismiss();
+    clearTripsyRefreshRun(); // shown once; keep the DOM message but don't persist
+  } else if (lc.state === 'timeout') {
+    el.innerHTML = box('var(--amber)', `⚠️ <b>No new data after 15 minutes.</b> The run may still be finishing, or it may have failed — check the run log.${runLink} <a href="#" data-tripsy-lifecycle-dismiss style="color:var(--muted);">Dismiss</a>`);
+    wireDismiss();
   }
 }
 
