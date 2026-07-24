@@ -9959,6 +9959,11 @@ function tripsyTransportationGaps(trip, pendingChanges) {
 
   // (2) Airport transfers (hotel <-> airport, on a same-day flight).
   const airportLabel = desc => String(desc || '').trim() || 'Airport';
+  const addDay = (dayKey, n) => {
+    const [y, m, d] = dayKey.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + n));
+    return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+  };
   const seen = new Set();
   const addTransfer = (from, to, day, key) => {
     if (!day || seen.has(key)) return;
@@ -9972,10 +9977,18 @@ function tripsyTransportationGaps(trip, pendingChanges) {
       const f = arrFlights.reduce((a, b) => (b.arrIso > a.arrIso ? b : a)); // last to land
       addTransfer(airportLabel(f.arrDesc), l.name, l.ci, `arr:${l.ci}:${l.name}`);
     }
-    const depFlights = flights.filter(f => f.depDay === l.co); // leave the day you check out
+    // The day you'd fly out AFTER this stay: the real check-out day if it has
+    // one, else check-in + 1 (a stay with no logged check-out has co defaulted
+    // to ci -- the "one night" assumption). Without this, a null-checkout stay
+    // (e.g. a "check-in for one night" parse that dropped its end date) would
+    // look for a departure flight on the check-in day and silently miss the
+    // next-morning departure transfer. A real check-out date still anchors the
+    // match, so a mid-stay day-trip flight won't wrongly trigger one.
+    const departDay = l.co > l.ci ? l.co : addDay(l.ci, 1);
+    const depFlights = flights.filter(f => f.depDay === departDay); // leave the morning after your last night
     if (depFlights.length) {
       const f = depFlights.reduce((a, b) => (b.depIso < a.depIso ? b : a)); // first to leave
-      addTransfer(l.name, airportLabel(f.depDesc), l.co, `dep:${l.co}:${l.name}`);
+      addTransfer(l.name, airportLabel(f.depDesc), departDay, `dep:${departDay}:${l.name}`);
     }
   });
 
