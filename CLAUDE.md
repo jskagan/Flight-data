@@ -183,6 +183,19 @@ back / 1095 forward, i.e. 3 years).
   `~/.claude/scheduled-tasks/tripsy-trips-refresh/SKILL.md`. That file is untracked and
   machine-local — it is the runbook text, not a schedule by itself.
 
+  **⚠️ GUARDRAIL — before running a refresh, confirm the runbook is actually here.** If you are asked
+  to "run a Tripsy refresh", FIRST check that `~/.claude/scheduled-tasks/tripsy-trips-refresh/SKILL.md`
+  exists. If it does **not**, you are on an iPad/iPhone/`claude.ai/code`/other cloud-cloned session
+  (`.claude/` is gitignored, so a fresh clone of this repo never contains it). Do **NOT** try to
+  improvise a refresh from this CLAUDE.md — you'd be missing the actual procedure (passphrase location,
+  AES/PBKDF2 params, the pending-changes/email/doc-parse steps, the two-const diff gating) and would
+  likely push a broken snapshot or silently skip the push/parse steps. Instead **STOP and tell the
+  user**: *"This device doesn't have the refresh runbook, so I can't run it here. Use **Run now** on
+  the **Tripsy Trips Refresh** routine at claude.ai/code/routines — it has the runbook baked in and
+  does the whole thing (push queued changes, parse flagged docs/photos and forwarded emails, pull data,
+  republish)."* Only proceed with a hand-run refresh when that `SKILL.md` is present (i.e. you're on
+  the owner's Mac).
+
   **A note on scheduling — don't be fooled by empty `crontab`/`launchd`.** There genuinely IS (was)
   a second scheduler: the **Claude desktop app runs its own scheduled tasks**, registered in
   `~/Library/Application Support/Claude/claude-code-sessions/<userId>/<workspaceId>/scheduled-tasks.json`,
