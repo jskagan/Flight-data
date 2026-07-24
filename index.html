@@ -6900,7 +6900,7 @@ async function renderUtilitiesTripsyRefresh() {
         </ol>
         <p style="margin-top:10px;">
           <button id="tripsy-open-routines-btn" class="btn primary" style="font-size:13px; padding:6px 14px;">Run Refresh</button>
-          <span style="margin-left:10px; font-size:12px; color:var(--muted);">Opens claude.ai/code/routines in a new tab.</span>
+          <span style="margin-left:10px; font-size:12px; color:var(--muted);">Starts the cloud refresh now; it republishes in a few minutes. <a href="https://claude.ai/code/routines" target="_blank" rel="noopener" style="color:var(--amber);">View runs ↗</a></span>
         </p>
         <div style="margin-top:12px; border:1px solid var(--amber); border-radius:8px; padding:10px 12px; background:rgba(227,164,56,0.08); font-size:12px;">
           <b style="color:var(--amber);">⚠️ Don't try to run a refresh from a plain iPad Claude Code session.</b>
@@ -6929,7 +6929,8 @@ async function renderUtilitiesTripsyRefresh() {
     btn.addEventListener("click", () => tripsyToggleLocationPicker(btn.dataset.changeId, changes));
   });
   document.getElementById('tripsy-check-now-btn').addEventListener('click', checkForFreshTripsySnapshot);
-  document.getElementById('tripsy-open-routines-btn').addEventListener('click', () => window.open('https://claude.ai/code/routines', '_blank', 'noopener'));
+  const runRefreshBtn = document.getElementById('tripsy-open-routines-btn');
+  if (runRefreshBtn) runRefreshBtn.addEventListener('click', () => runTripsyRefreshViaWorker(runRefreshBtn));
   main.querySelectorAll("[data-nav]").forEach(el => {
     el.addEventListener("click", e => {
       e.preventDefault();
@@ -7631,6 +7632,61 @@ async function fetchAnthropicApiKeyFromDrive() {
   const firstLine = (text.split('\n')[0] || '').trim();
   if (!firstLine) throw new Error('Claude Narrative API Key file is empty.');
   return firstLine;
+}
+
+// One-tap "Run Refresh": fire the Tripsy Trips Refresh cloud routine on demand.
+// The browser can't call Anthropic's routine /fire endpoint directly (no CORS,
+// and the powerful sk-ant-oat01 token must never live in this public page), so
+// the click goes through a tiny Cloudflare Worker that holds the routine token
+// and calls /fire server-side. The Worker is gated by a shared secret the app
+// reads at click time from an owner-only Drive file (same private-Drive-file
+// pattern as the passphrase / narrative key above) -- so only the owner, who
+// alone can read that file, can trigger a refresh. Owner-only.
+const TRIPSY_REFRESH_WORKER_URL = 'https://tripsy-refresh-proxy.jskagan.workers.dev/';
+const TRIPSY_REFRESH_WORKER_SECRET_FILENAME = 'Tripsy Refresh Worker Secret';
+
+async function fetchTripsyRefreshWorkerSecretFromDrive() {
+  const q = encodeURIComponent(`name='${TRIPSY_REFRESH_WORKER_SECRET_FILENAME}' and mimeType='text/plain' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&spaces=drive`);
+  const json = await res.json();
+  const fileId = (json.files && json.files.length) ? json.files[0].id : null;
+  if (!fileId) throw new Error('Tripsy Refresh Worker Secret file not found (or not shared with this account).');
+  const contentRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  const text = await contentRes.text();
+  const firstLine = (text.split('\n')[0] || '').trim();
+  if (!firstLine) throw new Error('Tripsy Refresh Worker Secret file is empty.');
+  return firstLine;
+}
+
+let tripsyRefreshFireInFlight = false;
+async function runTripsyRefreshViaWorker(triggerEl) {
+  if (!isOwner) return;
+  if (tripsyRefreshFireInFlight) { toast('A refresh is already being started…'); return; }
+  tripsyRefreshFireInFlight = true;
+  const originalText = triggerEl ? triggerEl.textContent : null;
+  if (triggerEl) { triggerEl.disabled = true; triggerEl.textContent = 'Starting…'; }
+  try {
+    const secret = await fetchTripsyRefreshWorkerSecretFromDrive();
+    const res = await fetch(TRIPSY_REFRESH_WORKER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-App-Secret': secret },
+    });
+    if (res.ok) {
+      toast('Refresh started — it runs in the cloud and republishes in a few minutes. Use "Check Now" once it lands.');
+    } else if (res.status === 401) {
+      toast('Could not start the refresh: the app secret did not match the Worker. Check the "Tripsy Refresh Worker Secret" Drive file.', 'error');
+    } else if (res.status === 429) {
+      toast('A refresh was just started — wait a minute before starting another.', 'error');
+    } else {
+      toast(`Could not start the refresh (error ${res.status}). You can open the routine page and press Run now instead.`, 'error');
+    }
+  } catch (e) {
+    console.error('runTripsyRefreshViaWorker failed:', e);
+    toast('Could not start the refresh — the Worker secret could not be read from Drive, or the network failed. Open the routine page and press Run now instead.', 'error');
+  } finally {
+    tripsyRefreshFireInFlight = false;
+    if (triggerEl && triggerEl.isConnected) { triggerEl.disabled = false; triggerEl.textContent = originalText; }
+  }
 }
 
 // Decrypts TRIPSY_ENCRYPTED with the given passphrase and returns the
@@ -18734,7 +18790,7 @@ async function renderTripsyStatusPanel() {
     ${state !== 'green' ? `
       <div style="border-top:1px solid var(--line); margin-top:2px; padding:10px 6px 2px;">
         <button class="btn primary" data-tripsy-status-open-routines style="display:block; width:100%; font-size:12px; padding:6px 12px;">Run Refresh</button>
-        <div style="font-size:11px; color:var(--muted); margin-top:5px; text-align:center;">Press <b>Run now</b> there to run a refresh (opens claude.ai/code/routines in a new tab).</div>
+        <div style="font-size:11px; color:var(--muted); margin-top:5px; text-align:center;">Starts the cloud refresh now; it republishes in a few minutes.</div>
       </div>
     ` : ''}
   `;
@@ -18745,7 +18801,7 @@ async function renderTripsyStatusPanel() {
     });
   });
   const openRoutinesBtn = panel.querySelector('[data-tripsy-status-open-routines]');
-  if (openRoutinesBtn) openRoutinesBtn.addEventListener('click', () => window.open('https://claude.ai/code/routines', '_blank', 'noopener'));
+  if (openRoutinesBtn) openRoutinesBtn.addEventListener('click', () => runTripsyRefreshViaWorker(openRoutinesBtn));
   // Only this specific failed write clears -- per explicit request, it
   // stays listed until the owner dismisses it themselves, never on its own.
   panel.querySelectorAll('[data-tripsy-status-dismiss-write]').forEach(btn => {
