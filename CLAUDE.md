@@ -240,10 +240,16 @@ that catches drift between them.
   despite older task-doc claims to the contrary), extracts event fields, and writes a
   `tripsy-doc-proposals.json` relay the app drains on its next open (`drainTripsyDocProposals` →
   `Store.applyDrainedDocProposals`). So flagged documents parse with NO browser or desktop — the
-  whole flow works from an iPad (upload+flag → cloud parses 3×/day → review/import). A browser-driven
-  fallback still exists for on-demand desktop parsing
-  (`~/.claude/scheduled-tasks/tripsy-pdf-parse/RUN_NOW.md`, "process flagged Tripsy docs") but is no
-  longer the only path.
+  whole flow works from an iPad (upload+flag → cloud parses 3×/day → review/import). **Supported
+  formats: PDF, Word `.docx`, and images** (`image/jpeg`/`png`/`heic`/`webp`/`gif` — a photo or
+  screenshot of a printed itinerary/confirmation, read natively by the Read tool's vision). This
+  parse logic is **triplicated and must be kept in lockstep** — the cloud routine's inline STEP 1c
+  (managed at `https://claude.ai/code/routines`, since the cloud sandbox can't read `.claude/`), the
+  local `~/.claude/scheduled-tasks/tripsy-trips-refresh/SKILL.md` step 1c (desktop/on-demand
+  refresh), and the on-demand `~/.claude/scheduled-tasks/tripsy-pdf-parse/RUN_NOW.md` fallback all
+  parse the same formats the same way. (Images were unsupported until 2026-07-24, and the local
+  `SKILL.md` was missing step 1c entirely — a desktop refresh silently skipped doc-parsing — both
+  fixed then; if you change what formats parse, update all three.)
   Independently, there's an **email-intake pipeline** for confirmations the owner forwards to
   `kaganworldtravel@gmail.com`. The scan (`scanTripsyEmailIntake`) searches the owner's Gmail for
   that address in *either* direction — `(to:kaganworldtravel@gmail.com OR from:kaganworldtravel@gmail.com)`
