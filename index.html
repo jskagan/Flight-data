@@ -3276,6 +3276,53 @@ function findTextPartData(payload) {
   return null;
 }
 
+// Gmail attachment MIME types the doc-parse pipeline can read (the same formats
+// step 1c handles: PDF, images, Word .docx). A forwarded confirmation whose
+// details live only in one of these -- e.g. a photo of a printed itinerary --
+// arrives with an empty text body, so capturing just the body loses the booking
+// entirely (the intake used to store body only). We funnel such an attachment
+// into the SAME doc-parse flow as a manually-uploaded flagged doc (a
+// purpose:'parse' attachment), so NO new refresh step is needed: step 1c parses
+// it and stages a proposal to review.
+const TRIPSY_PARSEABLE_ATTACHMENT_MIMES = new Set([
+  'application/pdf',
+  'image/jpeg', 'image/png', 'image/heic', 'image/heif', 'image/webp', 'image/gif',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]);
+function base64UrlToBytes(b64url) {
+  const b64 = String(b64url || '').replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+// Walk a Gmail message payload for real, parseable attachments. Skips message
+// bodies (no attachmentId) and small inline images (logos, signatures, tracking
+// pixels): a part counts only if it's a supported type AND either marked
+// Content-Disposition: attachment or is a larger inline image (>= 40KB).
+function collectTripsyEmailAttachmentParts(payload) {
+  const out = [];
+  const consider = p => {
+    if (!p) return;
+    if (p.parts) { p.parts.forEach(consider); return; }
+    const attId = p.body && p.body.attachmentId;
+    if (!attId) return;
+    const mime = (p.mimeType || '').toLowerCase();
+    if (!TRIPSY_PARSEABLE_ATTACHMENT_MIMES.has(mime)) return;
+    const disposition = ((p.headers || []).find(h => (h.name || '').toLowerCase() === 'content-disposition') || {}).value || '';
+    const isAttachment = /^\s*attachment/i.test(disposition);
+    const size = (p.body && p.body.size) || 0;
+    if (!isAttachment && size < 40000) return; // skip small inline logos/pixels
+    out.push({ gmailAttachmentId: attId, fileName: p.filename || 'attachment', mimeType: mime, sizeBytes: size });
+  };
+  (payload && payload.parts || []).forEach(consider);
+  return out;
+}
+async function fetchGmailAttachmentBytes(messageId, attachmentId) {
+  const res = await gmailApiFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/attachments/${attachmentId}`);
+  return base64UrlToBytes(res.data);
+}
+
 async function fetchTripsyIntakeEmail(messageId) {
   const msg = await gmailApiFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=full`);
   const headers = msg.payload.headers || [];
@@ -3290,7 +3337,8 @@ async function fetchTripsyIntakeEmail(messageId) {
     const textData = findTextPartData(msg.payload) || (msg.payload.body && msg.payload.body.data);
     if (textData) body = decodeQuotedPrintableIfNeeded(base64UrlDecodeToUtf8(textData)).replace(/\s+/g, ' ').trim();
   }
-  return { id: messageId, rfc822MessageId, subject, body, foundAt: new Date().toISOString(), parsedAt: null };
+  const entry = { id: messageId, rfc822MessageId, subject, body, foundAt: new Date().toISOString(), parsedAt: null };
+  return { entry, attachmentParts: collectTripsyEmailAttachmentParts(msg.payload) };
 }
 
 // Owner-only. Finds confirmation emails involving the Tripsy intake alias --
@@ -3316,13 +3364,42 @@ async function scanTripsyEmailIntake() {
   const known = new Set((await Store.listTripsyEmailIntake()).map(e => e.id));
   const toFetch = refs.filter(m => !known.has(m.id));
   const fetched = [];
+  const attachmentJobs = [];
   for (const ref of toFetch) {
-    try { fetched.push(await fetchTripsyIntakeEmail(ref.id)); }
+    try {
+      const { entry, attachmentParts } = await fetchTripsyIntakeEmail(ref.id);
+      fetched.push(entry);
+      if (attachmentParts.length) attachmentJobs.push({ messageId: ref.id, parts: attachmentParts });
+    }
     catch (e) { console.error('fetchTripsyIntakeEmail failed for', ref.id, e); }
   }
   const res = await Store.addTripsyEmailIntakeEntries(fetched);
+  // Capture any parseable attachments (a photo/PDF of a confirmation) as
+  // purpose:'parse' docs so step 1c reads them -- the email body alone is empty
+  // for an image-only confirmation. Best-effort, deduped by
+  // (sourceEmailId, gmailAttachmentId); scope:'email' keeps them off trip cards.
+  let attachmentsAdded = 0;
+  for (const job of attachmentJobs) {
+    for (const part of job.parts) {
+      try {
+        const dupe = (await Store.listTripsyAttachments()).some(a => a.sourceEmailId === job.messageId && a.gmailAttachmentId === part.gmailAttachmentId);
+        if (dupe) continue;
+        const bytes = await fetchGmailAttachmentBytes(job.messageId, part.gmailAttachmentId);
+        const driveFileId = await uploadBlobToDrive(new Blob([bytes], { type: part.mimeType }), part.fileName, part.mimeType);
+        const saved = await Store.saveTripsyAttachment({
+          id: crypto.randomUUID(),
+          scope: 'email', tripKey: null, eventKey: null,
+          fileName: part.fileName, driveFileId, mimeType: part.mimeType, sizeBytes: part.sizeBytes,
+          purpose: 'parse', parseStatus: 'pending',
+          uploadedAt: new Date().toISOString(), uploadedBy: currentUserEmail,
+          sourceEmailId: job.messageId, gmailAttachmentId: part.gmailAttachmentId,
+        });
+        if (saved.ok) attachmentsAdded++;
+      } catch (e) { console.error('Tripsy email attachment intake failed', job.messageId, part.gmailAttachmentId, e); }
+    }
+  }
   await Store.setSyncTimestamp('tripsyEmailScan', new Date().toISOString());
-  return { ok: res.ok, added: res.added || 0 };
+  return { ok: res.ok, added: res.added || 0, attachmentsAdded };
 }
 
 // Shared drain: find every Drive file named `filename`, hand its parsed JSON to
@@ -6914,7 +6991,7 @@ async function renderUtilitiesParsingDocs() {
     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:8px 0; border-top:1px solid var(--line); font-size:13px;">
       <div>
         <span>📄 ${esc(a.fileName)}</span>
-        <span style="color:var(--muted);"> (${esc(tripNameFor(a.tripKey))}${a.eventKey ? ', event-level' : ''})</span>
+        <span style="color:var(--muted);"> (${esc(a.scope === 'email' ? 'from a forwarded email' : tripNameFor(a.tripKey))}${a.eventKey ? ', event-level' : ''})</span>
       </div>
     </div>
   `;
