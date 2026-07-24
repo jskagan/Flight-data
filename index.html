@@ -2465,7 +2465,7 @@ const Store = {
     try {
       if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
       const byId = new Map((results || []).filter(r => r && r.changeId).map(r => [r.changeId, r]));
-      let cleared = 0, flagged = 0, failed = 0;
+      let cleared = 0, flagged = 0, failed = 0, landed = 0;
       const now = new Date().toISOString();
       driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(c => {
         const r = byId.get(c.id);
@@ -2485,13 +2485,28 @@ const Store = {
               if (a.scope === 'event' && a.eventKey === c.id) a.eventKey = r.eventKey;
             });
           }
-          return false; // confirmed -> remove
+          // A newly-CREATED event won't appear in THIS tab's itinerary until the
+          // page reloads the newer snapshot that includes it. Dropping it from
+          // the queue right now would leave it invisible for that window (not
+          // queued, not yet in the itinerary) -- the "everything disappeared"
+          // problem. So keep it, marked "landed": shown as a green "Added --
+          // appears on reload" item instead of vanishing, and cleared by
+          // reconcileTripsyLandedChanges once the reloaded snapshot really
+          // contains it. Edits/deletes have no such gap (they change/remove an
+          // already-visible event), so they clear immediately as before.
+          if (c.type === 'create_event' && r.eventKey && !tripsySnapshotContainsEventKey(r.eventKey)) {
+            c.landed = true; c.landedEventKey = r.eventKey; c.landedAt = now;
+            delete c.pushConfirmationFailed; delete c.pushConfirmationFailedAt; delete c.lastPushError;
+            landed++;
+            return true; // keep visible as "added"
+          }
+          return false; // confirmed and already in-snapshot (or not a create) -> remove
         }
         if (r.status === 'unverified') { c.pushConfirmationFailed = true; c.pushConfirmationFailedAt = now; flagged++; return true; }
         c.lastPushError = r.reason || true; failed++; return true; // 'failed' -> retry next run
       });
       await persistDriveData();
-      return { ok: true, cleared, flagged, failed };
+      return { ok: true, cleared, flagged, failed, landed };
     } catch (e) {
       console.error('Store.applyDrainedPushResults failed:', e);
       return { ok: false, cleared: 0, flagged: 0, failed: 0, error: e.message || String(e) };
@@ -3511,6 +3526,12 @@ async function syncTripsyRelays() {
     // correcting itself once My Trips renders). Best-effort -- an unlock
     // failure must never abort the badge refresh below.
     try { await ensureTripsyDecrypted(); } catch (e) { /* ignore -- badge falls back to pre-decryption behavior */ }
+    // With this tab's snapshot (re)loaded: drop any "landed" change it now
+    // contains, then start/refresh the auto-catch-up so a just-pushed create
+    // either reloads into the itinerary or stays visibly "added" until it does.
+    await reconcileTripsyLandedChanges();
+    tripsyEnsureLandedPoll();
+    tripsyMaybeReloadForLanded();
     await updateTripsyStatusBadge();
     const relayStateAfter = JSON.stringify([
       driveData.tripsyPendingChanges || [],
@@ -6790,6 +6811,10 @@ async function renderUtilitiesReparsePsReservations() {
 async function renderUtilitiesTripsyRefresh() {
   const changes = isOwner ? await Store.listTripsyPendingChanges() : [];
   const unverified = changes.filter(c => c.pushConfirmationFailed);
+  // "landed" = a create that Tripsy confirmed but that isn't in this tab's
+  // snapshot yet -- shown as a separate green "Added" list, not "waiting to push".
+  const waiting = changes.filter(c => !c.landed);
+  const landed = changes.filter(c => c.landed);
   main.innerHTML = `
     <div class="page-title">Tripsy Refresh</div>
     <div class="page-sub">My Trips data moves between this app and the real Tripsy account through a scheduled refresh that runs three times a day (or one you trigger yourself) -- this page shows what's waiting to go out, when data last came in, and how the whole process works.</div>
@@ -6806,8 +6831,8 @@ async function renderUtilitiesTripsyRefresh() {
         </div>
       </div>
       ` : ''}
-      <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700; margin-bottom:6px;">${changes.length ? `${changes.length} change${changes.length === 1 ? '' : 's'} waiting` : 'Nothing waiting'}</div>
-      ${changes.length ? changes.map(c => {
+      <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700; margin-bottom:6px;">${waiting.length ? `${waiting.length} change${waiting.length === 1 ? '' : 's'} waiting` : 'Nothing waiting'}</div>
+      ${waiting.length ? waiting.map(c => {
         const needsLoc = tripsyChangeNeedsLocation(c);
         return `
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:8px 0; border-top:1px solid var(--line); font-size:13px;">
@@ -6824,6 +6849,15 @@ async function renderUtilitiesTripsyRefresh() {
         </div>
         ${needsLoc ? `<div data-tripsy-loc-picker="${esc(c.id)}" style="display:none;"></div>` : ''}
       `; }).join("") : `<div style="font-size:13px; color:var(--muted);">Nothing is currently queued -- editing or deleting something on the My Trips page adds it here.</div>`}
+      ${landed.length ? `
+        <div style="font-family:var(--mono); font-size:13px; color:var(--home-green); font-weight:700; margin:16px 0 6px;">✅ Added to Tripsy — appears on reload (${landed.length})</div>
+        <div style="font-size:12px; color:var(--muted); margin-bottom:6px;">${landed.length === 1 ? 'This item was' : 'These items were'} created in Tripsy. ${landed.length === 1 ? 'It' : 'They'} will show in your My Trips itinerary as soon as this page reloads to the latest snapshot — <a href="#" data-tripsy-reload-landed style="color:var(--home-green);">reload now</a>.</div>
+        ${landed.map(c => `
+          <div style="display:flex; align-items:flex-start; gap:8px; padding:8px 0; border-top:1px solid var(--line); font-size:13px;">
+            <span style="color:var(--home-green);">✅ ${esc(TRIPSY_PENDING_CHANGE_LABEL[c.type] || c.type)}</span>
+            — ${esc(c.eventSummary || c.tripName)} <span style="color:var(--muted);">(${esc(c.tripName)})</span>
+          </div>`).join('')}
+      ` : ''}
     </div>
 
     <div class="card" style="margin-bottom:16px;">
@@ -6880,6 +6914,8 @@ async function renderUtilitiesTripsyRefresh() {
     </div>
   `;
 
+  const reloadLandedLink = main.querySelector('[data-tripsy-reload-landed]');
+  if (reloadLandedLink) reloadLandedLink.addEventListener('click', e => { e.preventDefault(); location.reload(); });
   document.querySelectorAll("[data-tripsy-push-cancel]").forEach(btn => {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
@@ -8356,6 +8392,97 @@ function tripsyAddMenuButtonsHtml(tripKey) {
 // used both to key pending changes and to look them up again.
 function tripsyEventKey(tripsyRaw) {
   return tripsyRaw ? `${tripsyRaw.resource}:${tripsyRaw.id}` : null;
+}
+
+// Is a given "<resource>:<id>" event key present in THIS tab's currently-loaded
+// snapshot (tripsyDecryptedTrips)? Used to bridge the gap after a create is
+// pushed to Tripsy but before this page reloads the newer snapshot that
+// contains it -- see applyDrainedPushResults' "landed" handling and
+// reconcileTripsyLandedChanges.
+function tripsySnapshotContainsEventKey(eventKey) {
+  if (!eventKey || !Array.isArray(tripsyDecryptedTrips)) return false;
+  return tripsyDecryptedTrips.some(t => (t.events || []).some(ev => tripsyEventKey(ev.tripsyRaw) === eventKey));
+}
+
+// Clear any "landed" pending change (a create that Tripsy confirmed but whose
+// event this tab couldn't yet show) once the loaded snapshot actually contains
+// it -- i.e. after a reload pulled the fresher snapshot in. Called after every
+// snapshot (re)load. Keeps the "Queued -> Added -> In itinerary" hand-off gapless:
+// a landed item stays visible until it's really in the itinerary, then drops.
+async function reconcileTripsyLandedChanges() {
+  if (!isOwner || !driveData.tripsyPendingChanges) return;
+  const before = driveData.tripsyPendingChanges.length;
+  driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
+    c => !(c.landed && (!c.landedEventKey || tripsySnapshotContainsEventKey(c.landedEventKey)))
+  );
+  if (driveData.tripsyPendingChanges.length !== before) {
+    try { await persistDriveData(); } catch (e) { console.error('reconcileTripsyLandedChanges persist failed:', e); }
+    updateTripsyStatusBadge();
+    if (currentView === 'tripsytrips') renderTripsyEventsList();
+  }
+}
+
+// ---- Auto-catch-up for "landed" changes (see applyDrainedPushResults) ----
+// A just-created event is confirmed in Tripsy but not yet in THIS tab's
+// snapshot; the deployed page carries a newer snapshot that includes it. Pull
+// that in (reload) so the itinerary updates on its own -- but never yank the
+// page while the owner is mid-edit (show a reload banner then instead). A light
+// poll runs only while landed items are outstanding, since the snapshot may
+// deploy a little after the push is confirmed.
+let _tripsyLandedPollTimer = null;
+function tripsyHasLandedChanges() {
+  return isOwner && ((driveData && driveData.tripsyPendingChanges) || []).some(c => c.landed);
+}
+// Only auto-reload / keep polling for RECENTLY landed items. A landed item whose
+// event somehow never enters the snapshot (e.g. out of the sync window) would
+// otherwise re-trigger a reload on every future snapshot deploy; after this
+// window it just stays as the green "reload to see" badge, no auto-reload.
+function tripsyRecentLandedChanges() {
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  return ((driveData && driveData.tripsyPendingChanges) || []).filter(c => c.landed && c.landedAt && new Date(c.landedAt).getTime() > cutoff);
+}
+function tripsyIsEditingOpen() {
+  const ae = document.activeElement;
+  if (ae && ['INPUT', 'TEXTAREA', 'SELECT'].includes(ae.tagName)) return true; // typing in a field
+  const pv = document.getElementById('tripsy-preview-overlay');
+  if (pv && pv.style.display !== 'none' && pv.offsetParent !== null) return true; // itinerary Preview open
+  return [...document.querySelectorAll('[data-tripsy-edit-save], [data-tripsy-edit-trip-save]')].some(b => b.offsetParent !== null);
+}
+async function tripsyDeployedSnapshotIsNewer() {
+  try {
+    const res = await fetch(location.href, { cache: 'no-store' });
+    const m = (await res.text()).match(/const TRIPSY_SNAPSHOT_GENERATED_AT = '([^']*)';/);
+    return !!(m && m[1] !== TRIPSY_SNAPSHOT_GENERATED_AT);
+  } catch (e) { return false; }
+}
+async function tripsyMaybeReloadForLanded() {
+  if (!tripsyRecentLandedChanges().length) { tripsyStopLandedPoll(); return; } // nothing fresh to catch up on
+  if (!(await tripsyDeployedSnapshotIsNewer())) return; // snapshot not deployed yet -- keep item visible, poll again
+  if (tripsyIsEditingOpen()) { tripsyShowLandedReloadBanner(); return; } // don't reload mid-edit
+  location.reload();
+}
+function tripsyEnsureLandedPoll() {
+  if (_tripsyLandedPollTimer || !tripsyRecentLandedChanges().length) return;
+  _tripsyLandedPollTimer = setInterval(tripsyMaybeReloadForLanded, 20000);
+}
+function tripsyStopLandedPoll() {
+  if (_tripsyLandedPollTimer) { clearInterval(_tripsyLandedPollTimer); _tripsyLandedPollTimer = null; }
+  const banner = document.getElementById('tripsy-landed-banner');
+  if (banner && !tripsyHasLandedChanges()) banner.remove();
+}
+function tripsyShowLandedReloadBanner() {
+  if (document.getElementById('tripsy-landed-banner')) return;
+  const n = ((driveData && driveData.tripsyPendingChanges) || []).filter(c => c.landed).length;
+  if (!n) return;
+  const bar = document.createElement('div');
+  bar.id = 'tripsy-landed-banner';
+  bar.style.cssText = 'position:fixed; left:50%; transform:translateX(-50%); bottom:18px; z-index:10050; background:var(--panel); border:1px solid var(--home-green); border-radius:10px; padding:10px 14px; box-shadow:0 8px 30px rgba(0,0,0,0.5); display:flex; align-items:center; gap:12px; font-size:13px; color:var(--text); max-width:92vw;';
+  bar.innerHTML = `<span>✅ ${n} new item${n === 1 ? '' : 's'} added to Tripsy.</span>
+    <button class="btn primary" data-landed-reload style="font-size:12px; padding:5px 12px;">Reload to see ${n === 1 ? 'it' : 'them'}</button>
+    <button data-landed-dismiss title="Dismiss" style="background:none; border:none; color:var(--muted); font-size:16px; cursor:pointer; padding:0 2px;">✕</button>`;
+  bar.querySelector('[data-landed-reload]').addEventListener('click', () => location.reload());
+  bar.querySelector('[data-landed-dismiss]').addEventListener('click', () => bar.remove());
+  document.body.appendChild(bar);
 }
 
 // Drives the Edit icon's border independent of the browser's own focus
@@ -18445,7 +18572,10 @@ async function computeTripsyStatus() {
   // still queued genuinely hasn't been confirmed pushed yet -- the flag stays
   // amber until then, instead of being inferred "done" from the snapshot clock
   // advancing (which it does even when a specific push fails).
-  const changesToPush = changes.filter(c => !c.pushConfirmationFailed);
+  // Exclude "landed" changes (create confirmed in Tripsy, just not yet in this
+  // tab's snapshot) -- they're done pushing, so they must NOT read as "waiting
+  // to push"; they surface as their own GREEN "added, reload to see" reason below.
+  const changesToPush = changes.filter(c => !c.pushConfirmationFailed && !c.landed);
   if (changesToPush.length) yellow.push({ kind: 'changes-push', label: `${changesToPush.length} change${changesToPush.length === 1 ? '' : 's'} waiting to be pushed to Tripsy — run a refresh`, view: 'utilitiestripsyrefresh' });
   const docsToParse = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'pending');
   if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged, waiting to be parsed — process flagged docs in Claude`, view: 'utilitiesparsingdocs' });
@@ -18479,6 +18609,12 @@ async function computeTripsyStatus() {
   const green = [];
   const proposalsToReview = proposals.reduce((n, p) => n + p.events.filter(e => e.resolution === 'pending').length, 0);
   if (proposalsToReview) green.push({ label: `${proposalsToReview} proposed event${proposalsToReview === 1 ? '' : 's'} ready to review`, view: 'tripsyparsereview' });
+  // "Landed" changes: created in Tripsy and confirmed, but this tab's snapshot
+  // predates them, so they're not in the itinerary here yet. Surface them (so
+  // they never just vanish) with a reload action, and let the auto-catch-up
+  // (tripsyMaybeReloadForLanded) pull the fresh snapshot in.
+  const landedChanges = changes.filter(c => c.landed);
+  if (landedChanges.length) green.push({ kind: 'landed-reload', label: `${landedChanges.length} new item${landedChanges.length === 1 ? '' : 's'} added to Tripsy — reload to see ${landedChanges.length === 1 ? 'it' : 'them'} in your itinerary` });
   // (No "sync complete — clear the pushed changes" green state anymore: applied
   // changes are now auto-removed from the queue by drainTripsyAppliedChanges as
   // soon as a refresh confirms them, so a change remaining in the queue always
@@ -18583,6 +18719,10 @@ async function renderTripsyStatusPanel() {
         <div style="font-size:13px; color:var(--text); margin-bottom:8px;">${esc(r.label)}</div>
         <button class="btn" data-tripsy-status-dismiss-write data-write-id="${esc(r.id)}" style="font-size:12px; padding:5px 12px;">Dismiss</button>
       </div>
+    ` : r.kind === 'landed-reload' ? `
+      <button class="btn" data-tripsy-status-reload style="display:block; width:100%; text-align:left; background:none; border:none; padding:8px 6px; border-radius:6px; cursor:pointer; color:var(--home-green); font-size:13px; font-weight:600; border-top:1px solid var(--line);">
+        ${esc(r.label)} <span style="color:var(--muted);">⟳</span>
+      </button>
     ` : r.view ? `
       <button class="btn" data-tripsy-status-go data-view="${esc(r.view)}" style="display:block; width:100%; text-align:left; background:none; border:none; padding:8px 6px; border-radius:6px; cursor:pointer; color:var(--text); font-size:13px; border-top:1px solid var(--line);">
         ${esc(r.label)} <span style="color:var(--muted);">›</span>
@@ -18613,6 +18753,10 @@ async function renderTripsyStatusPanel() {
       tripsyDismissFailedWrite(btn.dataset.writeId);
     });
   });
+  // "N added — reload to see them": the deployed page already has the new
+  // events, so just reload to swap this tab's snapshot for the fresh one.
+  const reloadBtn = panel.querySelector('[data-tripsy-status-reload]');
+  if (reloadBtn) reloadBtn.addEventListener('click', () => { location.reload(); });
   panel.style.display = 'block';
 }
 
