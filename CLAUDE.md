@@ -265,6 +265,17 @@ that catches drift between them.
   events and writes them to a separate `tripsy-email-proposals.json` Drive file; the **app** drains
   that file on its next open (`drainTripsyEmailProposals`), staging into the same proposal queue and
   deleting the relay file. Claude never touches the app's domain or `flight-log-data.json` writes.
+  **Email *attachments* are captured too (as of 2026-07-24).** `scanTripsyEmailIntake` also walks each
+  forwarded email's payload for a real parseable attachment (image/PDF/`.docx`; inline logos and
+  tracking pixels are filtered out by requiring `Content-Disposition: attachment` or size ≥ 40KB),
+  fetches its bytes from Gmail, uploads them to their own Drive file, and stages each as a
+  `scope:'email'`, `purpose:'parse'` entry in `driveData.tripsyAttachments` (deduped by
+  `sourceEmailId`+`gmailAttachmentId`). This deliberately reuses the **document** pipeline rather than
+  the email one: the attachment is then read by the refresh's doc-parse **step 1c** (which handles
+  images), NOT step 1b — so an image-only confirmation (empty text body, all the detail in the photo)
+  no longer arrives with `bodyLen=0`, get marked `empty` by step 1b, and vanish. `scope:'email'` keeps
+  these off trip cards; they show on the Parsing Docs page as "from a forwarded email". Only *new*
+  forwards benefit — an already-scanned email id isn't re-fetched.
   Both sources stage their finds into the exact same queue, `driveData.tripsyParseProposals`
   (`Store.saveTripsyParseProposal`, `index.html:1760`) — **nothing extracted becomes a real Tripsy
   change until the owner explicitly reviews it** on the "Review Parsed Docs" page
