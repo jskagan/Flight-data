@@ -15623,10 +15623,10 @@ function ensureTripsyStatusStyles() {
     .tst-title { font-size:18px; font-weight:800; color:var(--text); }
     .tst-sub { font-size:12px; color:var(--muted); margin-top:2px; }
     .tst-close { width:34px; height:34px; border-radius:8px; border:1px solid var(--line); background:var(--panel-2); color:var(--text); font-size:16px; cursor:pointer; flex-shrink:0; }
-    .tst-colhead { display:grid; grid-template-columns:1fr 40px 62px 62px 66px; gap:6px; padding:6px 8px; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:var(--muted); }
+    .tst-colhead { display:grid; grid-template-columns:1fr 62px 62px 66px 40px; gap:6px; padding:6px 8px; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:var(--muted); }
     .tst-colhead > div:not(:first-child) { text-align:center; }
     .tst-datehead { font-family:var(--mono); font-size:12px; font-weight:700; color:var(--amber); padding:14px 8px 4px; }
-    .tst-row { display:grid; grid-template-columns:1fr 40px 62px 62px 66px; gap:6px; align-items:center; padding:2px 8px; border-radius:6px; }
+    .tst-row { display:grid; grid-template-columns:1fr 62px 62px 66px 40px; gap:6px; align-items:center; padding:2px 8px; border-radius:6px; }
     .tst-del { background:none; border:none; cursor:pointer; font-size:14px; padding:4px; opacity:0.75; }
     .tst-del:hover { opacity:1; }
     .tst-row.tst-approved { background:rgba(42,157,79,0.16); }
@@ -15634,6 +15634,8 @@ function ensureTripsyStatusStyles() {
     .tst-cell { display:flex; justify-content:center; }
     .tst-box { width:18px; height:18px; border-radius:4px; border:1.5px solid var(--line); display:flex; align-items:center; justify-content:center; font-size:12px; color:transparent; }
     .tst-box.tst-on { background:#2a9d4f; border-color:#2a9d4f; color:#fff; }
+    .tst-approve { background:none; border:none; padding:4px; cursor:pointer; display:flex; justify-content:center; }
+    .tst-approve:hover .tst-box { border-color:#2a9d4f; }
     .tst-na { color:var(--muted); opacity:0.5; }
   `;
   document.head.appendChild(style);
@@ -15675,23 +15677,48 @@ async function tripsyBuildItineraryStatus(trip) {
   };
   const monthDay = dayKey => { const [y, m, d] = dayKey.split('-').map(Number); return tripPartsToUtcDate({ year: y, month: m, day: d }).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'UTC' }); };
   const dateHead = dayKey => dayKey === 'undated' ? 'Undated' : tripPartsToUtcDate({ year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)) }).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
-  const days = sections.days.map(day => ({
-    dateLabel: dateHead(day.dayKey),
-    summary: { label: day.dayKey === 'undated' ? 'Summary (undated)' : `Summary of ${monthDay(day.dayKey)}`, anchor: `tp-detail-day-${day.dayKey}`, narrative: day.hasNarrative, approved: day.approved, photo: null, deletable: false },
-    events: day.events.map(ev => {
-      const it = itemByRowKey.get(ev.rowKey);
-      const raw = it && it.ev && it.ev.tripsyRaw;
-      const deletable = !!(raw && raw.id != null && !(it && it.psReservation));
-      return {
-        label: ev.label, anchor: `tp-detail-event-${ev.rowKey}`, rowKey: ev.rowKey,
-        narrative: ev.hasNarrative, approved: ev.approved, photo: photoFor(ev.rowKey),
-        deletable, eventKey: deletable ? tripsyEventKey(raw) : null,
-        resource: deletable ? raw.resource : null, tripsyId: deletable ? String(raw.id) : null,
-        summary: (it && it.ev && it.ev.summary) || ev.label,
-      };
-    }),
-  }));
-  return { overview: { label: 'Trip Overview', anchor: 'tp-detail-overview', narrative: sections.overview.hasNarrative, approved: sections.overview.approved, photo: null }, days };
+  // For approving an event that has no OWN eventblurb entry, we snapshot its
+  // effective (inherited) blurb -- same as the edit screen -- so approving never
+  // blanks the text shown on the card. Inherited text lives in the summary rows
+  // (transportation) or the day's place_blurbs (hosting/activity).
+  const summaryEntry = narrativeCache[`${trip.key}::summary`];
+  const summaryBlurbByKey = new Map((summaryEntry ? summaryEntry.content.rows : []).map(r => [r.row_key, r.blurb]));
+  const overviewKey = `${trip.key}::intro`;
+  const days = sections.days.map(day => {
+    const dayCacheKey = `${trip.key}::day::${day.dayKey}`;
+    const dayEntry = narrativeCache[dayCacheKey];
+    const placeBlurbsByName = new Map(((dayEntry && dayEntry.content.place_blurbs) || []).map(pb => [pb.place_name, pb.blurb]));
+    return {
+      dateLabel: dateHead(day.dayKey),
+      summary: { label: day.dayKey === 'undated' ? 'Summary (undated)' : `Summary of ${monthDay(day.dayKey)}`, anchor: `tp-detail-day-${day.dayKey}`, narrative: day.hasNarrative, approved: day.approved, photo: null, deletable: false, cacheKey: dayCacheKey, kind: 'day', ownEntryExists: !!dayEntry },
+      events: day.events.map(ev => {
+        const it = itemByRowKey.get(ev.rowKey);
+        const raw = it && it.ev && it.ev.tripsyRaw;
+        const deletable = !!(raw && raw.id != null && !(it && it.psReservation));
+        const cacheKey = `${trip.key}::eventblurb::${ev.rowKey}`;
+        const ownEntry = narrativeCache[cacheKey];
+        let inherited = '';
+        if (raw && raw.resource === 'transportation') {
+          const wantsBlurb = !(raw.category === 'airplane' || raw.category === 'car');
+          inherited = wantsBlurb ? (summaryBlurbByKey.get(`ev:${it.ev.id}`) || '') : '';
+        } else if (raw && (raw.resource === 'hosting' || raw.resource === 'activity')) {
+          inherited = placeBlurbsByName.get(raw.name || it.ev.summary) || '';
+        }
+        let fingerprint = null;
+        try { fingerprint = it ? tripsyContentFingerprint(tripsySummaryRowPromptData(it)) : null; } catch (e) { /* best-effort */ }
+        return {
+          label: ev.label, anchor: `tp-detail-event-${ev.rowKey}`, rowKey: ev.rowKey,
+          narrative: ev.hasNarrative, approved: ev.approved, photo: photoFor(ev.rowKey),
+          deletable, eventKey: deletable ? tripsyEventKey(raw) : null,
+          resource: deletable ? raw.resource : null, tripsyId: deletable ? String(raw.id) : null,
+          summary: (it && it.ev && it.ev.summary) || ev.label,
+          cacheKey, kind: 'event', ownEntryExists: !!ownEntry,
+          effectiveBlurb: (ownEntry && ownEntry.content.blurb) || inherited || '', fingerprint,
+        };
+      }),
+    };
+  });
+  return { overview: { label: 'Trip Overview', anchor: 'tp-detail-overview', narrative: sections.overview.hasNarrative, approved: sections.overview.approved, photo: null, cacheKey: overviewKey, kind: 'overview', ownEntryExists: !!narrativeCache[overviewKey] }, days };
 }
 
 // The Itinerary Status page -- read-only overview of every section's
@@ -15704,13 +15731,17 @@ async function showTripsyItineraryStatus(trip) {
   let filter = null; // null | 'approved' | 'unapproved'
   const box = on => `<span class="tst-box${on ? ' tst-on' : ''}">${on ? '✓' : ''}</span>`;
   const cell = v => `<div class="tst-cell">${v === null ? '<span class="tst-na">—</span>' : box(v)}</div>`;
+  // The Approved column is clickable here -- toggling it has the same effect
+  // as the Approve/Un-approve button on the itinerary edit screen (see the
+  // data-tst-approve handler below).
+  const approveCell = sec => `<button class="tst-approve" data-tst-approve="${esc(sec.anchor)}" title="${sec.approved ? 'Approved — click to un-approve' : 'Click to approve'}">${box(sec.approved)}</button>`;
   const passFilter = sec => filter === null || (filter === 'approved' ? sec.approved : !sec.approved);
   const rowHtml = sec => {
     const del = sec.deletable ? `<button class="tst-del" data-tst-del="${esc(sec.rowKey)}" title="Delete this item">🗑️</button>` : '';
     return `<div class="tst-row${sec.approved ? ' tst-approved' : ''}">
       <button class="tst-name" data-tst-goto="${esc(sec.anchor)}" title="${esc(sec.label)}">${esc(sec.label)}</button>
+      ${cell(sec.photo)}${cell(sec.narrative)}${approveCell(sec)}
       <div class="tst-cell">${del}</div>
-      ${cell(sec.narrative)}${cell(sec.photo)}${cell(sec.approved)}
     </div>`;
   };
   const bodyHtml = () => {
@@ -15723,6 +15754,15 @@ async function showTripsyItineraryStatus(trip) {
     return html || `<div style="padding:16px 8px; color:var(--muted); font-size:13px;">No sections match this filter.</div>`;
   };
   const findEvent = rowKey => { for (const day of status.days) { const e = day.events.find(ev => ev.rowKey === rowKey); if (e) return e; } return null; };
+  const findSection = anchor => {
+    if (status.overview.anchor === anchor) return status.overview;
+    for (const day of status.days) {
+      if (day.summary.anchor === anchor) return day.summary;
+      const e = day.events.find(ev => ev.anchor === anchor);
+      if (e) return e;
+    }
+    return null;
+  };
 
   const overlay = document.createElement('div');
   overlay.className = 'tst-overlay';
@@ -15737,7 +15777,7 @@ async function showTripsyItineraryStatus(trip) {
             <button class="tst-close" data-tst-close title="Close">✕</button>
           </div>
         </div>
-        <div class="tst-colhead"><div>Section</div><div></div><div>Narrative</div><div>Photo</div><div>Approved</div></div>
+        <div class="tst-colhead"><div>Section</div><div>Photo</div><div>Narrative</div><div>Approved</div><div></div></div>
         ${bodyHtml()}
       </div>`;
     const card = overlay.querySelector('.tst-card');
@@ -15747,6 +15787,27 @@ async function showTripsyItineraryStatus(trip) {
       const anchor = btn.dataset.tstGoto;
       overlay.remove();
       previewTripsyItinerary(trip.key, { forceGeneratedView: true, scrollToId: anchor, onExit: () => showTripsyItineraryStatus(trip) });
+    }));
+    card.querySelectorAll('[data-tst-approve]').forEach(btn => btn.addEventListener('click', async () => {
+      const sec = findSection(btn.dataset.tstApprove);
+      if (!sec) return;
+      const newVal = !sec.approved;
+      btn.disabled = true;
+      let ok;
+      if (sec.kind === 'event' && newVal && !sec.ownEntryExists) {
+        // No individual override yet -- snapshot the effective (inherited)
+        // blurb into its own entry, marked approved, exactly as the edit
+        // screen's Approve button does (see data-tripsy-event-narrative-approve).
+        ok = await Store.saveTripsyNarrativeSections({
+          [sec.cacheKey]: { content: { blurb: sec.effectiveBlurb }, fingerprint: sec.fingerprint, generatedAt: new Date().toISOString(), approved: true },
+        });
+      } else {
+        ok = await Store.setTripsyNarrativeApproved(sec.cacheKey, newVal);
+        if (!ok && newVal) { btn.disabled = false; toast('This section has no narrative to approve yet — generate one first.', 'error'); return; }
+      }
+      if (!ok) { btn.disabled = false; toast('Could not update approval — storage error. Please try again.', 'error'); return; }
+      status = await tripsyBuildItineraryStatus(trip);
+      rerender();
     }));
     card.querySelectorAll('[data-tst-del]').forEach(btn => btn.addEventListener('click', async () => {
       const sec = findEvent(btn.dataset.tstDel);
