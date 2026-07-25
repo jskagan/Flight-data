@@ -726,18 +726,17 @@
     font-family: var(--mono); font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
     flex: 1; text-align: left;
   }
-  .tp-day-divider-date { font-family: var(--mono); font-size: 13px; font-weight: 700; flex: 1; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .tp-day-divider-date { font-family: var(--mono); font-size: 13px; font-weight: 700; flex: 1; text-align: center; }
   .tp-day-divider-weather { font-family: var(--mono); font-size: 11px; font-weight: 400; opacity: 0.82; letter-spacing: 0; }
   .tp-day-divider-cities { font-size: 12px; opacity: 0.85; flex: 1; text-align: right; letter-spacing: 0.02em; }
-  /* Per-city weather printed at the bottom of each day (below the last event,
-     above the next day bar). Hidden on screen -- the day bar's glyph line
-     carries the weather there -- and shown only when the itinerary is printed,
-     where the day bar's weather line is hidden instead (see @media print). */
-  .tp-day-weather-print { display: none; margin: 4px 0 18px; padding-left: 2px; }
+  /* The longer per-city weather description at the bottom of each day (below the
+     last event, above the next day bar) -- shown on screen AND in print. In
+     print the day bar's inline glyph line is hidden (see @media print) so the
+     printed page carries the weather only here, in words. */
+  .tp-day-weather-print { display: block; margin: 4px 0 18px; padding-left: 2px; }
   .tp-day-weather-line { font-size: 11px; color: #444; line-height: 1.5; }
   @media print {
     .tp-day-divider-weather { display: none; }
-    .tp-day-weather-print { display: block; }
   }
   /* Part 2's free-day placeholder (tripsyDetailedEmptyDayBlockHtml) --
      lighter charcoal than a normal day divider, same distinction Part 1's
@@ -11202,23 +11201,130 @@ function tripsyWeatherTimeShort(iso) {
   let h = Number(m[1]); const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
   return `${h}:${m[2]} ${ap}`;
 }
-// The rich Travel-View weather bar: icon + conditions, high/low, feels-like,
-// precip chance, wind, UV, and the daylight window. Fields the "typical"
-// (climate-normal) path can't supply (UV, sunrise/sunset) just drop out, and a
-// small "typical" tag flags a normal vs. a real forecast.
-function tripsyTravelWeatherBarHtml(rec) {
+// ---- Hourly weather + tap-to-open dialog ---------------------------------
+// Hour-by-hour data only exists within the forecast window (or in the past via
+// the archive) -- there's no hourly beyond ~16 days, so the dialog falls back to
+// the daily "typical" outlook there. Hourly is cached in driveData.tripsyWeatherHourly.
+async function tripsyFetchHourly(city, country, dateKey) {
+  const offset = tripsyDayKeyOffsetFromToday(dateKey);
+  if (offset > TRIPSY_WEATHER_HORIZON_DAYS) return null; // no hourly beyond the forecast window
+  const g = await tripsyWeatherGeocode(city, country);
+  if (!g) return null;
+  if (!driveData.tripsyWeatherHourly) driveData.tripsyWeatherHourly = {};
+  const ck = tripsyWeatherCacheKey(g.lat, g.lon, dateKey);
+  const cached = driveData.tripsyWeatherHourly[ck];
+  // A past day's hours never change; a forecast day refreshes on the daily TTL.
+  if (cached && (offset < 0 || (Date.now() - (cached.fetchedAt || 0)) < TRIPSY_WEATHER_FORECAST_TTL_MS)) {
+    return cached.miss ? null : cached.hours;
+  }
+  const base = offset < 0 ? TRIPSY_WEATHER_ARCHIVE_URL : TRIPSY_WEATHER_FORECAST_URL;
+  const vars = offset < 0 ? 'temperature_2m,apparent_temperature,weathercode' : 'temperature_2m,apparent_temperature,precipitation_probability,weathercode';
+  try {
+    const j = await tripsyWeatherFetchJson(`${base}?latitude=${g.lat}&longitude=${g.lon}&hourly=${vars}&temperature_unit=fahrenheit&timezone=auto&start_date=${dateKey}&end_date=${dateKey}`);
+    const h = j.hourly;
+    if (!h || !h.time) { driveData.tripsyWeatherHourly[ck] = { miss: true, fetchedAt: Date.now() }; return null; }
+    const hours = h.time.map((t, i) => ({ t, temp: h.temperature_2m[i], feels: h.apparent_temperature ? h.apparent_temperature[i] : null, precip: h.precipitation_probability ? h.precipitation_probability[i] : null, wcode: h.weathercode[i] }));
+    driveData.tripsyWeatherHourly[ck] = { hours, fetchedAt: Date.now() };
+    try { await persistDriveData(); } catch (e) { /* best-effort */ }
+    return hours;
+  } catch (e) { console.error('tripsyFetchHourly failed', e); return null; }
+}
+function tripsyWeatherHourLabel(iso) {
+  const m = String(iso).match(/T(\d{2}):/); if (!m) return '';
+  let hh = Number(m[1]); const ap = hh >= 12 ? 'PM' : 'AM'; hh = hh % 12 || 12; return `${hh} ${ap}`;
+}
+function tripsyWeatherDateLabel(dateKey) {
+  return tripPartsToUtcDate({ year: +dateKey.slice(0, 4), month: +dateKey.slice(5, 7), day: +dateKey.slice(8, 10) })
+    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+}
+function ensureTripsyWeatherDialogStyles() {
+  if (document.getElementById('tw-styles')) return;
+  const s = document.createElement('style'); s.id = 'tw-styles';
+  s.textContent = `
+    .tw-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10003; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+    .tw-card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; max-width:420px; width:100%; box-shadow:0 16px 48px rgba(0,0,0,0.55); }
+    .tw-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+    .tw-city { font-size:17px; font-weight:800; color:var(--text); }
+    .tw-date { font-size:12px; color:var(--muted); margin-top:2px; }
+    .tw-close { width:32px; height:32px; border-radius:8px; border:1px solid var(--line); background:var(--panel-2); color:var(--text); font-size:15px; cursor:pointer; flex-shrink:0; }
+    .tw-summary { margin:12px 0; padding:10px 12px; background:var(--panel-2); border-radius:10px; font-size:13px; color:var(--text); line-height:1.55; }
+    .tw-summary .tw-cond { font-weight:700; }
+    .tw-note { font-size:12px; color:var(--muted); font-style:italic; margin:12px 0 0; }
+    .tw-hours { margin-top:6px; max-height:340px; overflow-y:auto; }
+    .tw-hour { display:grid; grid-template-columns:56px 22px 1fr auto; gap:8px; align-items:center; padding:6px 4px; border-bottom:1px solid var(--line); }
+    .tw-hour:last-child { border-bottom:none; }
+    .tw-hour-t { color:var(--muted); font-family:var(--mono); font-size:12px; }
+    .tw-hour-temp { font-weight:600; color:var(--text); font-size:13px; }
+    .tw-hour-precip { color:#5a8fd6; font-size:12px; text-align:right; }
+  `;
+  document.head.appendChild(s);
+}
+// Tap-to-open weather dialog: daily summary + an hour-by-hour list when it's
+// available (within ~16 days, or a past date). Wired to the day bars on the
+// My Trips and Travel View timelines.
+async function tripsyShowWeatherDialog(city, country, dateKey) {
+  if (!city || !dateKey) return;
+  ensureTripsyWeatherDialogStyles();
+  const overlay = document.createElement('div'); overlay.className = 'tw-overlay';
+  const close = () => overlay.remove();
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  overlay.innerHTML = `<div class="tw-card"><div class="tw-head"><div><div class="tw-city">${esc(city)}</div><div class="tw-date">${esc(tripsyWeatherDateLabel(dateKey))}</div></div><button class="tw-close" title="Close">✕</button></div><div class="tw-body"><div class="tw-summary">Loading…</div></div></div>`;
+  overlay.querySelector('.tw-close').addEventListener('click', close);
+  document.body.appendChild(overlay);
+  const daily = tripsyGetWeather(city, country, dateKey);
+  const hours = await tripsyFetchHourly(city, country, dateKey);
+  let summaryHtml = '';
+  if (daily) {
+    const [g, text] = tripsyWmo(daily.wcode);
+    const extra = [];
+    if (daily.feels != null) extra.push(`Feels like ${Math.round(daily.feels)}°`);
+    if (daily.wind != null) extra.push(`${Math.round(daily.wind)} mph wind`);
+    if (daily.uv != null) extra.push(`UV ${Math.round(daily.uv)}`);
+    if (daily.sunrise && daily.sunset) extra.push(`🌅 ${tripsyWeatherTimeShort(daily.sunrise)}–${tripsyWeatherTimeShort(daily.sunset)}`);
+    summaryHtml = `<div class="tw-summary"><span class="tw-cond">${g} ${esc(text.charAt(0).toUpperCase() + text.slice(1))}</span> · High ${Math.round(daily.hi)}° / Low ${Math.round(daily.lo)}°${daily.precip != null ? ` · ${daily.precip}% precip` : ''}${extra.length ? '<br>' + esc(extra.join(' · ')) : ''}${daily.kind === 'typical' ? '<br><span style="opacity:0.7;">(typical for this date, not a forecast)</span>' : ''}</div>`;
+  }
+  let hoursHtml = '';
+  if (hours && hours.length) {
+    hoursHtml = `<div class="tw-hours">${hours.map(h => {
+      const [hg] = tripsyWmo(h.wcode);
+      return `<div class="tw-hour"><span class="tw-hour-t">${esc(tripsyWeatherHourLabel(h.t))}</span><span>${hg}</span><span class="tw-hour-temp">${Math.round(h.temp)}°</span><span class="tw-hour-precip">${h.precip != null ? h.precip + '%' : ''}</span></div>`;
+    }).join('')}</div>`;
+  } else if (!daily) {
+    hoursHtml = `<div class="tw-note">Weather isn't available for this day yet.</div>`;
+  } else if (tripsyDayKeyOffsetFromToday(dateKey) > TRIPSY_WEATHER_HORIZON_DAYS) {
+    hoursHtml = `<div class="tw-note">Hour-by-hour detail becomes available within about 16 days of the date.</div>`;
+  }
+  const body = overlay.querySelector('.tw-body');
+  if (body) body.innerHTML = summaryHtml + hoursHtml;
+}
+// A small, tappable weather chip for a day bar: the compact glyph line, opening
+// the hourly dialog on click. city/country/dateKey are stamped as data-* so one
+// delegated listener per surface can handle the tap.
+function tripsyWeatherChipHtml(rec, city, country, dateKey, extraStyle) {
   if (!rec) return '';
-  const [g, text] = tripsyWmo(rec.wcode);
-  const item = t => `<span class="tv-wx-item">${esc(t)}</span>`;
-  const bits = [`<span class="tv-wx-cond">${g} ${esc(text.charAt(0).toUpperCase() + text.slice(1))}</span>`,
-    item(`${Math.round(rec.hi)}° / ${Math.round(rec.lo)}°`)];
-  if (rec.feels != null) bits.push(item(`Feels ${Math.round(rec.feels)}°`));
-  if (rec.precip != null) bits.push(item(`${rec.precip}% precip`));
-  if (rec.wind != null) bits.push(item(`${Math.round(rec.wind)} mph wind`));
-  if (rec.uv != null) bits.push(item(`UV ${Math.round(rec.uv)}`));
-  if (rec.sunrise && rec.sunset) bits.push(item(`🌅 ${tripsyWeatherTimeShort(rec.sunrise)} – ${tripsyWeatherTimeShort(rec.sunset)}`));
-  if (rec.kind === 'typical') bits.push(`<span class="tv-wx-typical">typical</span>`);
-  return bits.join('');
+  return `<span class="tripsy-wx-chip" role="button" tabindex="0" data-tripsy-wx-city="${esc(city)}" data-tripsy-wx-country="${esc(country || '')}" data-tripsy-wx-date="${esc(dateKey)}" title="Tap for hourly weather" style="cursor:pointer; white-space:nowrap;${extraStyle || ''}">${esc(tripsyWeatherBarShort(rec))}</span>`;
+}
+// One delegated, document-level listener (installed once) handles taps/keypresses
+// on any weather chip anywhere -- My Trips and Travel View both just render
+// chips; this opens the hourly dialog for the chip's city+date.
+let _tripsyWxChipHandlerInstalled = false;
+function tripsyEnsureWeatherChipHandler() {
+  if (_tripsyWxChipHandlerInstalled) return;
+  _tripsyWxChipHandlerInstalled = true;
+  const open = chip => tripsyShowWeatherDialog(chip.dataset.tripsyWxCity, chip.dataset.tripsyWxCountry, chip.dataset.tripsyWxDate);
+  document.addEventListener('click', e => {
+    const chip = e.target.closest('[data-tripsy-wx-date]');
+    if (!chip) return;
+    e.stopPropagation(); e.preventDefault();
+    open(chip);
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const chip = e.target.closest && e.target.closest('[data-tripsy-wx-date]');
+    if (!chip) return;
+    e.preventDefault();
+    open(chip);
+  });
 }
 
 // Shared by tripsyFindFirstPlacePhotoName and tripsyGatherPlacePhotoCandidates
@@ -12193,10 +12299,12 @@ function tripsyDetailedDayDividerHtml(dayKey, dayNumber, cities, weatherRec) {
   const dateLabel = isUndated ? '' : tripPartsToUtcDate({
     year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)),
   }).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
-  // The weather sub-line sits under the date, centered ("in the middle of the
-  // bar"). It's the primary (lodging) city's forecast/normal; @media print
-  // hides it in favor of the per-city word block at the bottom of the day.
-  const weatherLine = weatherRec ? `<span class="tp-day-divider-weather">${esc(tripsyWeatherBarShort(weatherRec))}</span>` : '';
+  // The weather glyph line sits inline right after the date, set off with a
+  // bullet. It's the primary (lodging) city's forecast/normal; @media print
+  // hides it in favor of the per-city word block at the bottom of the day (the
+  // bullet lives inside the span so it disappears too). The bullet + weather is
+  // kept in one span for the print hide.
+  const weatherLine = weatherRec ? `<span class="tp-day-divider-weather"> • ${esc(tripsyWeatherBarShort(weatherRec))}</span>` : '';
   // id is the jump target for Part 1's clickable day tiles (see
   // tripsySummaryDayBlockHtml's data-tripsy-summary-day-link and the
   // delegated click listener in previewTripsyItinerary) -- one stable
@@ -17561,6 +17669,25 @@ async function renderTripsyEventsListImpl() {
     .filter(c => c.type === 'create_trip')
     .map(c => ({ key: c.tripKey, name: c.name, start: c.start, end: c.end, location: null, events: [], _isPendingCreateTrip: c }));
 
+  // Pre-load weather for the day bars of EXPANDED trips only (collapsed trips
+  // render no timeline). One combined fetch/cache; dayHeaderHtml reads it
+  // synchronously per day from the per-trip targets stashed here.
+  const tripsyMyTripsWeather = new Map(); // trip.key -> weatherTargetsByDay
+  {
+    const allTargets = [];
+    for (const t of trips) {
+      if (isTripsyTripCollapsed(t.key)) continue;
+      const pes = (t.events || []).filter(ev => ev.tripsyRaw && (ev.tripsyRaw.resource === 'hosting' || ev.tripsyRaw.resource === 'activity'));
+      const pbd = new Map();
+      for (const ev of pes) { const k = tripsyDayKey(ev.start); if (!k) continue; if (!pbd.has(k)) pbd.set(k, []); pbd.get(k).push(ev); }
+      const tgts = tripsyWeatherTargetsByDay(pes, pbd, [...pbd.keys()]);
+      tripsyMyTripsWeather.set(t.key, tgts);
+      allTargets.push(...tripsyWeatherTargetList(tgts));
+    }
+    await tripsyLoadWeather(allTargets);
+  }
+  tripsyEnsureWeatherChipHandler();
+
   container.innerHTML = [...trips, ...pendingCreateTripPlaceholders].map(trip => {
     const isPendingCreateTrip = !!trip._isPendingCreateTrip;
     const pendingDeleteTrip = pendingChanges.find(c => c.type === 'delete_trip' && c.tripKey === trip.key);
@@ -17855,9 +17982,16 @@ async function renderTripsyEventsListImpl() {
     const dayHeaderHtml = dayKey => {
       const dayNum = tripsyDayNumberFromTripStart(dayKey, tlTripStartDayKey);
       const dayNumHtml = (dayNum != null && dayNum >= 1) ? `<span style="opacity:0.85;">Day ${dayNum}</span>` : '';
+      // Weather glyph line in the middle of the bar (primary/lodging city),
+      // tappable for the hourly dialog. With justify-content:space-between the
+      // three children land left (date) / center (weather) / right (Day N).
+      const wxTargets = tripsyMyTripsWeather.get(trip.key);
+      const wxArr = wxTargets && wxTargets.get(dayKey);
+      const wxRec = wxArr && wxArr.length ? tripsyGetWeather(wxArr[0].city, wxArr[0].country, dayKey) : null;
+      const wxHtml = wxRec ? tripsyWeatherChipHtml(wxRec, wxArr[0].city, wxArr[0].country, dayKey, 'color:var(--text); font-weight:600; font-size:12px; letter-spacing:0;') : '';
       // data-tt-trip/data-tt-day are the scroll anchors the Verify Travel
       // Details report jumps to (tripsyGoToTripDay).
-      return `<div data-tt-trip="${esc(trip.key)}" data-tt-day="${esc(dayKey)}" style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}</span>${dayNumHtml}</div>`;
+      return `<div data-tt-trip="${esc(trip.key)}" data-tt-day="${esc(dayKey)}" style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}</span>${wxHtml}${dayNumHtml}</div>`;
     };
     const timelineHtml = collapsed ? '' : `<div class="tripsy-tl-trip" data-tripsy-connector-trip="${esc(trip.key)}">${[
       ...dayGroups.map(g => `${dayHeaderHtml(g.dayKey)}${renderTimelineGroup(g.items)}`),
@@ -20874,11 +21008,6 @@ function ensureTravelViewStyles() {
     .tv-dayhead-main { font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.03em; color:#c9b3ec; }
     .tv-dayhead-city { font-family:var(--mono); font-size:13px; font-weight:400; color:#c9b3ec; opacity:0.8; }
     .tv-dayhead-ord { font-size:12px; font-weight:600; color:#c9b3ec; opacity:0.9; flex-shrink:0; }
-    /* Second bar, same navy as the date bar, holding the day's weather. */
-    .tv-dayweather { background:#25233A; color:#c9b3ec; border-radius:6px; margin-top:-2px; padding:7px 12px; display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px; }
-    .tv-wx-cond { font-size:12.5px; font-weight:700; color:#e6dcff; }
-    .tv-wx-item { font-size:12px; color:#c9b3ec; opacity:0.92; }
-    .tv-wx-typical { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:#c9b3ec; opacity:0.6; border:1px solid rgba(201,179,236,0.4); border-radius:4px; padding:1px 5px; }
     .tv-lodging { display:flex; align-items:center; gap:8px; background:rgba(150,110,220,0.16); border:1px solid rgba(150,110,220,0.4); color:#c9b3ec; border-radius:8px; padding:7px 12px; font-size:13px; font-weight:600; margin:8px 0 4px; }
     .tv-events { margin-bottom:16px; }
     /* One continuous connector line for the whole trip, behind the icons and
@@ -21197,11 +21326,13 @@ async function renderTravelView(chosenTripKey) {
     const loc = dayKey === 'undated' ? '' : dayLocationFor(dayKey);
     const dayNum = dayKey === 'undated' ? null : tripsyDayNumberFromTripStart(dayKey, tripStartKey);
     const dayLabel = dayNum != null ? `Day ${dayNum}` : '';
-    const wxBar = dayKey === 'undated' ? '' : tvWeatherBarFor(dayKey);
+    // Single-line header: the weather chip takes the right slot where "Day N"
+    // used to be, falling back to "Day N" on days with no weather.
+    const wxChip = dayKey === 'undated' ? '' : tvWeatherChipFor(dayKey);
+    const rightSlot = wxChip || (dayLabel ? `<span class="tv-dayhead-ord">${esc(dayLabel)}</span>` : '');
     return `
       <div class="tv-daysec" id="tv-day-${esc(dayKey)}">
-        <div class="tv-dayhead"><span><span class="tv-dayhead-main">${esc(headMain)}</span>${loc ? `<span class="tv-dayhead-city"> ${esc(loc)}</span>` : ''}</span>${dayLabel ? `<span class="tv-dayhead-ord">${esc(dayLabel)}</span>` : ''}</div>
-        ${wxBar ? `<div class="tv-dayweather">${wxBar}</div>` : ''}
+        <div class="tv-dayhead"><span><span class="tv-dayhead-main">${esc(headMain)}</span>${loc ? `<span class="tv-dayhead-city"> ${esc(loc)}</span>` : ''}</span>${rightSlot}</div>
         <div class="tv-events">${evs.map(rowHtml).join('')}</div>
       </div>`;
   };
@@ -21214,11 +21345,16 @@ async function renderTravelView(chosenTripKey) {
   for (const e of tvPlaceEvents) { const k = tripsyDayKey(e.start); if (!k) continue; if (!tvPlacesByDay.has(k)) tvPlacesByDay.set(k, []); tvPlacesByDay.get(k).push(e); }
   const tvWeatherTargets = tripsyWeatherTargetsByDay(tvPlaceEvents, tvPlacesByDay, allDays);
   await tripsyLoadWeather(tripsyWeatherTargetList(tvWeatherTargets));
-  const tvWeatherBarFor = dayKey => {
+  // Compact, tappable weather chip that replaces "Day N" on the right of the
+  // single-line date bar. Primary (lodging) city; opens the hourly dialog on tap.
+  const tvWeatherChipFor = dayKey => {
     const arr = tvWeatherTargets.get(dayKey);
-    const rec = arr && arr.length ? tripsyGetWeather(arr[0].city, arr[0].country, dayKey) : null;
-    return rec ? tripsyTravelWeatherBarHtml(rec) : '';
+    if (!arr || !arr.length) return '';
+    const t = arr[0];
+    const rec = tripsyGetWeather(t.city, t.country, dayKey);
+    return rec ? tripsyWeatherChipHtml(rec, t.city, t.country, dayKey, 'color:#c9b3ec; font-family:var(--mono); font-size:12.5px; font-weight:600;') : '';
   };
+  tripsyEnsureWeatherChipHandler();
 
   const bodyDays = allDays.map(daySectionHtml).filter(Boolean).join('');
   main.innerHTML = wrap(`
