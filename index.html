@@ -7676,7 +7676,6 @@ async function runTripsyRefreshViaWorker(triggerEl) {
   if (!isOwner) return;
   if (tripsyRefreshFireInFlight) { toast('A refresh is already being started…'); return; }
   tripsyRefreshFireInFlight = true;
-  const originalText = triggerEl ? triggerEl.textContent : null;
   if (triggerEl) { triggerEl.disabled = true; triggerEl.textContent = 'Starting…'; }
   try {
     const secret = await fetchTripsyRefreshWorkerSecretFromDrive();
@@ -7704,7 +7703,10 @@ async function runTripsyRefreshViaWorker(triggerEl) {
     toast('Could not start the refresh — the Worker secret could not be read from Drive, or the network failed. Open the routine page and press Run now instead.', 'error');
   } finally {
     tripsyRefreshFireInFlight = false;
-    if (triggerEl && triggerEl.isConnected) { triggerEl.disabled = false; triggerEl.textContent = originalText; }
+    // Success -> a run is now in progress, so leave the button as "Refresh
+    // Running" (disabled); failure -> restore "Run Refresh". Both handled by
+    // reading the lifecycle state rather than blindly restoring the old text.
+    updateTripsyRunRefreshButton();
   }
 }
 
@@ -7764,10 +7766,25 @@ function startTripsyRefreshPoll() {
   }, 45000);
 }
 
+// The Tripsy Refresh page's action button reads "Refresh Running" (disabled)
+// while a run is in progress, "Run Refresh" otherwise. No-op if the button
+// isn't on screen. Driven off the same lifecycle state the badge/lifecycle use,
+// so it flips on fire and flips back the moment the run lands or times out.
+function updateTripsyRunRefreshButton() {
+  const btn = document.getElementById('tripsy-open-routines-btn');
+  if (!btn) return;
+  const running = (tripsyRefreshLifecycleState() || {}).state === 'running';
+  btn.textContent = running ? 'Refresh Running' : 'Run Refresh';
+  btn.disabled = running;
+  btn.style.opacity = running ? '0.7' : '';
+  btn.style.cursor = running ? 'default' : '';
+}
+
 // Renders the lifecycle line into #tripsy-refresh-lifecycle when that element is
 // on screen (the Tripsy Refresh page). No-op elsewhere, so a background poll
 // fired from the badge panel just updates localStorage silently.
 function renderTripsyRefreshLifecycle() {
+  updateTripsyRunRefreshButton(); // keep the Run/Refresh-Running button in sync with state
   const el = document.getElementById('tripsy-refresh-lifecycle');
   if (!el) return;
   const lc = tripsyRefreshLifecycleState();
@@ -19546,6 +19563,12 @@ async function computeTripsyStatus() {
   return { state: 'hidden', reasons: [] };
 }
 
+// The status badge's refresh symbol: white counterclockwise two-arrow glyph
+// (Material "sync" geometry -- round + perfectly 180°-symmetric) on a solid
+// blue disc, i.e. a filled circular button. Replaces the squarish 🔄 emoji; the
+// badge's own rotate animation spins it as a loading spinner.
+const TRIPSY_REFRESH_ICON_HTML = '<span style="display:flex; align-items:center; justify-content:center; width:1em; height:1em; background:#4a90d9; border-radius:50%; color:#fff;"><svg viewBox="0 0 24 24" width="0.64em" height="0.64em" fill="currentColor" style="display:block;" aria-hidden="true"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg></span>';
+
 async function updateTripsyStatusBadge() {
   const badge = document.getElementById('tripsy-status-badge');
   if (!badge) return;
@@ -19555,8 +19578,8 @@ async function updateTripsyStatusBadge() {
   // 🔄, above every other state (even 'hidden'), until the run lands.
   if ((tripsyRefreshLifecycleState() || {}).state === 'running') {
     badge.style.display = '';
-    badge.style.color = '#4a90d9';
-    badge.textContent = '⟳'; // circular refresh glyph (spins cleanly, unlike the squarish 🔄 emoji)
+    badge.style.color = '';
+    badge.innerHTML = TRIPSY_REFRESH_ICON_HTML; // filled blue disc, white CCW two-arrow refresh
     badge.title = 'Refresh running…';
     badge.classList.add('tripsy-badge-spin');
     badge.classList.remove('tripsy-badge-checking');
@@ -19572,8 +19595,8 @@ async function updateTripsyStatusBadge() {
   // is usually a no-op -- pulsing on that just looked like click feedback.
   if (tripsyIsActivelyUpdating()) {
     badge.style.display = '';
-    badge.style.color = '#4a90d9';
-    badge.textContent = '⟳'; // circular refresh glyph (matches the running state)
+    badge.style.color = '';
+    badge.innerHTML = TRIPSY_REFRESH_ICON_HTML; // filled blue disc, white CCW two-arrow refresh
     badge.title = 'Updating…';
     badge.classList.add('tripsy-badge-checking');
     if (panel && panel.style.display === 'block') renderTripsyStatusPanel();
