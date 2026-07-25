@@ -9002,9 +9002,23 @@ function tripsyEditActionButtonsHtml(saveDataAttr, cancelDataAttr, { vertical = 
 // save -- a date-only value isn't storable/applyable to Tripsy on its own.
 function tripsyReadDateTimeField(panel, key) {
   const datePart = (panel.querySelector(`[data-tripsy-edit-field-date="${key}"]`) || {}).value || '';
-  const timePart = (panel.querySelector(`[data-tripsy-edit-field-time="${key}"]`) || {}).value || '';
   if (!datePart) return '';
-  return `${datePart}T${timePart || '12:00'}:00`;
+  const h = (panel.querySelector(`[data-tripsy-edit-field-h="${key}"]`) || {}).value || '';
+  const mRaw = (panel.querySelector(`[data-tripsy-edit-field-m="${key}"]`) || {}).value || '';
+  const ap = (panel.querySelector(`[data-tripsy-edit-field-ap="${key}"]`) || {}).value || 'AM';
+  // Minute is free-typed (datalist just suggests 00/15/30/45), so clamp it to a
+  // valid 0-59 rather than restricting the field itself.
+  let M = parseInt(mRaw, 10);
+  if (!Number.isFinite(M) || M < 0) M = 0;
+  if (M > 59) M = 59;
+  const m = String(M).padStart(2, '0');
+  let timePart = '12:00'; // no hour picked -> default noon (same as before)
+  if (h) {
+    let H = Number(h) % 12;
+    if (ap === 'PM') H += 12;
+    timePart = `${String(H).padStart(2, '0')}:${m}`;
+  }
+  return `${datePart}T${timePart}:00`;
 }
 
 // Counterpart start/end (or departure/arrival) datetime fields per
@@ -9181,15 +9195,31 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     }
     if (f.kind === 'datetime') {
       const datePart = val ? val.slice(0, 10) : '';
-      const timePart = val ? val.slice(11, 16) : '';
-      // step=900 (15 min) limits the native time picker's minute wheel to
-      // 00/15/30/45 -- the common case for reservations/check-ins. An event
-      // that already carries an off-step minute (e.g. a synced 4:25pm flight)
-      // still displays and reads back verbatim; the step only constrains the
-      // wheel when the owner actually spins it.
-      return `<div style="display:flex; gap:6px;">
-        <input type="date" data-tripsy-edit-field-date="${f.key}" value="${esc(datePart)}" class="field-input" style="flex:3; min-width:0;">
-        <input type="time" step="900" data-tripsy-edit-field-time="${f.key}" value="${esc(timePart)}" class="field-input" style="flex:2; min-width:0;">
+      const timePart = val ? val.slice(11, 16) : ''; // "HH:MM" 24-hour, or ''
+      // Time is picked with hour / minute / AM-PM controls. The MINUTE field is
+      // an input backed by a <datalist> (same pattern as the Company field): its
+      // dropdown SUGGESTS the 15-min steps (00/15/30/45) -- the common case for
+      // reservations/check-ins -- but the owner can still TYPE any minute (an
+      // off-step synced 4:25pm flight, or an exact 07). Hour/AM-PM stay selects
+      // (bounded sets). Read back / clamped in tripsyReadDateTimeField.
+      let selH = '', selM = '', selAP = 'PM';
+      if (/^\d{1,2}:\d{2}/.test(timePart)) {
+        const [H, M] = timePart.split(':').map(Number);
+        selAP = H >= 12 ? 'PM' : 'AM';
+        selH = String((H % 12) || 12);
+        selM = String(M).padStart(2, '0');
+      }
+      const opt = (v, label, sel) => `<option value="${v}"${v === sel ? ' selected' : ''}>${label}</option>`;
+      const hourOpts = opt('', '––', selH) + [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map(h => opt(String(h), String(h), selH)).join('');
+      const apOpts = ['AM', 'PM'].map(a => opt(a, a, selAP)).join('');
+      const minListId = `tripsy-min-${f.key}`;
+      return `<div style="display:flex; gap:5px; align-items:center;">
+        <input type="date" data-tripsy-edit-field-date="${f.key}" value="${esc(datePart)}" class="field-input" style="flex:2; min-width:0;">
+        <select data-tripsy-edit-field-h="${f.key}" class="field-input" style="min-width:0; flex:0 0 auto;">${hourOpts}</select>
+        <span style="color:var(--muted);">:</span>
+        <input data-tripsy-edit-field-m="${f.key}" list="${minListId}" value="${esc(selM)}" inputmode="numeric" maxlength="2" placeholder="00" class="field-input" style="width:3.4em; min-width:0; flex:0 0 auto; text-align:center;">
+        <datalist id="${minListId}"><option value="00"></option><option value="15"></option><option value="30"></option><option value="45"></option></datalist>
+        <select data-tripsy-edit-field-ap="${f.key}" class="field-input" style="min-width:0; flex:0 0 auto;">${apOpts}</select>
       </div>`;
     }
     if (f.kind === 'company') {
@@ -9275,7 +9305,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
 
   // After the datetime cross-sync above, so its auto-fill doesn't itself
   // register as a "change" the moment the form opens.
-  tripsyWireEditFormChangeDetection(panel, 'data-tripsy-edit-save', '[data-tripsy-edit-field], [data-tripsy-edit-field-date], [data-tripsy-edit-field-time]');
+  tripsyWireEditFormChangeDetection(panel, 'data-tripsy-edit-save', '[data-tripsy-edit-field], [data-tripsy-edit-field-date], [data-tripsy-edit-field-h], [data-tripsy-edit-field-m], [data-tripsy-edit-field-ap]');
 
   panel.querySelector("[data-tripsy-edit-exit]").addEventListener("click", async () => {
     if (!(await tripsyGuardPanelClose(panel))) return;
