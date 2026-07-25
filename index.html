@@ -12304,7 +12304,7 @@ function tripsyDetailedDayDividerHtml(dayKey, dayNumber, cities, weatherRec) {
   // hides it in favor of the per-city word block at the bottom of the day (the
   // bullet lives inside the span so it disappears too). The bullet + weather is
   // kept in one span for the print hide.
-  const weatherLine = weatherRec ? `<span class="tp-day-divider-weather"> • ${esc(tripsyWeatherBarShort(weatherRec))}</span>` : '';
+  const weatherLine = weatherRec ? `<span class="tp-day-divider-weather"> • ${weatherRec.kind === 'typical' ? 'Typically ' : ''}${esc(tripsyWeatherBarShort(weatherRec))}</span>` : '';
   // id is the jump target for Part 1's clickable day tiles (see
   // tripsySummaryDayBlockHtml's data-tripsy-summary-day-link and the
   // delegated click listener in previewTripsyItinerary) -- one stable
@@ -14232,7 +14232,7 @@ async function buildTripsyPrintHtml(tripKey) {
   // best-effort) so the day dividers (glyph sub-line) and the per-city print
   // blocks below can read it synchronously. The primary city (first target =
   // the lodging city) drives the on-screen bar; the print block lists them all.
-  const weatherTargetsByDay = tripsyWeatherTargetsByDay(placeEvents, placesByDay, dayKeys);
+  const weatherTargetsByDay = tripsyWeatherTargetsByDay(placeEvents, placesByDay, tripsyFullDayKeys);
   await tripsyLoadWeather(tripsyWeatherTargetList(weatherTargetsByDay));
   const primaryWeatherFor = dayKey => {
     const arr = weatherTargetsByDay.get(dayKey);
@@ -14380,7 +14380,9 @@ async function buildTripsyPrintHtml(tripKey) {
   const tiWeatherRows = [...weatherTargetsByDay.keys()].sort().map(dayKey => {
     const lines = (weatherTargetsByDay.get(dayKey) || []).map(t => {
       const rec = tripsyGetWeather(t.city, t.country, dayKey);
-      return rec ? `<div class="tp-ti-meta"><b>${esc(t.city)}</b> — ${esc(tripsyWeatherDescribe(rec))}${rec.kind === 'typical' ? ' <i>(typical)</i>' : ''}</div>` : null;
+      if (!rec) return null;
+      const lead = rec.kind === 'typical' ? `<b>Typically:</b> ${esc(t.city)}` : `<b>${esc(t.city)}</b>`;
+      return `<div class="tp-ti-meta">${lead} — ${esc(tripsyWeatherDescribe(rec))}</div>`;
     }).filter(Boolean);
     return lines.length ? `<div class="tp-ti-row"><div class="tp-ti-date">${esc(tripsySummaryDayTileDate(dayKey))}</div><div class="tp-ti-details">${lines.join('')}</div></div>` : '';
   }).filter(Boolean).join('');
@@ -14844,7 +14846,7 @@ function drawTripsyTravelInfoPdf(doc, summaryByDay, weatherTargetsByDay) {
       dk,
       blocks: (weatherTargetsByDay.get(dk) || []).map(t => {
         const rec = tripsyGetWeather(t.city, t.country, dk);
-        return rec ? { text: `${t.city} - ${tripsyWeatherDescribe(rec)}${rec.kind === 'typical' ? ' (typical)' : ''}`, size: 9, color: TRIPSY_PDF_META_TEXT } : null;
+        return rec ? { text: `${rec.kind === 'typical' ? 'Typically: ' : ''}${t.city} - ${tripsyWeatherDescribe(rec)}`, size: 9, color: TRIPSY_PDF_META_TEXT } : null;
       }).filter(Boolean),
     })).filter(r => r.blocks.length);
     if (!rows.length) return;
@@ -14975,7 +14977,8 @@ async function buildTripsyItineraryPdf(tripKey) {
   // ---- Travel Information page(s) ----
   // Weather targets for the Travel Information "Weather" section (the cache is
   // already warm from the detailed itinerary above; this load is a cheap hit).
-  const tiWeatherTargets = tripsyWeatherTargetsByDay(placeEvents, placesByDay, dayKeys);
+  const tiStartK = tripsyDayKey(effectiveTrip.start), tiEndK = tripsyDayKey(effectiveTrip.end);
+  const tiWeatherTargets = tripsyWeatherTargetsByDay(placeEvents, placesByDay, (tiStartK && tiEndK) ? tripsyDayKeyRange(tiStartK, tiEndK) : dayKeys);
   await tripsyLoadWeather(tripsyWeatherTargetList(tiWeatherTargets));
   drawTripsyTravelInfoPdf(doc, summaryByDay, tiWeatherTargets);
 
@@ -15317,7 +15320,7 @@ async function drawTripsyDetailedItineraryPdf(doc, { effectiveTrip, dayKeys, pla
   // Per-city weather for each day, fetched/cached once (usually already warm
   // from buildTripsyPrintHtml). Drawn as plain-word lines at the bottom of each
   // day below.
-  const weatherTargetsByDay = tripsyWeatherTargetsByDay(placeEvents, placesByDay, dayKeys);
+  const weatherTargetsByDay = tripsyWeatherTargetsByDay(placeEvents, placesByDay, fullDayKeys);
   await tripsyLoadWeather(tripsyWeatherTargetList(weatherTargetsByDay));
 
   const segments = [];
@@ -17680,7 +17683,12 @@ async function renderTripsyEventsListImpl() {
       const pes = (t.events || []).filter(ev => ev.tripsyRaw && (ev.tripsyRaw.resource === 'hosting' || ev.tripsyRaw.resource === 'activity'));
       const pbd = new Map();
       for (const ev of pes) { const k = tripsyDayKey(ev.start); if (!k) continue; if (!pbd.has(k)) pbd.set(k, []); pbd.get(k).push(ev); }
-      const tgts = tripsyWeatherTargetsByDay(pes, pbd, [...pbd.keys()]);
+      // Every day of the trip (not just days a hotel/activity starts) so a day
+      // is weathered by whatever lodging covers it -- travel/checkout/rest days
+      // included. Falls back to place-event days if the trip has no start/end.
+      const startK = tripsyDayKey(t.start), endK = tripsyDayKey(t.end);
+      const rangeKeys = (startK && endK) ? tripsyDayKeyRange(startK, endK) : [...pbd.keys()];
+      const tgts = tripsyWeatherTargetsByDay(pes, pbd, rangeKeys);
       tripsyMyTripsWeather.set(t.key, tgts);
       allTargets.push(...tripsyWeatherTargetList(tgts));
     }
@@ -17988,7 +17996,10 @@ async function renderTripsyEventsListImpl() {
       const wxTargets = tripsyMyTripsWeather.get(trip.key);
       const wxArr = wxTargets && wxTargets.get(dayKey);
       const wxRec = wxArr && wxArr.length ? tripsyGetWeather(wxArr[0].city, wxArr[0].country, dayKey) : null;
-      const wxHtml = wxRec ? tripsyWeatherChipHtml(wxRec, wxArr[0].city, wxArr[0].country, dayKey, 'color:var(--text); font-weight:600; font-size:12px; letter-spacing:0;') : '';
+      // Only-typical (no real forecast) days get a thin outline box, same "this
+      // is a climate normal, not a forecast" cue Travel View uses.
+      const wxBox = wxRec && wxRec.kind === 'typical' ? ' border:1px solid var(--muted); border-radius:5px; padding:1px 6px;' : '';
+      const wxHtml = wxRec ? tripsyWeatherChipHtml(wxRec, wxArr[0].city, wxArr[0].country, dayKey, `color:var(--text); font-weight:600; font-size:12px; letter-spacing:0;${wxBox}`) : '';
       // data-tt-trip/data-tt-day are the scroll anchors the Verify Travel
       // Details report jumps to (tripsyGoToTripDay).
       return `<div data-tt-trip="${esc(trip.key)}" data-tt-day="${esc(dayKey)}" style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}</span>${wxHtml}${dayNumHtml}</div>`;
@@ -21352,7 +21363,10 @@ async function renderTravelView(chosenTripKey) {
     if (!arr || !arr.length) return '';
     const t = arr[0];
     const rec = tripsyGetWeather(t.city, t.country, dayKey);
-    return rec ? tripsyWeatherChipHtml(rec, t.city, t.country, dayKey, 'color:#c9b3ec; font-family:var(--mono); font-size:12.5px; font-weight:600;') : '';
+    if (!rec) return '';
+    // Only-typical (no real forecast) days are boxed with a thin white outline.
+    const box = rec.kind === 'typical' ? ' border:1px solid rgba(255,255,255,0.6); border-radius:5px; padding:2px 6px;' : '';
+    return tripsyWeatherChipHtml(rec, t.city, t.country, dayKey, `color:#c9b3ec; font-family:var(--mono); font-size:12.5px; font-weight:600;${box}`);
   };
   tripsyEnsureWeatherChipHandler();
 
