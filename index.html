@@ -10854,6 +10854,71 @@ function tripsyTripGeographySummary(placeEvents, tripLocation) {
   return tripLocation || '';
 }
 
+// Home's "Upcoming Trips" Location column: the trip's primary two cities (the two
+// with the most events on them), each shown as just the city when it's in the US,
+// or "City, Country" when it's abroad. So a domestic trip reads "Aspen & Denver",
+// an international one "London, United Kingdom & Paris, France", and a mixed one
+// "New York & London, United Kingdom" -- exactly Jon's rule. A city whose address
+// carries no recognizable country segment (and no US state+zip) is shown bare
+// rather than guessing a country. Falls back to the trip's own location field if
+// no event yields a parseable city.
+// City from a free-text address for the Home location column. Like tripsyGuessCity
+// but strips against the COMPREHENSIVE country list (tripsyGuessCity's own list is
+// short, so a Thai/Vietnamese address returned the country as the "city"), plus US
+// states/UK counties (TV_STRIP_LOC) and county/district/ward/prefecture words. Takes
+// the last locality left; if stripping empties it (a city-state like Singapore or
+// Monaco whose only token is the country), keeps that token.
+function tripsyPrimaryCityFromAddress(addr) {
+  const clean = String(addr || '').split(',')
+    .map(p => p.split(/\s+/).filter(w => w && !/\d/.test(w)).join(' ').trim()) // drop digit-words (postcodes/house #s)
+    .filter(Boolean);
+  const isDrop = p => {
+    const low = p.toLowerCase().replace(/\.$/, '');
+    return TRIPSY_COUNTRY_NAMES.has(low) || !!TRIPSY_COUNTRY_ALIASES[low] || TV_STRIP_LOC.has(low)
+      || /shire$/.test(low) || /\b(county|district|ward|prefecture|province)\b/.test(low);
+  };
+  const kept = clean.filter(p => !isDrop(p));
+  return kept.length ? kept[kept.length - 1] : (clean.length ? clean[clean.length - 1] : '');
+}
+function tripsyTripHomeLocation(trip) {
+  const byCity = new Map(); // cityKey -> { city, country (''=US/unknown), isUS, count, order }
+  let order = 0;
+  for (const e of (trip.events || [])) {
+    const addr = e.tripsyRaw && e.tripsyRaw.address;
+    if (!addr) continue;
+    const city = tripsyPrimaryCityFromAddress(addr);
+    if (!city) continue;
+    // Guard against a mangled extraction (a comma-less street left whole, or a
+    // leftover "State Country" chunk): skip anything too long, too many words, or
+    // made up entirely of strip-words (countries/states).
+    const words = city.split(/\s+/);
+    if (city.length > 22 || words.length > 4) continue;
+    if (words.every(w => TV_STRIP_LOC.has(w.toLowerCase()))) continue;
+    const key = city.toLowerCase();
+    const usState = tripsyGuessStateFromAddress(addr);
+    const country = tripsyCanonicalCountryName(tripsyGuessCountryFromAddress(addr));
+    const isUS = !!usState || (country && TRIPSY_US_COUNTRY_NAMES.has(country.toLowerCase()));
+    if (!byCity.has(key)) byCity.set(key, { city, country: '', isUS: false, count: 0, order: order++ });
+    const info = byCity.get(key);
+    info.count++;
+    if (isUS) info.isUS = true;
+    if (!info.country && country && !isUS) info.country = country; // keep the first non-US country we see for this city
+  }
+  const top = [...byCity.values()].sort((a, b) => b.count - a.count || a.order - b.order).slice(0, 2);
+  // No parseable city (missing/malformed addresses) -> degrade to the region
+  // summary (states for a domestic trip, countries otherwise), then trip.location.
+  if (!top.length) return tripsyTripGeographySummary(trip.events || [], trip.location);
+  // A US (or unknown) city shows bare; a non-US city shows "City, Country"
+  // (unless the city IS the country, e.g. Singapore). If BOTH primary cities are
+  // in the SAME non-US country, show that country once at the end instead of on
+  // each city.
+  const cell = c => (!c.isUS && c.country && c.city.toLowerCase() !== c.country.toLowerCase()) ? `${c.city}, ${c.country}` : c.city;
+  if (top.length === 2 && !top[0].isUS && !top[1].isUS && top[0].country && top[0].country === top[1].country) {
+    return `${top[0].city} & ${top[1].city}, ${top[0].country}`;
+  }
+  return tripsyJoinWithAmpersand(top.map(cell));
+}
+
 // Shared by tripsyFindFirstPlacePhotoName and tripsyGatherPlacePhotoCandidates
 // below -- the same most-specific-to-least query variants, built once so
 // the two search strategies (fast single-hit vs. full pool) never drift
@@ -20953,7 +21018,7 @@ async function renderHome() {
                   <tr data-home-trip-row style="cursor:pointer;">
                     <td>${esc(formatTripDateRange(t.start, t.end))}</td>
                     <td>${esc(t.name)}</td>
-                    <td>${esc(t.location || "—")}</td>
+                    <td>${esc(tripsyTripHomeLocation(t) || "—")}</td>
                   </tr>
                 `).join("")}
               </tbody>
