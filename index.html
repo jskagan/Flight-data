@@ -564,7 +564,11 @@
      (draining a refresh's relays -- see syncTripsyRelays). */
   @keyframes tripsy-badge-pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.18); opacity: 0.6; } }
   #tripsy-status-badge.tripsy-badge-checking { animation: tripsy-badge-pulse 1s ease-in-out infinite; }
-  @media (prefers-reduced-motion: reduce) { #tripsy-status-badge.tripsy-badge-checking { animation: none; } }
+  /* While a fired refresh is running, the badge is the 🔄 glyph spinning
+     counterclockwise (negative rotation). */
+  @keyframes tripsy-badge-spin-ccw { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
+  #tripsy-status-badge.tripsy-badge-spin { animation: tripsy-badge-spin-ccw 1.4s linear infinite; }
+  @media (prefers-reduced-motion: reduce) { #tripsy-status-badge.tripsy-badge-checking, #tripsy-status-badge.tripsy-badge-spin { animation: none; } }
 
   .invoice-group-title {
     font-family: var(--mono); font-size: 12px; color: var(--amber); margin: 20px 0 8px;
@@ -7676,6 +7680,7 @@ async function runTripsyRefreshViaWorker(triggerEl) {
       setTripsyRefreshRun({ firedAt: new Date().toISOString(), baseline: TRIPSY_SNAPSHOT_GENERATED_AT, sessionUrl });
       renderTripsyRefreshLifecycle();
       startTripsyRefreshPoll();
+      updateTripsyStatusBadge(); // badge -> spinning 🔄 while it runs
       toast('Refresh started — track it on the Tripsy Refresh page. It republishes in a few minutes.');
     } else if (res.status === 401) {
       toast('Could not start the refresh: the app secret did not match the Worker. Check the "Tripsy Refresh Worker Secret" Drive file.', 'error');
@@ -7737,13 +7742,14 @@ async function tripsyRefreshPollOnce() {
     if (m && m[1] !== run.baseline) { run.deployedAt = m[1]; setTripsyRefreshRun(run); }
   } catch (e) { /* transient; next tick retries */ }
   renderTripsyRefreshLifecycle();
+  updateTripsyStatusBadge(); // reflect a landed run (stop the spin)
 }
 
 function startTripsyRefreshPoll() {
   if (tripsyRefreshPollTimer) return;
   tripsyRefreshPollTimer = setInterval(() => {
     const lc = tripsyRefreshLifecycleState();
-    if (!lc || lc.state !== 'running') { clearInterval(tripsyRefreshPollTimer); tripsyRefreshPollTimer = null; renderTripsyRefreshLifecycle(); return; }
+    if (!lc || lc.state !== 'running') { clearInterval(tripsyRefreshPollTimer); tripsyRefreshPollTimer = null; renderTripsyRefreshLifecycle(); updateTripsyStatusBadge(); return; }
     tripsyRefreshPollOnce();
   }, 45000);
 }
@@ -18812,6 +18818,19 @@ async function updateTripsyStatusBadge() {
   if (!badge) return;
   const panel = document.getElementById('tripsy-status-panel');
   const { state, reasons } = await computeTripsyStatus();
+  // A fired refresh is running -> the badge becomes a counterclockwise-spinning
+  // 🔄, above every other state (even 'hidden'), until the run lands.
+  if ((tripsyRefreshLifecycleState() || {}).state === 'running') {
+    badge.style.display = '';
+    badge.style.color = '';
+    badge.textContent = '🔄';
+    badge.title = 'Refresh running…';
+    badge.classList.add('tripsy-badge-spin');
+    badge.classList.remove('tripsy-badge-checking');
+    if (panel && panel.style.display === 'block') renderTripsyStatusPanel();
+    return;
+  }
+  badge.classList.remove('tripsy-badge-spin');
   // Actively APPLYING an update right now (a relay drain processing found files,
   // new emails/attachments being ingested, or a Drive write in flight) -> show a
   // pulsing "syncing" glyph, ABOVE every other state (even 'hidden'), so it
