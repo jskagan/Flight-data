@@ -13434,7 +13434,7 @@ async function buildTripsyPrintHtml(tripKey) {
   // hosting events, not on which specific activity is being rendered.
   const tripsyLodgingPeriods = placeEvents
     .filter(ev => ev.tripsyRaw && ev.tripsyRaw.resource === 'hosting')
-    .map(ev => ({ start: new Date(ev.start).getTime(), end: new Date(ev.end).getTime(), city: tripsyGuessCityFromAddress(ev.tripsyRaw.address) }))
+    .map(ev => ({ start: new Date(ev.start).getTime(), end: new Date(ev.end).getTime(), city: tripsyPrimaryCityFromAddress(ev.tripsyRaw.address) }))
     .filter(p => p.city && !isNaN(p.start) && !isNaN(p.end));
   function tripsyLodgingCityAt(eventStart) {
     const t = new Date(eventStart).getTime();
@@ -13450,12 +13450,34 @@ async function buildTripsyPrintHtml(tripKey) {
   // day's lodging puts you, so an activity with no address of its own
   // (e.g. "Uffizi Gallery") still contributes its city instead of leaving
   // the divider blank.
+  //
+  // Uses tripsyPrimaryCityFromAddress (the same extractor the Home screen's
+  // Location column uses), not the looser tripsyGuessCityFromAddress: the
+  // latter grabs the second-to-last comma segment, which on the trip's real
+  // addresses is a neighborhood ("Mayfair"), a street ("22 Bishopsgate",
+  // "Russell St"), or a bare venue ("Victoria and Albert Museum") rather
+  // than the city. tripsyPrimaryCityFromAddress instead strips house
+  // numbers/postcodes, countries, and US-state/UK-county words, then keeps
+  // the last real locality -- so every one of those resolves to "London".
+  // A single-segment address (no comma) carries no locality at all -- e.g.
+  // a Soho Farmhouse spa activity whose address is literally "Soho
+  // Farmhouse" -- so it's treated like a missing address and falls back to
+  // the day's lodging city. A mangled extraction (too long / too many
+  // words, i.e. a street left whole) is likewise dropped to the lodging
+  // fallback rather than shown. Net: the bar only ever shows real cities.
+  const tripsyDayBarCity = raw => {
+    const addr = raw.address || '';
+    if (!addr.includes(',')) return '';
+    const c = tripsyPrimaryCityFromAddress(addr);
+    if (!c || c.length > 22 || c.split(/\s+/).length > 4) return '';
+    return c;
+  };
   function tripsyDayCities(dayPlaces) {
     const cities = [];
     for (const ev of (dayPlaces || [])) {
       const raw = ev.tripsyRaw;
       if (!raw) continue;
-      const city = tripsyGuessCityFromAddress(raw.address) || (raw.resource === 'hosting' ? '' : tripsyLodgingCityAt(ev.start));
+      const city = tripsyDayBarCity(raw) || (raw.resource === 'hosting' ? '' : tripsyLodgingCityAt(ev.start));
       if (city && !cities.includes(city)) cities.push(city);
     }
     return cities;
