@@ -19621,7 +19621,16 @@ async function reconcileTripsyFlightChanges(trips) {
     }
     return out;
   };
-  const summaryOf = raw => `${raw.company || ''} ${raw.transportNumber || ''}`.trim() || 'Flight';
+  // A human label for a transportation item. Prefer its route (works for a car
+  // transfer or train with no flight number), then airline+number, then the
+  // type -- so a review never shows a bare "Flight" for, say, a car.
+  const summaryOf = raw => {
+    const route = [raw.departureDescription, raw.arrivalDescription].filter(Boolean).join(' → ');
+    if (route) return route;
+    const co = `${raw.company || ''} ${raw.transportNumber || ''}`.trim();
+    if (co) return co;
+    return raw.category === 'airplane' ? 'Flight' : (tripsySlugToLabel(raw.category) || 'Transportation');
+  };
 
   // Currently-live transportation events, scoped per trip.
   const liveByTrip = {};
@@ -19711,18 +19720,42 @@ async function maybeShowTripsyFlightChangeReviewDialog() {
 function renderTripsyFlightChangeReviewDialog(reviews) {
   const overlay = document.getElementById('tripsy-flight-change-overlay');
   if (!overlay) return;
+  // Build a labelled detail block from a review's stored fields (oldFields /
+  // newFields) so the owner actually sees WHAT changed -- route, date/time,
+  // type, flight/confirmation numbers -- not just a bare summary.
+  const typeLabel = f => f.category === 'airplane' ? 'Flight' : (tripsySlugToLabel(f.category) || 'Transportation');
+  const routeOf = (f, fallback) => [f.departureDescription, f.arrivalDescription].filter(Boolean).join(' → ') || fallback || 'Transportation';
+  const detailRows = f => {
+    const rows = [];
+    if (f.departureAt) rows.push(['Departs', formatTripsyFieldDateTime(f.departureAt) || f.departureAt]);
+    if (f.arrivalAt) rows.push(['Arrives', formatTripsyFieldDateTime(f.arrivalAt) || f.arrivalAt]);
+    if (f.category) rows.push(['Type', typeLabel(f)]);
+    const co = `${f.company || ''} ${f.transportNumber || ''}`.trim();
+    if (co) rows.push([f.category === 'airplane' ? 'Flight' : 'Service', co]);
+    if (f.confirmation) rows.push(['Confirmation', f.confirmation]);
+    return rows.map(([k, v]) => `<div><span style="color:var(--muted);">${esc(k)}:</span> ${esc(v)}</div>`).join('');
+  };
   const describe = r => {
     if (r.changeType === 'cancelled') {
-      return `<div style="color:var(--muted); font-size:13px;">${esc(r.oldSummary)} no longer appears in your Tripsy itinerary -- it may have been cancelled.</div>`;
+      const f = r.oldFields || {};
+      return `<div style="font-size:13px;">
+        <div style="margin-bottom:4px;"><b>${esc(routeOf(f, r.oldSummary))}</b> no longer appears in your Tripsy itinerary — it may have been cancelled.</div>
+        <div style="color:var(--text); line-height:1.5; font-size:12.5px;">${detailRows(f)}</div>
+      </div>`;
     }
-    const oldWhen = r.oldFields.departureAt ? esc(r.oldFields.departureAt.replace('T', ' ')) : '?';
-    const newWhen = r.newFields.departureAt ? esc(r.newFields.departureAt.replace('T', ' ')) : '?';
-    return `<div style="color:var(--muted); font-size:13px;">${esc(r.oldSummary)} (${oldWhen}) now appears to be ${esc(r.newSummary)} (${newWhen}) -- its schedule changed.</div>`;
+    const o = r.oldFields || {}, n = r.newFields || {};
+    return `<div style="font-size:13px;">
+      <div style="margin-bottom:6px;"><b>${esc(routeOf(n, r.newSummary) || routeOf(o, r.oldSummary))}</b> — its schedule changed:</div>
+      <div style="display:flex; gap:14px; flex-wrap:wrap;">
+        <div style="min-width:150px;"><div style="color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:2px;">Was</div><div style="line-height:1.5; font-size:12.5px;"><div><b>${esc(routeOf(o, r.oldSummary))}</b></div>${detailRows(o)}</div></div>
+        <div style="min-width:150px;"><div style="color:var(--home-green); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:2px;">Now</div><div style="line-height:1.5; font-size:12.5px;"><div><b>${esc(routeOf(n, r.newSummary))}</b></div>${detailRows(n)}</div></div>
+      </div>
+    </div>`;
   };
   overlay.innerHTML = `
     <div class="card" style="max-width:520px; width:100%;">
-      <div class="card-title">Flight Changes Detected</div>
-      <p style="color:var(--muted); font-size:13.5px; margin:0 0 14px;">Tripsy shows the following changes since the last refresh. For each one, choose whether to update the existing entry, keep both as separate entries, or ignore.</p>
+      <div class="card-title">Transportation Changes Detected</div>
+      <p style="color:var(--muted); font-size:13.5px; margin:0 0 14px;">A flight, train, or transfer changed or disappeared in Tripsy since the last refresh. For each one, choose whether to update the existing entry, keep both as separate entries, or ignore.</p>
       ${reviews.map(r => `
         <div style="border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px;">
           <div style="font-weight:600; margin-bottom:6px;">${esc(r.tripName)}</div>
