@@ -3527,6 +3527,10 @@ async function syncTripsyRelays() {
     await reconcileTripsyLandedChanges();
     tripsyEnsureLandedPoll();
     tripsyMaybeReloadForLanded();
+    // Pull side: start the "newer trip data published" watch (once) and check now
+    // -- so a badge click / background sync surfaces stale-data as a yellow flag.
+    tripsyStartNewerSnapshotWatch();
+    tripsyCheckNewerSnapshot();
     await updateTripsyStatusBadge();
     const relayStateAfter = JSON.stringify([
       driveData.tripsyPendingChanges || [],
@@ -6879,28 +6883,22 @@ async function renderUtilitiesTripsyRefresh() {
     <div class="card">
       <div style="font-family:var(--mono); font-size:14px; color:var(--amber); font-weight:700; margin-bottom:10px;">Manual Refresh</div>
       <div style="font-size:13px; line-height:1.6;">
-        <p>You don't have to wait for the next scheduled run -- a refresh can be triggered on demand, since Tripsy's API key only ever lives in a Claude Code session, never in this page. <b>How you trigger it depends on the device:</b> on your <b>Mac</b> you tell a local Claude Code session <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span> (it has the full refresh runbook on disk); from an <b>iPad</b> -- or any device -- you press <b>Run now</b> on the cloud routine. Either route applies each queued change to Tripsy, parses flagged docs and forwarded emails, pulls fresh data, and republishes this page.</p>
-        <p style="margin-top:10px;"><b>On the Mac at your desk (fully automatic -- preferred):</b></p>
-        <ol style="margin:6px 0 0 20px; padding:0;">
-          <li>Double-click <span style="font-family:var(--mono);">Refresh Tripsy Trips.command</span> on the Desktop.</li>
-          <li>A Terminal window opens and runs the whole refresh without asking you anything -- it takes a few minutes and looks idle while it works. It then prints a summary and waits for a keypress to close.</li>
-          <li>That's the whole thing end to end -- pushing queued changes, pulling data, republishing, <b>and</b> writing the confirmation/proposal files straight into the Drive folder as local files. Nothing to upload; the Drive connector's write bug doesn't apply locally.</li>
-        </ol>
-        <p style="margin-top:8px; font-size:12px; color:var(--muted);">Same thing by hand: open a local <b>Claude Code</b> session inside the cloned repo and send <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span>. Either route needs <b>Google Drive for Desktop</b> running, so the <i>Travel Reservation Tracking</i> folder is mounted as normal files -- see <span style="font-family:var(--mono);">LOCAL_SETUP.md</span> for the one-time setup, including the one-time Tripsy sign-in the headless run depends on.</p>
-        <p style="margin-top:10px;"><b>On an iPad -- or any device -- via the cloud routine:</b></p>
-        <ol style="margin:6px 0 0 20px; padding:0;">
-          <li>Go to <b>claude.ai/code/routines</b> and open the <b>Tripsy Trips Refresh</b> routine.</li>
-          <li>Press <b>Run now</b>. It runs the whole refresh in the cloud -- pushing queued changes, parsing flagged docs (including photos/JPEGs) and forwarded emails, pulling data, republishing -- and writes its confirmation/proposal files straight to your Drive. <b>Nothing for you to upload</b>, and no Drive for Desktop needed on the iPad.</li>
-          <li>Come back and either click the top-right badge or press "Check Now" below, or just reload the page -- the badge updates to match (cleared, yellow, green, or red) once the refresh has landed.</li>
-        </ol>
+        <p>You don't have to wait for the next scheduled run. The easiest way to refresh on demand -- from <b>any</b> device (this Mac, your iPad, your phone) -- is the <b>Run Refresh</b> button below. One tap fires the cloud "Tripsy Trips Refresh" routine, which pushes your queued changes to Tripsy, parses any flagged docs and forwarded emails, pulls fresh trip data, and republishes this page. It finishes in a few minutes and you can watch its progress right here -- <b>no Claude Code session and no trip to the routines page needed.</b></p>
         <p style="margin-top:10px;">
           <button id="tripsy-open-routines-btn" class="btn primary" style="font-size:13px; padding:6px 14px;">Run Refresh</button>
           <span style="margin-left:10px; font-size:12px; color:var(--muted);">Starts the cloud refresh now; it republishes in a few minutes. <a href="https://claude.ai/code/routines" target="_blank" rel="noopener" style="color:var(--amber);">View runs ↗</a></span>
         </p>
         <div id="tripsy-refresh-lifecycle" style="margin-top:10px;"></div>
+        <p style="margin-top:8px; font-size:12px; color:var(--muted);">Under the hood the button asks a tiny Cloudflare Worker to fire the routine (the browser can't call Anthropic's endpoint directly, and the powerful token must never live in this public page); it's gated by an owner-only secret in your Drive, so only you can trigger it.</p>
+        <p style="margin-top:14px;"><b>Other ways to trigger it</b> (fallbacks, if the button ever can't reach the cloud):</p>
+        <ul style="margin:6px 0 0 20px; padding:0;">
+          <li><b>Run the cloud routine by hand:</b> open <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">claude.ai/code/routines</span>, open <b>Tripsy Trips Refresh</b>, and press <b>Run now</b>. Exactly what the button does, just manually -- works from any device, iPad included.</li>
+          <li style="margin-top:4px;"><b>On this Mac:</b> double-click <span style="font-family:var(--mono);">Refresh Tripsy Trips.command</span> on the Desktop, or tell a local <b>Claude Code</b> session <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span>. Runs locally instead of in the cloud; needs <b>Google Drive for Desktop</b> running (see <span style="font-family:var(--mono);">LOCAL_SETUP.md</span> for the one-time setup).</li>
+        </ul>
+        <p style="margin-top:10px; font-size:12px; color:var(--muted);">After any refresh, come back and click the top-right badge or press <b>Check Now</b> below (or just reload) -- the badge updates to match once the refresh has landed.</p>
         <div style="margin-top:12px; border:1px solid var(--amber); border-radius:8px; padding:10px 12px; background:rgba(227,164,56,0.08); font-size:12px;">
           <b style="color:var(--amber);">⚠️ Don't try to run a refresh from a plain iPad Claude Code session.</b>
-          <div style="margin-top:4px;">Opening <b>claude.ai/code</b> on the iPad and telling it <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span> does <b>not</b> work like the Mac does: that session clones this repo from GitHub, but the refresh runbook lives only on your Mac and isn't in the repo, so it has <b>no procedure to follow</b> -- it won't reliably push your queued changes, parse flagged docs, or parse forwarded emails. From an iPad, always use <b>Run now</b> on the cloud routine above (that copy of the runbook is baked into the routine itself).</div>
+          <div style="margin-top:4px;">Opening <b>claude.ai/code</b> on the iPad and telling it <span style="font-family:var(--mono); background:var(--panel-2); padding:2px 6px; border-radius:4px;">Run a Tripsy refresh</span> does <b>not</b> work like the Mac does: that session clones this repo from GitHub, but the refresh runbook lives only on your Mac and isn't in the repo, so it has <b>no procedure to follow</b> -- it won't reliably push your queued changes, parse flagged docs, or parse forwarded emails. Use the <b>Run Refresh</b> button above (or Run now on the routine) instead.</div>
         </div>
         <p style="margin-top:12px;">
           <button id="tripsy-check-now-btn" class="btn" style="font-size:13px; padding:6px 14px;">Check Now</button>
@@ -8628,6 +8626,42 @@ function tripsyShowLandedReloadBanner() {
   bar.querySelector('[data-landed-reload]').addEventListener('click', () => location.reload());
   bar.querySelector('[data-landed-dismiss]').addEventListener('click', () => bar.remove());
   document.body.appendChild(bar);
+}
+
+// ---- "Newer trip data published" (pull side) flag ----
+// The scheduled/manual refresh PULLS fresh Tripsy data and republishes this page
+// with a new snapshot; a tab that's been open since before then is showing stale
+// data. This surfaces a yellow "reload to get it" flag so the owner is never
+// unknowingly sitting on old data. Detected by reading the deployed page's
+// TRIPSY_SNAPSHOT_GENERATED_AT and comparing to this tab's -- via a Range read
+// of the file head (the const sits ~670KB in, after the base64 blobs) so we
+// don't pull the whole ~2.3MB page on each check. Sticky once set (reloading
+// clears it, since the page reloads onto the fresh snapshot). Owner-only (only
+// the owner sees the status badge).
+let tripsyNewerSnapshotPublished = false;
+async function tripsyFetchDeployedSnapshotStamp() {
+  try {
+    const res = await fetch(location.href, { cache: 'no-store', headers: { Range: 'bytes=0-1100000' } });
+    const m = (await res.text()).match(/const TRIPSY_SNAPSHOT_GENERATED_AT = '([^']*)';/);
+    return m ? m[1] : null; // null = not in the fetched range/error -> treat as unknown, don't flag
+  } catch (e) { return null; }
+}
+async function tripsyCheckNewerSnapshot() {
+  if (!isOwner || tripsyNewerSnapshotPublished) return; // sticky until reload
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  const stamp = await tripsyFetchDeployedSnapshotStamp();
+  if (stamp && stamp !== TRIPSY_SNAPSHOT_GENERATED_AT) {
+    tripsyNewerSnapshotPublished = true;
+    updateTripsyStatusBadge();
+  }
+}
+let _tripsyNewerSnapshotTimer = null;
+function tripsyStartNewerSnapshotWatch() {
+  if (_tripsyNewerSnapshotTimer) return;
+  // Check when the tab regains focus (the moment fresh data matters most) and on
+  // a slow backstop timer; both no-op when hidden / already flagged / not owner.
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tripsyCheckNewerSnapshot(); });
+  _tripsyNewerSnapshotTimer = setInterval(tripsyCheckNewerSnapshot, 15 * 60 * 1000);
 }
 
 // Drives the Edit icon's border independent of the browser's own focus
@@ -18776,6 +18810,8 @@ async function computeTripsyStatus() {
   // open until resolved, since this recomputes each time.
   const needLocation = changes.filter(tripsyChangeNeedsLocation);
   if (needLocation.length) yellow.push({ label: `${needLocation.length} ${needLocation.length === 1 ? 'activity needs' : 'activities need'} a location — search for it on the Tripsy Refresh page`, view: 'utilitiestripsyrefresh' });
+  // Pull side: a refresh has published newer trip data than this tab is showing.
+  if (tripsyNewerSnapshotPublished) yellow.push({ kind: 'reload-newer', label: 'Newer trip data has been published — reload to get the latest' });
   if (yellow.length) return { state: 'yellow', reasons: yellow };
 
   // GREEN -- the owner's turn in the app. Keyed off pending proposal events
@@ -18894,8 +18930,8 @@ async function renderTripsyStatusPanel() {
         <div style="font-size:13px; color:var(--text); margin-bottom:8px;">${esc(r.label)}</div>
         <button class="btn" data-tripsy-status-dismiss-write data-write-id="${esc(r.id)}" style="font-size:12px; padding:5px 12px;">Dismiss</button>
       </div>
-    ` : r.kind === 'landed-reload' ? `
-      <button class="btn" data-tripsy-status-reload style="display:block; width:100%; text-align:left; background:none; border:none; padding:8px 6px; border-radius:6px; cursor:pointer; color:var(--home-green); font-size:13px; font-weight:600; border-top:1px solid var(--line);">
+    ` : (r.kind === 'landed-reload' || r.kind === 'reload-newer') ? `
+      <button class="btn" data-tripsy-status-reload style="display:block; width:100%; text-align:left; background:none; border:none; padding:8px 6px; border-radius:6px; cursor:pointer; color:${r.kind === 'reload-newer' ? 'var(--amber)' : 'var(--home-green)'}; font-size:13px; font-weight:600; border-top:1px solid var(--line);">
         ${esc(r.label)} <span style="color:var(--muted);">⟳</span>
       </button>
     ` : r.view ? `
