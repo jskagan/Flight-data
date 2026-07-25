@@ -1795,89 +1795,84 @@ const Store = {
   async queueTripsyChange(change) {
     const writeLabel = `${TRIPSY_PENDING_CHANGE_LABEL[change.type] || change.type}: ${change.eventSummary || change.tripName || ''}`.trim();
     const writeId = tripsyBeginInFlightWrite(writeLabel);
-    // Snapshotted so a failed persistDriveData() below can roll the
-    // in-memory queue back to exactly how it looked before this call --
-    // every mutation from here on REPLACES these arrays rather than
-    // mutating them in place, so restoring the original references undoes
-    // all of it in one step. Without this, a failed write still left the
-    // change sitting in memory looking successfully queued, which
-    // contradicted the red "Write Failed" badge right next to it.
-    const rollbackPendingChanges = driveData.tripsyPendingChanges;
-    const rollbackUpdatePages = driveData.tripsyUpdatePages;
-    try {
+    // Applies this change's mutations to the CURRENT driveData and returns the
+    // pre-mutation array references so a real (non-conflict) failure can roll
+    // back in place. Every mutation REPLACES these arrays rather than mutating
+    // them, so restoring the references undoes all of it at once. It's a
+    // callable because a mid-write CONFLICT reloads driveData with a fresh copy
+    // (discarding this change) -- we then re-apply onto that fresh copy and
+    // retry, so a benign cross-device/refresh race adds the item transparently
+    // instead of throwing a scary "write failed".
+    const applyMutation = () => {
+      const rbP = driveData.tripsyPendingChanges;
+      const rbU = driveData.tripsyUpdatePages;
       if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
-      // Stamp with the snapshot version live at queue time -- lets the
-      // "Sync Complete" button (see updateTripsyPendingWarningBadge) tell
-      // whether a refresh has actually happened since this was queued,
-      // rather than appearing the instant something's queued.
-      change = { ...change, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT };
-      // Re-saving with the same id (e.g. editing a not-yet-created pending
-      // item again before it's applied) replaces the earlier entry rather
-      // than piling up duplicates.
-      driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(c => c.id !== change.id);
-      // An edit queued twice for the same event (or trip) AMENDS the existing
-      // pending edit -- this edit's changed fields are merged ONTO the earlier
-      // one's, not replaced wholesale. The Save handler diffs each edit against
-      // the current EFFECTIVE raw (snapshot + any already-pending edit), so a
-      // field this edit left untouched (e.g. a start/end date an earlier edit
-      // set, when a later edit only changed the title) isn't in change.changes
-      // at all -- replacing outright would silently drop it, which is exactly
-      // the bug this merge fixes. Any field this edit DID change (including one
-      // cleared back to empty) still wins, since the diff captured that
-      // explicitly and it lands last in the spread.
-      if (change.type === 'edit_event') {
-        const existingEdit = driveData.tripsyPendingChanges.find(
-          c => c.type === 'edit_event' && c.eventKey === change.eventKey
-        );
-        if (existingEdit) change = { ...change, changes: { ...existingEdit.changes, ...change.changes } };
-        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
-          c => !(c.type === 'edit_event' && c.eventKey === change.eventKey)
-        );
+      // Stamp with the snapshot version live at queue time (see the "Sync
+      // Complete" note in updateTripsyPendingWarningBadge).
+      let c = { ...change, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT };
+      // Re-saving with the same id replaces the earlier entry (no duplicates).
+      driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(x => x.id !== c.id);
+      // An edit queued twice for the same event/trip AMENDS the existing pending
+      // edit -- this edit's changed fields merge ONTO the earlier one's (a field
+      // this edit left untouched isn't in c.changes, so replacing outright would
+      // drop it); any field this edit DID change still wins (lands last).
+      if (c.type === 'edit_event') {
+        const existingEdit = driveData.tripsyPendingChanges.find(x => x.type === 'edit_event' && x.eventKey === c.eventKey);
+        if (existingEdit) c = { ...c, changes: { ...existingEdit.changes, ...c.changes } };
+        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(x => !(x.type === 'edit_event' && x.eventKey === c.eventKey));
       }
-      if (change.type === 'edit_trip') {
-        const existingEdit = driveData.tripsyPendingChanges.find(
-          c => c.type === 'edit_trip' && c.tripKey === change.tripKey
-        );
-        if (existingEdit) change = { ...change, changes: { ...existingEdit.changes, ...change.changes } };
-        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
-          c => !(c.type === 'edit_trip' && c.tripKey === change.tripKey)
-        );
+      if (c.type === 'edit_trip') {
+        const existingEdit = driveData.tripsyPendingChanges.find(x => x.type === 'edit_trip' && x.tripKey === c.tripKey);
+        if (existingEdit) c = { ...c, changes: { ...existingEdit.changes, ...c.changes } };
+        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(x => !(x.type === 'edit_trip' && x.tripKey === c.tripKey));
       }
-      // A delete makes any pending edit for the same event (or trip) moot.
-      if (change.type === 'delete_event') {
-        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
-          c => !(c.type === 'edit_event' && c.eventKey === change.eventKey)
-        );
+      // A delete makes any pending edit for the same event/trip moot.
+      if (c.type === 'delete_event') {
+        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(x => !(x.type === 'edit_event' && x.eventKey === c.eventKey));
       }
-      if (change.type === 'delete_trip') {
-        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(
-          c => !(c.type === 'edit_trip' && c.tripKey === change.tripKey)
-        );
+      if (c.type === 'delete_trip') {
+        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(x => !(x.type === 'edit_trip' && x.tripKey === c.tripKey));
       }
-      // A saved Update comparison page (see saveTripsyUpdatePage) is a
-      // snapshot of specific events at the moment it was generated -- if one
-      // of those events gets edited or deleted through anything OTHER than
-      // the Update page's own Accept/Add/Delete/Modify-Existing actions
-      // (which stamp source: 'tripsy_update_page'), that snapshot no longer
-      // reflects reality and gets dropped rather than left showing stale
-      // rows. Deleting a trip takes every Update page for it along,
-      // regardless of source.
+      // A saved Update comparison page is a snapshot of specific events -- if one
+      // gets edited/deleted through anything OTHER than the Update page's own
+      // actions (source: 'tripsy_update_page'), that page is now stale and gets
+      // dropped. Deleting a trip drops every Update page for it, any source.
       if (driveData.tripsyUpdatePages && driveData.tripsyUpdatePages.length) {
-        if (change.type === 'delete_trip') {
-          driveData.tripsyUpdatePages = driveData.tripsyUpdatePages.filter(p => p.tripKey !== change.tripKey);
-        } else if ((change.type === 'edit_event' || change.type === 'delete_event') && change.source !== 'tripsy_update_page') {
-          driveData.tripsyUpdatePages = driveData.tripsyUpdatePages.filter(
-            p => !(p.eventKeys || []).includes(change.eventKey)
-          );
+        if (c.type === 'delete_trip') {
+          driveData.tripsyUpdatePages = driveData.tripsyUpdatePages.filter(p => p.tripKey !== c.tripKey);
+        } else if ((c.type === 'edit_event' || c.type === 'delete_event') && c.source !== 'tripsy_update_page') {
+          driveData.tripsyUpdatePages = driveData.tripsyUpdatePages.filter(p => !(p.eventKeys || []).includes(c.eventKey));
         }
       }
-      driveData.tripsyPendingChanges.push(change);
-      await persistDriveData();
-      return true;
+      driveData.tripsyPendingChanges = [...driveData.tripsyPendingChanges, c];
+      return { rbP, rbU };
+    };
+    try {
+      let rb = applyMutation();
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await persistDriveData();
+          return true;
+        } catch (e) {
+          // CONFLICT = the shared file changed on Drive since we loaded it, so
+          // persistDriveData reloaded the newer copy and discarded our change.
+          if (e && e.conflict) {
+            // Re-apply onto the fresh data and try again (bounded). This turns the
+            // common "someone/a refresh just wrote" race into a transparent success.
+            if (attempt < 2) { rb = applyMutation(); continue; }
+            // Retries exhausted: driveData is already the fresh reloaded copy (our
+            // change discarded), so do NOT roll back -- that would clobber the reload.
+            throw e;
+          }
+          // A real (non-conflict) failure: our mutation is still in the in-memory
+          // driveData -- undo it so the queue doesn't look falsely updated.
+          driveData.tripsyPendingChanges = rb.rbP;
+          driveData.tripsyUpdatePages = rb.rbU;
+          throw e;
+        }
+      }
     } catch (e) {
       console.error('Store.queueTripsyChange failed:', e);
-      driveData.tripsyPendingChanges = rollbackPendingChanges;
-      driveData.tripsyUpdatePages = rollbackUpdatePages;
       tripsyRecordFailedWrite(writeLabel);
       return false;
     } finally {
@@ -18758,7 +18753,7 @@ async function computeTripsyStatus() {
   const changesToPush = changes.filter(c => !c.pushConfirmationFailed && !c.landed);
   if (changesToPush.length) yellow.push({ kind: 'changes-push', label: `${changesToPush.length} change${changesToPush.length === 1 ? '' : 's'} waiting to be pushed to Tripsy — run a refresh`, view: 'utilitiestripsyrefresh' });
   const docsToParse = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'pending');
-  if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged, waiting to be parsed — process flagged docs in Claude`, view: 'utilitiesparsingdocs' });
+  if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged, waiting to be parsed — run a refresh`, view: 'utilitiesparsingdocs' });
   const emailsToParse = tripsyEmailsAwaitingParseCount();
   if (emailsToParse) yellow.push({ label: `${emailsToParse} forwarded email${emailsToParse === 1 ? '' : 's'} waiting to be parsed — run a refresh`, view: 'utilitiestripsyrefresh' });
   // Mirror the per-trip yellow ⚠️ flag: while any trip has a still-unresolved
