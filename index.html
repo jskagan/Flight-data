@@ -11848,6 +11848,13 @@ const TRIPSY_PLACE_PHOTO_TTL_DAYS = 180;
 // A trip whose photos are all already cached never sets this, so re-opening
 // Preview a second time does zero Drive writes.
 let tripsyPlacePhotoCacheDirty = false;
+// New photos are auto-fetched ONLY during an explicit generate/regenerate pass
+// (set true around those buildTripsyPrintHtml calls). On a normal open or print,
+// this stays false so fetchTripsyPlacePhoto/fetchTripsyTransportationPhoto only
+// ever return what's already cached -- the itinerary opens exactly as it was
+// last left, with nothing regenerated or swapped. Manual search / gallery /
+// "try another" fetch through their own paths, so they're unaffected.
+let _tripsyAllowPhotoFetch = false;
 async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
   const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle, locationHint);
   if (cacheKey === '|||') return null;
@@ -11857,9 +11864,10 @@ async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
       return await tripsyPlacePhotoDisplayUrl(cached.driveFileId);
     } catch (e) {
       console.error('Loading cached place photo failed, refetching:', e);
-      // fall through to refetch below
+      // fall through to refetch below (only when fetching is enabled)
     }
   }
+  if (!_tripsyAllowPhotoFetch) return null; // open/print: cached-only, never fetch
   const apiKey = await Store.getPlacesApiKey();
   if (!apiKey) return null;
   try {
@@ -11985,6 +11993,7 @@ async function fetchTripsyTransportationPhoto(company, category) {
       console.error('Loading cached transportation photo failed, refetching:', e);
     }
   }
+  if (!_tripsyAllowPhotoFetch) return null; // open/print: cached-only, never fetch
   const apiKey = await Store.getPlacesApiKey();
   if (!apiKey) return null;
   try {
@@ -12138,6 +12147,17 @@ async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHin
   const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle, locationHint);
   const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
   if (cachedEntry && cachedEntry.skipped) return null;
+  // Dedup only ever runs when a photo is fetched for the FIRST time (initial
+  // generation, or a brand-new event). If this place ALREADY has a photo, show
+  // it verbatim -- reopening/editing the itinerary must never swap a photo, and
+  // the owner may deliberately want duplicates. Its name/hash is still recorded
+  // so a genuinely first-time card can dedup around it.
+  if (cachedEntry && cachedEntry.driveFileId) {
+    const url = await fetchTripsyPlacePhoto(name, address, eventTitle, locationHint);
+    if (cachedEntry.photoName) usedPlacePhotoNames.add(cachedEntry.photoName);
+    if (cachedEntry.contentHash) usedPlacePhotoHashes.add(cachedEntry.contentHash);
+    return url;
+  }
   let photoUrl = await fetchTripsyPlacePhoto(name, address, eventTitle, locationHint);
   const freshEntry = await Store.getTripsyPlacePhoto(cacheKey);
   let photoName = freshEntry?.photoName || null;
@@ -12225,6 +12245,26 @@ async function tripsyGatherPlacePhotoThumbnails(name, address, eventTitle, locat
     return thumbs.filter(Boolean);
   } catch (e) {
     console.error('tripsyGatherPlacePhotoThumbnails failed:', e);
+    return [];
+  }
+}
+
+// Like tripsyGatherPlacePhotoThumbnails, but for the manual-search box's own
+// free-text query -- nothing (name/address/location) is folded in, so it's a
+// broad, exactly-what-you-typed search that returns a grid of every photo the
+// matching places have, to pick from (rather than one photo at a time).
+async function tripsyGatherPlacePhotoThumbnailsForQuery(query) {
+  const apiKey = await Store.getPlacesApiKey();
+  if (!apiKey || !query) return [];
+  try {
+    const candidates = await tripsyGatherPhotoCandidatesForQueries(apiKey, [query]);
+    const thumbs = await Promise.all(candidates.map(async photoName => {
+      const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
+      return blob ? { photoName, blob, dataUrl: URL.createObjectURL(blob) } : null;
+    }));
+    return thumbs.filter(Boolean);
+  } catch (e) {
+    console.error('tripsyGatherPlacePhotoThumbnailsForQuery failed:', e);
     return [];
   }
 }
@@ -12855,7 +12895,8 @@ async function tripsyRunGeneratePanelUpdate(panel, tripKey) {
     // curates in Preview still overrides it. Only when this apply actually
     // generated narrative (skip a delete-only pass -- deletes add no places).
     if (includeIntro || dayKeysToGenerate.length || eventRowKeysToGenerate.length) {
-      try { await buildTripsyPrintHtml(tripKey); } catch (err) { console.error('Photo pre-fetch after generate failed:', err); }
+      _tripsyAllowPhotoFetch = true; // this pass MAY fetch new photos (it's a generation)
+      try { await buildTripsyPrintHtml(tripKey); } catch (err) { console.error('Photo pre-fetch after generate failed:', err); } finally { _tripsyAllowPhotoFetch = false; }
       // Record the itinerary's baseline (acknowledge current events) so a later
       // edit/add/Update is detected as a change against this generated state.
       try { await tripsyRecordItineraryBaseline((tripsyDecryptedTrips || []).find(t => t.key === tripKey)); } catch (err) { console.error('Itinerary baseline record failed:', err); }
@@ -13374,7 +13415,8 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       if (checkedDayKeys.length) {
         const { effectiveTrip, dayKeys, byDay: pdByDay, summaryByDay } = await buildTripsyPrintDayData(trip);
         await tripsyGenerateNarrativeSections(trip.key, effectiveTrip, dayKeys, pdByDay, summaryByDay, { includeIntro: false, includeSummary: true, dayKeysToGenerate: checkedDayKeys });
-        await buildTripsyPrintHtml(trip.key); // pre-fetch photos for the (re)generated days, same as Create
+        _tripsyAllowPhotoFetch = true; // this pass MAY fetch new photos (it's a regeneration)
+        try { await buildTripsyPrintHtml(trip.key); } finally { _tripsyAllowPhotoFetch = false; } // pre-fetch photos for the (re)generated days
       }
       // Acknowledge every listed event (checked ones regenerated, unchecked left
       // as-is), so the warning clears until something changes again.
@@ -16916,16 +16958,29 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
         searchBtn.disabled = true;
         searchBtn.textContent = '…';
         try {
-          const photoDataUrl = isTransportCard
-            ? await tripsyManualSearchTransportationPhoto(transportCompany, transportCategory, query)
-            : await tripsyManualSearchPlacePhoto(name, address, title, locationHint, query);
-          if (!photoDataUrl) {
-            toast('No photo found for that search -- try different terms.', 'error');
+          if (isTransportCard) {
+            const photoDataUrl = await tripsyManualSearchTransportationPhoto(transportCompany, transportCategory, query);
+            if (!photoDataUrl) { toast('No photo found for that search -- try different terms.', 'error'); return; }
+            swapCardPhoto(card, name, photoDataUrl);
             return;
           }
-          swapCardPhoto(card, name, photoDataUrl);
+          // Place cards: show a GRID of every result for the typed query (a broad,
+          // no-location search) in the gallery panel, so several can be compared
+          // and picked -- reusing the gallery's own thumbnail-pick handler below.
+          const thumbs = await tripsyGatherPlacePhotoThumbnailsForQuery(query);
+          if (!thumbs.length) { toast('No photos found for that search -- try different terms.', 'error'); return; }
+          galleryCandidatesCache.set(cardCacheKey(), Promise.resolve(thumbs));
+          const searchBox = card.querySelector('[data-tripsy-photo-manual-search]');
+          if (searchBox) searchBox.style.display = 'none';
+          const panel = card.querySelector('[data-tripsy-photo-gallery-panel]');
+          if (panel) {
+            panel.style.display = 'flex';
+            panel.innerHTML = `
+              <button type="button" class="btn" data-tripsy-photo-gallery-close-btn>Close</button>
+              <div class="tp-photo-gallery-grid">${thumbs.map(t => `<img class="tp-photo-gallery-thumb" src="${esc(t.dataUrl)}" data-photo-name="${esc(t.photoName)}" alt="Search result photo">`).join('')}</div>`;
+          }
         } catch (err) {
-          console.error('tripsyManualSearchPlacePhoto failed:', err);
+          console.error('manual photo search failed:', err);
           toast('Could not search for a photo. Please try again.', 'error');
         } finally {
           searchBtn.disabled = false;
