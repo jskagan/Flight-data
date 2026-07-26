@@ -9286,6 +9286,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
   `;
   panel.innerHTML = `
     <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
+      ${createOptions && createOptions.headerHtml ? `<div>${createOptions.headerHtml}</div>` : ''}
       ${groupOrder.map(sectionHtml).join('')}
       ${tripsyEditActionButtonsHtml('data-tripsy-edit-save', 'data-tripsy-edit-exit')}
     </div>
@@ -10042,6 +10043,37 @@ function tripsyConflictFieldDiffs(newSummary, newFields, resource, existing) {
     if (nName && eName && nName !== eName) diffs.push({ label: 'Name', nv: nName, ev: eName });
   }
   return diffs;
+}
+
+// The remembered conflict counterpart with any in-progress existing-event edit
+// (ctx.overrides) applied to its start/end -- shared by the box and the Modify
+// editors so both show the same "Existing" side.
+function tripsyEffectiveCounterpart(ctx) {
+  const c = ctx.counterpart;
+  if (!c) return null;
+  const key = c.eventKey || c.changeId;
+  const ov = key && ctx.overrides[key];
+  return ov ? { ...c, start: ov.startsAt || ov.departureAt || null, end: ov.endsAt || ov.arrivalAt || null } : c;
+}
+
+// The New-vs-Existing comparison chart (two columns, one row per field, event
+// name always first). Used in the conflict box AND at the top of the Modify
+// New/Existing editors. Returns '' when there's no counterpart to compare.
+function tripsyConflictChartHtml(newSummary, newFields, resource, existing) {
+  if (!existing) return '';
+  const rows = [{ label: 'Name', nv: newSummary || '(none)', ev: existing.summary || '(none)' },
+    ...tripsyConflictFieldDiffs(newSummary, newFields, resource, existing).filter(d => d.label !== 'Name')];
+  const trunc = s => s.length > 70 ? s.slice(0, 67) + '…' : s;
+  const cell = 'padding:3px 8px; vertical-align:top;';
+  const hcell = `${cell} text-align:left; color:var(--muted); font-weight:700; border-bottom:1px solid var(--line);`;
+  return `<table style="width:100%; border-collapse:collapse; font-size:12px; margin-top:8px;">
+    <thead><tr><th style="${hcell}"></th><th style="${hcell}">New</th><th style="${hcell}">Existing</th></tr></thead>
+    <tbody>${rows.map((r, i) => `<tr>
+      <td style="${cell} color:var(--muted); font-weight:600; white-space:nowrap;${i ? ' border-top:1px solid var(--line);' : ''}">${esc(r.label)}</td>
+      <td style="${cell} color:var(--text);${i ? ' border-top:1px solid var(--line);' : ''}">${esc(trunc(r.nv))}</td>
+      <td style="${cell} color:var(--text);${i ? ' border-top:1px solid var(--line);' : ''}">${esc(trunc(r.ev))}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
 }
 
 // Live conflict state for a row, recomputed from the current working new-event
@@ -19908,27 +19940,20 @@ function tripsyConflictUiHtml(ctx) {
   // The remembered counterpart's own start/end may be stale if it was itself
   // edited since (Modify Existing Event/Change) -- reapply any override the
   // same way tripsyLiveConflicts does for a still-live conflict.
-  let existing = counterpart;
-  if (counterpart) {
-    const key = counterpart.eventKey || counterpart.changeId;
-    const ov = key && ctx.overrides[key];
-    if (ov) existing = { ...counterpart, start: ov.startsAt || ov.departureAt || null, end: ov.endsAt || ov.arrivalAt || null };
-  }
+  const existing = tripsyEffectiveCounterpart(ctx);
   const label = resolved ? 'Conflict Resolved' : ((ctx.newModified || Object.keys(ctx.overrides).length) ? 'Conflict Not Resolved:' : 'Possible conflict:');
   const reason = resolved ? '' : conflicts.map(c => tripsyConflictReason(ctx.newFields, ctx.resource, c)).join('; ');
   const icon = resolved ? '🟢' : '⚠️';
   const color = resolved ? 'var(--home-green)' : 'var(--amber)';
   const ns = ctx.newFields.startsAt || ctx.newFields.departureAt;
   const ne = ctx.newFields.endsAt || ctx.newFields.arrivalAt;
-  const diffs = resolved ? [] : tripsyConflictFieldDiffs(ctx.event.eventSummary, ctx.newFields, ctx.resource, existing);
-  const diffTrunc = s => s.length > 70 ? s.slice(0, 67) + '…' : s;
   return `
     <div style="margin-top:8px; padding:8px; border:1px solid ${color}; border-radius:6px;">
       <div style="font-size:12px; color:${color}; font-weight:700;">${icon} ${esc(label)}${reason ? ' ' + esc(reason) : ''}</div>
       ${existing ? `<div ${firstReal || existing.changeId ? 'data-parse-conflict-open-existing title="Click to edit this existing event"' : ''} style="font-size:12px; color:var(--text); margin-top:8px;${firstReal || existing.changeId ? ' cursor:pointer; text-decoration:underline dotted;' : ''}"><b>Existing Event:</b> ${esc(existing.summary || 'Existing event')} — ${esc(tripsyEventOneLine(existing.start, existing.end))}${!firstReal && existing.changeId ? ' <span style="color:var(--muted);">(not yet synced to Tripsy)</span>' : ''}</div>` : ''}
       <div data-parse-conflict-open-new title="Click to edit the new event" style="font-size:12px; color:var(--text); margin-top:2px; cursor:pointer; text-decoration:underline dotted;"><b>New Event:</b> ${esc(ctx.event.eventSummary)} — ${esc(tripsyEventOneLine(ns, ne))}</div>
       ${resolved ? '' : `<div style="font-size:12px; color:var(--muted); font-style:italic; margin-top:8px; line-height:1.5;">${esc(tripsyConflictNarrative(ctx.event.eventSummary, ctx.newFields, ctx.resource, existing))}</div>`}
-      ${diffs.length ? `<div style="font-size:12px; color:var(--muted); margin-top:6px; line-height:1.5;"><b>What differs:</b><ul style="margin:3px 0 0; padding-left:18px;">${diffs.map(d => `<li>${esc(d.label)}: new <span style="color:var(--text);">${esc(diffTrunc(d.nv))}</span> vs. existing <span style="color:var(--text);">${esc(diffTrunc(d.ev))}</span></li>`).join('')}</ul></div>` : ''}
+      ${resolved ? '' : tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, existing)}
     </div>
     <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
       <button class="btn primary" data-parse-conflict-import${resolved ? '' : '-anyway'} style="font-size:12px; padding:5px 12px;">${resolved ? 'Import' : 'Import with conflict'}</button>
@@ -20032,6 +20057,7 @@ function wireTripsyConflictUi(ctx) {
       if (wasOpen) return;
       const raw = { ...tripsyBlankRaw(ctx.resource, null), ...ctx.newFields };
       renderTripsyEditPanel(panel, raw, null, null, ctx.event.eventSummary, {
+        headerHtml: tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)),
         onSave: async newFields => {
           ctx.newFields = { ...ctx.newFields, ...newFields };
           ctx.newModified = true;
@@ -20064,6 +20090,7 @@ function wireTripsyConflictUi(ctx) {
       const summary = tripsyRawToDisplay(found.raw.resource, found.raw).summary;
       const raw = { ...tripsyBlankRaw(found.raw.resource, null), ...found.raw };
       renderTripsyEditPanel(panel, raw, null, null, summary, {
+        headerHtml: tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)),
         onSave: async newFields => {
           const changes = {};
           for (const k of Object.keys(newFields)) if ((newFields[k] || '') !== (original[k] || '')) changes[k] = newFields[k] || null;
@@ -20102,6 +20129,7 @@ function wireTripsyConflictUi(ctx) {
       if (!change) { toast('Could not find that change — it may have changed.', 'error'); return; }
       const raw = { ...tripsyBlankRaw(change.tripsyResource, null), ...change.fields };
       renderTripsyEditPanel(panel, raw, null, null, change.eventSummary, {
+        headerHtml: tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)),
         onSave: async newFields => {
           const mergedFields = { ...change.fields, ...newFields };
           const ok = await Store.queueTripsyChange({ ...change, fields: mergedFields });
