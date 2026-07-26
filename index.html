@@ -1177,15 +1177,31 @@ async function fetchWithRetry(doFetch, { retries = 3, method = 'GET' } = {}) {
   }
 }
 
-async function driveApiFetch(url, options = {}) {
+async function driveApiFetch(url, options = {}, _retriedAfterRefresh = false) {
   const headers = Object.assign({}, options.headers, { Authorization: `Bearer ${driveAccessToken}` });
   const fetchOpts = Object.assign({}, options, { headers });
   const res = await fetchWithRetry(() => fetch(url, fetchOpts), { method: options.method });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     if (res.status === 401) {
+      // The access token expired mid-session (common on iPad, whose WebView
+      // doesn't silently renew it). Try ONE transparent GIS refresh and replay
+      // the request, so a write doesn't fail just because the ~1h token lapsed
+      // (the "two Write Failed messages" case). All bodies here are strings, so
+      // replaying is safe. Only if the silent refresh ALSO fails (the Google
+      // session is truly gone) do we surface an expired-session error.
+      if (!_retriedAfterRefresh) {
+        try {
+          await refreshDriveAccessToken();
+          return await driveApiFetch(url, options, true);
+        } catch (refreshErr) {
+          console.error('silent token refresh failed:', refreshErr);
+        }
+      }
       clearCachedToken(); // cached token is dead -- don't keep offering it
-      throw new Error('Your Google sign-in has expired. Please reload the page and sign in again.');
+      const err = new Error('Your Google sign-in expired. Please reload the page and sign in again.');
+      err.authExpired = true;
+      throw err;
     }
     throw new Error(`Drive API error ${res.status}: ${text.slice(0, 300)}`);
   }
@@ -1654,6 +1670,7 @@ async function persistTripsyNarrativeCacheWithRetry(applyFn) {
     }
   } catch (e) {
     console.error('persistTripsyNarrativeCacheWithRetry failed:', e);
+    if (e && e.authExpired) tripsyNotifyAuthExpired();
     return false;
   }
 }
@@ -1943,7 +1960,12 @@ const Store = {
       }
     } catch (e) {
       console.error('Store.queueTripsyChange failed:', e);
-      tripsyRecordFailedWrite(writeLabel);
+      // An expired sign-in (silent refresh couldn't recover it) gets a clearer
+      // "Session Expired -> reload & sign in" block + a toast, instead of a
+      // generic red "Write Failed" that gives the owner no idea what to do.
+      const authExpired = !!(e && e.authExpired);
+      tripsyRecordFailedWrite(writeLabel, { authExpired });
+      if (authExpired) tripsyNotifyAuthExpired();
       return false;
     } finally {
       tripsyEndInFlightWrite(writeId);
@@ -19910,9 +19932,9 @@ function tripsyIsActivelyUpdating() {
 // row is already back in front of the owner on the Update page itself.
 let tripsyFailedWrites = [];
 
-function tripsyRecordFailedWrite(label) {
+function tripsyRecordFailedWrite(label, opts = {}) {
   const id = crypto.randomUUID();
-  tripsyFailedWrites.push({ id, label });
+  tripsyFailedWrites.push({ id, label, authExpired: !!opts.authExpired });
   updateTripsyStatusBadge();
   return id;
 }
@@ -19953,7 +19975,7 @@ async function computeTripsyStatus() {
   // (that Drive write never even landed) -- both can show at once, each
   // as its own reason, and each write-failed one stays until the owner
   // explicitly dismisses it (tripsyDismissFailedWrite), never on its own.
-  const red = tripsyFailedWrites.map(w => ({ kind: 'write-failed', id: w.id, label: w.label }));
+  const red = tripsyFailedWrites.map(w => ({ kind: 'write-failed', id: w.id, label: w.label, authExpired: w.authExpired }));
   if (changes.some(c => c.pushConfirmationFailed)) {
     red.push({ label: 'A Tripsy push could not be verified — re-run a refresh', view: 'utilitiestripsyrefresh' });
   }
@@ -20142,8 +20164,9 @@ async function renderTripsyStatusPanel() {
     <div style="font-family:var(--mono); font-size:13px; font-weight:700; color:${headingColor}; margin-bottom:6px;">${heading}</div>
     ${reasons.map(r => r.kind === 'write-failed' ? `
       <div style="padding:8px 6px; border-top:1px solid var(--line);">
-        <div style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--red, #c0392b); margin-bottom:3px;">Write Failed</div>
-        <div style="font-size:13px; color:var(--text); margin-bottom:8px;">${esc(r.label)}</div>
+        <div style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--red, #c0392b); margin-bottom:3px;">${r.authExpired ? 'Session Expired' : 'Write Failed'}</div>
+        <div style="font-size:13px; color:var(--text); margin-bottom:8px;">${esc(r.label)}${r.authExpired ? `<br><span style="color:var(--muted);">Your Google sign-in expired before this saved — nothing was changed. Reload, sign in again, then redo it.</span>` : ''}</div>
+        ${r.authExpired ? `<button class="btn primary" data-tripsy-status-reload-auth style="font-size:12px; padding:5px 12px; margin-right:6px;">Reload &amp; sign in</button>` : ''}
         <button class="btn" data-tripsy-status-dismiss-write data-write-id="${esc(r.id)}" style="font-size:12px; padding:5px 12px;">Dismiss</button>
       </div>
     ` : (r.kind === 'landed-reload' || r.kind === 'reload-newer') ? `
@@ -20189,6 +20212,10 @@ async function renderTripsyStatusPanel() {
   // events, so just reload to swap this tab's snapshot for the fresh one.
   const reloadBtn = panel.querySelector('[data-tripsy-status-reload]');
   if (reloadBtn) reloadBtn.addEventListener('click', () => { location.reload(); });
+  // "Reload & sign in" on a session-expired write: same reload, which lands on
+  // the sign-in screen when the cached token is dead.
+  const reloadAuthBtn = panel.querySelector('[data-tripsy-status-reload-auth]');
+  if (reloadAuthBtn) reloadAuthBtn.addEventListener('click', () => { location.reload(); });
   panel.style.display = 'block';
 }
 
@@ -22587,6 +22614,49 @@ let currentUserEmail = null;
 let isOwner = false;
 let tokenClient = null;
 
+// A silent, mid-session token refresh in flight: the resolvers the token-client
+// callback hands the new token to (instead of re-running the whole sign-in).
+// null when no refresh is pending.
+let _pendingTokenRefresh = null;
+// Set once we've told the owner their sign-in expired, so a burst of failing
+// writes doesn't stack up duplicate toasts; cleared on the next fresh token.
+let _authExpiredNotified = false;
+
+// Ask Google Identity Services for a fresh access token WITHOUT the interactive
+// consent prompt (prompt:'') -- used when a Drive call 401s because the ~1h
+// token lapsed mid-session (common on iPad, whose WebView doesn't auto-renew).
+// Resolves with the new token (also stored in driveAccessToken); rejects if a
+// silent grant isn't possible (the Google session is gone -> needs a reload +
+// interactive sign-in). Concurrent callers share the one in-flight refresh.
+function refreshDriveAccessToken() {
+  if (!tokenClient) return Promise.reject(new Error('auth not initialized'));
+  if (_pendingTokenRefresh) return _pendingTokenRefresh.promise;
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  _pendingTokenRefresh = { resolve, reject, promise };
+  // Safety net: if GIS never fires the callback (popup blocked, no active
+  // session), don't leave the awaiting writes hung forever.
+  _pendingTokenRefresh.timer = setTimeout(() => {
+    if (_pendingTokenRefresh) { const p = _pendingTokenRefresh; _pendingTokenRefresh = null; p.reject(new Error('token refresh timed out')); }
+  }, 15000);
+  try {
+    tokenClient.requestAccessToken({ prompt: '' });
+  } catch (e) {
+    clearTimeout(_pendingTokenRefresh.timer);
+    _pendingTokenRefresh = null;
+    return Promise.reject(e);
+  }
+  return promise;
+}
+
+// One-time (per token lifetime) toast when a write fails because the sign-in
+// truly expired and couldn't be silently refreshed. Best-effort.
+function tripsyNotifyAuthExpired() {
+  if (_authExpiredNotified) return;
+  _authExpiredNotified = true;
+  try { toast('Your Google sign-in expired. Reload the page and sign in again, then redo your change.', 'error'); } catch (_) {}
+}
+
 function showSignInStatus(message, isError) {
   const el = document.getElementById('signin-status');
   if (el) {
@@ -22739,6 +22809,25 @@ function initGoogleAuth() {
     client_id: DRIVE_CLIENT_ID,
     scope: loadScopeTierHint() === 'base' ? DRIVE_SCOPE_BASE : DRIVE_SCOPE_FULL,
     callback: (response) => {
+      // A silent mid-session refresh (refreshDriveAccessToken) is waiting on
+      // this token -- hand it straight back to that caller and do NOT re-run
+      // the whole sign-in / data-load flow.
+      if (_pendingTokenRefresh) {
+        const pending = _pendingTokenRefresh;
+        clearTimeout(pending.timer);
+        _pendingTokenRefresh = null;
+        if (response.error || !response.access_token) {
+          pending.reject(new Error(response.error || 'token refresh failed'));
+          return;
+        }
+        driveAccessToken = response.access_token;
+        _authExpiredNotified = false; // fresh token -> let a future expiry notify again
+        // Keep the remembered token in sync (an existing cache entry -- even an
+        // expired one -- means "remember me" was chosen at sign-in).
+        try { if (localStorage.getItem(TOKEN_CACHE_KEY) !== null) saveCachedToken(response.access_token, response.expires_in); } catch (_) {}
+        pending.resolve(response.access_token);
+        return;
+      }
       if (response.error) {
         showSignInStatus('Sign-in failed: ' + response.error, true);
         return;
