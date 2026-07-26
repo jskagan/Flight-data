@@ -9989,6 +9989,61 @@ function tripsyConflictReason(newFields, resource, c) {
   return `the new event overlaps "${name}" from ${tripsyConflictWhen(oStart)} to ${tripsyConflictWhen(oEnd)}`;
 }
 
+// A brief, plain-language narrative of HOW the new event and the existing one
+// relate -- shown under the two event lines in the conflict box so the reviewer
+// can tell a likely duplicate (same-looking name) from a genuine double-booking,
+// and see what forces the overlap (a missing time makes an event span its whole
+// day). `existing` is the remembered counterpart (null in the dateless case).
+// Caller esc()s the result.
+function tripsyConflictNarrative(newSummary, newFields, resource, existing) {
+  const noun = { hosting: 'lodging', transportation: 'transportation', activity: 'activity', expense: 'expense' }[resource] || 'event';
+  if (!existing) return `The new ${noun} has no date, so it can't be placed on the timeline and may duplicate something already on the trip — add a date and time, or ignore it if it's already there.`;
+  const norm = s => (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const nName = norm(newSummary), eName = norm(existing.summary);
+  const sameName = !!nName && !!eName && (nName === eName || nName.includes(eName) || eName.includes(nName));
+  if (sameName) {
+    return `These look like the same ${noun} — most likely the existing item parsed again. If the new one doesn't correct anything, treat it as a duplicate and ignore it; otherwise modify or replace the existing one.`;
+  }
+  const ns = newFields.startsAt || newFields.departureAt;
+  const timeless = !tripsyHasClockTime(ns) || !tripsyHasClockTime(existing.start);
+  const why = timeless
+    ? `one of them has no specific time, so it's treated as filling the whole day and overlaps the other`
+    : `their scheduled times overlap`;
+  return `Two different ${noun} entries on the same day where ${why}. Importing the new one keeps both, so you'd be double-booked unless one of them is wrong.`;
+}
+
+// Field-by-field differences between the new event and the existing one, so a
+// near-duplicate shows exactly what changed (a corrected time, an added
+// confirmation #, edited notes, etc.). Start/end are compared as date+time;
+// the remaining fields come from the shared tripsyFieldGroups definition, so
+// this stays in step with whatever fields a resource actually has. Full text
+// fields need the existing event's raw record (real Tripsy events); a
+// not-yet-synced pending change only exposes its name beyond the times.
+// Returns [{label, nv, ev}] with '(none)' for an empty side. Caller esc()s.
+function tripsyConflictFieldDiffs(newSummary, newFields, resource, existing) {
+  if (!existing) return [];
+  const diffs = [];
+  const pt = iso => { if (!iso) return ''; return [formatTripDateRange(iso, null) || '', formatTripTime(iso) || ''].filter(Boolean).join(' '); };
+  const nStart = newFields.startsAt || newFields.departureAt, nEnd = newFields.endsAt || newFields.arrivalAt;
+  if (pt(nStart) !== pt(existing.start)) diffs.push({ label: 'Start', nv: pt(nStart) || '(none)', ev: pt(existing.start) || '(none)' });
+  if (pt(nEnd) !== pt(existing.end)) diffs.push({ label: 'End', nv: pt(nEnd) || '(none)', ev: pt(existing.end) || '(none)' });
+  if (existing.raw) {
+    const raw = existing.raw;
+    const { groupOrder, byGroup } = tripsyFieldGroups(resource);
+    const disp = (f, val) => { if (val == null || val === '') return ''; if (f.kind === 'select') return tripsySlugToLabel(val); return String(val).trim(); };
+    for (const f of groupOrder.flatMap(g => byGroup[g])) {
+      if (f.kind === 'datetime') continue; // start/end already covered above
+      const nv = disp(f, newFields[f.key]), ev = disp(f, raw[f.key]);
+      if (nv === ev || (!nv && !ev)) continue;
+      diffs.push({ label: f.label, nv: nv || '(none)', ev: ev || '(none)' });
+    }
+  } else {
+    const nName = (newSummary || '').trim(), eName = (existing.summary || '').trim();
+    if (nName && eName && nName !== eName) diffs.push({ label: 'Name', nv: nName, ev: eName });
+  }
+  return diffs;
+}
+
 // Live conflict state for a row, recomputed from the current working new-event
 // fields (ctx.newFields) each render so a date/time edit re-evaluates on the
 // spot. `noDate` is true when the new event has no date at all -- a potential
@@ -19865,11 +19920,15 @@ function tripsyConflictUiHtml(ctx) {
   const color = resolved ? 'var(--home-green)' : 'var(--amber)';
   const ns = ctx.newFields.startsAt || ctx.newFields.departureAt;
   const ne = ctx.newFields.endsAt || ctx.newFields.arrivalAt;
+  const diffs = resolved ? [] : tripsyConflictFieldDiffs(ctx.event.eventSummary, ctx.newFields, ctx.resource, existing);
+  const diffTrunc = s => s.length > 70 ? s.slice(0, 67) + '…' : s;
   return `
     <div style="margin-top:8px; padding:8px; border:1px solid ${color}; border-radius:6px;">
       <div style="font-size:12px; color:${color}; font-weight:700;">${icon} ${esc(label)}${reason ? ' ' + esc(reason) : ''}</div>
       ${existing ? `<div ${firstReal || existing.changeId ? 'data-parse-conflict-open-existing title="Click to edit this existing event"' : ''} style="font-size:12px; color:var(--text); margin-top:8px;${firstReal || existing.changeId ? ' cursor:pointer; text-decoration:underline dotted;' : ''}"><b>Existing Event:</b> ${esc(existing.summary || 'Existing event')} — ${esc(tripsyEventOneLine(existing.start, existing.end))}${!firstReal && existing.changeId ? ' <span style="color:var(--muted);">(not yet synced to Tripsy)</span>' : ''}</div>` : ''}
       <div data-parse-conflict-open-new title="Click to edit the new event" style="font-size:12px; color:var(--text); margin-top:2px; cursor:pointer; text-decoration:underline dotted;"><b>New Event:</b> ${esc(ctx.event.eventSummary)} — ${esc(tripsyEventOneLine(ns, ne))}</div>
+      ${resolved ? '' : `<div style="font-size:12px; color:var(--muted); font-style:italic; margin-top:8px; line-height:1.5;">${esc(tripsyConflictNarrative(ctx.event.eventSummary, ctx.newFields, ctx.resource, existing))}</div>`}
+      ${diffs.length ? `<div style="font-size:12px; color:var(--muted); margin-top:6px; line-height:1.5;"><b>What differs:</b><ul style="margin:3px 0 0; padding-left:18px;">${diffs.map(d => `<li>${esc(d.label)}: new <span style="color:var(--text);">${esc(diffTrunc(d.nv))}</span> vs. existing <span style="color:var(--text);">${esc(diffTrunc(d.ev))}</span></li>`).join('')}</ul></div>` : ''}
     </div>
     <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
       <button class="btn primary" data-parse-conflict-import${resolved ? '' : '-anyway'} style="font-size:12px; padding:5px 12px;">${resolved ? 'Import' : 'Import with conflict'}</button>
@@ -20102,7 +20161,7 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
     const evDay = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt) || tripsyDayKey(ev.fields.endsAt || ev.fields.arrivalAt);
     const flagConflict = conflicts.length || !evDay;
     return `
-      <div data-parse-event-row data-event-id="${esc(ev.id)}" data-proposal-id="${esc(proposal.id)}" ${flagConflict ? 'data-parse-has-conflict="1"' : ''} style="border-top:1px solid var(--line); padding:12px 0;">
+      <div data-parse-event-row data-event-id="${esc(ev.id)}" data-proposal-id="${esc(proposal.id)}" ${flagConflict ? 'data-parse-has-conflict="1"' : ''} style="border-top:2px solid var(--muted); padding:18px 0;">
         <div style="font-size:14px; font-weight:600; color:var(--text);">${esc(ev.eventSummary)} <span style="color:var(--muted); font-weight:400; font-size:12px;">(${esc(tripsySlugToLabel(ev.tripsyResource))})</span></div>
         ${tripsyParseEventFieldsHtml(ev.tripsyResource, ev.fields)}
         <div data-parse-trip-label style="margin-top:10px; font-size:12px; color:var(--muted);">${matches.length ? `Falls within an existing trip:` : `Doesn't match any existing trip.`}</div>
