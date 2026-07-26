@@ -9064,8 +9064,22 @@ function tripsyEditActionButtonsHtml(saveDataAttr, cancelDataAttr, { vertical = 
 // save -- a date-only value isn't storable/applyable to Tripsy on its own.
 function tripsyReadDateTimeField(panel, key) {
   const datePart = (panel.querySelector(`[data-tripsy-edit-field-date="${key}"]`) || {}).value || '';
-  const timePart = (panel.querySelector(`[data-tripsy-edit-field-time="${key}"]`) || {}).value || '';
   if (!datePart) return '';
+  // Reassemble 'HH:MM' (24h) from the hour/minute/AM-PM dropdowns. An unset hour
+  // means "no clock time," which (as before) defaults to 12:00 so a dated-but-
+  // timeless event keeps its date instead of being dropped on save.
+  const h = (panel.querySelector(`[data-tripsy-edit-time-hour="${key}"]`) || {}).value || '';
+  const ap = (panel.querySelector(`[data-tripsy-edit-time-ampm="${key}"]`) || {}).value || '';
+  // The minute box is free text (datalist suggestions), so sanitize: digits
+  // only, clamped 0-59, zero-padded. Blank -> :00.
+  const rawMin = ((panel.querySelector(`[data-tripsy-edit-time-min="${key}"]`) || {}).value || '').replace(/\D/g, '');
+  let timePart = '';
+  if (h) {
+    let h24 = Number(h) % 12;
+    if (ap === 'PM') h24 += 12;
+    const mm = rawMin === '' ? '00' : String(Math.max(0, Math.min(59, parseInt(rawMin, 10)))).padStart(2, '0');
+    timePart = `${String(h24).padStart(2, '0')}:${mm}`;
+  }
   return `${datePart}T${timePart || '12:00'}:00`;
 }
 
@@ -9243,17 +9257,28 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     }
     if (f.kind === 'datetime') {
       const datePart = val ? val.slice(0, 10) : '';
-      const timePart = val ? val.slice(11, 16) : '';
-      // The plain native date + time inputs (the familiar single time field).
-      // step=900 (15 min) makes the native time picker's minute wheel step by
-      // 00/15/30/45 -- on iPhone/iPad it shows exactly those. An event that
-      // already carries an off-step minute (e.g. a synced 4:25pm flight) still
-      // displays and reads back verbatim; the step only constrains the wheel
-      // when the owner actually spins it, and on desktop any minute can still be
-      // typed.
-      return `<div style="display:flex; gap:6px;">
-        <input type="date" data-tripsy-edit-field-date="${f.key}" value="${esc(datePart)}" class="field-input" style="flex:3; min-width:0;">
-        <input type="time" step="900" data-tripsy-edit-field-time="${f.key}" value="${esc(timePart)}" class="field-input" style="flex:2; min-width:0;">
+      const timePart = val ? val.slice(11, 16) : ''; // 'HH:MM' (24h) or ''
+      // Time is entered with hour (1-12) and AM/PM dropdowns plus a MINUTE field
+      // -- not a native <input type="time">, whose minute list can't be reliably
+      // restricted on desktop. The minute is a text box backed by a datalist so
+      // it offers :00/:15/:30/:45 as a dropdown but still accepts any typed value
+      // (0-59, validated/padded on save; see tripsyReadDateTimeField). A blank
+      // hour keeps a date "timeless" (no clock time).
+      const h24 = timePart ? Number(timePart.slice(0, 2)) : null;
+      const curMin = timePart ? timePart.slice(3, 5) : '';
+      const h12 = h24 == null ? '' : String(h24 % 12 || 12);
+      const ampm = h24 == null ? '' : (h24 < 12 ? 'AM' : 'PM');
+      const opt = (v, label, sel) => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(label)}</option>`;
+      const minDlId = 'tripsy-min-dl-' + Math.random().toString(36).slice(2, 10);
+      const styleSel = 'flex:1; min-width:0;';
+      return `<div style="display:flex; gap:6px; flex-wrap:wrap;">
+        <input type="date" data-tripsy-edit-field-date="${f.key}" value="${esc(datePart)}" class="field-input" style="flex:2 1 150px; min-width:0;">
+        <div style="display:flex; gap:6px; flex:1 1 170px; min-width:0;">
+          <select data-tripsy-edit-time-hour="${f.key}" class="field-input" style="${styleSel}">${opt('', '––', h12)}${Array.from({ length: 12 }, (_, i) => String(i + 1)).map(hh => opt(hh, hh, h12)).join('')}</select>
+          <input type="text" inputmode="numeric" maxlength="2" list="${minDlId}" data-tripsy-edit-time-min="${f.key}" value="${esc(curMin)}" placeholder="min" class="field-input" style="${styleSel}">
+          <datalist id="${minDlId}">${['00', '15', '30', '45'].map(mm => `<option value="${mm}"></option>`).join('')}</datalist>
+          <select data-tripsy-edit-time-ampm="${f.key}" class="field-input" style="${styleSel}">${opt('', '––', ampm)}${['AM', 'PM'].map(a => opt(a, a, ampm)).join('')}</select>
+        </div>
       </div>`;
     }
     if (f.kind === 'company') {
@@ -9340,7 +9365,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
 
   // After the datetime cross-sync above, so its auto-fill doesn't itself
   // register as a "change" the moment the form opens.
-  tripsyWireEditFormChangeDetection(panel, 'data-tripsy-edit-save', '[data-tripsy-edit-field], [data-tripsy-edit-field-date], [data-tripsy-edit-field-time]');
+  tripsyWireEditFormChangeDetection(panel, 'data-tripsy-edit-save', '[data-tripsy-edit-field], [data-tripsy-edit-field-date], [data-tripsy-edit-time-hour], [data-tripsy-edit-time-min], [data-tripsy-edit-time-ampm]');
 
   panel.querySelector("[data-tripsy-edit-exit]").addEventListener("click", async () => {
     if (!(await tripsyGuardPanelClose(panel))) return;
@@ -20021,14 +20046,37 @@ function wireTripsyConflictUi(ctx) {
     });
 
     const ignoreBtn = q('[data-parse-conflict-ignore-new]');
-    if (ignoreBtn) ignoreBtn.addEventListener('click', async () => {
+    if (ignoreBtn) ignoreBtn.addEventListener('click', () => {
+      // Optimistic, same shape as the Import button: hide the row and confirm
+      // immediately, run the ~2.5s Drive save in the background (serialized via
+      // _tripsyParseImportChain), and only re-render once every queued action
+      // has settled. Restore the row if the save actually fails, so nothing is
+      // silently dropped. Store.rejectTripsyParseProposalEvent folds in the
+      // "maybe finish the proposal" step, so afterImport is the right reconcile.
       ignoreBtn.disabled = true;
-      // Store.rejectTripsyParseProposalEvent already folds the "maybe finish
-      // the proposal" step into its one write -- afterImport (badge + full
-      // re-render only, no separate tripsyParseMaybeFinishProposal call) is
-      // the right post-action here, same as a real Import.
-      await Store.rejectTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id);
-      await ctx.afterImport();
+      ctx.row.style.display = 'none';
+      toast('Ignored.');
+      _tripsyParseImportPending++;
+      _tripsyParseImportChain = _tripsyParseImportChain
+        .then(() => Store.rejectTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id))
+        .then(ok => {
+          _tripsyParseImportPending--;
+          if (!ok) {
+            ctx.row.style.display = '';
+            ignoreBtn.disabled = false;
+            toast("That didn't save — please try again.", 'error');
+            return;
+          }
+          if (_tripsyParseImportPending === 0) ctx.afterImport();
+          else updateTripsyDocParseBadge();
+        })
+        .catch(err => {
+          _tripsyParseImportPending--;
+          console.error('Optimistic ignore failed:', err);
+          ctx.row.style.display = '';
+          ignoreBtn.disabled = false;
+          toast("That didn't save — please try again.", 'error');
+        });
     });
 
     const delBtn = q('[data-parse-conflict-delete-existing]');
