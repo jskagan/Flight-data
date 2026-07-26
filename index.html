@@ -11414,12 +11414,19 @@ async function tripsyFetchHourly(city, country, dateKey) {
     return cached.miss ? null : cached.hours;
   }
   const base = offset < 0 ? TRIPSY_WEATHER_ARCHIVE_URL : TRIPSY_WEATHER_FORECAST_URL;
-  const vars = offset < 0 ? 'temperature_2m,apparent_temperature,weathercode' : 'temperature_2m,apparent_temperature,precipitation_probability,weathercode';
+  // precipitation_probability is forecast-only (the archive doesn't have it).
+  const common = 'temperature_2m,apparent_temperature,precipitation,relative_humidity_2m,cloud_cover,weathercode';
+  const vars = offset < 0 ? common : `${common},precipitation_probability`;
   try {
-    const j = await tripsyWeatherFetchJson(`${base}?latitude=${g.lat}&longitude=${g.lon}&hourly=${vars}&temperature_unit=fahrenheit&timezone=auto&start_date=${dateKey}&end_date=${dateKey}`);
+    const j = await tripsyWeatherFetchJson(`${base}?latitude=${g.lat}&longitude=${g.lon}&hourly=${vars}&temperature_unit=fahrenheit&precipitation_unit=inch&timezone=auto&start_date=${dateKey}&end_date=${dateKey}`);
     const h = j.hourly;
     if (!h || !h.time) { driveData.tripsyWeatherHourly[ck] = { miss: true, fetchedAt: Date.now() }; return null; }
-    const hours = h.time.map((t, i) => ({ t, temp: h.temperature_2m[i], feels: h.apparent_temperature ? h.apparent_temperature[i] : null, precip: h.precipitation_probability ? h.precipitation_probability[i] : null, wcode: h.weathercode[i] }));
+    const at = (arr, i) => (arr && arr[i] != null) ? arr[i] : null;
+    const hours = h.time.map((t, i) => ({
+      t, temp: at(h.temperature_2m, i), feels: at(h.apparent_temperature, i),
+      precip: at(h.precipitation_probability, i), amount: at(h.precipitation, i),
+      humidity: at(h.relative_humidity_2m, i), cloud: at(h.cloud_cover, i), wcode: at(h.weathercode, i),
+    }));
     driveData.tripsyWeatherHourly[ck] = { hours, fetchedAt: Date.now() };
     try { await persistDriveData(); } catch (e) { /* best-effort */ }
     return hours;
@@ -11446,12 +11453,17 @@ function ensureTripsyWeatherDialogStyles() {
     .tw-summary { margin:12px 0; padding:10px 12px; background:var(--panel-2); border-radius:10px; font-size:13px; color:var(--text); line-height:1.55; }
     .tw-summary .tw-cond { font-weight:700; }
     .tw-note { font-size:12px; color:var(--muted); font-style:italic; margin:12px 0 0; }
-    .tw-hours { margin-top:6px; max-height:340px; overflow-y:auto; }
-    .tw-hour { display:grid; grid-template-columns:56px 22px 1fr auto; gap:8px; align-items:center; padding:6px 4px; border-bottom:1px solid var(--line); }
+    .tw-hours { margin-top:6px; max-height:360px; overflow-y:auto; }
+    .tw-hour { display:grid; grid-template-columns:52px 22px 1fr; gap:8px; align-items:baseline; padding:7px 4px; border-bottom:1px solid var(--line); }
     .tw-hour:last-child { border-bottom:none; }
     .tw-hour-t { color:var(--muted); font-family:var(--mono); font-size:12px; }
+    .tw-hour-main { display:flex; flex-direction:column; gap:2px; min-width:0; }
+    .tw-hour-l1 { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:baseline; }
     .tw-hour-temp { font-weight:600; color:var(--text); font-size:13px; }
-    .tw-hour-precip { color:#5a8fd6; font-size:12px; text-align:right; }
+    .tw-hour-feels { color:var(--muted); font-size:12px; }
+    .tw-hour-precip { color:#5a8fd6; font-size:12px; }
+    .tw-hour-sub { color:var(--muted); font-size:11px; }
+    .tw-hour-marker { text-align:center; font-family:var(--mono); font-size:11.5px; letter-spacing:0.03em; color:var(--muted); padding:7px 4px; border-bottom:1px solid var(--line); }
   `;
   document.head.appendChild(s);
 }
@@ -11481,10 +11493,24 @@ async function tripsyShowWeatherDialog(city, country, dateKey) {
   }
   let hoursHtml = '';
   if (hours && hours.length) {
-    hoursHtml = `<div class="tw-hours">${hours.map(h => {
+    // Merge in sunrise/sunset markers (available on forecast days) at their
+    // chronological spot, then render each row.
+    const items = hours.map(h => ({ ...h, kind: 'hour' }));
+    if (daily && daily.sunrise) items.push({ kind: 'marker', t: daily.sunrise, label: `🌅 Sunrise ${tripsyWeatherTimeShort(daily.sunrise)}` });
+    if (daily && daily.sunset) items.push({ kind: 'marker', t: daily.sunset, label: `🌇 Sunset ${tripsyWeatherTimeShort(daily.sunset)}` });
+    items.sort((a, b) => String(a.t).localeCompare(String(b.t)));
+    const hourRow = h => {
       const [hg] = tripsyWmo(h.wcode);
-      return `<div class="tw-hour"><span class="tw-hour-t">${esc(tripsyWeatherHourLabel(h.t))}</span><span>${hg}</span><span class="tw-hour-temp">${Math.round(h.temp)}°</span><span class="tw-hour-precip">${h.precip != null ? h.precip + '%' : ''}</span></div>`;
-    }).join('')}</div>`;
+      const precipTxt = h.precip != null ? `💧 ${h.precip}%` : '';
+      const amtTxt = (h.amount != null && h.amount >= 0.01) ? ` · ${h.amount.toFixed(2)}"` : '';
+      const l1 = [`<span class="tw-hour-temp">${Math.round(h.temp)}°</span>`,
+        h.feels != null ? `<span class="tw-hour-feels">feels ${Math.round(h.feels)}°</span>` : '',
+        precipTxt ? `<span class="tw-hour-precip">${precipTxt}${amtTxt}</span>` : ''].filter(Boolean).join('');
+      const sub = [h.humidity != null ? `Humidity ${Math.round(h.humidity)}%` : '',
+        h.cloud != null ? `Cloud ${Math.round(h.cloud)}%` : ''].filter(Boolean).join(' · ');
+      return `<div class="tw-hour"><span class="tw-hour-t">${esc(tripsyWeatherHourLabel(h.t))}</span><span>${hg}</span><div class="tw-hour-main"><div class="tw-hour-l1">${l1}</div>${sub ? `<div class="tw-hour-sub">${esc(sub)}</div>` : ''}</div></div>`;
+    };
+    hoursHtml = `<div class="tw-hours">${items.map(it => it.kind === 'marker' ? `<div class="tw-hour-marker">${esc(it.label)}</div>` : hourRow(it)).join('')}</div>`;
   } else if (!daily) {
     hoursHtml = `<div class="tw-note">Weather isn't available for this day yet.</div>`;
   } else if (tripsyDayKeyOffsetFromToday(dateKey) > TRIPSY_WEATHER_HORIZON_DAYS) {
