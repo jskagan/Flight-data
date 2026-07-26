@@ -20177,17 +20177,24 @@ function wireTripsyConflictUi(ctx) {
     return ok;
   }
 
-  // After a modify-screen Save (edits already committed), ask what to do with
-  // the OTHER event and carry it out. otherIsNew: the other event is the new
-  // proposal (we were modifying the existing); else the other is the existing
-  // counterpart (we were modifying the new). Add = import the new proposal and
-  // keep the existing; Drop = Ignore the new (reject) or Delete the existing;
-  // Modify = re-open the other event's modify screen (with its conflict chart).
-  async function resolveOtherAfterSave(otherIsNew, otherName) {
+  // After a modify-screen Save, ask what to do with the OTHER event and carry
+  // it out. The dialog is shown FIRST (before any Drive write) so pressing Save
+  // feels instant; `commitCurrent(choice)` then persists the edited event's own
+  // changes and returns false on failure. otherIsNew: the other event is the
+  // new proposal (we were modifying the existing); else the other is the
+  // existing counterpart (we were modifying the new). Add = import the new
+  // proposal and keep the existing; Drop = Ignore the new (reject) or Delete the
+  // existing; Modify = re-open the other event's modify screen.
+  async function resolveOtherAfterSave(otherIsNew, otherName, commitCurrent) {
     const choice = await tripsyConflictOtherActionDialog(otherIsNew, otherName);
-    if (!choice) { setTimeout(rerender, 0); return; } // dismissed: keep edits, re-check the conflict
-    if (choice === 'add') { await doImport(); return; }
+    // Non-finishing paths stay on the page, so commit in the foreground.
+    if (!choice) { // dismissed: keep edits, re-check the conflict
+      if (commitCurrent && (await commitCurrent(choice)) === false) return;
+      setTimeout(rerender, 0);
+      return;
+    }
     if (choice === 'modify') {
+      if (commitCurrent && (await commitCurrent(choice)) === false) return;
       setTimeout(() => {
         rerender();
         const b = otherIsNew
@@ -20197,33 +20204,50 @@ function wireTripsyConflictUi(ctx) {
       }, 0);
       return;
     }
-    // choice === 'drop'
-    if (otherIsNew) {
-      await Store.rejectTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id);
-      toast('New event ignored.');
-      await ctx.afterImport();
-      return;
-    }
-    // Delete the existing counterpart, then import the new (one write via
-    // deleteExistingChange when it's a real event; cancel the queued change if
-    // it isn't synced yet).
-    const cp = tripsyEffectiveCounterpart(ctx);
-    if (cp && cp.eventKey) {
-      const found = findTripsyRawByKey(cp.eventKey);
-      const summary = found ? tripsyRawToDisplay(found.raw.resource, found.raw).summary : (cp.summary || 'Existing event');
-      const deleteChange = found ? {
-        id: crypto.randomUUID(), type: 'delete_event', createdAt: new Date().toISOString(),
-        tripKey: found.tripKey, tripName: found.tripName, eventKey: cp.eventKey,
-        eventSummary: summary, tripsyResource: found.raw.resource, tripsyId: found.raw.id,
-      } : null;
-      const ok = await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null, deleteChange);
-      if (ok) { toast('Deleted the existing event and imported the new one.'); await ctx.afterImport(); }
-    } else if (cp && cp.changeId) {
-      await Store.cancelTripsyChange(cp.changeId);
-      await doImport();
-    } else {
-      await doImport();
-    }
+    // Finishing paths (Add / Drop): optimistic -- clear the row and confirm
+    // immediately, run the writes in the background (serialized via the shared
+    // import chain), reconcile when they settle, and restore the row on failure.
+    const runFinish = async () => {
+      if (commitCurrent && (await commitCurrent(choice)) === false) return false;
+      if (choice === 'add') {
+        return await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null);
+      }
+      // choice === 'drop'
+      if (otherIsNew) return await Store.rejectTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id);
+      // Delete the existing counterpart, then import the new (one write via
+      // deleteExistingChange when it's a real event; cancel the queued change if
+      // it isn't synced yet).
+      const cp = tripsyEffectiveCounterpart(ctx);
+      if (cp && cp.eventKey) {
+        const found = findTripsyRawByKey(cp.eventKey);
+        const summary = found ? tripsyRawToDisplay(found.raw.resource, found.raw).summary : (cp.summary || 'Existing event');
+        const deleteChange = found ? {
+          id: crypto.randomUUID(), type: 'delete_event', createdAt: new Date().toISOString(),
+          tripKey: found.tripKey, tripName: found.tripName, eventKey: cp.eventKey,
+          eventSummary: summary, tripsyResource: found.raw.resource, tripsyId: found.raw.id,
+        } : null;
+        return await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null, deleteChange);
+      }
+      if (cp && cp.changeId) await Store.cancelTripsyChange(cp.changeId);
+      return await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null);
+    };
+    ctx.row.style.display = 'none';
+    toast(choice === 'add' ? 'Imported.' : (otherIsNew ? 'New event ignored.' : 'Deleted the existing event and imported the new one.'));
+    _tripsyParseImportPending++;
+    _tripsyParseImportChain = _tripsyParseImportChain
+      .then(runFinish)
+      .then(ok => {
+        _tripsyParseImportPending--;
+        if (ok === false) { ctx.row.style.display = ''; toast("That didn't save — please try again.", 'error'); return; }
+        if (_tripsyParseImportPending === 0) ctx.afterImport();
+        else updateTripsyDocParseBadge();
+      })
+      .catch(err => {
+        _tripsyParseImportPending--;
+        console.error('Optimistic conflict resolve failed:', err);
+        ctx.row.style.display = '';
+        toast("That didn't save — please try again.", 'error');
+      });
   }
 
   function wire() {
@@ -20300,18 +20324,25 @@ function wireTripsyConflictUi(ctx) {
         onSave: async newFields => {
           ctx.newFields = { ...ctx.newFields, ...newFields };
           ctx.newModified = true;
-          // Persist the edit onto the stored proposal so a re-render (or editing
-          // the existing next) doesn't rebuild this row from the old fields.
-          const saved = await Store.resolveTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id, { fields: ctx.newFields });
-          if (!saved) { toast('Could not save your changes — storage error.', 'error'); return false; }
-          ctx.event.fields = ctx.newFields;
+          ctx.event.fields = ctx.newFields; // in-memory; persisted below only when needed
           tripsyRefreshTripSelect(ctx);
-          // Ask what to do with the OTHER (existing) event -- but only if there
-          // is a specific counterpart. A dateless new event has none, so just
-          // re-check instead of asking about a nonexistent event.
           const cp = tripsyEffectiveCounterpart(ctx);
-          if (cp) await resolveOtherAfterSave(false, cp.summary);
-          else setTimeout(rerender, 0);
+          if (!cp) {
+            // Dateless new event: no specific counterpart, so persist and re-check.
+            const saved = await Store.resolveTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id, { fields: ctx.newFields });
+            if (!saved) { toast('Could not save your changes — storage error.', 'error'); return false; }
+            setTimeout(rerender, 0);
+            return true;
+          }
+          // Dialog first (instant); the write happens after the choice. Add/Delete
+          // import with the in-memory fields, so a separate persist is only needed
+          // when we stay on the row (Modify) or dismiss.
+          await resolveOtherAfterSave(false, cp.summary, async choice => {
+            if (choice === 'add' || choice === 'drop') return true;
+            const saved = await Store.resolveTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id, { fields: ctx.newFields });
+            if (!saved) { toast('Could not save your changes — storage error.', 'error'); return false; }
+            return true;
+          });
           return true;
         },
       });
@@ -20337,17 +20368,18 @@ function wireTripsyConflictUi(ctx) {
         onSave: async newFields => {
           const changes = {};
           for (const k of Object.keys(newFields)) if ((newFields[k] || '') !== (original[k] || '')) changes[k] = newFields[k] || null;
-          if (Object.keys(changes).length) {
+          ctx.overrides[key] = { ...original, ...newFields }; // in-memory; edit queued in commitCurrent
+          // Dialog first (instant); queue the existing-event edit after the choice.
+          await resolveOtherAfterSave(true, ctx.event.eventSummary, async () => {
+            if (!Object.keys(changes).length) return true;
             const ok = await Store.queueTripsyChange({
               id: crypto.randomUUID(), type: 'edit_event', createdAt: new Date().toISOString(),
               tripKey: found.tripKey, tripName: found.tripName, eventKey: key,
               eventSummary: summary, tripsyResource: found.raw.resource, tripsyId: found.raw.id, changes,
             });
             if (!ok) { toast('Could not queue the edit — storage error.', 'error'); return false; }
-          }
-          ctx.overrides[key] = { ...original, ...newFields };
-          // Then ask what to do with the OTHER (new proposal) event.
-          await resolveOtherAfterSave(true, ctx.event.eventSummary);
+            return true;
+          });
           return true;
         },
       });
@@ -20377,11 +20409,13 @@ function wireTripsyConflictUi(ctx) {
         compactButtons: true,
         onSave: async newFields => {
           const mergedFields = { ...change.fields, ...newFields };
-          const ok = await Store.queueTripsyChange({ ...change, fields: mergedFields });
-          if (!ok) { toast('Could not save your changes — storage error.', 'error'); return false; }
-          ctx.overrides[changeId] = mergedFields;
-          // Then ask what to do with the OTHER (new proposal) event.
-          await resolveOtherAfterSave(true, ctx.event.eventSummary);
+          ctx.overrides[changeId] = mergedFields; // in-memory; change re-queued in commitCurrent
+          // Dialog first (instant); re-queue the change after the choice.
+          await resolveOtherAfterSave(true, ctx.event.eventSummary, async () => {
+            const ok = await Store.queueTripsyChange({ ...change, fields: mergedFields });
+            if (!ok) { toast('Could not save your changes — storage error.', 'error'); return false; }
+            return true;
+          });
           return true;
         },
       });
