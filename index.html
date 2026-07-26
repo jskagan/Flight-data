@@ -9366,6 +9366,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
   // After the datetime cross-sync above, so its auto-fill doesn't itself
   // register as a "change" the moment the form opens.
   tripsyWireEditFormChangeDetection(panel, 'data-tripsy-edit-save', '[data-tripsy-edit-field], [data-tripsy-edit-field-date], [data-tripsy-edit-time-hour], [data-tripsy-edit-time-min], [data-tripsy-edit-time-ampm]');
+  if (createOptions && createOptions.copyFrom) tripsyWireConflictCopyButtons(panel, createOptions.copyFrom, raw.resource);
 
   panel.querySelector("[data-tripsy-edit-exit]").addEventListener("click", async () => {
     if (!(await tripsyGuardPanelClose(panel))) return;
@@ -10099,6 +10100,72 @@ function tripsyConflictChartHtml(newSummary, newFields, resource, existing) {
       <td style="${cell} color:var(--text);${i ? ' border-top:1px solid var(--line);' : ''}">${esc(trunc(r.ev))}</td>
     </tr>`).join('')}</tbody>
   </table>`;
+}
+
+// The other event's field values (by field key) for the copy-from buttons: the
+// real event's raw record, or a not-yet-synced change's own fields.
+function tripsyCounterpartFieldValues(ctx) {
+  const c = ctx.counterpart;
+  if (!c) return {};
+  if (c.raw) return c.raw;
+  if (c.changeId) { const ch = (ctx.pendingChanges || []).find(x => x.id === c.changeId); return ch ? ch.fields : {}; }
+  return {};
+}
+
+// In the conflict-modify editors, focusing a field where the OTHER event has a
+// value reveals a "Copy Entry From <label> Event" button under it that fills
+// that field from the other side. Wired only when createOptions.copyFrom is
+// passed; copyFrom = { label, fields } with fields keyed by field key (datetime
+// fields hold an ISO string). Datetime copies fan out to the date/hour/min/ampm
+// controls; every set input fires input+change so Save-visibility updates.
+function tripsyWireConflictCopyButtons(panel, copyFrom, resource) {
+  const other = copyFrom.fields || {};
+  const srcLabel = copyFrom.label || 'Other Event';
+  const { groupOrder, byGroup } = tripsyFieldGroups(resource);
+  const fire = el => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); };
+  for (const f of groupOrder.flatMap(g => byGroup[g])) {
+    const key = f.key;
+    const otherVal = other[key];
+    if (otherVal == null || otherVal === '') continue; // only where the other event has data
+    const primary = f.kind === 'datetime'
+      ? panel.querySelector(`[data-tripsy-edit-field-date="${key}"]`)
+      : panel.querySelector(`[data-tripsy-edit-field="${key}"]`);
+    const labelEl = primary && primary.closest('label');
+    if (!labelEl) continue;
+    const inputs = f.kind === 'datetime'
+      ? [primary, panel.querySelector(`[data-tripsy-edit-time-hour="${key}"]`), panel.querySelector(`[data-tripsy-edit-time-min="${key}"]`), panel.querySelector(`[data-tripsy-edit-time-ampm="${key}"]`)].filter(Boolean)
+      : [primary];
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn';
+    btn.textContent = `Copy Entry From ${srcLabel}`;
+    btn.style.cssText = 'display:none; margin-top:6px; font-size:11px; padding:3px 8px;';
+    labelEl.appendChild(btn);
+    inputs.forEach(inp => {
+      inp.addEventListener('focus', () => { btn.style.display = 'inline-block'; });
+      inp.addEventListener('blur', () => setTimeout(() => {
+        if (!labelEl.contains(document.activeElement) && document.activeElement !== btn) btn.style.display = 'none';
+      }, 150));
+    });
+    btn.addEventListener('mousedown', e => e.preventDefault()); // keep field focus through the click
+    btn.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      if (f.kind === 'datetime') {
+        const iso = String(otherVal);
+        const tp = iso.slice(11, 16);
+        const h24 = tp ? Number(tp.slice(0, 2)) : null;
+        const set = (sel, v) => { const el = panel.querySelector(sel); if (el) { el.value = v; fire(el); } };
+        set(`[data-tripsy-edit-field-date="${key}"]`, iso.slice(0, 10));
+        set(`[data-tripsy-edit-time-hour="${key}"]`, h24 == null ? '' : String(h24 % 12 || 12));
+        set(`[data-tripsy-edit-time-min="${key}"]`, tp ? tp.slice(3, 5) : '');
+        set(`[data-tripsy-edit-time-ampm="${key}"]`, h24 == null ? '' : (h24 < 12 ? 'AM' : 'PM'));
+      } else {
+        primary.value = otherVal;
+        fire(primary);
+      }
+      btn.style.display = 'none';
+    });
+  }
 }
 
 // Live conflict state for a row, recomputed from the current working new-event
@@ -20106,6 +20173,7 @@ function wireTripsyConflictUi(ctx) {
       const raw = { ...tripsyBlankRaw(ctx.resource, null), ...ctx.newFields };
       renderTripsyEditPanel(panel, raw, null, null, ctx.event.eventSummary, {
         headerHtml: tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)),
+        copyFrom: { label: 'Existing Event', fields: tripsyCounterpartFieldValues(ctx) },
         onSave: async newFields => {
           ctx.newFields = { ...ctx.newFields, ...newFields };
           ctx.newModified = true;
@@ -20139,6 +20207,7 @@ function wireTripsyConflictUi(ctx) {
       const raw = { ...tripsyBlankRaw(found.raw.resource, null), ...found.raw };
       renderTripsyEditPanel(panel, raw, null, null, summary, {
         headerHtml: tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)),
+        copyFrom: { label: 'New Event', fields: ctx.newFields },
         onSave: async newFields => {
           const changes = {};
           for (const k of Object.keys(newFields)) if ((newFields[k] || '') !== (original[k] || '')) changes[k] = newFields[k] || null;
@@ -20178,6 +20247,7 @@ function wireTripsyConflictUi(ctx) {
       const raw = { ...tripsyBlankRaw(change.tripsyResource, null), ...change.fields };
       renderTripsyEditPanel(panel, raw, null, null, change.eventSummary, {
         headerHtml: tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)),
+        copyFrom: { label: 'New Event', fields: ctx.newFields },
         onSave: async newFields => {
           const mergedFields = { ...change.fields, ...newFields };
           const ok = await Store.queueTripsyChange({ ...change, fields: mergedFields });
