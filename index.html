@@ -908,8 +908,19 @@
     font-size: 13px; color: #5b6675; white-space: nowrap; min-width: 46px; text-align: right;
     font-variant-numeric: tabular-nums;
   }
-  mark.tp-search-hit { background: #ffe58a; color: inherit; border-radius: 2px; padding: 0 1px; }
+  mark.tp-search-hit { background: #ffe58a; color: #1a1200; border-radius: 2px; padding: 0 1px; }
   mark.tp-search-hit.current { background: #ff9f45; box-shadow: 0 0 0 2px rgba(255,159,69,0.4); }
+  /* Custom minute picker (renderTripsyEditPanel datetime field): a typeable
+     text input plus a real, always-visible dropdown of :00/:15/:30/:45 --
+     replaces the native <datalist>, whose popup doesn't render on the iPad
+     WebView. */
+  .tp-min-combo-menu {
+    position: absolute; z-index: 50; top: calc(100% + 3px); left: 0; right: 0;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4); overflow: hidden; padding: 2px;
+  }
+  .tp-min-combo-opt { padding: 7px 10px; font-size: 13.5px; color: var(--text); cursor: pointer; border-radius: 5px; }
+  .tp-min-combo-opt:hover, .tp-min-combo-opt.active { background: var(--bg); }
   /* Itinerary menu's "Update" button (compareTripsyItineraryPdf,
      renderTripsyUpdateOverlay) -- same fixed full-screen modal shape as
      #tripsy-preview-overlay above (dark backdrop, click-outside-to-close),
@@ -9095,8 +9106,8 @@ function renderTripsyViewPanel(panel, raw, eventSummary, onEdit) {
 // block for Save/Cancel (below) and for standalone actions styled to match
 // them (e.g. the Trip Details panel's "Add Doc" button, which sits
 // alongside Save/Cancel rather than inside the fields box).
-function tripsyLargeIconButtonHtml(dataAttr, icon, label) {
-  return `<button class="btn" ${dataAttr} style="display:flex; flex-direction:column; align-items:center; gap:4px; font-size:12px; padding:10px 18px;">
+function tripsyLargeIconButtonHtml(dataAttr, icon, label, extraStyle = '') {
+  return `<button class="btn" ${dataAttr} style="display:flex; flex-direction:column; align-items:center; gap:4px; font-size:12px; padding:10px 18px; ${extraStyle}">
     <span style="font-size:36px; line-height:1;">${icon}</span>${esc(label)}
   </button>`;
 }
@@ -9110,10 +9121,14 @@ function tripsyLargeIconButtonHtml(dataAttr, icon, label) {
 // only distinguishing color. Pass `{ vertical: true }` to stack Save above
 // Cancel instead of side by side.
 function tripsyEditActionButtonsHtml(saveDataAttr, cancelDataAttr, { vertical = false } = {}) {
+  // Row mode: force the two boxes to share the width and stay on ONE line
+  // (flex:1/min-width:0 + nowrap) so they never wrap to a stacked pair in a
+  // narrow panel (the add/edit event forms on iPad). Column mode still stacks.
+  const btnStyle = vertical ? '' : 'flex:1 1 0; min-width:0;';
   return `
-    <div style="display:flex; flex-direction:${vertical ? 'column' : 'row'}; gap:12px; align-items:${vertical ? 'stretch' : 'center'};">
-      ${tripsyLargeIconButtonHtml(saveDataAttr, '✅', 'Save')}
-      ${tripsyLargeIconButtonHtml(cancelDataAttr, '❌', 'Cancel')}
+    <div style="display:flex; flex-direction:${vertical ? 'column' : 'row'}; flex-wrap:nowrap; gap:12px; align-items:stretch;">
+      ${tripsyLargeIconButtonHtml(saveDataAttr, '✅', 'Save', btnStyle)}
+      ${tripsyLargeIconButtonHtml(cancelDataAttr, '❌', 'Cancel', btnStyle)}
     </div>
   `;
 }
@@ -9370,14 +9385,23 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
       const h12 = h24 == null ? '' : String(h24 % 12 || 12);
       const ampm = h24 == null ? '' : (h24 < 12 ? 'AM' : 'PM');
       const opt = (v, label, sel) => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(label)}</option>`;
-      const minDlId = 'tripsy-min-dl-' + Math.random().toString(36).slice(2, 10);
       const styleSel = 'flex:1; min-width:0;';
+      // The minute is a typeable text box PLUS a custom dropdown of :00/:15/:30/:45
+      // (.tp-min-combo, wired below). It replaces the old native <datalist>, whose
+      // suggestion popup doesn't render as a dropdown on the iPad WebView -- keeping
+      // both hard requirements: the dropdown offers only the four quarter-hours, and
+      // any 0-59 value can still be typed (sanitized on save; see tripsyReadDateTimeField).
       return `<div style="display:flex; gap:6px; flex-wrap:wrap;">
         <input type="date" data-tripsy-edit-field-date="${f.key}" value="${esc(datePart)}" class="field-input" style="flex:2 1 150px; min-width:0;">
         <div style="display:flex; gap:6px; flex:1 1 170px; min-width:0;">
           <select data-tripsy-edit-time-hour="${f.key}" class="field-input" style="${styleSel}">${opt('', '––', h12)}${Array.from({ length: 12 }, (_, i) => String(i + 1)).map(hh => opt(hh, hh, h12)).join('')}</select>
-          <input type="text" inputmode="numeric" maxlength="2" list="${minDlId}" data-tripsy-edit-time-min="${f.key}" value="${esc(curMin)}" placeholder="min" class="field-input" style="${styleSel}">
-          <datalist id="${minDlId}">${['00', '15', '30', '45'].map(mm => `<option value="${mm}"></option>`).join('')}</datalist>
+          <div class="tp-min-combo" style="position:relative; ${styleSel}">
+            <input type="text" inputmode="numeric" maxlength="2" data-tripsy-edit-time-min="${f.key}" value="${esc(curMin)}" placeholder="min" class="field-input" style="width:100%; min-width:0; padding-right:20px;" autocomplete="off">
+            <span aria-hidden="true" style="position:absolute; right:8px; top:50%; transform:translateY(-50%); pointer-events:none; color:var(--muted); font-size:10px;">▾</span>
+            <div class="tp-min-combo-menu" data-tripsy-min-menu style="display:none;">
+              ${['00', '15', '30', '45'].map(mm => `<div class="tp-min-combo-opt" data-min="${mm}">:${mm}</div>`).join('')}
+            </div>
+          </div>
           <select data-tripsy-edit-time-ampm="${f.key}" class="field-input" style="${styleSel}">${opt('', '––', ampm)}${['AM', 'PM'].map(a => opt(a, a, ampm)).join('')}</select>
         </div>
       </div>`;
@@ -9433,19 +9457,58 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     refreshAirlineOptions();
   }
 
-  // If one side of a start/end (or departure/arrival) pair already has a
-  // date and the other doesn't, seed the empty one with the same date --
-  // both up front (so opening, say, an empty End date picker starts on the
-  // Start date instead of today) and live as either date gets filled in.
-  // Never overwrites a date that's already set on either side.
+  // Start/end (or departure/arrival) date coupling. Up front, an empty side
+  // inherits the other's date. Then the END date TRACKS the start: changing the
+  // start date carries the end along as long as the end hasn't been diverged to
+  // a different date -- so a same-day event (the common case) fills the end date
+  // by default on both the add and edit forms, while a deliberately different
+  // end date is left untouched. Filling an empty start from the end still works
+  // too. Fires on 'input' as well as 'change' so it updates the moment a date is
+  // picked, not only on blur.
   (TRIPSY_DATETIME_FIELD_COUNTERPARTS[raw.resource] || []).forEach(([keyA, keyB]) => {
     const dateA = panel.querySelector(`[data-tripsy-edit-field-date="${keyA}"]`);
     const dateB = panel.querySelector(`[data-tripsy-edit-field-date="${keyB}"]`);
     if (!dateA || !dateB) return;
     if (dateA.value && !dateB.value) dateB.value = dateA.value;
     else if (dateB.value && !dateA.value) dateA.value = dateB.value;
-    dateA.addEventListener('change', () => { if (dateA.value && !dateB.value) dateB.value = dateA.value; });
-    dateB.addEventListener('change', () => { if (dateB.value && !dateA.value) dateA.value = dateB.value; });
+    let prevA = dateA.value; // the start value the end is currently tracking
+    const onStart = () => {
+      if (!dateB.value || dateB.value === prevA) {
+        if (dateA.value) dateB.value = dateA.value;
+      }
+      prevA = dateA.value;
+    };
+    const onEnd = () => { if (dateB.value && !dateA.value) dateA.value = dateB.value; };
+    dateA.addEventListener('input', onStart);
+    dateA.addEventListener('change', onStart);
+    dateB.addEventListener('input', onEnd);
+    dateB.addEventListener('change', onEnd);
+  });
+
+  // Wire the custom minute dropdowns (.tp-min-combo above): open on focus/click,
+  // pick a quarter-hour by tapping an option, close on blur. Selecting an option
+  // fires an 'input' event so the form's change-detection (wired below) enables
+  // Save just as typing would. Keeping the input focused during the option
+  // pointerdown (preventDefault on the menu) avoids a blur-before-click race and
+  // works on the iPad WebView, where the old native datalist popup never showed.
+  panel.querySelectorAll('.tp-min-combo').forEach(combo => {
+    const input = combo.querySelector('[data-tripsy-edit-time-min]');
+    const menu = combo.querySelector('[data-tripsy-min-menu]');
+    if (!input || !menu) return;
+    const openMenu = () => { menu.style.display = 'block'; };
+    const closeMenu = () => { menu.style.display = 'none'; };
+    input.addEventListener('focus', openMenu);
+    input.addEventListener('click', openMenu);
+    input.addEventListener('blur', () => setTimeout(closeMenu, 150));
+    menu.addEventListener('mousedown', e => e.preventDefault()); // keep input focused
+    menu.querySelectorAll('.tp-min-combo-opt').forEach(o => {
+      o.addEventListener('click', () => {
+        input.value = o.dataset.min;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        closeMenu();
+        input.focus();
+      });
+    });
   });
 
   // A dated-but-timeless event (a date in one of its datetime fields but no specific
@@ -18073,6 +18136,61 @@ function closeAllTripsyTripPanels() {
     });
   });
 }
+// Reusable find-in-page: highlights every occurrence of a query within `scope`
+// (wrapping matches in <mark class="tp-search-hit">), steps through them, and
+// keeps `countEl` in sync ("3 / 12" / "No matches"). Re-scans the LIVE DOM each
+// run (stripping the prior run's marks first) so a re-render in between can't
+// corrupt it. Skips form controls / script / style so edit widgets aren't hit.
+// Returns { run, clear, next, prev, count }. (The itinerary preview has its own
+// inline copy of this pattern; this shared one backs the per-trip card search.)
+function tripsyCreateFindInPage(scope, countEl) {
+  let hits = [], idx = -1;
+  const clear = () => {
+    scope.querySelectorAll('mark.tp-search-hit').forEach(m => {
+      const p = m.parentNode; if (!p) return;
+      p.replaceChild(document.createTextNode(m.textContent), m); p.normalize();
+    });
+    hits = []; idx = -1;
+  };
+  const focus = (i, scroll = true) => {
+    if (!hits.length) return;
+    idx = ((i % hits.length) + hits.length) % hits.length;
+    hits.forEach((m, j) => m.classList.toggle('current', j === idx));
+    const cur = hits[idx];
+    if (scroll && cur) cur.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    countEl.textContent = `${idx + 1} / ${hits.length}`;
+  };
+  const run = (query) => {
+    clear();
+    const needle = (query || '').trim().toLowerCase();
+    if (!needle) { countEl.textContent = ''; return; }
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || !node.nodeValue.toLowerCase().includes(needle)) return NodeFilter.FILTER_REJECT;
+        const el = node.parentElement;
+        if (!el || el.closest('input, textarea, select, script, style, [contenteditable="true"]')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    const targets = []; let n;
+    while ((n = walker.nextNode())) targets.push(n);
+    for (const t of targets) {
+      const text = t.nodeValue, lower = text.toLowerCase();
+      const frag = document.createDocumentFragment();
+      let from = 0, at;
+      while ((at = lower.indexOf(needle, from)) !== -1) {
+        if (at > from) frag.appendChild(document.createTextNode(text.slice(from, at)));
+        const mk = document.createElement('mark'); mk.className = 'tp-search-hit'; mk.textContent = text.slice(at, at + needle.length);
+        frag.appendChild(mk); hits.push(mk); from = at + needle.length;
+      }
+      if (from < text.length) frag.appendChild(document.createTextNode(text.slice(from)));
+      t.parentNode.replaceChild(frag, t);
+    }
+    if (hits.length) focus(0); else countEl.textContent = 'No matches';
+  };
+  return { run, clear, next: () => focus(idx + 1), prev: () => focus(idx - 1), get count() { return hits.length; } };
+}
+
 function renderTripsyEventsList() {
   const run = _tripsyEventsListRenderChain.then(() => renderTripsyEventsListImpl());
   // Once the trip cards (and their per-trip conflict flags) have rendered,
@@ -18612,6 +18730,21 @@ async function renderTripsyEventsListImpl() {
         <div data-tripsy-generate-panel="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:280px; max-width:380px; max-height:70vh; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.4);"></div>
       </div>
     `, 'Itinerary') : '';
+    // 🔍 Search this trip -- toggles the find-in-page bar (searchBarHtml below,
+    // placed just above the timeline) that highlights + steps through matches
+    // in this trip's own timeline. Sits right of the Itinerary button.
+    const searchButtonHtml = !collapsed ? iconLabelButton(`
+      <button class="btn" data-tripsy-trip-search-toggle data-key="${esc(trip.key)}" title="Search this trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:16px; display:flex; align-items:center; justify-content:center;">🔍</button>
+    `, 'Search') : '';
+    const searchBarHtml = !collapsed ? `
+      <div data-tripsy-trip-search-bar="${esc(trip.key)}" style="display:none; margin-top:12px; padding:8px 10px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; gap:8px; align-items:center;">
+        <input type="search" data-tripsy-trip-search-input placeholder="Search this trip…" autocomplete="off" spellcheck="false" class="field-input" style="flex:1; min-width:0;">
+        <span data-tripsy-trip-search-count style="font-size:13px; color:var(--muted); white-space:nowrap; min-width:46px; text-align:right; font-variant-numeric:tabular-nums;"></span>
+        <button class="btn" data-tripsy-trip-search-prev title="Previous match" aria-label="Previous match" style="padding:5px 11px;">‹</button>
+        <button class="btn" data-tripsy-trip-search-next title="Next match" aria-label="Next match" style="padding:5px 11px;">›</button>
+        <button class="btn" data-tripsy-trip-search-hide title="Close search" aria-label="Close search" style="padding:5px 11px;">✕</button>
+      </div>
+    ` : '';
     // Edit/Hide/Delete merged into one "Trip" dropdown. Hide is available
     // to every viewer (a purely local view override, unlike Edit/Delete
     // which mutate real Tripsy data and stay owner-gated) -- so the button
@@ -18757,14 +18890,16 @@ async function renderTripsyEventsListImpl() {
             ${addButtonHtml}
             ${documentButtonHtml}
             ${itineraryButtonHtml}
-            ${tripActionsMenuButtonHtml}
+            ${searchButtonHtml}
             ${sortButtonHtml}
+            ${tripActionsMenuButtonHtml}
             `}
           </div>
         </div>
         ${showAddButton ? `<div data-tripsy-add-item-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${isOwner ? `<div data-tripsy-edit-trip-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${isOwner ? `<div data-tripsy-attach-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
+        ${searchBarHtml}
         ${timelineHtml}
       </div>
     `;
@@ -19096,6 +19231,38 @@ async function renderTripsyEventsListImpl() {
   wireTripsyHeaderMenuToggle("[data-tripsy-document-menu-toggle]", "data-tripsy-document-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-itinerary-menu-toggle]", "data-tripsy-itinerary-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-trip-menu-toggle]", "data-tripsy-trip-menu");
+
+  // Per-trip 🔍 Search: the toggle reveals that trip's find-in-page bar, which
+  // highlights + steps through matches within its own timeline (tripsyCreateFindInPage).
+  container.querySelectorAll("[data-tripsy-trip-search-toggle]").forEach(btn => {
+    const key = btn.dataset.key;
+    const bar = container.querySelector(`[data-tripsy-trip-search-bar="${CSS.escape(key)}"]`);
+    const scope = container.querySelector(`.tripsy-tl-trip[data-tripsy-connector-trip="${CSS.escape(key)}"]`);
+    if (!bar || !scope) return;
+    const input = bar.querySelector("[data-tripsy-trip-search-input]");
+    const countEl = bar.querySelector("[data-tripsy-trip-search-count]");
+    const finder = tripsyCreateFindInPage(scope, countEl);
+    const open = () => {
+      bar.style.display = "flex";
+      positionTripsyTimelineConnectors(); // the bar shifts the timeline down
+      input.focus(); input.select();
+      if (input.value.trim()) finder.run(input.value);
+    };
+    const close = () => {
+      finder.clear(); countEl.textContent = "";
+      bar.style.display = "none";
+      positionTripsyTimelineConnectors();
+    };
+    btn.addEventListener("click", () => { bar.style.display === "flex" ? close() : open(); });
+    bar.querySelector("[data-tripsy-trip-search-hide]").addEventListener("click", close);
+    bar.querySelector("[data-tripsy-trip-search-next]").addEventListener("click", () => finder.next());
+    bar.querySelector("[data-tripsy-trip-search-prev]").addEventListener("click", () => finder.prev());
+    input.addEventListener("input", () => finder.run(input.value));
+    input.addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); if (finder.count) (e.shiftKey ? finder.prev() : finder.next()); }
+      else if (e.key === "Escape") { e.preventDefault(); close(); }
+    });
+  });
 
   // Reveal the red ▲ next to each trip's itinerary "Edit" when that trip's
   // generated itinerary has added/modified events since it was last generated.
