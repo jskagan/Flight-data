@@ -8407,17 +8407,60 @@ function expandMultiDayTripsyEvents(events) {
 const tripsyIsCheckoutEvent = ev => typeof ev.id === 'string' && ev.id.endsWith('-checkout');
 const tripsyIsCheckinEvent = ev => typeof ev.id === 'string' && ev.id.endsWith('-checkin');
 
+// City of a lodging (hosting) event, lowercased, from its address.
+function tripsyLodgingCityLower(ev) {
+  return ev.tripsyRaw && ev.tripsyRaw.resource === 'hosting'
+    ? tripsyPrimaryCityFromAddress(ev.tripsyRaw.address).toLowerCase()
+    : '';
+}
+// Does a transportation endpoint description refer to `city` (lowercased)?
+// Handles both a comma address (parsed to its own city) and an airport/place
+// string that merely CONTAINS the city as a whole word (e.g. "London Heathrow
+// Airport" for "london"). Conservative: needs a >=3-char city and a real match.
+function tripsyDescMatchesCity(desc, city) {
+  if (!desc || !city || city.length < 3) return false;
+  if (tripsyPrimaryCityFromAddress(desc).toLowerCase() === city) return true;
+  return new RegExp('\\b' + city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b')
+    .test(String(desc).toLowerCase());
+}
+// Same-day tie-break between a lodging event and a transportation event that
+// connects the lodging's city with a DIFFERENT city: transport ARRIVING to the
+// lodging city sorts BEFORE the lodging (you arrive, then check in); transport
+// DEPARTING from the lodging city sorts AFTER it (you check out, then leave).
+// No reorder when the transport touches the lodging city at both ends or
+// neither -- then it falls back to time order. Returns a comparator value or null.
+function tripsyLodgingTransportOrder(a, b) {
+  const aH = !!(a.tripsyRaw && a.tripsyRaw.resource === 'hosting');
+  const bH = !!(b.tripsyRaw && b.tripsyRaw.resource === 'hosting');
+  const aT = !!(a.tripsyRaw && a.tripsyRaw.resource === 'transportation');
+  const bT = !!(b.tripsyRaw && b.tripsyRaw.resource === 'transportation');
+  let lodging, transport, transportIsA;
+  if (aH && bT) { lodging = a; transport = b; transportIsA = false; }
+  else if (bH && aT) { lodging = b; transport = a; transportIsA = true; }
+  else return null;
+  const city = tripsyLodgingCityLower(lodging);
+  if (!city) return null;
+  const depMatch = tripsyDescMatchesCity(transport.tripsyRaw.departureDescription, city);
+  const arrMatch = tripsyDescMatchesCity(transport.tripsyRaw.arrivalDescription, city);
+  if (depMatch === arrMatch) return null; // both (same-city round trip) or neither
+  const transportBefore = arrMatch; // arriving to the city -> before the lodging
+  if (transportIsA) return transportBefore ? -1 : 1;
+  return transportBefore ? 1 : -1;
+}
+
 // Explicit tie-break for two split halves landing on the same day (e.g.
 // one hotel's check-out the same day another's check-in starts, or a
 // tour's end the same day a flight's begin) -- always list the "end" half
-// first. By the time this runs every event has already been split into
-// single-day halves by expandMultiDayTripsyEvents, so no other special
-// multi-day-vs-single-day logic is needed here.
+// first. Also applies the lodging<->transportation city rule above. By the
+// time this runs every event has already been split into single-day halves by
+// expandMultiDayTripsyEvents, so no other special multi-day logic is needed.
 function tripsyMultiDayEventOrder(a, b) {
   const aDay = tripsyDayKey(a.start);
   if (aDay && aDay === tripsyDayKey(b.start)) {
     if (a._splitHalf === 'end' && b._splitHalf === 'begin') return -1;
     if (a._splitHalf === 'begin' && b._splitHalf === 'end') return 1;
+    const lt = tripsyLodgingTransportOrder(a, b);
+    if (lt != null) return lt;
   }
   return null;
 }
