@@ -9061,6 +9061,18 @@ function tripsyEditActionButtonsHtml(saveDataAttr, cancelDataAttr, { vertical = 
   `;
 }
 
+// Compact, always-side-by-side Save/Cancel (used on the conflict-modify screens,
+// where the big stacked-icon buttons were wrapping to two rows in the narrow
+// panel). flex-wrap:nowrap keeps them on one line.
+function tripsyCompactSaveCancelHtml(saveDataAttr, cancelDataAttr) {
+  return `
+    <div style="display:flex; flex-direction:row; flex-wrap:nowrap; gap:10px;">
+      <button class="btn primary" ${saveDataAttr} style="font-size:13px; padding:7px 16px;">✅ Save</button>
+      <button class="btn" ${cancelDataAttr} style="font-size:13px; padding:7px 16px;">❌ Cancel</button>
+    </div>
+  `;
+}
+
 // Reads one split date+time field pair (see renderTripsyEditPanel's inputHtml
 // datetime branch) back into a single 'YYYY-MM-DDTHH:MM:00' value. No date -> ''
 // (genuinely no value). A DATE with no time defaults the time to 12:00 PM so a
@@ -9152,6 +9164,33 @@ function tripsyWireEditFormChangeDetection(panel, saveDataAttr, fieldSelector) {
   panel._tripsyIsDirty = () => inputs.some(el => el.value !== initialValues.get(el));
   panel._tripsySaveAttr = saveDataAttr;
   panel.dataset.tripsyChangeTracked = '1';
+}
+
+// After Save on a conflict-modify screen, ask what to do with the OTHER event.
+// Resolves to 'add' | 'modify' | 'drop' (or null if dismissed). The third
+// option is "Ignore" for a new event, "Delete" for an existing one.
+function tripsyConflictOtherActionDialog(otherIsNew, otherName) {
+  return new Promise(resolve => {
+    const dropLabel = otherIsNew ? 'Ignore' : 'Delete';
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10004; display:flex; align-items:center; justify-content:center; padding:20px;';
+    overlay.innerHTML = `
+      <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; max-width:420px; width:100%; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+        <div style="font-size:15px; font-weight:700; color:var(--text); margin-bottom:4px;">What would you like to do with the ${otherIsNew ? 'new' : 'existing'} event?</div>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:16px;">${esc(otherName || '')}</div>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          <button data-act="add" class="btn primary" style="font-size:13px; padding:8px 14px;">Add</button>
+          <button data-act="modify" class="btn" style="font-size:13px; padding:8px 14px;">Modify</button>
+          <button data-act="drop" class="btn" style="font-size:13px; padding:8px 14px;">${dropLabel}</button>
+        </div>
+      </div>`;
+    const done = v => { overlay.remove(); resolve(v); };
+    overlay.addEventListener('click', e => { if (e.target === overlay) done(null); });
+    overlay.querySelector('[data-act="add"]').addEventListener('click', () => done('add'));
+    overlay.querySelector('[data-act="modify"]').addEventListener('click', () => done('modify'));
+    overlay.querySelector('[data-act="drop"]').addEventListener('click', () => done('drop'));
+    document.body.appendChild(overlay);
+  });
 }
 
 // Save / Discard / Keep-editing dialog for the unsaved-changes guard on the Tripsy
@@ -9318,7 +9357,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
       ${createOptions && createOptions.headerHtml ? `<div>${createOptions.headerHtml}</div>` : ''}
       ${groupOrder.map(sectionHtml).join('')}
-      ${tripsyEditActionButtonsHtml('data-tripsy-edit-save', 'data-tripsy-edit-exit')}
+      ${createOptions && createOptions.compactButtons ? tripsyCompactSaveCancelHtml('data-tripsy-edit-save', 'data-tripsy-edit-exit') : tripsyEditActionButtonsHtml('data-tripsy-edit-save', 'data-tripsy-edit-exit')}
     </div>
   `;
 
@@ -10076,6 +10115,13 @@ function tripsyConflictFieldDiffs(newSummary, newFields, resource, existing) {
   return diffs;
 }
 
+// Whether this row still has a live conflict (a real overlap, or a dateless new
+// event). Used to decide whether a Modify screen shows the comparison chart.
+function tripsyConflictHasLive(ctx) {
+  const lc = tripsyLiveConflicts(ctx);
+  return lc.noDate || lc.conflicts.length > 0;
+}
+
 // The remembered conflict counterpart with any in-progress existing-event edit
 // (ctx.overrides) applied to its start/end -- shared by the box and the Modify
 // editors so both show the same "Existing" side.
@@ -10117,12 +10163,13 @@ function tripsyCounterpartFieldValues(ctx) {
   return {};
 }
 
-// In the conflict-modify editors, focusing a field where the OTHER event has a
-// value reveals a "Copy Entry From <label> Event" button under it that fills
-// that field from the other side. Wired only when createOptions.copyFrom is
-// passed; copyFrom = { label, fields } with fields keyed by field key (datetime
-// fields hold an ISO string). Datetime copies fan out to the date/hour/min/ampm
-// controls; every set input fires input+change so Save-visibility updates.
+// In the conflict-modify editors, every field where the OTHER event has a value
+// gets a green "Copy Entry From <label> Event" button under it (always visible,
+// not just on focus) that fills that field from the other side. Wired only when
+// createOptions.copyFrom is passed; copyFrom = { label, fields } with fields
+// keyed by field key (datetime fields hold an ISO string). Datetime copies fan
+// out to the date/hour/min/ampm controls; every set input fires input+change so
+// Save-visibility updates.
 function tripsyWireConflictCopyButtons(panel, copyFrom, resource) {
   const other = copyFrom.fields || {};
   const srcLabel = copyFrom.label || 'Other Event';
@@ -10137,22 +10184,11 @@ function tripsyWireConflictCopyButtons(panel, copyFrom, resource) {
       : panel.querySelector(`[data-tripsy-edit-field="${key}"]`);
     const labelEl = primary && primary.closest('label');
     if (!labelEl) continue;
-    const inputs = f.kind === 'datetime'
-      ? [primary, panel.querySelector(`[data-tripsy-edit-time-hour="${key}"]`), panel.querySelector(`[data-tripsy-edit-time-min="${key}"]`), panel.querySelector(`[data-tripsy-edit-time-ampm="${key}"]`)].filter(Boolean)
-      : [primary];
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'btn';
     btn.textContent = `Copy Entry From ${srcLabel}`;
-    btn.style.cssText = 'display:none; margin-top:6px; font-size:11px; padding:3px 8px;';
+    btn.style.cssText = 'display:block; margin-top:6px; font-size:11px; padding:4px 10px; border-radius:6px; border:1px solid var(--home-green); background:var(--home-green); color:#fff; cursor:pointer;';
     labelEl.appendChild(btn);
-    inputs.forEach(inp => {
-      inp.addEventListener('focus', () => { btn.style.display = 'inline-block'; });
-      inp.addEventListener('blur', () => setTimeout(() => {
-        if (!labelEl.contains(document.activeElement) && document.activeElement !== btn) btn.style.display = 'none';
-      }, 150));
-    });
-    btn.addEventListener('mousedown', e => e.preventDefault()); // keep field focus through the click
     btn.addEventListener('click', e => {
       e.preventDefault(); e.stopPropagation();
       if (f.kind === 'datetime') {
@@ -10168,7 +10204,6 @@ function tripsyWireConflictCopyButtons(panel, copyFrom, resource) {
         primary.value = otherVal;
         fire(primary);
       }
-      btn.style.display = 'none';
     });
   }
 }
@@ -20139,6 +20174,55 @@ function wireTripsyConflictUi(ctx) {
     return ok;
   }
 
+  // After a modify-screen Save (edits already committed), ask what to do with
+  // the OTHER event and carry it out. otherIsNew: the other event is the new
+  // proposal (we were modifying the existing); else the other is the existing
+  // counterpart (we were modifying the new). Add = import the new proposal and
+  // keep the existing; Drop = Ignore the new (reject) or Delete the existing;
+  // Modify = re-open the other event's modify screen (with its conflict chart).
+  async function resolveOtherAfterSave(otherIsNew, otherName) {
+    const choice = await tripsyConflictOtherActionDialog(otherIsNew, otherName);
+    if (!choice) { setTimeout(rerender, 0); return; } // dismissed: keep edits, re-check the conflict
+    if (choice === 'add') { await doImport(); return; }
+    if (choice === 'modify') {
+      setTimeout(() => {
+        rerender();
+        const b = otherIsNew
+          ? ui.querySelector('[data-parse-conflict-modify-new]')
+          : (ui.querySelector('[data-parse-conflict-modify-existing]') || ui.querySelector('[data-parse-conflict-modify-existing-change]'));
+        if (b) b.click();
+      }, 0);
+      return;
+    }
+    // choice === 'drop'
+    if (otherIsNew) {
+      await Store.rejectTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id);
+      toast('New event ignored.');
+      await ctx.afterImport();
+      return;
+    }
+    // Delete the existing counterpart, then import the new (one write via
+    // deleteExistingChange when it's a real event; cancel the queued change if
+    // it isn't synced yet).
+    const cp = tripsyEffectiveCounterpart(ctx);
+    if (cp && cp.eventKey) {
+      const found = findTripsyRawByKey(cp.eventKey);
+      const summary = found ? tripsyRawToDisplay(found.raw.resource, found.raw).summary : (cp.summary || 'Existing event');
+      const deleteChange = found ? {
+        id: crypto.randomUUID(), type: 'delete_event', createdAt: new Date().toISOString(),
+        tripKey: found.tripKey, tripName: found.tripName, eventKey: cp.eventKey,
+        eventSummary: summary, tripsyResource: found.raw.resource, tripsyId: found.raw.id,
+      } : null;
+      const ok = await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null, deleteChange);
+      if (ok) { toast('Deleted the existing event and imported the new one.'); await ctx.afterImport(); }
+    } else if (cp && cp.changeId) {
+      await Store.cancelTripsyChange(cp.changeId);
+      await doImport();
+    } else {
+      await doImport();
+    }
+  }
+
   function wire() {
     const q = sel => ui.querySelector(sel);
     const importBtn = q('[data-parse-conflict-import]') || q('[data-parse-conflict-import-anyway]');
@@ -20207,21 +20291,24 @@ function wireTripsyConflictUi(ctx) {
       if (wasOpen) return;
       const raw = { ...tripsyBlankRaw(ctx.resource, null), ...ctx.newFields };
       renderTripsyEditPanel(panel, raw, null, null, ctx.event.eventSummary, {
-        headerHtml: tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)),
+        headerHtml: tripsyConflictHasLive(ctx) ? tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)) : '',
         copyFrom: { label: 'Existing Event', fields: tripsyCounterpartFieldValues(ctx) },
+        compactButtons: true,
         onSave: async newFields => {
           ctx.newFields = { ...ctx.newFields, ...newFields };
           ctx.newModified = true;
-          // Persist the edit onto the stored proposal event, not just this
-          // row's in-memory ctx -- otherwise any other action that re-renders
-          // the whole review page (e.g. importing a different event) rebuilds
-          // this row's ctx.newFields from the OLD stored fields and silently
-          // drops the edit, resurrecting the conflict.
+          // Persist the edit onto the stored proposal so a re-render (or editing
+          // the existing next) doesn't rebuild this row from the old fields.
           const saved = await Store.resolveTripsyParseProposalEvent(ctx.proposal.id, ctx.event.id, { fields: ctx.newFields });
           if (!saved) { toast('Could not save your changes — storage error.', 'error'); return false; }
           ctx.event.fields = ctx.newFields;
           tripsyRefreshTripSelect(ctx);
-          setTimeout(rerender, 0);
+          // Ask what to do with the OTHER (existing) event -- but only if there
+          // is a specific counterpart. A dateless new event has none, so just
+          // re-check instead of asking about a nonexistent event.
+          const cp = tripsyEffectiveCounterpart(ctx);
+          if (cp) await resolveOtherAfterSave(false, cp.summary);
+          else setTimeout(rerender, 0);
           return true;
         },
       });
@@ -20241,8 +20328,9 @@ function wireTripsyConflictUi(ctx) {
       const summary = tripsyRawToDisplay(found.raw.resource, found.raw).summary;
       const raw = { ...tripsyBlankRaw(found.raw.resource, null), ...found.raw };
       renderTripsyEditPanel(panel, raw, null, null, summary, {
-        headerHtml: tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)),
+        headerHtml: tripsyConflictHasLive(ctx) ? tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)) : '',
         copyFrom: { label: 'New Event', fields: ctx.newFields },
+        compactButtons: true,
         onSave: async newFields => {
           const changes = {};
           for (const k of Object.keys(newFields)) if ((newFields[k] || '') !== (original[k] || '')) changes[k] = newFields[k] || null;
@@ -20255,8 +20343,8 @@ function wireTripsyConflictUi(ctx) {
             if (!ok) { toast('Could not queue the edit — storage error.', 'error'); return false; }
           }
           ctx.overrides[key] = { ...original, ...newFields };
-          setTimeout(rerender, 0);
-          toast('Existing event updated.');
+          // Then ask what to do with the OTHER (new proposal) event.
+          await resolveOtherAfterSave(true, ctx.event.eventSummary);
           return true;
         },
       });
@@ -20281,15 +20369,16 @@ function wireTripsyConflictUi(ctx) {
       if (!change) { toast('Could not find that change — it may have changed.', 'error'); return; }
       const raw = { ...tripsyBlankRaw(change.tripsyResource, null), ...change.fields };
       renderTripsyEditPanel(panel, raw, null, null, change.eventSummary, {
-        headerHtml: tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)),
+        headerHtml: tripsyConflictHasLive(ctx) ? tripsyConflictChartHtml(ctx.event.eventSummary, ctx.newFields, ctx.resource, tripsyEffectiveCounterpart(ctx)) : '',
         copyFrom: { label: 'New Event', fields: ctx.newFields },
+        compactButtons: true,
         onSave: async newFields => {
           const mergedFields = { ...change.fields, ...newFields };
           const ok = await Store.queueTripsyChange({ ...change, fields: mergedFields });
           if (!ok) { toast('Could not save your changes — storage error.', 'error'); return false; }
           ctx.overrides[changeId] = mergedFields;
-          setTimeout(rerender, 0);
-          toast('Existing change updated.');
+          // Then ask what to do with the OTHER (new proposal) event.
+          await resolveOtherAfterSave(true, ctx.event.eventSummary);
           return true;
         },
       });
