@@ -1107,6 +1107,7 @@
     </button>
     <div id="utilities-submenu" class="collapsed">
       <button class="rail-item rail-subitem" data-view="utilitiesusers">Users</button>
+      <button class="rail-item rail-subitem" data-view="utilitiestripsonly">Trips-Only Access</button>
       <button class="rail-item rail-subitem" id="utilities-refresh-all-btn">Refresh All</button>
       <button class="rail-item rail-subitem" data-view="utilitiesdeletepsreservations">Delete P/S Reservations</button>
       <button class="rail-item rail-subitem" data-view="utilitiesreparsepsreservations">Re-Parse P/S Reservations</button>
@@ -2643,6 +2644,28 @@ const Store = {
       return { ok: true };
     } catch (e) {
       console.error('Store.setGmailCalendarAccessForEmail failed:', e);
+      return { ok: false, error: e.message || String(e) };
+    }
+  },
+  // Emails limited to a "trips-only" view: still read-only viewers, but their
+  // nav is scoped to just My Trips + Travel View (the NetJets/P/S pages are
+  // hidden). Set from the Users utility page; takes effect at their next
+  // sign-in (see isTripsOnlyUser in completeSignIn). Mirrors the Gmail-access
+  // list above -- a flat array of lowercased emails in the shared file.
+  async getTripsOnlyEmails() {
+    return [...(driveData.tripsOnlyEmails || [])];
+  },
+  async setTripsOnlyForEmail(email, enabled) {
+    try {
+      if (!driveData.tripsOnlyEmails) driveData.tripsOnlyEmails = [];
+      const lower = email.toLowerCase();
+      const idx = driveData.tripsOnlyEmails.findIndex(e => e.toLowerCase() === lower);
+      if (enabled && idx < 0) driveData.tripsOnlyEmails.push(lower);
+      else if (!enabled && idx >= 0) driveData.tripsOnlyEmails.splice(idx, 1);
+      await persistDriveData();
+      return { ok: true };
+    } catch (e) {
+      console.error('Store.setTripsOnlyForEmail failed:', e);
       return { ok: false, error: e.message || String(e) };
     }
   },
@@ -4509,13 +4532,17 @@ function setActiveNav(view, param) {
   document.getElementById("psreservations-submenu").classList.toggle("collapsed", !isPsReservationsView);
   document.getElementById("psreservations-caret").textContent = isPsReservationsView ? "▾" : "▸";
 
-  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiestripsyrefresh" || view === "utilitiesparsingdocs" || view === "utilitiesitineraryphotos";
+  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiestripsonly" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiestripsyrefresh" || view === "utilitiesparsingdocs" || view === "utilitiesitineraryphotos";
   document.getElementById("utilities-toggle").classList.toggle("active", isUtilitiesView);
   document.getElementById("utilities-submenu").classList.toggle("collapsed", !isUtilitiesView);
   document.getElementById("utilities-caret").textContent = isUtilitiesView ? "▾" : "▸";
 }
 
 async function navigate(view, param) {
+  // A trips-only viewer can never leave My Trips / Travel View -- redirect any
+  // other destination (a stray link, or a navigate('home') like the Travel View
+  // exit) to My Trips. Central enforcement so no disallowed view ever renders.
+  if (isTripsOnlyUser && !TRIPS_ONLY_ALLOWED_VIEWS.has(view)) { view = 'tripsytrips'; param = undefined; }
   const previousView = currentView;
   currentView = view;
   setActiveNav(view, param);
@@ -4547,6 +4574,7 @@ async function navigate(view, param) {
     else if (view === "psinvoices") await renderPsInvoices();
     else if (view === "psinvoicedetail") await renderPsInvoiceDetail(param);
     else if (view === "utilitiesusers") await renderUtilitiesUsers();
+    else if (view === "utilitiestripsonly") await renderUtilitiesTripsOnly();
     else if (view === "utilitiesdeletepsreservations") await renderUtilitiesDeletePsReservations();
     else if (view === "utilitiesreparsepsreservations") await renderUtilitiesReparsePsReservations();
     else if (view === "utilitiesreparsepsinvoices") await renderUtilitiesReparsePsInvoices();
@@ -6525,6 +6553,10 @@ async function renderUtilitiesUsers() {
       <p style="color:var(--red); line-height:1.6; font-size:13px; margin-top:10px;">
         The email here must match the one used in Step 2 exactly, or they'll sign in fine but see "no shared data found."
       </p>
+      <p style="color:var(--text); line-height:1.6; font-size:14px; margin-top:10px;">
+        For them to see the <strong>My Trips</strong> / <strong>Travel View</strong> itinerary, also Share the
+        <strong>"Tripsy Trips Passphrase"</strong> file with the same email (Viewer) -- that's what unlocks the trip data.
+      </p>
     </div>
 
     <div class="card">
@@ -6543,9 +6575,81 @@ async function renderUtilitiesUsers() {
         except the account holder -- everyone else gets read-only access (plus Flight Type/Notes editing, if you gave them Editor
         permission in Step 3).
       </p>
+      <p style="color:var(--text); line-height:1.6; font-size:14px; margin-top:10px;">
+        To limit someone to just the travel side, tick <strong>Trips-only</strong> next to their name in the Authorized Users
+        list above: they'll land on <strong>My Trips</strong> and can reach only it and <strong>Travel View</strong> -- the
+        NetJets and P/S pages are hidden. Takes effect at their next sign-in.
+      </p>
     </div>
   `;
   await renderUsersListBody();
+}
+
+// Owner-only step-by-step guide for granting someone "Trips-only" access --
+// a read-only viewer scoped to just My Trips + Travel View (nav hidden,
+// navigate() guarded; see isTripsOnlyUser in completeSignIn). The actual
+// toggle lives on the Users page; this page documents the exact end-to-end
+// procedure and links there.
+async function renderUtilitiesTripsOnly() {
+  const step = (n, title, bodyHtml) => `
+    <div class="card">
+      <div class="card-title">${n}. ${title}</div>
+      ${bodyHtml}
+    </div>`;
+  const p = html => `<p style="color:var(--text); line-height:1.6; font-size:14px;">${html}</p>`;
+  main.innerHTML = `
+    <div class="page-title">Trips-Only Access</div>
+    <div class="page-sub">Give someone a read-only view of just <strong>My Trips</strong> and <strong>Travel View</strong> — the NetJets and P/S pages stay hidden for them.</div>
+
+    <div class="card" style="border-left:3px solid var(--amber);">
+      <div class="card-title">What a Trips-Only viewer can and can't do</div>
+      <ul style="color:var(--text); line-height:1.8; font-size:14px; margin:4px 0 0 20px;">
+        <li>They land on <strong>My Trips</strong> and can open <strong>Travel View</strong> — nothing else.</li>
+        <li>The Home, NetJets, P/S, Invoices, and Utilities pages are hidden, and can't be reached even by a direct link.</li>
+        <li>They're <strong>read-only</strong> — no add / edit / delete anywhere (same as any viewer).</li>
+        <li>They see the itinerary, weather, and any attached documents; they do <strong>not</strong> see your billing/financial data in the app.</li>
+      </ul>
+      <p style="color:var(--muted); line-height:1.6; font-size:12.5px; margin-top:10px;">
+        Note: this hides the financial pages in the app, but a technically-savvy person with read access to the shared
+        data file could still open its raw contents outside the app. Grant Trips-Only access to people you trust.
+      </p>
+    </div>
+
+    ${step(1, 'Confirm they have a Google Account', p(`They sign in with Google, so they need a Google Account (any email works — it doesn't have to be @gmail.com). If they don't have one, they can make one at <a href="https://accounts.google.com/signup" target="_blank" rel="noopener" style="color:var(--amber);">accounts.google.com/signup</a> using "Use my current email address instead."`))}
+
+    ${step(2, 'Add them as a Google OAuth Test User', p(`Go to <a href="https://console.cloud.google.com" target="_blank" rel="noopener" style="color:var(--amber);">console.cloud.google.com</a> → your project → <strong>APIs &amp; Services → OAuth consent screen → Audience → Test users → Add users</strong>, and enter their <em>exact</em> email. Without this they'll hit "access blocked" at sign-in.`))}
+
+    ${step(3, 'Share the data file with them (Viewer)', `
+      ${p(`In Google Drive, find <strong>flight-log-data.json</strong> → right-click → <strong>Share</strong> → enter the same exact email → set them to <strong>Viewer</strong> → Send.`)}
+      <p style="color:var(--muted); line-height:1.6; font-size:12.5px; margin-top:6px;">This is what lets them read the shared data (weather, document icons). Keep it "Viewer," never "Editor."</p>
+    `)}
+
+    ${step(4, 'Share the passphrase file with them (Viewer)', `
+      ${p(`Still in Drive, find <strong>"Tripsy Trips Passphrase"</strong> → <strong>Share</strong> → same email → <strong>Viewer</strong> → Send.`)}
+      <p style="color:var(--muted); line-height:1.6; font-size:12.5px; margin-top:6px;">This is what unlocks the encrypted trip data so My Trips / Travel View actually show the itinerary. Without it they'd see a "locked / enter passphrase" screen.</p>
+    `)}
+
+    ${step(5, 'Turn on "Trips-only" for them', `
+      ${p(`Open <strong>Utilities → Users</strong>. Once you've shared the file in Step 3, their name appears in the <strong>Authorized Users</strong> list (they don't have to sign in first). Find their row and tick the <strong>Trips-only</strong> checkbox.`)}
+      <p style="color:var(--text); line-height:1.6; font-size:14px; margin-top:6px;">
+        <button class="btn" id="tripsonly-goto-users" style="font-size:13px; padding:7px 14px;">Go to Users →</button>
+      </p>
+      <p style="color:var(--muted); line-height:1.6; font-size:12.5px; margin-top:8px;">Each row has two checkboxes: <strong>Gmail access</strong> (leave off for viewers) and <strong>Trips-only</strong> (tick this). The change saves immediately and takes effect at their <strong>next</strong> sign-in.</p>
+    `)}
+
+    ${step(6, 'Send them the link', p(`Send them the app's URL. They click "Sign in with Google," pick the approved account, click through Google's "unverified app" notice (expected — the app is kept in Testing mode on purpose), and land straight on <strong>My Trips</strong>.`))}
+
+    <div class="card">
+      <div class="card-title">Changing or removing access later</div>
+      <ul style="color:var(--text); line-height:1.8; font-size:14px; margin:4px 0 0 20px;">
+        <li><strong>Make them a full viewer</strong> (all pages, still read-only): un-tick <strong>Trips-only</strong> on the Users page.</li>
+        <li><strong>Revoke all access</strong>: remove their sharing on both files in Google Drive (Share → their name → Remove).</li>
+        <li>Either change applies the next time they sign in / reload.</li>
+      </ul>
+    </div>
+  `;
+  const goBtn = document.getElementById('tripsonly-goto-users');
+  if (goBtn) goBtn.addEventListener('click', () => navigate('utilitiesusers'));
 }
 
 // Owner-only settings page for the Google Places API key used by the
@@ -6620,9 +6724,10 @@ async function renderUsersListBody() {
   const body = document.getElementById('users-list-body');
   if (!body) return;
   try {
-    const [permissions, accessEmails] = await Promise.all([
+    const [permissions, accessEmails, tripsOnlyEmails] = await Promise.all([
       listDriveFilePermissions(driveFileId),
       Store.getGmailCalendarAccessEmails(),
+      Store.getTripsOnlyEmails(),
     ]);
     if (!permissions.length) {
       body.innerHTML = `<div style="color:var(--muted);">Could not load the sharing list from Drive.</div>`;
@@ -6633,28 +6738,44 @@ async function renderUsersListBody() {
       const isThisOwner = email.toLowerCase() === OWNER_EMAIL.toLowerCase();
       const roleLabel = p.role === 'owner' ? 'Owner' : p.role === 'writer' ? 'Editor' : p.role === 'reader' ? 'Viewer' : esc(p.role);
       const checked = isThisOwner || accessEmails.includes(email.toLowerCase());
+      const tripsOnlyChecked = !isThisOwner && tripsOnlyEmails.includes(email.toLowerCase());
       return `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-top:1px solid var(--line);">
           <div style="min-width:0;">
             <div style="font-weight:600; font-size:14px;">${esc(p.displayName || email)}</div>
             <div style="font-size:12px; color:var(--muted);">${esc(email)} · ${roleLabel}</div>
           </div>
-          <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); flex-shrink:0; ${isThisOwner ? '' : 'cursor:pointer;'}">
-            <input type="checkbox" data-user-access-toggle data-email="${esc(email)}"
-              ${checked ? 'checked' : ''} ${isThisOwner ? 'disabled' : ''}
-              style="width:16px; height:16px; ${isThisOwner ? '' : 'cursor:pointer;'}">
-            Gmail access
-          </label>
+          <div style="display:flex; flex-direction:column; gap:6px; flex-shrink:0;">
+            <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); justify-content:flex-end; ${isThisOwner ? '' : 'cursor:pointer;'}">
+              <input type="checkbox" data-user-access-toggle data-email="${esc(email)}"
+                ${checked ? 'checked' : ''} ${isThisOwner ? 'disabled' : ''}
+                style="width:16px; height:16px; ${isThisOwner ? '' : 'cursor:pointer;'}">
+              Gmail access
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); justify-content:flex-end; ${isThisOwner ? '' : 'cursor:pointer;'}">
+              <input type="checkbox" data-user-tripsonly-toggle data-email="${esc(email)}"
+                ${tripsOnlyChecked ? 'checked' : ''} ${isThisOwner ? 'disabled' : ''}
+                style="width:16px; height:16px; ${isThisOwner ? '' : 'cursor:pointer;'}">
+              Trips-only
+            </label>
+          </div>
         </div>
       `;
     }).join("");
     body.innerHTML = rows + `
       <p style="color:var(--muted); font-size:12px; margin-top:10px; line-height:1.5;">
         Drive access is always required for everyone -- that's how the shared data gets read, and it isn't optional here.
-        Turning Gmail access on for someone means their <strong>next</strong> sign-in will also ask them to approve
+        Turning <strong>Gmail access</strong> on for someone means their <strong>next</strong> sign-in will also ask them to approve
         read-only Gmail access. ${esc(OWNER_EMAIL)} always needs it, since only that account runs the
         background syncs (PS Reservations, PS Balance) -- toggling it on for anyone else doesn't start syncing
         anything on their behalf, it only changes what their own sign-in requests.
+      </p>
+      <p style="color:var(--muted); font-size:12px; margin-top:8px; line-height:1.5;">
+        <strong>Trips-only</strong> limits that person to just the <strong>My Trips</strong> and <strong>Travel View</strong> pages
+        (the NetJets and P/S pages are hidden). They stay read-only either way. Takes effect at their <strong>next</strong> sign-in.
+        For trips to unlock, also share the <strong>"Tripsy Trips Passphrase"</strong> file with their Google account in Drive
+        (same as the data file). Note: this scopes what they <em>see</em> in the app -- it does not stop a technically-savvy
+        person from reading the raw shared file directly.
       </p>
     `;
     body.querySelectorAll('[data-user-access-toggle]').forEach(cb => {
@@ -6663,6 +6784,22 @@ async function renderUsersListBody() {
         const enabled = cb.checked;
         cb.disabled = true;
         const result = await Store.setGmailCalendarAccessForEmail(email, enabled);
+        if (!result.ok) {
+          toast(`Could not save -- ${result.error || 'unknown error'}`, 'error');
+          cb.checked = !enabled;
+          cb.disabled = false;
+        } else {
+          toast(`Saved. Takes effect the next time ${email} signs in.`, 'success');
+          cb.disabled = false;
+        }
+      });
+    });
+    body.querySelectorAll('[data-user-tripsonly-toggle]').forEach(cb => {
+      cb.addEventListener('change', async () => {
+        const email = cb.dataset.email;
+        const enabled = cb.checked;
+        cb.disabled = true;
+        const result = await Store.setTripsOnlyForEmail(email, enabled);
         if (!result.ok) {
           toast(`Could not save -- ${result.error || 'unknown error'}`, 'error');
           cb.checked = !enabled;
@@ -22790,6 +22927,12 @@ function saveTravelViewPref(on) {
 const OWNER_EMAIL = 'jskagan@gmail.com';
 let currentUserEmail = null;
 let isOwner = false;
+// A "trips-only" viewer (email on driveData.tripsOnlyEmails): a normal read-only
+// viewer whose navigation is scoped to just My Trips + Travel View. Set in
+// completeSignIn once driveData has loaded; read by navigate() and the nav-rail
+// scoping. Views allowed for this tier:
+const TRIPS_ONLY_ALLOWED_VIEWS = new Set(['tripsytrips', 'travelview']);
+let isTripsOnlyUser = false;
 let tokenClient = null;
 
 // A silent, mid-session token refresh in flight: the resolvers the token-client
@@ -22869,7 +23012,7 @@ async function completeSignIn() {
       driveData = await loadDriveDataFile(driveFileId);
     } else if (isOwner) {
       stage = 'creating a new data file in Drive';
-      driveData = { invoices: [], report: null, reservations: [], psBalanceDeductions: [], syncTimestamps: {}, gmailCalendarAccessEmails: [] };
+      driveData = { invoices: [], report: null, reservations: [], psBalanceDeductions: [], syncTimestamps: {}, gmailCalendarAccessEmails: [], tripsOnlyEmails: [] };
       driveFileId = await createDriveDataFile(driveData);
     } else {
       // A viewer signed in but the shared file hasn't been shared with
@@ -22891,11 +23034,29 @@ async function completeSignIn() {
     }
 
     stage = 'setting up the menu';
+    // A trips-only viewer is a normal read-only viewer whose nav is scoped to
+    // just My Trips + Travel View. Their email is on driveData.tripsOnlyEmails
+    // (which they can read, since they still have shared-file access). navigate()
+    // enforces the same allowlist for any programmatic navigation.
+    try {
+      const tripsOnlyEmails = await Store.getTripsOnlyEmails();
+      isTripsOnlyUser = !isOwner && !!currentUserEmail && tripsOnlyEmails.includes(currentUserEmail.toLowerCase());
+    } catch (e) { console.error('Resolving trips-only tier failed (non-fatal):', e); isTripsOnlyUser = false; }
     if (!isOwner) {
       document.getElementById('nav-upload-btn').style.display = 'none';
       document.getElementById('view-only-badge').style.display = '';
     } else {
       document.getElementById('utilities-toggle').style.display = '';
+    }
+    if (isTripsOnlyUser) {
+      // Hide every rail item except My Trips + Travel View.
+      document.querySelectorAll('.rail-item[data-view]').forEach(el => {
+        if (!TRIPS_ONLY_ALLOWED_VIEWS.has(el.dataset.view)) el.style.display = 'none';
+      });
+      // Submenu toggle buttons + their collapsible subitem containers -- the
+      // NetJets Hours/Legs/Flight Log subitems use data-mode, not data-view, so
+      // hide the whole container rather than rely on the data-view sweep above.
+      document.querySelectorAll('.rail-item[data-submenu-toggle], #passengers-submenu, #psreservations-submenu, #utilities-submenu, #ambiguities-submenu').forEach(el => { el.style.display = 'none'; });
     }
     try { await updateTripsyPendingWarningBadge(); } catch (e) { console.error('updateTripsyPendingWarningBadge on startup failed:', e); }
     try { await updateTripsyDocParseBadge(); } catch (e) { console.error('updateTripsyDocParseBadge on startup failed:', e); }
@@ -22919,7 +23080,10 @@ async function completeSignIn() {
     // placeholders. #app-root is display:none at this point, but writing
     // into #main still works fine -- it just isn't visible yet.
     stage = 'building the home screen';
-    await renderHome();
+    // A trips-only viewer never sees Home -- land them straight on My Trips
+    // (the Travel View pref below can still override to Travel View).
+    if (isTripsOnlyUser) await navigate('tripsytrips');
+    else await renderHome();
 
     stage = 'refreshing menu counts';
     try {
