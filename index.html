@@ -11414,15 +11414,17 @@ function tripsyWeatherTargetList(targetsByDay) {
 }
 
 // ---- Weather formatters --------------------------------------------------
-// Compact glyph line for an on-screen day bar: "⛅ 72°/58° · 10%".
+// Compact glyph line for an on-screen day bar: "⛅ 72°/58° · 10% 💧".
 // Returns HTML (not plain text): the conditions glyph is wrapped in
 // .tripsy-wx-glyph so it can be sized much larger than the temp/precip text on
-// the day bars. Content is only an emoji + digits/°/%, so callers insert it
-// WITHOUT esc().
-function tripsyWeatherBarShort(rec) {
+// the day bars. Content is only emoji + digits/°/%, so callers insert it
+// WITHOUT esc(). noBullet drops the "·" before the precip (used in Travel View,
+// where the extra width could push the day header onto a second line).
+function tripsyWeatherBarShort(rec, { noBullet } = {}) {
   if (!rec) return '';
   const [g] = tripsyWmo(rec.wcode);
-  return `<span class="tripsy-wx-glyph">${g}</span> ${Math.round(rec.hi)}°/${Math.round(rec.lo)}°${rec.precip != null ? ` · ${rec.precip}%` : ''}`;
+  const precip = rec.precip != null ? `${noBullet ? ' ' : ' · '}${rec.precip}% 💧` : '';
+  return `<span class="tripsy-wx-glyph">${g}</span> ${Math.round(rec.hi)}°/${Math.round(rec.lo)}°${precip}`;
 }
 // Plain-word description for print / PDF: "partly cloudy, high 72°, low 58°, 10% chance of precipitation, feels like 70°".
 function tripsyWeatherDescribe(rec) {
@@ -11498,9 +11500,10 @@ function ensureTripsyWeatherDialogStyles() {
     .tw-summary .tw-cond { font-weight:700; }
     .tw-note { font-size:12px; color:var(--muted); font-style:italic; margin:12px 0 0; }
     .tw-hours { margin-top:6px; max-height:360px; overflow-y:auto; }
-    .tw-hour { display:grid; grid-template-columns:52px 22px 1fr; gap:8px; align-items:baseline; padding:7px 4px; border-bottom:1px solid var(--line); }
+    .tw-hour { display:grid; grid-template-columns:52px 34px 1fr; gap:8px; align-items:center; padding:7px 4px; border-bottom:1px solid var(--line); }
     .tw-hour:last-child { border-bottom:none; }
     .tw-hour-t { color:var(--muted); font-family:var(--mono); font-size:12px; }
+    .tw-hour-glyph { font-size:26px; line-height:1; text-align:center; }
     .tw-hour-main { display:flex; flex-direction:column; gap:2px; min-width:0; }
     .tw-hour-l1 { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:baseline; }
     .tw-hour-temp { font-weight:600; color:var(--text); font-size:13px; }
@@ -11552,7 +11555,7 @@ async function tripsyShowWeatherDialog(city, country, dateKey) {
         precipTxt ? `<span class="tw-hour-precip">${precipTxt}${amtTxt}</span>` : ''].filter(Boolean).join('');
       const sub = [h.humidity != null ? `Humidity ${Math.round(h.humidity)}%` : '',
         h.cloud != null ? `Cloud ${Math.round(h.cloud)}%` : ''].filter(Boolean).join(' · ');
-      return `<div class="tw-hour"><span class="tw-hour-t">${esc(tripsyWeatherHourLabel(h.t))}</span><span>${hg}</span><div class="tw-hour-main"><div class="tw-hour-l1">${l1}</div>${sub ? `<div class="tw-hour-sub">${esc(sub)}</div>` : ''}</div></div>`;
+      return `<div class="tw-hour"><span class="tw-hour-t">${esc(tripsyWeatherHourLabel(h.t))}</span><span class="tw-hour-glyph">${hg}</span><div class="tw-hour-main"><div class="tw-hour-l1">${l1}</div>${sub ? `<div class="tw-hour-sub">${esc(sub)}</div>` : ''}</div></div>`;
     };
     hoursHtml = `<div class="tw-hours">${items.map(it => it.kind === 'marker' ? `<div class="tw-hour-marker">${esc(it.label)}</div>` : hourRow(it)).join('')}</div>`;
   } else if (!daily) {
@@ -11566,9 +11569,9 @@ async function tripsyShowWeatherDialog(city, country, dateKey) {
 // A small, tappable weather chip for a day bar: the compact glyph line, opening
 // the hourly dialog on click. city/country/dateKey are stamped as data-* so one
 // delegated listener per surface can handle the tap.
-function tripsyWeatherChipHtml(rec, city, country, dateKey, extraStyle) {
+function tripsyWeatherChipHtml(rec, city, country, dateKey, extraStyle, noBullet) {
   if (!rec) return '';
-  return `<span class="tripsy-wx-chip" role="button" tabindex="0" data-tripsy-wx-city="${esc(city)}" data-tripsy-wx-country="${esc(country || '')}" data-tripsy-wx-date="${esc(dateKey)}" title="Tap for hourly weather" style="cursor:pointer; white-space:nowrap;${extraStyle || ''}">${tripsyWeatherBarShort(rec)}</span>`;
+  return `<span class="tripsy-wx-chip" role="button" tabindex="0" data-tripsy-wx-city="${esc(city)}" data-tripsy-wx-country="${esc(country || '')}" data-tripsy-wx-date="${esc(dateKey)}" title="Tap for hourly weather" style="cursor:pointer; white-space:nowrap;${extraStyle || ''}">${tripsyWeatherBarShort(rec, { noBullet })}</span>`;
 }
 // One delegated, document-level listener (installed once) handles taps/keypresses
 // on any weather chip anywhere -- My Trips and Travel View both just render
@@ -21718,7 +21721,9 @@ async function renderTravelView(chosenTripKey) {
     if (!rec) return '';
     // Only-typical (no real forecast) days are boxed with a thin white outline.
     const box = rec.kind === 'typical' ? ' border:1px solid rgba(255,255,255,0.6); border-radius:5px; padding:2px 6px;' : '';
-    return tripsyWeatherChipHtml(rec, t.city, t.country, dayKey, `color:#c9b3ec; font-family:var(--mono); font-size:12.5px; font-weight:600;${box}`);
+    // Drop the bullet before precip here so the extra width doesn't wrap the
+    // single-line day header onto two lines.
+    return tripsyWeatherChipHtml(rec, t.city, t.country, dayKey, `color:#c9b3ec; font-family:var(--mono); font-size:12.5px; font-weight:600;${box}`, true);
   };
   tripsyEnsureWeatherChipHandler();
 
