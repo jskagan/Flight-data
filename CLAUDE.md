@@ -454,12 +454,13 @@ that catches drift between them.
   `getOrCreateTripsyAttireDefinitionsOverlay`, reached via the toolbar's Definitions button) — a full
   reference chart (`TRIPSY_ATTIRE_DRESS_CODE_CHART`, transcribed from an owner-provided "Master Dress
   Code Guide" PDF, White Tie/Business Formal/Business Casual rows dropped since they're not tiers
-  this app's own taxonomy uses) with a column each for Men's Suit/Jacket & Neckwear, Bottoms,
-  Footwear and Women's Style & Length, Fabric & Details, Footwear — wide enough that this page gets
-  its own modal (`#tripsy-attire-definitions-overlay`, max-width 1100px with its own
-  `overflow-x:auto` table wrapper) rather than reusing the generic small "detail" modal the category
-  drill-down below uses. Each row's own dress-code name renders with the exact same colored badge
-  style (`tripsyAttireBadgeStyle`) used everywhere else in Attire, keyed off that row's `category`
+  this app's own taxonomy uses) with a column each for Suit/Jacket & Neckwear, Bottoms, Footwear
+  (grouped under a centered "Men" super-header, soft blue column tint) and Style & Length, Fabric &
+  Details, Footwear (grouped under a centered "Women" super-header, soft pink column tint) — wide
+  enough that this page gets its own modal (`#tripsy-attire-definitions-overlay`, max-width 1100px
+  with its own `overflow-x:auto` table wrapper) rather than reusing the generic small "detail" modal
+  the category drill-down below uses. Each row's own dress-code name renders with the exact same
+  colored badge style (`tripsyAttireBadgeStyle`) used everywhere else in Attire, keyed off that row's `category`
   field so a future palette change to `TRIPSY_ATTIRE_CATEGORY_COLOR` is picked up here for free. The
   Daily Dress Guide (`renderTripsyAttireOverlayContent`'s `dailyDressGuideHtml`) states
   what to wear before the day's first event, lists every event as just its title and start–stop
@@ -513,7 +514,13 @@ that catches drift between them.
   that fresh element and bounce straight back to Attire the instant My Trips happened to redraw. If
   the locked-onto node disappears from the DOM entirely instead (that same kind of re-render, or the
   owner navigating elsewhere/collapsing the trip), the watcher stops silently without reopening
-  Attire — that's not "closing the event."
+  Attire — that's not "closing the event." A second, separate timing issue lives on the way IN
+  rather than the way back: right after `navigate('tripsytrips')` resolves, the target row's
+  `data-tripsy-view-event` trigger may not be in the DOM yet on a real trip page (photos, weather
+  chips, many events all rendering) — `tripsyAttireWaitForEventTrigger` polls (50ms, up to ~3s) for
+  it to appear instead of assuming a fixed delay is enough. A too-short fixed wait here looks exactly
+  like "click bounces straight back to Attire," but is a render-timing race, not the row genuinely
+  missing — this bit a real trip with enough events that a small mocked test never would.
 - **Owner-only manual category override, per event**: in the day-by-day table, each event's badge
   is itself a clickable trigger (`tripsyAttireEventBadgeHtml` — viewers get the same plain,
   non-interactive badge everywhere else in the guide instead) opening a 7-item dropdown
@@ -524,14 +531,34 @@ that catches drift between them.
   `blocks`/`counts` from scratch via `computeTripsyAttireBlocks` (so the itemized block lists and
   every Him/Her occasion count update immediately, and the event may re-chain into a different
   time-block entirely), and saves the guide. Deliberately does **not** re-run
-  `generateTripsyAttireCategories` or touch `personGuidance`/`essentials`/`calloutNote` — those are
+  `generateTripsyAttireCategories` or touch `personGuidance`/`essentials` — those are
   Claude's own judgment calls from the full trip context, not something one event's category swap
   can cheaply/correctly redo; only what's mechanically re-derivable from `(dayKey, category, gap)`
   actually updates. Picking the SAME category as already shown is a no-op (no save, no re-render).
+- **Genuinely ambiguous events show both candidate categories as a pickable pair**: alongside each
+  event's `category`, `generateTripsyAttireCategories` may also return a non-empty
+  `alternate_category` — reserved for real ambiguity (e.g. a private dinner that could honestly read
+  as either Semi-formal or Cocktail), not general uncertainty; most events leave it `''`. While an
+  event has an unresolved `alternateCategory` (`ev.categoryOverridden` still false),
+  `tripsyAttireEventBadgeHtml` renders BOTH badges side by side separated by "/" — each its own
+  button (`data-tripsy-attire-ambiguous-pick`) — instead of the usual single clickable badge.
+  Clicking either calls the exact same `tripsyAttireOverrideCategory` the manual dropdown override
+  uses, so picking one behaves identically to a manual override (`categoryOverridden: true`, sticky,
+  the split view never reappears for that event) — this is a second entry point into that one
+  mechanism, not a separate one. `.tripsy-attire-dressguide-event` is `flex-wrap: wrap` specifically
+  so this wider two-badge pair can drop to its own line rather than overflowing at narrower widths,
+  the same way the single-badge case already fit.
 - **Detailed Packing List, one per person, nested under the Packing Summary cards**: each Him/Her
   card's aggregate outfit counts (above) are complemented by a real itemized garment list — a
-  "View Detailed List" button opens `showTripsyAttirePackingListOverlay`, an overlay listing
-  `guide.packingList.{him,her}[]` (`{id, name, quantity, checked, eventIds}`). Seeded once from a
+  prominent amber/orange "View Detailed List" button (`.tripsy-attire-packinglist-btn`, the one CTA
+  each card wants to draw the eye to, deliberately styled apart from the plain outline buttons
+  elsewhere in Attire) opens `showTripsyAttirePackingListOverlay`, an overlay listing
+  `guide.packingList.{him,her}[]` (`{id, name, quantity, checked, eventIds}`). The button always
+  sits flush at the bottom of its card (`.tripsy-attire-person-card` is a flex column;
+  `.tripsy-attire-person-card-body` wraps the rows+essentials above it with `flex:1` so IT absorbs
+  the card's leftover height) — since the grid row already stretches both cards to equal height,
+  this keeps the Him and Her buttons aligned on the same horizontal line regardless of how long
+  either person's essentials list is. Seeded once from a
   new `packing_list` field on `generateTripsyAttireCategories`'s existing `person_guidance` schema
   (same call, no extra round trip) — the prompt asks for the same anchor-garment-plus-restyled-
   accessories logic worked out by hand this session (suits/dresses counted low and reused; a fresh
