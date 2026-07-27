@@ -17197,25 +17197,35 @@ function tripsyAttireScrollToEventRow(eventId) {
 // can close a view panel -- the row-toggle click, the panel's own Close
 // button, and tripsyCloseOpenViewPanels' outside-click handler) for the
 // specific event panel `eventKey` going from open ("view" mode) back to
-// closed, then fires `onClosed`. Deliberately waits to actually OBSERVE the
-// panel open first (`sawOpen`) before arming the close-detection, so it
-// can't fire immediately if polling starts a beat before the click handler
-// finishes opening it. If the panel disappears from the DOM entirely (the
-// owner navigated elsewhere, collapsed the trip, etc.) this stops silently
-// without calling back -- that's the owner choosing to leave, not "closing
-// the event", so Attire shouldn't pop back over whatever they navigated to.
+// closed, then fires `onClosed`. Locks onto the EXACT DOM node once it's
+// observed open, and only ever inspects that same node afterward -- rather
+// than re-querying the selector fresh on every tick -- because My Trips
+// can legitimately re-render its own timeline out from under an open panel
+// (a background sync landing, a periodic refresh; see CLAUDE.md's
+// "stale-while-revalidate" note on runBackgroundSyncs), which replaces the
+// panel element with a fresh, closed one that has nothing to do with the
+// owner actually closing anything. Re-querying by selector would find that
+// fresh element and misread the reset as a genuine close, bouncing straight
+// back to Attire the instant My Trips happened to redraw (the bug this
+// comment is here to prevent a regression of). If the locked-onto node
+// disappears from the DOM entirely instead -- because of exactly that kind
+// of re-render, or because the owner navigated elsewhere/collapsed the trip
+// -- this stops silently without calling back; Attire has no business
+// popping back over whatever the owner is looking at now.
 function tripsyAttireWatchEventPanelClose(eventKey, onClosed) {
-  let sawOpen = false;
+  let watchedPanel = null;
   let ticks = 0;
   const interval = setInterval(() => {
     ticks++;
-    const panel = document.querySelector(`[data-tripsy-edit-panel="${CSS.escape(eventKey)}"]`);
-    if (!panel || !document.body.contains(panel)) { clearInterval(interval); return; }
-    if (panel.dataset.mode === 'view') {
-      sawOpen = true;
-    } else if (sawOpen) {
+    if (!watchedPanel) {
+      const found = document.querySelector(`[data-tripsy-edit-panel="${CSS.escape(eventKey)}"]`);
+      if (found && found.dataset.mode === 'view') watchedPanel = found;
+    } else if (!document.body.contains(watchedPanel)) {
+      clearInterval(interval);
+    } else if (watchedPanel.dataset.mode !== 'view') {
       clearInterval(interval);
       onClosed();
+      return;
     }
     if (ticks > 1500) clearInterval(interval); // ~10 min safety cap at 400ms -- never watch forever
   }, 400);

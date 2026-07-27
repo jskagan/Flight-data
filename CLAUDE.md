@@ -490,9 +490,15 @@ that catches drift between them.
   attribute (waiting to actually observe it open before arming the close-detection) and fires a
   callback once it flips back off — which reopens Attire (`showTripsyAttireOverlay`) and scrolls to
   the same event row (`tripsyAttireScrollToEventRow`, same amber-flash convention as the existing
-  day-level `tripsyGoToTripDay`). If the panel node disappears from the DOM entirely instead (the
-  owner navigated elsewhere, collapsed the trip, etc.), the watcher stops silently without
-  reopening Attire — that's the owner choosing to leave, not "closing the event."
+  day-level `tripsyGoToTripDay`). Once armed, it locks onto that EXACT DOM node rather than
+  re-querying the selector on every tick, since My Trips can legitimately re-render its own timeline
+  out from under an open panel (a background sync landing mid-view — see `runBackgroundSyncs`'s
+  stale-while-revalidate note above), which replaces the panel element with a fresh, closed one that
+  has nothing to do with the owner actually closing anything; re-querying by selector would catch
+  that fresh element and bounce straight back to Attire the instant My Trips happened to redraw. If
+  the locked-onto node disappears from the DOM entirely instead (that same kind of re-render, or the
+  owner navigating elsewhere/collapsing the trip), the watcher stops silently without reopening
+  Attire — that's not "closing the event."
 - **Owner-only manual category override, per event**: in the day-by-day table, each event's badge
   is itself a clickable trigger (`tripsyAttireEventBadgeHtml` — viewers get the same plain,
   non-interactive badge everywhere else in the guide instead) opening a 7-item dropdown
