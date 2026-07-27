@@ -440,13 +440,20 @@ that catches drift between them.
   non-cryptographic fingerprint (`tripsyAttireFingerprint`) from the trip's current events and shows
   a non-blocking "may be out of date — Refresh" note if it no longer matches the saved one, since
   Attire is an informational summary rather than a row-by-row diff against an external document
-  where drift would actually matter. A "Definitions" button in the overlay's toolbar (available to
-  every viewer, not owner-gated) opens a second, higher-stacked modal
-  (`getOrCreateTripsyAttireDefinitionsOverlay`/`showTripsyAttireDefinitions`) listing what each of
-  the 7 tiers means — generated straight from `TRIPSY_ATTIRE_CATEGORY_DESCRIPTION`, the same lookup
-  `TRIPSY_ATTIRE_TAXONOMY_GUIDE` (the prompt text `generateTripsyAttireCategories` sends to Claude)
-  is itself derived from, so the definitions shown can never drift out of sync with what the model
-  was actually told.
+  where drift would actually matter. `renderTripsyAttireOverlayContent` lays out the report in a
+  fixed top-to-bottom order: a Dress Code Definitions table (`tripsyAttireDefinitionsTableHtml`,
+  inline, not a popup — generated straight from `TRIPSY_ATTIRE_CATEGORY_DESCRIPTION`, the same
+  lookup `TRIPSY_ATTIRE_TAXONOMY_GUIDE`/the prompt text is itself derived from, so it can never
+  drift out of sync with what Claude was actually told), then the trip-wide summary (itemized
+  blocks + Him/Her cards + callout), then the full day-by-day breakdown last — summary-first,
+  detail-last, since the day-by-day table is the longest part for a multi-week trip. Every Him/Her
+  category row is clickable (`data-tripsy-attire-category-link`, wired at the end of
+  `renderTripsyAttireOverlayContent`) and opens a small drill-down modal
+  (`getOrCreateTripsyAttireDetailOverlay`/`showTripsyAttireCategoryEvents`) listing the SPECIFIC
+  events behind that occasion count, oldest first (`tripsyAttireEventsForCategory`, a plain filter
+  over `guide.days` by category) — e.g. clicking "Formal" under Him shows only the Concert, not the
+  two Cocktail receptions that got folded into the same time-block around it. This is the same
+  generic small-modal shape reused for any future Attire drill-down, not one-off markup.
 - **A partial-itinerary PDF only compares the days it actually covers**: `compareTripsyItineraryPdf`
   determines the PDF's own date range from its day headings (`pdf_date_range`, part of the schema) —
   which can be narrower than the trip's real date range, e.g. a supplement covering just the middle
