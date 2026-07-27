@@ -14384,14 +14384,19 @@ ${JSON.stringify(currentEventsForPrompt)}`;
 }
 
 // Attire feature (My Trips -> Attire button, generateTripsyAttireGuide) --
-// asks Claude ONLY to assign a dress-code category (+ short outfit note) to
-// each event, and to write the trip-wide supporting-category blurbs/
-// essentials/callout. Deliberately does NOT ask Claude to chain events into
-// time-blocks (a formal reception -> dinner -> concert reading as one
-// evening, not three) -- that's a mechanical reduce over (date, category,
-// gap) once categories are known, so it's done afterward in plain JS
-// (computeTripsyAttireBlocks) instead, keeping the schema smaller and
-// avoiding any risk of the model getting grouping arithmetic wrong.
+// asks Claude to assign a dress-code category (+ short outfit note) to
+// each event, judge whether it continues directly from the previous one
+// with no realistic time to change (continues_previous_event -- a formal
+// reception -> dinner -> concert reading as one evening, not three, is a
+// judgment call about event titles/venues/timing together, not something a
+// fixed gap threshold alone can reliably tell apart from two unrelated
+// back-to-back bookings), and write the trip-wide supporting-category
+// blurbs/essentials/callout. Deliberately does NOT ask Claude to actually
+// CHAIN events into named time-blocks or count occasions itself -- once
+// every event has a category and a continues_previous_event judgment,
+// turning that into blocks/counts is a mechanical reduce
+// (computeTripsyAttireBlocks), done afterward in plain JS so it can never
+// get the grouping arithmetic wrong and the schema stays small.
 const TRIPSY_ATTIRE_TAXONOMY_GUIDE = TRIPSY_ATTIRE_CATEGORY_ORDER
   .map(category => `- ${category}: ${TRIPSY_ATTIRE_CATEGORY_DESCRIPTION[category]}`)
   .join('\n');
@@ -14428,8 +14433,9 @@ async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPro
             id: { type: 'string' },
             category: { type: 'string', enum: categoryEnum },
             note: { type: 'string' },
+            continues_previous_event: { type: 'boolean' },
           },
-          required: ['id', 'category', 'note'],
+          required: ['id', 'category', 'note', 'continues_previous_event'],
           additionalProperties: false,
         },
       },
@@ -14460,6 +14466,8 @@ ${TRIPSY_ATTIRE_TAXONOMY_GUIDE}
 For each event, weigh its venue/address, its own name/category, and the time of day -- and any explicit dress-code wording in the event's own name or notes (e.g. "Black Tie Gala", "Cocktail Reception") should drive the category directly. When two adjacent tiers are both plausible, prefer the LOWER (less formal) one unless there's a clear signal otherwise.
 
 note is short (under 20 words) outfit guidance for that specific event -- may reference the day's weather (a rain layer, a warm coat) when relevant, but weather must NEVER change which category you pick, only what you mention in the note.
+
+continues_previous_event is true if this event flows directly from the immediately preceding event ON THE SAME DAY with realistically no opportunity to return to lodging and change outfits -- judge this from the event titles/descriptions and the clock time together, not a fixed time gap: a "Pre-concert Reception" at 5pm followed by a "Concert" at 7pm followed by a "Post-concert Reception" at 9:30pm are obviously one continuous evening (same venue, sequential parts of one occasion) even though an hour or two separates each part -- all three after the first should be true. Two events that are just independently scheduled back-to-back with a real gap and no such connection (different venues, unrelated occasions) should be false even if the gap is short. Always false for the FIRST event of a day (nothing precedes it) and false whenever there's a genuine free block of time to go back and change.
 
 Return one events[] entry for EVERY event in the current-events list below, in the same order, with id copied VERBATIM -- never drop or invent one.
 
@@ -14564,33 +14572,45 @@ function tripsyAttireGapWithinThreeHours(prevEvent, ev) {
   return (prevEndMinutes == null || thisStartMinutes == null) ? true : (thisStartMinutes - prevEndMinutes) <= 180;
 }
 // Does `ev` belong in the same named TIME-BLOCK as `prevEvent`, for
-// occasion-COUNTING purposes (computeTripsyAttireBlocks) -- same day, a gap
-// of 3 hours or less, and either an exact category match or (for the 4
-// "plan around this" tiers only) both events itemized regardless of which
-// specific tier each is, since real evenings routinely mix adjacent
-// formality levels (a cocktail reception flowing into a formal concert)
-// without actually needing a change. NOTE: this is deliberately NOT the
-// same question as "does ev need a wardrobe change from prevEvent" -- see
-// tripsyAttireOutfitChangeNeeded below, used by the Daily Dress Guide
-// instead, since two SAME-category events far apart in time (e.g. a 10am
-// and a 7pm semi-formal event) are correctly counted as two separate
-// occasions here, but obviously never need an actual clothing change
-// between them just because time passed while wearing the same category.
+// occasion-COUNTING purposes (computeTripsyAttireBlocks) -- same day, and
+// EITHER Claude explicitly judged them continuous
+// (ev.continuesFromPrevious, set by generateTripsyAttireCategories's
+// continues_previous_event field -- title/timing judgment like "Pre-concert
+// Reception" -> "Concert" -> "Post-concert Reception" being obviously one
+// evening even across a couple of hours, which a fixed gap threshold alone
+// can't reliably tell apart from two unrelated back-to-back bookings), OR
+// the mechanical fallback: a gap of 3 hours or less AND either an exact
+// category match or (for the 4 "plan around this" tiers only) both events
+// itemized regardless of which specific tier each is. The mechanical
+// fallback matters for guides saved before continuesFromPrevious existed
+// (undefined there) and as a safety net if Claude's judgment is ever
+// missing. NOTE: this is deliberately NOT the same question as "does ev
+// need a wardrobe change from prevEvent" -- see tripsyAttireOutfitChangeNeeded
+// below, used by the Daily Dress Guide instead, since two SAME-category
+// events far apart in time (e.g. a 10am and a 7pm semi-formal event) are
+// correctly counted as two separate occasions here, but obviously never
+// need an actual clothing change between them just because time passed
+// while wearing the same category.
 function tripsyAttireContinuesPrevious(prevEvent, ev) {
+  if (!prevEvent || prevEvent.dayKey !== ev.dayKey) return false;
+  if (ev.continuesFromPrevious === true) return true;
   if (!tripsyAttireGapWithinThreeHours(prevEvent, ev)) return false;
   const isItemized = category => TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(category);
   return isItemized(ev.category) ? isItemized(prevEvent.category) : prevEvent.category === ev.category;
 }
 // Does `ev` require an actual wardrobe change from `prevEvent`, for the
-// Daily Dress Guide's "⇄ Change to…" markers? An IDENTICAL category never
-// needs a change, no matter how much time has passed (you don't change out
-// of casual clothes just because 6 hours went by) -- this is the one case
-// where this function's answer differs from tripsyAttireContinuesPrevious.
+// Daily Dress Guide's "⇄ Change to…" markers? No change is needed if
+// Claude explicitly judged them continuous (see tripsyAttireContinuesPrevious's
+// comment on continuesFromPrevious) or if the category is IDENTICAL, no
+// matter how much time has passed (you don't change out of casual clothes
+// just because 6 hours went by) -- this identical-category case is the one
+// place this function's answer differs from tripsyAttireContinuesPrevious.
 // A different category still needs no change if both are itemized tiers
 // close together in time (same reasoning/threshold as above: a quick
 // cocktail-to-formal transition shares one outfit).
 function tripsyAttireOutfitChangeNeeded(prevEvent, ev) {
   if (!prevEvent || prevEvent.dayKey !== ev.dayKey) return false; // no prior event today -- the "Start the day in" lead-in covers this case instead
+  if (ev.continuesFromPrevious === true) return false;
   if (prevEvent.category === ev.category) return false;
   const isItemized = category => TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(category);
   if (isItemized(ev.category) && isItemized(prevEvent.category) && tripsyAttireGapWithinThreeHours(prevEvent, ev)) return false;
@@ -14600,13 +14620,16 @@ function tripsyAttireOutfitChangeNeeded(prevEvent, ev) {
 // reception that flows into the (formal) concert and then a cocktail
 // post-concert reception all read as ONE evening, one outfit, not three
 // separate changes (see tripsyAttireContinuesPrevious for the exact
-// chaining rule). The block's overall category becomes whichever event in
-// it is the MOST formal (you dress for the most formal moment; that
-// outfit covers the less-formal parts around it). The 3 mix-and-match
-// tiers are just counted, never itemized into named blocks. Pure,
-// deterministic JS -- see generateTripsyAttireCategories's own comment for
-// why the category assignment (but not this chaining) is asked of Claude.
-// `days` must already be sorted by dayKey, each day's events already
+// chaining rule, which leans on Claude's own continuesFromPrevious
+// judgment first and a mechanical gap+category fallback second). The
+// block's overall category becomes whichever event in it is the MOST
+// formal (you dress for the most formal moment; that outfit covers the
+// less-formal parts around it). The 3 mix-and-match tiers are just
+// counted, never itemized into named blocks. This function itself is
+// pure, deterministic JS over already-decided per-event data -- see
+// generateTripsyAttireCategories's own comment for why the category
+// assignment is asked of Claude. `days` must already be sorted by dayKey,
+// each day's events already
 // sorted by start time (generateTripsyAttireGuide does this before
 // calling in).
 function computeTripsyAttireBlocks(days) {
@@ -17970,7 +17993,12 @@ async function generateTripsyAttireGuide(tripKey) {
   for (const day of days) {
     day.events = day.events.map(ev => {
       const match = categoryById.get(ev.id);
-      return { ...ev, category: (match && match.category) || 'casual', note: (match && match.note) || '' };
+      return {
+        ...ev,
+        category: (match && match.category) || 'casual',
+        note: (match && match.note) || '',
+        continuesFromPrevious: !!(match && match.continues_previous_event),
+      };
     });
   }
 

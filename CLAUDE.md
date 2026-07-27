@@ -415,17 +415,24 @@ that catches drift between them.
   (`generateTripsyAttireCategories`, `index.html:14312`, same `fetchAnthropicApiKeyFromDrive` +
   streamed-`json_schema` pattern as `compareTripsyItineraryPdf`, `model: 'claude-sonnet-5'`) that
   also writes a `person_guidance` object for two travelers ("him"/"her", both assumed to attend
-  every event) — but deliberately does **not** decide how events chain into outfit-worthy
-  "time-blocks" (a cocktail reception that flows into a formal concert and then another cocktail
-  reception is one evening, one outfit, not three separate changes — the block's category becomes
-  whichever event in it is most formal); that's a mechanical reduce over `(dayKey, category, gap)`
-  done afterward in plain JS (`computeTripsyAttireBlocks`, `index.html:14472`), so it can never get
-  the grouping arithmetic wrong and never needs a second API call to re-derive. Within the 4 "plan
-  around this" tiers (Black Tie/Formal/Cocktail/Semi-formal) a block chains across a CATEGORY
-  CHANGE too, not just an exact match, as long as the gap is short and same-day; the 3 "mix and
-  match" tiers (Athletic/Smart Casual/Casual) still only chain within an exact match, since those
-  are just counted (`counts{}`, now a flat block-count per ALL 7 tiers, shared between both
-  people), never itemized. Per person, `person_guidance.{him,her}.outfits{}` gives a SEPARATE
+  every event) and, per event, a `continues_previous_event` boolean — Claude's own judgment (from
+  the event titles/venues and the clock time together, not a fixed threshold) on whether this event
+  flows directly from the one before it with no realistic time to go back and change, e.g. a
+  "Pre-concert Reception" → "Concert" → "Post-concert Reception" reads as one continuous evening
+  even across a couple of hours between each part, the same way a noon reception flowing straight
+  into a 1pm concert does — plain arithmetic alone kept mis-splitting exactly these cases. Actually
+  deciding how events chain into outfit-worthy "time-blocks" from there is still **not** asked of
+  Claude — that's a mechanical reduce over each event's category + `continues_previous_event` done
+  afterward in plain JS (`computeTripsyAttireBlocks`/`tripsyAttireContinuesPrevious`,
+  `index.html:14472`/`14582`), so it can never get the grouping arithmetic wrong and never needs a
+  second API call to re-derive; `continues_previous_event: true` always wins outright, falling back
+  to a mechanical gap+category rule when it's `false` or (for a guide saved before this field
+  existed) simply absent. Within the 4 "plan around this" tiers (Black Tie/Formal/Cocktail/
+  Semi-formal) that fallback also chains across a plain CATEGORY CHANGE, not just an exact match, as
+  long as the gap is short and same-day; the 3 "mix and match" tiers (Athletic/Smart Casual/Casual)
+  still only chain within an exact match there, since those are just counted (`counts{}`, a flat
+  block-count per ALL 7 tiers, shared between both people), never itemized. Per person,
+  `person_guidance.{him,her}.outfits{}` gives a SEPARATE
   suggested outfit count per tier (deliberately not the same number as the block count — e.g. 7
   black-tie occasions can still often share 3-4 restyled outfits via accessories, which is Claude's
   judgment call, not JS's) plus that person's own `essentials[]`; the Attire overlay renders these
@@ -452,7 +459,8 @@ that catches drift between them.
   time (no address/note — this is a dressing schedule, not the itinerary, which is what the
   category drill-down and My Trips' own timeline are for), and inserts a "⇄ Change to…" marker
   right before any event that actually needs a DIFFERENT outfit from the one before it
-  (`tripsyAttireOutfitChangeNeeded`) across ALL 7 tiers, not just the 4 itemized ones, since "when
+  (`tripsyAttireOutfitChangeNeeded`, same `continues_previous_event`-first/gap+category-fallback
+  logic as the block-chaining above) across ALL 7 tiers, not just the 4 itemized ones, since "when
   do I need to change" is just as real a question for a casual→athletic transition as a
   semi-formal→cocktail one; a cocktail→formal→cocktail evening correctly shows only ONE change
   marker (into the block) since itemized tiers chain across a category change. This is deliberately
