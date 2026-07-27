@@ -404,6 +404,42 @@ that catches drift between them.
   the Update page itself (Accept/Add/Delete, and Modify Existing's jump into the real edit panel) are
   stamped `source: 'tripsy_update_page'` on the pending change they queue specifically so this check
   can tell those apart from an unrelated edit to the same event.
+- **Attire is a generated, saved packing guide, one Claude call per (re)generation**: a "👔 Attire"
+  button on each trip card (`index.html:19741` area, between Itinerary and Search) opens
+  `showTripsyAttireOverlay` (`index.html:16879`), which renders whatever's already saved
+  (`driveData.tripsyAttireGuides`, `Store.getTripsyAttireGuide`/`saveTripsyAttireGuide`/
+  `deleteTripsyAttireGuide`) or, for the owner, an empty state with a Generate button —
+  `generateTripsyAttireGuide` (`index.html:17450`). Every event on the trip gets assigned one of 7
+  dress-code tiers (Athletic / Casual / Smart Casual / Semi-formal / Cocktail / Formal / Black Tie,
+  `TRIPSY_ATTIRE_CATEGORY_COLOR`/`_LABEL`/`_ORDER`) by a single Claude call
+  (`generateTripsyAttireCategories`, `index.html:14312`, same `fetchAnthropicApiKeyFromDrive` +
+  streamed-`json_schema` pattern as `compareTripsyItineraryPdf`, `model: 'claude-sonnet-5'`) that
+  also writes the trip-wide supporting-category blurbs/essentials/callout — but deliberately does
+  **not** decide how events chain into outfit-worthy "time-blocks" (a reception that flows into a
+  dinner and then a concert is one formal evening, not three separate outfits); that's a mechanical
+  reduce over `(dayKey, category, gap)` done afterward in plain JS
+  (`computeTripsyAttireBlocks`, `index.html:14472` — breaks a block on a category change, a >3hr
+  gap, or any day boundary), so it can never get the grouping arithmetic wrong and never needs a
+  second API call to re-derive. Only the 4 "plan around this" tiers (Black Tie/Formal/Cocktail/
+  Semi-formal) get itemized into `blocks{}` with a date + one-line summary each; the 3 "mix and
+  match" tiers (Athletic/Smart Casual/Casual) are just counted (`counts{}`), since those pieces are
+  meant to repeat and recombine rather than needing a fresh outfit per occasion. Weather is fetched
+  live via the same Open-Meteo pipeline the day-bar chips already use
+  (`tripsyWeatherTargetsByDay`/`tripsyLoadWeather`/`tripsyGetWeather`) and folded into the prompt so
+  per-event notes can mention a rain layer or a warm coat, but it's never stored in the guide itself
+  (re-fetched fresh each generation, same cache as everywhere else) and it can never change which
+  category an event gets, only what its note says. Unlike `tripsyUpdatePages` above, a saved guide
+  never auto-invalidates on an unrelated edit — `showTripsyAttireOverlay` just recomputes a light,
+  non-cryptographic fingerprint (`tripsyAttireFingerprint`) from the trip's current events and shows
+  a non-blocking "may be out of date — Refresh" note if it no longer matches the saved one, since
+  Attire is an informational summary rather than a row-by-row diff against an external document
+  where drift would actually matter. A "Definitions" button in the overlay's toolbar (available to
+  every viewer, not owner-gated) opens a second, higher-stacked modal
+  (`getOrCreateTripsyAttireDefinitionsOverlay`/`showTripsyAttireDefinitions`) listing what each of
+  the 7 tiers means — generated straight from `TRIPSY_ATTIRE_CATEGORY_DESCRIPTION`, the same lookup
+  `TRIPSY_ATTIRE_TAXONOMY_GUIDE` (the prompt text `generateTripsyAttireCategories` sends to Claude)
+  is itself derived from, so the definitions shown can never drift out of sync with what the model
+  was actually told.
 - **A partial-itinerary PDF only compares the days it actually covers**: `compareTripsyItineraryPdf`
   determines the PDF's own date range from its day headings (`pdf_date_range`, part of the schema) —
   which can be narrower than the trip's real date range, e.g. a supplement covering just the middle
