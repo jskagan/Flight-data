@@ -440,20 +440,41 @@ that catches drift between them.
   non-cryptographic fingerprint (`tripsyAttireFingerprint`) from the trip's current events and shows
   a non-blocking "may be out of date — Refresh" note if it no longer matches the saved one, since
   Attire is an informational summary rather than a row-by-row diff against an external document
-  where drift would actually matter. `renderTripsyAttireOverlayContent` lays out the report in a
-  fixed top-to-bottom order: a Dress Code Definitions table (`tripsyAttireDefinitionsTableHtml`,
-  inline, not a popup — generated straight from `TRIPSY_ATTIRE_CATEGORY_DESCRIPTION`, the same
-  lookup `TRIPSY_ATTIRE_TAXONOMY_GUIDE`/the prompt text is itself derived from, so it can never
-  drift out of sync with what Claude was actually told), then the trip-wide summary (itemized
-  blocks + Him/Her cards + callout), then the full day-by-day breakdown last — summary-first,
-  detail-last, since the day-by-day table is the longest part for a multi-week trip. Every Him/Her
-  category row is clickable (`data-tripsy-attire-category-link`, wired at the end of
-  `renderTripsyAttireOverlayContent`) and opens a small drill-down modal
-  (`getOrCreateTripsyAttireDetailOverlay`/`showTripsyAttireCategoryEvents`) listing the SPECIFIC
-  events behind that occasion count, oldest first (`tripsyAttireEventsForCategory`, a plain filter
-  over `guide.days` by category) — e.g. clicking "Formal" under Him shows only the Concert, not the
-  two Cocktail receptions that got folded into the same time-block around it. This is the same
-  generic small-modal shape reused for any future Attire drill-down, not one-off markup.
+  where drift would actually matter. `renderTripsyAttireOverlayContent` lays out the main report
+  top-to-bottom as the Him/Her summary cards first, then a "Daily Dress Guide" — Dress Code
+  Definitions is its own page instead (`showTripsyAttireDefinitions`, reached via the toolbar's
+  Definitions button, reusing the same generic small-modal shape as the category drill-down below;
+  content from `tripsyAttireDefinitionsTableHtml`, generated straight from
+  `TRIPSY_ATTIRE_CATEGORY_DESCRIPTION`, the same lookup `TRIPSY_ATTIRE_TAXONOMY_GUIDE`/the prompt
+  text is itself derived from, so it can never drift out of sync with what Claude was actually
+  told). The Daily Dress Guide (`renderTripsyAttireOverlayContent`'s `dailyDressGuideHtml`) states
+  what to wear before the day's first event, lists every event in order, and inserts a "⇄ Change
+  to…" marker right before any event that doesn't continue the previous one's outfit — this uses
+  `tripsyAttireContinuesPrevious` (factored out of `computeTripsyAttireBlocks` so both share one
+  chaining rule) across ALL 7 tiers, not just the 4 itemized ones, since "when do I need to change"
+  is just as real a question for a casual→athletic transition as a semi-formal→cocktail one; a
+  cocktail→formal→cocktail evening correctly shows only ONE change marker (into the block) since
+  itemized tiers chain across a category change. Every Him/Her category row is clickable
+  (`data-tripsy-attire-category-link`, wired at the end of `renderTripsyAttireOverlayContent`) and
+  opens a small drill-down modal (`getOrCreateTripsyAttireDetailOverlay`/
+  `showTripsyAttireCategoryEvents`) listing the SPECIFIC events behind that occasion count, oldest
+  first (`tripsyAttireEventsForCategory`, a plain filter over `guide.days` by category) — e.g.
+  clicking "Formal" under Him shows only the Concert, not the two Cocktail receptions folded into
+  the same time-block around it.
+- **Owner-only manual category override, per event**: in the day-by-day table, each event's badge
+  is itself a clickable trigger (`tripsyAttireEventBadgeHtml` — viewers get the same plain,
+  non-interactive badge everywhere else in the guide instead) opening a 7-item dropdown
+  (`getOrCreateTripsyAttireCategoryMenu`, same `positionTripsyFixedMenu` anchoring every other
+  Tripsy dropdown uses) to reassign that one event's category by hand. Picking a genuinely
+  different category (`tripsyAttireOverrideCategory`) marks the event `categoryOverridden: true` —
+  shown as " (selected)" next to the badge, visible to viewers too, not just the owner — recomputes
+  `blocks`/`counts` from scratch via `computeTripsyAttireBlocks` (so the itemized block lists and
+  every Him/Her occasion count update immediately, and the event may re-chain into a different
+  time-block entirely), and saves the guide. Deliberately does **not** re-run
+  `generateTripsyAttireCategories` or touch `personGuidance`/`essentials`/`calloutNote` — those are
+  Claude's own judgment calls from the full trip context, not something one event's category swap
+  can cheaply/correctly redo; only what's mechanically re-derivable from `(dayKey, category, gap)`
+  actually updates. Picking the SAME category as already shown is a no-op (no save, no re-render).
 - **A partial-itinerary PDF only compares the days it actually covers**: `compareTripsyItineraryPdf`
   determines the PDF's own date range from its day headings (`pdf_date_range`, part of the schema) —
   which can be narrower than the trip's real date range, e.g. a supplement covering just the middle
