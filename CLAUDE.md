@@ -451,12 +451,17 @@ that catches drift between them.
   what to wear before the day's first event, lists every event as just its title and start–stop
   time (no address/note — this is a dressing schedule, not the itinerary, which is what the
   category drill-down and My Trips' own timeline are for), and inserts a "⇄ Change to…" marker
-  right before any event that doesn't continue the previous one's outfit — this uses
-  `tripsyAttireContinuesPrevious` (factored out of `computeTripsyAttireBlocks` so both share one
-  chaining rule) across ALL 7 tiers, not just the 4 itemized ones, since "when do I need to change"
-  is just as real a question for a casual→athletic transition as a semi-formal→cocktail one; a
-  cocktail→formal→cocktail evening correctly shows only ONE change marker (into the block) since
-  itemized tiers chain across a category change. Both the "Start the day in…" lead-in and every
+  right before any event that actually needs a DIFFERENT outfit from the one before it
+  (`tripsyAttireOutfitChangeNeeded`) across ALL 7 tiers, not just the 4 itemized ones, since "when
+  do I need to change" is just as real a question for a casual→athletic transition as a
+  semi-formal→cocktail one; a cocktail→formal→cocktail evening correctly shows only ONE change
+  marker (into the block) since itemized tiers chain across a category change. This is deliberately
+  a DIFFERENT question from `tripsyAttireContinuesPrevious` (which `computeTripsyAttireBlocks` uses
+  for the trip-wide summary's occasion COUNTS above) — an identical category never needs a change
+  no matter how much time passed (e.g. a casual morning walk and a casual dinner 6 hours later),
+  even though the same two events are correctly counted as two separate occasions elsewhere in the
+  guide; both functions share the same `tripsyAttireGapWithinThreeHours` timing check, just applied
+  under different rules. Both the "Start the day in…" lead-in and every
   "⇄ Change to…" marker share one highlighted style (`.tripsy-attire-dressguide-instruction`) so
   they read as instructions, not commentary. Each day's header is the exact same "day bar" (date +
   weather chip + Day N) My Trips' own timeline uses (`tripsyAttireDayBarHtml`, a deliberate copy of

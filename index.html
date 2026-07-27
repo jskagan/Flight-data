@@ -1124,6 +1124,12 @@
     padding: 5px 10px; background: rgba(227,164,56,0.12); border-radius: 6px; display: inline-block;
   }
   .tripsy-attire-dressguide-event { display: flex; gap: 14px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+  /* .tripsy-attire-col-time's shared width:78px (sized for a single time
+     like "9:00 AM") is too narrow for this row's "9:00 AM – 10:00 AM"
+     range and overflows into the title next to it -- let it size to its
+     own content here instead, while staying fixed-width in the other
+     places that class is used (e.g. the category drill-down's table). */
+  .tripsy-attire-dressguide-event .tripsy-attire-col-time { width: auto; flex-shrink: 0; }
   .tripsy-attire-dressguide-event-main { flex: 1; min-width: 0; font-weight: 600; }
   /* Jumps to this event's read-only detail view on My Trips
      (tripsyAttireGoToEvent) -- plain text otherwise, styled to read as a
@@ -14547,26 +14553,48 @@ function tripsyAttireMinutesOf(timeStr) {
   const parsed = tripsyParse12HourTime(timeStr);
   return parsed ? Number(parsed.hour) * 60 + Number(parsed.minute) : null;
 }
-// Does `ev` continue wearing the same outfit as `prevEvent` -- same day, a
-// gap of 3 hours or less, and either an exact category match or (for the 4
-// "plan around this" tiers only) both events itemized regardless of which
-// specific tier each is, since real evenings routinely mix adjacent
-// formality levels (a cocktail reception flowing into a formal concert)
-// without actually needing a change. Shared by computeTripsyAttireBlocks
-// (which groups the 4 itemized tiers into named, most-formal-wins blocks)
-// and the Daily Dress Guide (tripsyAttireDailyDressGuideHtml, which marks
-// a change point for ANY tier, itemized or not -- "when do I need to
-// change clothes today" applies just as much to a casual->athletic
-// transition as a semi-formal->cocktail one). Both `prevEvent`/`ev` need a
-// `.dayKey` alongside the usual category/startTime/endTime fields.
-function tripsyAttireContinuesPrevious(prevEvent, ev) {
+// Same day + a gap of 3 hours or less between prevEvent's end and ev's
+// start. Shared by tripsyAttireContinuesPrevious and
+// tripsyAttireOutfitChangeNeeded below, both of which need this exact
+// timing check but apply it under different rules.
+function tripsyAttireGapWithinThreeHours(prevEvent, ev) {
   if (!prevEvent || prevEvent.dayKey !== ev.dayKey) return false;
   const prevEndMinutes = tripsyAttireMinutesOf(prevEvent.endTime) ?? tripsyAttireMinutesOf(prevEvent.startTime);
   const thisStartMinutes = tripsyAttireMinutesOf(ev.startTime);
-  const gapOk = (prevEndMinutes == null || thisStartMinutes == null) ? true : (thisStartMinutes - prevEndMinutes) <= 180;
-  if (!gapOk) return false;
+  return (prevEndMinutes == null || thisStartMinutes == null) ? true : (thisStartMinutes - prevEndMinutes) <= 180;
+}
+// Does `ev` belong in the same named TIME-BLOCK as `prevEvent`, for
+// occasion-COUNTING purposes (computeTripsyAttireBlocks) -- same day, a gap
+// of 3 hours or less, and either an exact category match or (for the 4
+// "plan around this" tiers only) both events itemized regardless of which
+// specific tier each is, since real evenings routinely mix adjacent
+// formality levels (a cocktail reception flowing into a formal concert)
+// without actually needing a change. NOTE: this is deliberately NOT the
+// same question as "does ev need a wardrobe change from prevEvent" -- see
+// tripsyAttireOutfitChangeNeeded below, used by the Daily Dress Guide
+// instead, since two SAME-category events far apart in time (e.g. a 10am
+// and a 7pm semi-formal event) are correctly counted as two separate
+// occasions here, but obviously never need an actual clothing change
+// between them just because time passed while wearing the same category.
+function tripsyAttireContinuesPrevious(prevEvent, ev) {
+  if (!tripsyAttireGapWithinThreeHours(prevEvent, ev)) return false;
   const isItemized = category => TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(category);
   return isItemized(ev.category) ? isItemized(prevEvent.category) : prevEvent.category === ev.category;
+}
+// Does `ev` require an actual wardrobe change from `prevEvent`, for the
+// Daily Dress Guide's "⇄ Change to…" markers? An IDENTICAL category never
+// needs a change, no matter how much time has passed (you don't change out
+// of casual clothes just because 6 hours went by) -- this is the one case
+// where this function's answer differs from tripsyAttireContinuesPrevious.
+// A different category still needs no change if both are itemized tiers
+// close together in time (same reasoning/threshold as above: a quick
+// cocktail-to-formal transition shares one outfit).
+function tripsyAttireOutfitChangeNeeded(prevEvent, ev) {
+  if (!prevEvent || prevEvent.dayKey !== ev.dayKey) return false; // no prior event today -- the "Start the day in" lead-in covers this case instead
+  if (prevEvent.category === ev.category) return false;
+  const isItemized = category => TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(category);
+  if (isItemized(ev.category) && isItemized(prevEvent.category) && tripsyAttireGapWithinThreeHours(prevEvent, ev)) return false;
+  return true;
 }
 // Chains consecutive events into "time-blocks" -- a cocktail pre-concert
 // reception that flows into the (formal) concert and then a cocktail
@@ -17335,10 +17363,13 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
   // Daily Dress Guide: for each day, what to wear before the first event,
   // then every event (title + start-stop time only -- no address/note,
   // this is a dressing schedule, not the itinerary), with a change marker
-  // inserted right before any event that doesn't continue the previous
-  // one's outfit (see tripsyAttireContinuesPrevious -- this applies to ALL
-  // 7 tiers, not just the 4 itemized ones, since "when do I need to
-  // change" is just as real a question for a casual->athletic transition).
+  // inserted right before any event that actually needs a different
+  // outfit from the one before it (see tripsyAttireOutfitChangeNeeded --
+  // this applies to ALL 7 tiers, not just the 4 itemized ones, since "when
+  // do I need to change" is just as real a question for a casual->athletic
+  // transition; an identical category never triggers a marker no matter
+  // how much time passed, unlike the separate occasion-counting rule
+  // computeTripsyAttireBlocks uses for the trip-wide summary above).
   // Both the "Start the day in" lead-in and the "Change to" marker are
   // instructions, not commentary, so they share the same highlighted
   // treatment (.tripsy-attire-dressguide-instruction). Each event's own
@@ -17352,7 +17383,7 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
       const prev = i > 0 ? events[i - 1] : null;
       const leadIn = i === 0
         ? `<div class="tripsy-attire-dressguide-instruction">Start the day in ${tripsyAttireBadgeHtml(ev.category)}</div>`
-        : (!tripsyAttireContinuesPrevious(prev, ev)
+        : (tripsyAttireOutfitChangeNeeded(prev, ev)
           ? `<div class="tripsy-attire-dressguide-instruction">⇄ Change to ${tripsyAttireBadgeHtml(ev.category)} before ${ev.startTime ? esc(ev.startTime) : 'this event'} — ${esc(ev.name || '')}</div>`
           : '');
       const timeRange = ev.startTime && ev.endTime ? `${ev.startTime} – ${ev.endTime}` : (ev.startTime || '');
