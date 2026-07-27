@@ -1125,6 +1125,16 @@
   }
   .tripsy-attire-dressguide-event { display: flex; gap: 14px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
   .tripsy-attire-dressguide-event-main { flex: 1; min-width: 0; font-weight: 600; }
+  /* Jumps to this event's read-only detail view on My Trips
+     (tripsyAttireGoToEvent) -- plain text otherwise, styled to read as a
+     link only on hover so the guide doesn't look cluttered with underlines. */
+  .tripsy-attire-event-title-link {
+    background: none; border: none; padding: 0; margin: 0; cursor: pointer;
+    font: inherit; font-weight: inherit; color: var(--text); text-align: left;
+  }
+  .tripsy-attire-event-title-link:hover, .tripsy-attire-event-title-link:focus-visible {
+    text-decoration: underline; outline: none;
+  }
   .tripsy-attire-dressguide-badge { flex-shrink: 0; }
 
   /* Generic small modal reused for any Attire drill-down (currently: the
@@ -17141,6 +17151,81 @@ function showTripsyAttireCategoryEvents(guide, category) {
   overlay.style.display = 'flex';
 }
 let tripsyAttireOverlayTripKey = null;
+// Scrolls the Daily Dress Guide back to one event row (after returning from
+// My Trips, see tripsyAttireGoToEvent) and briefly flashes an amber
+// outline -- same convention tripsyGoToTripDay already uses for its own
+// day-bar scroll-to.
+function tripsyAttireScrollToEventRow(eventId) {
+  const content = document.getElementById('tripsy-attire-content');
+  const row = content && content.querySelector(`[data-tripsy-attire-event-row="${CSS.escape(eventId)}"]`);
+  if (!row) return;
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const prev = row.style.boxShadow;
+  row.style.transition = 'box-shadow 0.2s ease';
+  row.style.boxShadow = '0 0 0 2px var(--amber)';
+  setTimeout(() => { row.style.boxShadow = prev; }, 1500);
+}
+// Polls (rather than patching the 3 separate places the My Trips timeline
+// can close a view panel -- the row-toggle click, the panel's own Close
+// button, and tripsyCloseOpenViewPanels' outside-click handler) for the
+// specific event panel `eventKey` going from open ("view" mode) back to
+// closed, then fires `onClosed`. Deliberately waits to actually OBSERVE the
+// panel open first (`sawOpen`) before arming the close-detection, so it
+// can't fire immediately if polling starts a beat before the click handler
+// finishes opening it. If the panel disappears from the DOM entirely (the
+// owner navigated elsewhere, collapsed the trip, etc.) this stops silently
+// without calling back -- that's the owner choosing to leave, not "closing
+// the event", so Attire shouldn't pop back over whatever they navigated to.
+function tripsyAttireWatchEventPanelClose(eventKey, onClosed) {
+  let sawOpen = false;
+  let ticks = 0;
+  const interval = setInterval(() => {
+    ticks++;
+    const panel = document.querySelector(`[data-tripsy-edit-panel="${CSS.escape(eventKey)}"]`);
+    if (!panel || !document.body.contains(panel)) { clearInterval(interval); return; }
+    if (panel.dataset.mode === 'view') {
+      sawOpen = true;
+    } else if (sawOpen) {
+      clearInterval(interval);
+      onClosed();
+    }
+    if (ticks > 1500) clearInterval(interval); // ~10 min safety cap at 400ms -- never watch forever
+  }, 400);
+}
+// Jumps from an Attire Daily Dress Guide event title to that same event's
+// read-only detail view on My Trips (hiding, not destroying, the Attire
+// overlay so reopening it is cheap), and once the owner closes that detail
+// view -- by any of the 3 paths tripsyAttireWatchEventPanelClose covers --
+// returns to Attire scrolled back to the same row. attireEventId is the
+// Attire guide's own event id, which for a split multi-day event
+// (expandMultiDayTripsyEvents) carries a "-checkin"/"-checkout"/"-begin"/
+// "-end" suffix the My Trips timeline's own data-tripsy-view-event
+// attribute does NOT use (that panel is shared by both halves) -- stripped
+// here to recover the base key.
+async function tripsyAttireGoToEvent(tripKey, attireEventId) {
+  const overlay = getOrCreateTripsyAttireOverlay();
+  overlay.style.display = 'none';
+  const baseEventKey = attireEventId.replace(/-(checkin|checkout|begin|end)$/, '');
+  setTripsyTripCollapsed(tripKey, false);
+  if (currentView !== 'tripsytrips') await navigate('tripsytrips');
+  else await renderTripsyTrips();
+  setTimeout(() => {
+    const trigger = document.querySelector(`[data-tripsy-view-event="${CSS.escape(baseEventKey)}"]`);
+    if (!trigger) {
+      // Couldn't find it on My Trips (deleted/hidden since the guide was
+      // generated, etc.) -- come straight back rather than stranding the
+      // owner on an otherwise-unrelated My Trips page.
+      showTripsyAttireOverlay(tripKey);
+      return;
+    }
+    trigger.click();
+    trigger.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    tripsyAttireWatchEventPanelClose(baseEventKey, async () => {
+      await showTripsyAttireOverlay(tripKey);
+      tripsyAttireScrollToEventRow(attireEventId);
+    });
+  }, 60);
+}
 // Opens the overlay for a trip and renders whatever's saved -- or an empty
 // state (owner: an inline Generate button; viewer: plain text, since only
 // the owner's account can reach the Anthropic key needed to generate one).
@@ -17273,9 +17358,11 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
       const timeRange = ev.startTime && ev.endTime ? `${ev.startTime} – ${ev.endTime}` : (ev.startTime || '');
       return `
         ${leadIn}
-        <div class="tripsy-attire-dressguide-event">
+        <div class="tripsy-attire-dressguide-event" data-tripsy-attire-event-row="${esc(ev.id)}">
           <div class="tripsy-attire-col-time">${esc(timeRange)}</div>
-          <div class="tripsy-attire-dressguide-event-main">${esc(ev.name || '')}</div>
+          <div class="tripsy-attire-dressguide-event-main">
+            <button type="button" class="tripsy-attire-event-title-link" data-tripsy-attire-goto-event data-trip-key="${esc(guide.tripKey)}" data-event-id="${esc(ev.id)}">${esc(ev.name || '')}</button>
+          </div>
           <div class="tripsy-attire-dressguide-badge">${tripsyAttireEventBadgeHtml(day.dayKey, ev)}</div>
         </div>
       `;
@@ -17355,6 +17442,15 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       tripsyAttireOpenCategoryMenu(btn, guide, renderOpts);
+    });
+  });
+  // Available to every viewer (not owner-gated) -- jumping to the read-only
+  // event detail view on My Trips needs no write access, same as any
+  // viewer already being able to open it directly from there.
+  content.querySelectorAll('[data-tripsy-attire-goto-event]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      tripsyAttireGoToEvent(btn.dataset.tripKey, btn.dataset.eventId);
     });
   });
 }

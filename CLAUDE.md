@@ -472,6 +472,22 @@ that catches drift between them.
   first (`tripsyAttireEventsForCategory`, a plain filter over `guide.days` by category) — e.g.
   clicking "Formal" under Him shows only the Concert, not the two Cocktail receptions folded into
   the same time-block around it.
+- **An event's title jumps to its own read-only detail view on My Trips, and back again**
+  (`tripsyAttireGoToEvent`, available to every viewer, not owner-gated — viewing that detail panel
+  on My Trips needs no write access either): hides (not destroys) the Attire overlay, navigates to
+  `tripsytrips`, strips the Attire guide's own `-checkin`/`-checkout`/`-begin`/`-end` suffix (from
+  `expandMultiDayTripsyEvents`) back to the base `tripsyEventKey` the timeline's
+  `data-tripsy-view-event`/`data-tripsy-edit-panel` are keyed by (that panel is shared by both
+  halves of a split multi-day event), then clicks that event's own row to open it. There are 3
+  separate places the My Trips timeline can close that panel (the row-toggle click, the panel's own
+  Close button, `tripsyCloseOpenViewPanels`' outside-click handler) with no shared choke point, so
+  rather than patching all 3, `tripsyAttireWatchEventPanelClose` polls the panel's `data-mode`
+  attribute (waiting to actually observe it open before arming the close-detection) and fires a
+  callback once it flips back off — which reopens Attire (`showTripsyAttireOverlay`) and scrolls to
+  the same event row (`tripsyAttireScrollToEventRow`, same amber-flash convention as the existing
+  day-level `tripsyGoToTripDay`). If the panel node disappears from the DOM entirely instead (the
+  owner navigated elsewhere, collapsed the trip, etc.), the watcher stops silently without
+  reopening Attire — that's the owner choosing to leave, not "closing the event."
 - **Owner-only manual category override, per event**: in the day-by-day table, each event's badge
   is itself a clickable trigger (`tripsyAttireEventBadgeHtml` — viewers get the same plain,
   non-interactive badge everywhere else in the guide instead) opening a 7-item dropdown
