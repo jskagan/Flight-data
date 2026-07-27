@@ -414,16 +414,23 @@ that catches drift between them.
   `TRIPSY_ATTIRE_CATEGORY_COLOR`/`_LABEL`/`_ORDER`) by a single Claude call
   (`generateTripsyAttireCategories`, `index.html:14312`, same `fetchAnthropicApiKeyFromDrive` +
   streamed-`json_schema` pattern as `compareTripsyItineraryPdf`, `model: 'claude-sonnet-5'`) that
-  also writes the trip-wide supporting-category blurbs/essentials/callout — but deliberately does
-  **not** decide how events chain into outfit-worthy "time-blocks" (a reception that flows into a
-  dinner and then a concert is one formal evening, not three separate outfits); that's a mechanical
-  reduce over `(dayKey, category, gap)` done afterward in plain JS
-  (`computeTripsyAttireBlocks`, `index.html:14472` — breaks a block on a category change, a >3hr
-  gap, or any day boundary), so it can never get the grouping arithmetic wrong and never needs a
-  second API call to re-derive. Only the 4 "plan around this" tiers (Black Tie/Formal/Cocktail/
-  Semi-formal) get itemized into `blocks{}` with a date + one-line summary each; the 3 "mix and
-  match" tiers (Athletic/Smart Casual/Casual) are just counted (`counts{}`), since those pieces are
-  meant to repeat and recombine rather than needing a fresh outfit per occasion. Weather is fetched
+  also writes a `person_guidance` object for two travelers ("him"/"her", both assumed to attend
+  every event) — but deliberately does **not** decide how events chain into outfit-worthy
+  "time-blocks" (a cocktail reception that flows into a formal concert and then another cocktail
+  reception is one evening, one outfit, not three separate changes — the block's category becomes
+  whichever event in it is most formal); that's a mechanical reduce over `(dayKey, category, gap)`
+  done afterward in plain JS (`computeTripsyAttireBlocks`, `index.html:14472`), so it can never get
+  the grouping arithmetic wrong and never needs a second API call to re-derive. Within the 4 "plan
+  around this" tiers (Black Tie/Formal/Cocktail/Semi-formal) a block chains across a CATEGORY
+  CHANGE too, not just an exact match, as long as the gap is short and same-day; the 3 "mix and
+  match" tiers (Athletic/Smart Casual/Casual) still only chain within an exact match, since those
+  are just counted (`counts{}`, now a flat block-count per ALL 7 tiers, shared between both
+  people), never itemized. Per person, `person_guidance.{him,her}.outfits{}` gives a SEPARATE
+  suggested outfit count per tier (deliberately not the same number as the block count — e.g. 7
+  black-tie occasions can still often share 3-4 restyled outfits via accessories, which is Claude's
+  judgment call, not JS's) plus that person's own `essentials[]`; the Attire overlay renders these
+  as two "Him"/"Her" cards in the trip-wide summary, each row showing the shared occasion count
+  alongside that person's outfit suggestion. Weather is fetched
   live via the same Open-Meteo pipeline the day-bar chips already use
   (`tripsyWeatherTargetsByDay`/`tripsyLoadWeather`/`tripsyGetWeather`) and folded into the prompt so
   per-event notes can mention a rain layer or a warm coat, but it's never stored in the guide itself
