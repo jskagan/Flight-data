@@ -448,13 +448,24 @@ that catches drift between them.
   `TRIPSY_ATTIRE_CATEGORY_DESCRIPTION`, the same lookup `TRIPSY_ATTIRE_TAXONOMY_GUIDE`/the prompt
   text is itself derived from, so it can never drift out of sync with what Claude was actually
   told). The Daily Dress Guide (`renderTripsyAttireOverlayContent`'s `dailyDressGuideHtml`) states
-  what to wear before the day's first event, lists every event in order, and inserts a "⇄ Change
-  to…" marker right before any event that doesn't continue the previous one's outfit — this uses
+  what to wear before the day's first event, lists every event as just its title and start–stop
+  time (no address/note — this is a dressing schedule, not the itinerary, which is what the
+  category drill-down and My Trips' own timeline are for), and inserts a "⇄ Change to…" marker
+  right before any event that doesn't continue the previous one's outfit — this uses
   `tripsyAttireContinuesPrevious` (factored out of `computeTripsyAttireBlocks` so both share one
   chaining rule) across ALL 7 tiers, not just the 4 itemized ones, since "when do I need to change"
   is just as real a question for a casual→athletic transition as a semi-formal→cocktail one; a
   cocktail→formal→cocktail evening correctly shows only ONE change marker (into the block) since
-  itemized tiers chain across a category change. Every Him/Her category row is clickable
+  itemized tiers chain across a category change. Both the "Start the day in…" lead-in and every
+  "⇄ Change to…" marker share one highlighted style (`.tripsy-attire-dressguide-instruction`) so
+  they read as instructions, not commentary. Each day's header is the exact same "day bar" (date +
+  weather chip + Day N) My Trips' own timeline uses (`tripsyAttireDayBarHtml`, a deliberate copy of
+  `renderTripsyEventsListImpl`'s `dayHeaderHtml` closure rather than a shared extraction, since the
+  original captures several My-Trips-only locals) — weather is fetched fresh at render time
+  (`tripsyAttireLoadWeatherBar`, the same `tripsyWeatherTargetsByDay`/`tripsyLoadWeather` pipeline
+  the generation prompt itself uses for weather, never stored in the guide) and threaded through
+  every re-render, including after a category override, so it's never refetched needlessly. Every
+  Him/Her category row is clickable
   (`data-tripsy-attire-category-link`, wired at the end of `renderTripsyAttireOverlayContent`) and
   opens a small drill-down modal (`getOrCreateTripsyAttireDetailOverlay`/
   `showTripsyAttireCategoryEvents`) listing the SPECIFIC events behind that occasion count, oldest
