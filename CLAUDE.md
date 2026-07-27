@@ -436,8 +436,9 @@ that catches drift between them.
   suggested outfit count per tier (deliberately not the same number as the block count — e.g. 7
   black-tie occasions can still often share 3-4 restyled outfits via accessories, which is Claude's
   judgment call, not JS's) plus that person's own `essentials[]`; the Attire overlay renders these
-  as two "Him"/"Her" cards in the trip-wide summary, each row showing the shared occasion count
-  alongside that person's outfit suggestion. Weather is fetched
+  as two "Him"/"Her" cards in the Packing Summary, each row showing just the category name and that
+  person's outfit suggestion (the underlying occasion count still drives `guide.counts` and the
+  category drill-down, but isn't displayed on the row itself). Weather is fetched
   live via the same Open-Meteo pipeline the day-bar chips already use
   (`tripsyWeatherTargetsByDay`/`tripsyLoadWeather`/`tripsyGetWeather`) and folded into the prompt so
   per-event notes can mention a rain layer or a warm coat, but it's never stored in the guide itself
@@ -448,13 +449,19 @@ that catches drift between them.
   a non-blocking "may be out of date — Refresh" note if it no longer matches the saved one, since
   Attire is an informational summary rather than a row-by-row diff against an external document
   where drift would actually matter. `renderTripsyAttireOverlayContent` lays out the main report
-  top-to-bottom as the Him/Her summary cards first, then a "Daily Dress Guide" — Dress Code
-  Definitions is its own page instead (`showTripsyAttireDefinitions`, reached via the toolbar's
-  Definitions button, reusing the same generic small-modal shape as the category drill-down below;
-  content from `tripsyAttireDefinitionsTableHtml`, generated straight from
-  `TRIPSY_ATTIRE_CATEGORY_DESCRIPTION`, the same lookup `TRIPSY_ATTIRE_TAXONOMY_GUIDE`/the prompt
-  text is itself derived from, so it can never drift out of sync with what Claude was actually
-  told). The Daily Dress Guide (`renderTripsyAttireOverlayContent`'s `dailyDressGuideHtml`) states
+  top-to-bottom as the Him/Her "Packing Summary" cards first, then a "Daily Dress Guide". Dress Code
+  Definitions is its own page instead (`showTripsyAttireDefinitions`/
+  `getOrCreateTripsyAttireDefinitionsOverlay`, reached via the toolbar's Definitions button) — a full
+  reference chart (`TRIPSY_ATTIRE_DRESS_CODE_CHART`, transcribed from an owner-provided "Master Dress
+  Code Guide" PDF, White Tie/Business Formal/Business Casual rows dropped since they're not tiers
+  this app's own taxonomy uses) with a column each for Men's Suit/Jacket & Neckwear, Bottoms,
+  Footwear and Women's Style & Length, Fabric & Details, Footwear — wide enough that this page gets
+  its own modal (`#tripsy-attire-definitions-overlay`, max-width 1100px with its own
+  `overflow-x:auto` table wrapper) rather than reusing the generic small "detail" modal the category
+  drill-down below uses. Each row's own dress-code name renders with the exact same colored badge
+  style (`tripsyAttireBadgeStyle`) used everywhere else in Attire, keyed off that row's `category`
+  field so a future palette change to `TRIPSY_ATTIRE_CATEGORY_COLOR` is picked up here for free. The
+  Daily Dress Guide (`renderTripsyAttireOverlayContent`'s `dailyDressGuideHtml`) states
   what to wear before the day's first event, lists every event as just its title and start–stop
   time (no address/note — this is a dressing schedule, not the itinerary, which is what the
   category drill-down and My Trips' own timeline are for), and inserts a "⇄ Change to…" marker
@@ -521,6 +528,40 @@ that catches drift between them.
   Claude's own judgment calls from the full trip context, not something one event's category swap
   can cheaply/correctly redo; only what's mechanically re-derivable from `(dayKey, category, gap)`
   actually updates. Picking the SAME category as already shown is a no-op (no save, no re-render).
+- **Detailed Packing List, one per person, nested under the Packing Summary cards**: each Him/Her
+  card's aggregate outfit counts (above) are complemented by a real itemized garment list — a
+  "View Detailed List" button opens `showTripsyAttirePackingListOverlay`, an overlay listing
+  `guide.packingList.{him,her}[]` (`{id, name, quantity, checked, eventIds}`). Seeded once from a
+  new `packing_list` field on `generateTripsyAttireCategories`'s existing `person_guidance` schema
+  (same call, no extra round trip) — the prompt asks for the same anchor-garment-plus-restyled-
+  accessories logic worked out by hand this session (suits/dresses counted low and reused; a fresh
+  dress shirt *and* a different tie per formal night for him, since a shirt worn a full evening
+  isn't practical to re-wear but the suit/tie are; different jewelry/scarves for her; casual basics
+  sized for realistic once-a-week laundry rotation, not one item per day), plus an `event_ids` per
+  item where it reasonably maps to specific occasions. **A Refresh never touches an existing
+  `packingList`** — `generateTripsyAttireGuide` fetches the previously-saved guide first and, if it
+  already has a non-empty `packingList`, carries it over untouched into the freshly-regenerated
+  guide instead of reseeding from Claude's new output; only a first generation (or a guide from
+  before this field existed) seeds it. This is the same "owner's edits are sticky, no
+  auto-invalidation" philosophy as the category-override bullet above, just for a second kind of
+  edit. Every mutation (check/uncheck, rename, requantify, delete, add) is owner-gated exactly like
+  the rest of Attire (viewers see the same list read-only — checkboxes disabled, no Add/Edit/Delete
+  — never fully hidden, since seeing what's packed needs no write access) and persists straight to
+  `driveData` via the same `Store.saveTripsyAttireGuide`, since checked-state is real shared trip
+  data, not a personal display preference (unlike `isTripsyTripCollapsed`/`tripsyUpdateShowMatches`,
+  which are deliberately `localStorage`/session-only specifically because a non-owner viewer has no
+  Drive write access to persist anything into the shared file at all). Clicking an item's name opens
+  a small popup listing exactly which event(s) it's linked to (date/time/name, resolved against
+  `guide.days`), each clickable to jump to that event on My Trips via the same
+  `tripsyAttireGoToEvent` the Daily Dress Guide's own event titles already use — hiding the popup
+  and the packing-list overlay first so nothing is left stacked on top of My Trips underneath.
+  Adding a new item prompts "Link to specific events?"; accepting opens a checkbox picker over every
+  event on the trip (grouped by day, `guide.days`), pre-checked from the item's current `eventIds` —
+  the same picker an existing item's own "Link to Events…" button reopens to change its links later.
+  Both the event-link picker and the linked-events popup share one generic small overlay
+  (`getOrCreateTripsyAttirePackingPopupOverlay`) since neither is ever open at the same time as the
+  other — the same "one generic modal, several drill-downs" precedent
+  `getOrCreateTripsyAttireDetailOverlay` already established for the category drill-down.
 - **A partial-itinerary PDF only compares the days it actually covers**: `compareTripsyItineraryPdf`
   determines the PDF's own date range from its day headings (`pdf_date_range`, part of the schema) —
   which can be narrower than the trip's real date range, e.g. a supplement covering just the middle
