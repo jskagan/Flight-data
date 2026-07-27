@@ -12579,6 +12579,15 @@ let tripsyPlacePhotoCacheDirty = false;
 // last left, with nothing regenerated or swapped. Manual search / gallery /
 // "try another" fetch through their own paths, so they're unaffected.
 let _tripsyAllowPhotoFetch = false;
+// Session-only cache of the full built itinerary HTML, keyed by tripKey and
+// gated on a content fingerprint (tripsyItineraryFingerprint) -- lets
+// previewTripsyItinerary reuse an already-built itinerary verbatim when
+// nothing that affects it changed, so a no-change reopen is instant. Never
+// persisted: the built HTML embeds blob: object URLs (tripsyPhotoObjectUrlCache)
+// that are only valid for this page load. Any real change (event edit,
+// narrative generate/approve, photo change/skip, weather >=6h) flips the
+// fingerprint, so there's no manual invalidation to keep in sync.
+const tripsyBuiltItineraryCache = new Map(); // tripKey -> { html, fingerprint }
 async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
   const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle, locationHint);
   if (cacheKey === '|||') return null;
@@ -14062,6 +14071,54 @@ function tripsyItineraryBaselineFromEvents(events) {
   for (const ev of events) fp[tripsyItineraryEventKey(ev)] = tripsyItineraryEventFingerprint(ev);
   return { fp, recordedAt: new Date().toISOString() };
 }
+// A single fingerprint over everything buildTripsyPrintHtml's output depends
+// on, so previewTripsyItinerary can reuse a cached build when it hasn't
+// changed (tripsyBuiltItineraryCache). Any real change flips this string;
+// there is no manual invalidation. Reuses the same event/effective-trip
+// helpers buildTripsyPrintDayData does, so it stays in step with what the
+// builder actually reads.
+async function tripsyItineraryFingerprint(tripKey) {
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return null;
+  const pendingChanges = isOwner ? await Store.listTripsyPendingChanges() : [];
+  const effTrip = getEffectiveTripsyTrip(trip, pendingChanges);
+  // Effective + visible events plus pending creates (same list the baseline
+  // and change-tracker use), each reduced to its content fingerprint.
+  const events = await tripsyItineraryEventList(trip);
+  const eventsFp = events.map(ev => [tripsyItineraryEventKey(ev), tripsyItineraryEventFingerprint(ev)]);
+  // Only this trip's narrative entries (intro / day / summary / eventblurb /
+  // baseline), so another trip's narrative edit doesn't invalidate this one.
+  const narr = await Store.getTripsyNarrativeCache();
+  const narrFp = Object.keys(narr)
+    .filter(k => k.startsWith(`${tripKey}::`))
+    .sort()
+    .map(k => {
+      const e = narr[k] || {};
+      return [k, e.generatedAt || '', !!e.approved, tripsyContentFingerprint(e.content || null)];
+    });
+  // Whole photo-cache state reduced to what actually shows on a card
+  // (which Drive file, or skipped). Over-invalidates across trips, which is
+  // fine -- a rebuild is cheap now that photos are memoized and never
+  // re-hashed on open.
+  const photoCache = driveData.tripsyPlacePhotoCache || {};
+  const photosFp = Object.keys(photoCache)
+    .sort()
+    .map(k => [k, (photoCache[k] && photoCache[k].driveFileId) || '', !!(photoCache[k] && photoCache[k].skipped)]);
+  return tripsyContentFingerprint({
+    trip: { name: effTrip.name || '', start: effTrip.start || '', end: effTrip.end || '', location: effTrip.location || '' },
+    events: eventsFp,
+    narrative: narrFp,
+    photos: photosFp,
+    isOwner,
+    snapshot: TRIPSY_SNAPSHOT_GENERATED_AT,
+    // Part 1's summary splices in matched P/S reservations, so a landed P/S
+    // sync should invalidate.
+    reservationsSync: (driveData.syncTimestamps || {}).reservations || '',
+    // 6h bucket matching the weather TTL, so weather still refreshes at least
+    // every 6h without any manual invalidation call.
+    weatherBucket: Math.floor(Date.now() / (6 * 60 * 60 * 1000)),
+  });
+}
 // Reset the baseline to exactly the current itinerary events -- the "acknowledge
 // current state" step. Owner-only (only the owner can write driveData).
 async function tripsyRecordItineraryBaseline(trip) {
@@ -15344,50 +15401,18 @@ async function buildTripsyPrintHtml(tripKey) {
     const cacheKey = tripsyPlacePhotoCacheKey(name, address, ev.summary, locationHint);
     const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
     const isSkipped = !!(cachedEntry && cachedEntry.skipped);
-    let photoDataUrl = isSkipped ? null : await fetchTripsyPlacePhoto(name, address, ev.summary, locationHint);
-    const freshEntry = isSkipped ? null : await Store.getTripsyPlacePhoto(cacheKey);
-    let photoName = freshEntry?.photoName || null;
-    let photoHash = freshEntry?.contentHash || null;
-    // Entry predates contentHash being stored (or somehow missed it) --
-    // compute and backfill it now so this and every future print/preview
-    // can dedup by content, not just by the unreliable name token.
-    if (photoDataUrl && !photoHash) {
-      try {
-        const blob = await fetch(photoDataUrl).then(r => r.blob());
-        photoHash = await tripsyHashBlob(blob);
-        if (freshEntry) {
-          Store.cacheTripsyPlacePhotoLocal(cacheKey, { ...freshEntry, contentHash: photoHash });
-          tripsyPlacePhotoCacheDirty = true;
-        }
-      } catch (e) {
-        console.error('tripsyPlaceCardHtml: failed to hash photo for dedup:', e);
-      }
-    }
-    const isDuplicate = photoDataUrl && (
-      (photoName && usedPlacePhotoNames.has(photoName)) ||
-      (photoHash && usedPlacePhotoHashes.has(photoHash))
-    );
-    if (isDuplicate) {
-      const alt = await tripsyFindUnusedPlacePhoto(name, address, ev.summary, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
-      if (alt) {
-        photoDataUrl = alt.photoDataUrl;
-        photoName = alt.photoName;
-        photoHash = alt.contentHash;
-        Store.cacheTripsyPlacePhotoLocal(cacheKey, {
-          driveFileId: alt.driveFileId, photoName, contentHash: photoHash,
-          triedPhotoNames: [...new Set([...(cachedEntry?.triedPhotoNames || []), photoName])],
-        });
-        tripsyPlacePhotoCacheDirty = true;
-      } else {
-        // No unused candidate left for this place -- fall back to the
-        // plain category icon rather than repeat a photo already shown.
-        photoDataUrl = null;
-        photoName = null;
-        photoHash = null;
-      }
-    }
-    if (photoName) usedPlacePhotoNames.add(photoName);
-    if (photoHash) usedPlacePhotoHashes.add(photoHash);
+    // Photo resolution + de-dup goes through the shared, guarded helper
+    // (tripsyDedupedPlacePhotoUrl) that the PDF builder already uses -- it
+    // returns an already-cached photo VERBATIM (never swapped, never
+    // re-hashed) and only ever fetches/swaps to a different image when
+    // _tripsyAllowPhotoFetch is true (i.e. during an actual generation),
+    // never on a plain open. This is what enforces the hard rule that a
+    // photo can only change when the user changes it -- an earlier inline
+    // copy of this dedup logic ran ungated on every open and could silently
+    // swap or drop a duplicate photo.
+    const photoDataUrl = isSkipped
+      ? null
+      : await tripsyDedupedPlacePhotoUrl(name, address, ev.summary, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
     const isStay = raw.resource === 'hosting';
     // A hosting/activity event has no departure/arrival description --
     // that's transportation-only -- so the meta line under its title is
@@ -19891,7 +19916,19 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
     content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Preparing your itinerary…</div>`;
     overlay.style.display = 'flex';
   }
-  const html = await buildTripsyPrintHtml(tripKey);
+  // Reuse the last built itinerary for this trip when nothing that affects it
+  // has changed (tripsyItineraryFingerprint) -- a no-change reopen is then
+  // instant, with no rebuild and no photo network calls. Any real change flips
+  // the fingerprint and rebuilds. Session-only; see tripsyBuiltItineraryCache.
+  const fp = await tripsyItineraryFingerprint(tripKey);
+  const cached = tripsyBuiltItineraryCache.get(tripKey);
+  let html;
+  if (cached && fp != null && cached.fingerprint === fp) {
+    html = cached.html;
+  } else {
+    html = await buildTripsyPrintHtml(tripKey);
+    if (html != null && fp != null) tripsyBuiltItineraryCache.set(tripKey, { html, fingerprint: fp });
+  }
   if (html == null) { if (!wasOpen) overlay.style.display = 'none'; return; }
   content.innerHTML = html;
   if (printBtn) printBtn.style.display = '';
