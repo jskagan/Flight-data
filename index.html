@@ -2724,10 +2724,19 @@ const Store = {
     return entry || null;
   },
   async saveTripsyPlacePhoto(cacheKey, fields) {
+    // Conflict-resilient, like the generation flush (buildTripsyPrintHtml) and
+    // the narrative writes: a plain persistDriveData() would, on a revision
+    // conflict (another of the owner's sessions/devices wrote the shared file
+    // since we loaded it), reload the other copy and DISCARD this photo pick --
+    // the exact clobber that made photos vanish. So re-apply the entry onto the
+    // reloaded copy and retry (bounded), via silentConflict.
     try {
-      this.cacheTripsyPlacePhotoLocal(cacheKey, fields);
-      await persistDriveData();
-      return true;
+      const apply = () => this.cacheTripsyPlacePhotoLocal(cacheKey, fields);
+      apply();
+      for (let attempt = 0; ; attempt++) {
+        try { await persistDriveData({ silentConflict: true }); return true; }
+        catch (e) { if (e && e.conflict && attempt < 2) { apply(); continue; } throw e; }
+      }
     } catch (e) {
       console.error('Store.saveTripsyPlacePhoto failed:', e);
       return false;
