@@ -12221,12 +12221,20 @@ async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
   const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle, locationHint);
   if (cacheKey === '|||') return null;
   const cached = await Store.getTripsyPlacePhoto(cacheKey);
-  if (cached && cached.driveFileId && (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000) {
-    try {
-      return await tripsyPlacePhotoDisplayUrl(cached.driveFileId);
-    } catch (e) {
-      console.error('Loading cached place photo failed, refetching:', e);
-      // fall through to refetch below (only when fetching is enabled)
+  if (cached && cached.driveFileId) {
+    const fresh = (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000;
+    // A plain open/print NEVER refetches, so ALWAYS show the cached photo there
+    // -- even if it's past the TTL -- instead of dropping it. Opening/editing
+    // the itinerary must never make a photo disappear. Only a generation (fetch
+    // enabled) treats a stale cache as a reason to refetch a fresher one.
+    if (fresh || !_tripsyAllowPhotoFetch) {
+      try {
+        return await tripsyPlacePhotoDisplayUrl(cached.driveFileId);
+      } catch (e) {
+        console.error('Loading cached place photo failed:', e);
+        if (!_tripsyAllowPhotoFetch) return null; // open: nothing else we can do
+        // generation: fall through to refetch below
+      }
     }
   }
   if (!_tripsyAllowPhotoFetch) return null; // open/print: cached-only, never fetch
@@ -12348,11 +12356,17 @@ async function fetchTripsyTransportationPhoto(company, category) {
   const cacheKey = tripsyTransportationPhotoCacheKey(company, category);
   const cached = await Store.getTripsyPlacePhoto(cacheKey);
   if (cached && cached.skipped) return null;
-  if (cached && cached.driveFileId && (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000) {
-    try {
-      return await tripsyPlacePhotoDisplayUrl(cached.driveFileId);
-    } catch (e) {
-      console.error('Loading cached transportation photo failed, refetching:', e);
+  if (cached && cached.driveFileId) {
+    const fresh = (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000;
+    // Same rule as fetchTripsyPlacePhoto: on a plain open/print always show the
+    // cached photo (even past TTL); only refetch a stale one during generation.
+    if (fresh || !_tripsyAllowPhotoFetch) {
+      try {
+        return await tripsyPlacePhotoDisplayUrl(cached.driveFileId);
+      } catch (e) {
+        console.error('Loading cached transportation photo failed:', e);
+        if (!_tripsyAllowPhotoFetch) return null;
+      }
     }
   }
   if (!_tripsyAllowPhotoFetch) return null; // open/print: cached-only, never fetch
@@ -14989,7 +15003,31 @@ async function buildTripsyPrintHtml(tripKey) {
   // flag, so this is a no-op most of the time (e.g. re-opening Preview).
   if (tripsyPlacePhotoCacheDirty) {
     tripsyPlacePhotoCacheDirty = false;
-    try { await persistDriveData(); } catch (e) { console.error('buildTripsyPrintHtml: failed to persist photo cache:', e); }
+    // Conflict-resilient flush: a plain persistDriveData() here would, on a
+    // revision conflict (another session/device wrote the shared file since we
+    // loaded it), reload the other copy and DISCARD the photo mappings we just
+    // added -- their image bytes are already in their own Drive files, so
+    // losing only the cacheKey->fileId mapping is exactly what makes photos
+    // vanish on a later open. Instead: snapshot the entries, and on conflict
+    // re-merge them onto the reloaded data and retry (mirrors
+    // persistTripsyNarrativeCacheWithRetry). silentConflict avoids the
+    // disruptive reload toast for this background flush.
+    const pendingPhotoCache = { ...(driveData.tripsyPlacePhotoCache || {}) };
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try { await persistDriveData({ silentConflict: true }); break; }
+        catch (e) {
+          if (e && e.conflict && attempt < 2) {
+            driveData.tripsyPlacePhotoCache = { ...(driveData.tripsyPlacePhotoCache || {}), ...pendingPhotoCache };
+            continue;
+          }
+          throw e;
+        }
+      }
+    } catch (e) {
+      console.error('buildTripsyPrintHtml: failed to persist photo cache:', e);
+      tripsyPlacePhotoCacheDirty = true; // leave dirty so a later flush can retry
+    }
   }
 
   // ---- "Travel Information" page: Date | Details reference tables of every
@@ -17850,7 +17888,29 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
         tripsyUpdateEventNarrativeControls(previewContent, rowKey, false);
         (async () => {
           try {
-            const ok = await Store.setTripsyNarrativeApproved(cacheKey, false);
+            const cache = await Store.getTripsyNarrativeCache();
+            const existingEntry = cache[cacheKey];
+            let ok;
+            if (existingEntry) {
+              ok = await Store.setTripsyNarrativeApproved(cacheKey, false);
+            } else {
+              // No individual override entry to flip (its blurb is inherited
+              // from the whole-day narrative, or the entry was dropped by a
+              // background reload since this row rendered). Mirror the approve
+              // branch: snapshot exactly what's displayed into its own override,
+              // marked NOT approved -- so un-approving always sticks and the
+              // text is now editable as a custom narrative (the whole point of
+              // un-approving). Without this, setTripsyNarrativeApproved returns
+              // false on a missing entry and the badge springs back to Approved.
+              const displayedBlurb = section.dataset.displayedBlurb || '';
+              const { summaryByDay } = await buildTripsyPrintDayData(trip);
+              const allItems = [...summaryByDay.values()].flat();
+              const item = allItems.find(it => tripsySummaryRowKey(it) === rowKey);
+              const promptData = item ? tripsySummaryRowPromptData(item) : { row_key: rowKey };
+              ok = await Store.saveTripsyNarrativeSections({
+                [cacheKey]: { content: { blurb: displayedBlurb }, fingerprint: tripsyContentFingerprint(promptData), generatedAt: new Date().toISOString(), approved: false },
+              });
+            }
             if (!ok) { tripsyUpdateEventNarrativeControls(previewContent, rowKey, true); toast('Could not un-approve. Please try again.', 'error'); }
           } catch (err) {
             console.error('Failed to un-approve event note:', err);
