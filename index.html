@@ -14700,6 +14700,7 @@ async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPro
     : '';
   const tripLine = `Trip: ${effectiveTrip.name || ''}, ${formatTripDateRange(effectiveTrip.start, effectiveTrip.end)}${effectiveTrip.location ? `, ${effectiveTrip.location}` : ''}.`;
   const eventsJson = JSON.stringify(currentEventsForPrompt);
+  const timeBlocksJson = JSON.stringify(tripsyAttireComputeTimeBlocks(currentEventsForPrompt));
   // Call 1 of 2: per-event categorization only. No weather block on purpose --
   // weather was only ever allowed to influence the (now-dropped) per-event
   // note, never the category itself, so it's dead input weight here.
@@ -14733,10 +14734,12 @@ ${tripLine}
 Use exactly these 7 dress-code categories, from most relaxed to most formal:
 ${TRIPSY_ATTIRE_TAXONOMY_GUIDE}
 
-First, privately judge each event in the current-events list below: which of the 7 tiers it calls for (weigh its venue/address, its own name/category, the time of day, and any explicit dress-code wording in its name or notes), and which consecutive SAME-DAY events flow directly into each other with realistically no opportunity to return to lodging and change outfits in between (e.g. a "Pre-concert Reception" -> "Concert" -> "Post-concert Reception" evening is one continuous stretch even with an hour or two between parts). Do NOT output any per-event data -- use these judgments only for the counting rules below.
+The TIME-BLOCKS list below is PRE-COMPUTED and authoritative -- do NOT re-derive or re-split it. Each block is a run of events with no realistic chance to change clothes between them, so ONE outfit is worn across the whole block. Treat each block as exactly ONE wearing/occasion.
+
+Your job is to judge, privately: which of the 7 tiers each event calls for (weigh its venue/address, its own name, the time of day, and any explicit dress-code wording), and from that, each BLOCK's tier = the DRESSIEST tier among its events (that's the outfit actually worn for that block; the less-formal events inside it get no outfit of their own). Do NOT output any per-event or per-block data -- use these judgments only for the counting rules below.
 
 person_guidance covers TWO travelers on this trip, "him" and "her", both attending every event above -- for EACH person and EACH of the 7 categories, give:
-- COUNT EVERYTHING BELOW BY TIME-BLOCK, NEVER BY INDIVIDUAL EVENT. A time-block is a maximal run of consecutive same-day events worn as ONE outfit: each event after the first flows directly from the previous one per your continuity judgment above (and, within the 4 formal tiers, treat same-day events only a short gap apart as one block even across a category change, since a single outfit covers them). A pre-concert reception -> concert -> post-concert reception evening is ONE time-block = ONE wearing of the anchor garment (and, for him, ONE fresh shirt + tie), NOT three. DRESSIEST TIER WINS WITHIN A BLOCK: a time-block's tier is the DRESSIEST tier among its events -- the block counts ONCE under that dressiest tier ONLY, and the less-formal events inside it add NOTHING to their own tiers' counts (e.g. that cocktail-reception -> formal-concert -> cocktail-reception evening is ONE formal occasion and ZERO cocktail occasions). So everywhere below, an "occasion" means one time-block counted at its dressiest tier, not one event -- collapse continuous events before you count.
+- COUNT EVERYTHING BELOW BY TIME-BLOCK (from the pre-computed TIME-BLOCKS list), NEVER BY INDIVIDUAL EVENT. Each block counts ONCE, under its dressiest tier ONLY; the less-formal events inside a block add NOTHING to their own tiers' counts. So a pre-concert reception -> concert -> post-concert reception evening is ONE formal occasion requiring ONE wearing of the anchor garment (and, for him, ONE fresh shirt + tie) -- not three, and it contributes ZERO cocktail occasions. Everywhere below, "occasion" means one time-block at its dressiest tier. Before you count anything, work out how many blocks fall in each tier, and let those numbers -- not the raw event count -- drive every quantity you give. A garment worn once per occasion should never be quantified above that tier's BLOCK count.
 - garments: the ACTUAL GARMENTS TO PACK for that tier, itemized -- NOT a count of outfits, and NOT a description of how things get restyled. Each entry in items[] is one garment line: name (e.g. "suits", "dress shirts", "ties", "cocktail dresses", "tops", "trousers") and quantity (e.g. "2", "5", "3-4"). Say only what is NEEDED. Example for a formal tier: [{"name":"suits","quantity":"2"},{"name":"dress shirts","quantity":"5"},{"name":"ties","quantity":"5"}]. Never write prose like "restyled with different accessories" in a garment name.
 - Anchor garments are counted LOW and re-worn across time-blocks in the tier (see the packing_list rules below for the exact reuse logic: a suit/dress repeats, but a dress shirt worn through a whole evening does not). Items that DO repeat per time-block (dress shirts, ties for him; jewelry/scarves for her) should be quantified per time-block in that tier.
 - At the COCKTAIL tier specifically, a tie is optional rather than expected (an open collar reads fine there, unlike Formal/Black Tie) -- still list ties if they're worth packing for that tier, but size the quantity accordingly; the UI labels that line "Optional" on its own.
@@ -14755,6 +14758,9 @@ Each person's packing_list is a REAL itemized garment-by-garment packing list, m
 - Include footwear, outerwear, and accessories as their own line items, not folded into essentials.
 - Set group on EVERY item to exactly one of: dress_wear, tops, pants, essentials, footwear, accessories. What belongs where: dress_wear = suits, tuxedos, blazers, sport coats, dress shirts, dress trousers, ties, DRESS socks, cummerbunds, gowns and cocktail dresses; tops = casual shirts, sweaters, t-shirts, blouses, polos, cardigans; pants = casual trousers, jeans, shorts, chinos, skirts; essentials = underwear, undershirts, CASUAL socks, sleepwear (the washable base layers); footwear = every kind of shoe or boot; accessories = belts, scarves, jewelry, watches, hats, bags, gloves, cuff links, pocket squares, sunglasses. Note the two deliberate splits: dress socks are dress_wear but casual socks are essentials, and dress trousers are dress_wear but casual trousers/jeans are pants.
 ${weatherLines}
+
+TIME-BLOCKS (pre-computed, authoritative -- one outfit per block; count occasions from THESE, not from the event list):
+${timeBlocksJson}
 
 Current events:
 ${eventsJson}`;
@@ -14873,6 +14879,34 @@ function tripsyAttireGapWithinThreeHours(prevEvent, ev) {
   const prevEndMinutes = tripsyAttireMinutesOf(prevEvent.endTime) ?? tripsyAttireMinutesOf(prevEvent.startTime);
   const thisStartMinutes = tripsyAttireMinutesOf(ev.startTime);
   return (prevEndMinutes == null || thisStartMinutes == null) ? true : (thisStartMinutes - prevEndMinutes) <= 180;
+}
+// Clusters the prompt's event list into candidate TIME-BLOCKS -- consecutive
+// same-day events with no realistic chance to change clothes between them
+// (gap of 3 hours or less, unknown times treated as continuous, matching
+// tripsyAttireGapWithinThreeHours). Computed in plain JS BEFORE the generation
+// calls and handed to the guidance call as input, so its garment counts are
+// grounded in an explicit block structure instead of a private per-event
+// re-derivation -- the model still exercises judgment about how many garments a
+// given number of blocks actually warrants, it just no longer has to guess what
+// the blocks ARE. Deliberately category-free (the attire tiers don't exist yet
+// at this point, since the two calls run concurrently), so this is the timing
+// half of the real rule; the model applies the dressiest-tier-wins half.
+function tripsyAttireComputeTimeBlocks(events) {
+  const blocks = [];
+  let current = null;
+  let prev = null;
+  for (const ev of events) {
+    const prevEnd = prev ? (tripsyAttireMinutesOf(prev.endTime) ?? tripsyAttireMinutesOf(prev.startTime)) : null;
+    const thisStart = tripsyAttireMinutesOf(ev.startTime);
+    const withinGap = (prevEnd == null || thisStart == null) ? true : (thisStart - prevEnd) <= 180;
+    if (!prev || prev.date !== ev.date || !withinGap) {
+      current = { date: ev.date, events: [] };
+      blocks.push(current);
+    }
+    current.events.push({ id: ev.id, name: ev.name, startTime: ev.startTime });
+    prev = ev;
+  }
+  return blocks.map((b, i) => ({ block: i + 1, date: b.date, events: b.events }));
 }
 // Does `ev` belong in the same named TIME-BLOCK as `prevEvent`, for
 // occasion-COUNTING purposes (computeTripsyAttireBlocks) -- same day, and

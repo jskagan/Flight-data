@@ -419,9 +419,16 @@ that catches drift between them.
   per-event array (category / `alternate_category` / `continues_previous_event` — the per-event
   `note` field was retired in this split, it was stored but never rendered anywhere and cost about
   half the events stream), and the other emits `person_guidance` for two travelers ("him"/"her",
-  both assumed to attend every event), making its own PRIVATE tier/continuity judgments over the
-  same event list (never emitted) rather than waiting on the events call — the two align closely in
-  practice and the mechanical block grouping governs what the UI displays either way. Per event,
+  both assumed to attend every event). The guidance call does NOT wait on the events call; instead
+  it's handed a **pre-computed, authoritative TIME-BLOCKS list** as input
+  (`tripsyAttireComputeTimeBlocks`, plain JS run before both calls: consecutive same-day events ≤3h
+  apart, unknown times treated as continuous — the timing half of
+  `tripsyAttireOutfitChangeNeeded`, category-free because the attire tiers don't exist yet when the
+  two calls fire concurrently). It privately judges each event's tier and takes each block's tier as
+  its DRESSIEST event, then counts every quantity per BLOCK. This is what keeps judgment (how many
+  ties N formal blocks actually warrant is still the model's call) while removing the guesswork about
+  what the blocks ARE — previously it re-derived grouping per event and drifted, e.g. quoting "5-6
+  ties" across 11 tie-linked events that mechanically form just 4 blocks. Per event,
   `continues_previous_event` is a boolean — Claude's own judgment (from
   the event titles/venues and the clock time together, not a fixed threshold) on whether this event
   flows directly from the one before it with no realistic time to go back and change, e.g. a
@@ -622,14 +629,14 @@ that catches drift between them.
   evening isn't practical to re-wear but the suit/tie are; different jewelry/scarves for her; casual
   basics sized for realistic once-a-week laundry rotation, not one item per day), plus an `event_ids`
   per item where it reasonably maps to specific occasions. **All garment/outfit counting is done per
-  TIME-BLOCK, not per event** — the prompt explicitly redefines "occasion" to mean one time-block (a
-  maximal run of `continues_previous_event`-linked same-day events worn as one outfit, e.g. a
-  pre-concert reception → concert → post-concert reception evening = ONE wearing), so a continuous
-  evening counts as one anchor wearing / one fresh shirt, not one per sub-event. This uses the same
-  `continues_previous_event` signal that drives `computeTripsyAttireBlocks`, so the packing counts
-  track the block-based occasion counts the UI shows — but it's the model's in-call grouping (the
-  mechanical blocks aren't fed back into the same call), so the two align closely rather than by
-  construction. **A Refresh re-generates the ENTIRE plan, `packingList` included** —
+  TIME-BLOCK, not per event** — "occasion" means one time-block (events with no time to change
+  between them, worn as one outfit, e.g. a pre-concert reception → concert → post-concert reception
+  evening = ONE wearing), so a continuous evening counts as one anchor wearing / one fresh shirt, not
+  one per sub-event. The blocks are **given to the call as input** rather than re-derived by it (see
+  `tripsyAttireComputeTimeBlocks` under the two-parallel-calls bullet above), and the prompt states
+  outright that a garment worn once per occasion must never be quantified above its tier's BLOCK
+  count. Judgment is preserved — how many ties N formal blocks warrants is still the model's call —
+  but it can no longer disagree with the app about what the blocks are. **A Refresh re-generates the ENTIRE plan, `packingList` included** —
   `generateTripsyAttireGuide` always seeds the packing list fresh from Claude's new output, the same
   way it already re-derives every event's category from scratch, so a Refresh intentionally discards
   hand-edited packing-list items (checked-off state, renames, custom quantities, manual adds) exactly
