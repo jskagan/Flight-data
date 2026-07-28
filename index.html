@@ -14609,7 +14609,17 @@ function TRIPSY_ATTIRE_PERSON_GUIDANCE_SCHEMA(categoryEnum) {
 async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay) {
   const apiKey = await fetchAnthropicApiKeyFromDrive();
   const categoryEnum = ['athletic', 'casual', 'smart_casual', 'semi_formal', 'cocktail', 'formal', 'black_tie'];
-  const schema = {
+  // TWO schemas for TWO PARALLEL calls (fired via Promise.all below) instead of
+  // the original single call: per-event categorization and per-person guidance
+  // don't need to share one serial output stream, and on a large (~60-event)
+  // trip that one stream was the entire wait -- splitting it roughly halves
+  // wall-clock time at the same total cost. The guidance call makes its own
+  // private tier/continuity judgments over the same event list (never emitted),
+  // so neither call depends on the other's output. The per-event `note` field
+  // was dropped outright (not just made optional): notes were stored on the
+  // guide but never rendered anywhere in the Attire UI, and they were about
+  // half of the events stream's output tokens.
+  const eventsSchema = {
     type: 'object',
     properties: {
       events: {
@@ -14620,13 +14630,19 @@ async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPro
             id: { type: 'string' },
             category: { type: 'string', enum: categoryEnum },
             alternate_category: { type: 'string', enum: [...categoryEnum, ''] },
-            note: { type: 'string' },
             continues_previous_event: { type: 'boolean' },
           },
-          required: ['id', 'category', 'alternate_category', 'note', 'continues_previous_event'],
+          required: ['id', 'category', 'alternate_category', 'continues_previous_event'],
           additionalProperties: false,
         },
       },
+    },
+    required: ['events'],
+    additionalProperties: false,
+  };
+  const guidanceSchema = {
+    type: 'object',
+    properties: {
       person_guidance: {
         type: 'object',
         properties: {
@@ -14637,15 +14653,20 @@ async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPro
         additionalProperties: false,
       },
     },
-    required: ['events', 'person_guidance'],
+    required: ['person_guidance'],
     additionalProperties: false,
   };
   const weatherLines = Object.keys(weatherByDay || {}).length
     ? `\n\nPer-day weather:\n${JSON.stringify(weatherByDay)}`
     : '';
-  const promptText = `Assign a dress-code category to every event in this trip, so the owner can pack the right outfits.
+  const tripLine = `Trip: ${effectiveTrip.name || ''}, ${formatTripDateRange(effectiveTrip.start, effectiveTrip.end)}${effectiveTrip.location ? `, ${effectiveTrip.location}` : ''}.`;
+  const eventsJson = JSON.stringify(currentEventsForPrompt);
+  // Call 1 of 2: per-event categorization only. No weather block on purpose --
+  // weather was only ever allowed to influence the (now-dropped) per-event
+  // note, never the category itself, so it's dead input weight here.
+  const eventsPrompt = `Assign a dress-code category to every event in this trip, so the owner can pack the right outfits.
 
-Trip: ${effectiveTrip.name || ''}, ${formatTripDateRange(effectiveTrip.start, effectiveTrip.end)}${effectiveTrip.location ? `, ${effectiveTrip.location}` : ''}.
+${tripLine}
 
 Use exactly these 7 categories, from most relaxed to most formal:
 ${TRIPSY_ATTIRE_TAXONOMY_GUIDE}
@@ -14654,14 +14675,29 @@ For each event, weigh its venue/address, its own name/category, and the time of 
 
 alternate_category: most events have a clear single answer -- leave this as an empty string ''. Only set it when an event is GENUINELY ambiguous between two adjacent tiers (not just uncertainty on your part) -- e.g. a private dinner that could reasonably read as either Semi-formal or Cocktail depending on interpretation, with no strong signal pointing either way. In that case set alternate_category to the second plausible tier (from the same list) so the owner can pick between the two themselves; category should still be whichever of the two you'd lean toward.
 
-note is short (under 20 words) outfit guidance for that specific event -- may reference the day's weather (a rain layer, a warm coat) when relevant, but weather must NEVER change which category you pick, only what you mention in the note.
-
 continues_previous_event is true if this event flows directly from the immediately preceding event ON THE SAME DAY with realistically no opportunity to return to lodging and change outfits -- judge this from the event titles/descriptions and the clock time together, not a fixed time gap: a "Pre-concert Reception" at 5pm followed by a "Concert" at 7pm followed by a "Post-concert Reception" at 9:30pm are obviously one continuous evening (same venue, sequential parts of one occasion) even though an hour or two separates each part -- all three after the first should be true. Two events that are just independently scheduled back-to-back with a real gap and no such connection (different venues, unrelated occasions) should be false even if the gap is short. Always false for the FIRST event of a day (nothing precedes it) and false whenever there's a genuine free block of time to go back and change.
 
 Return one events[] entry for EVERY event in the current-events list below, in the same order, with id copied VERBATIM -- never drop or invent one.
 
+Current events:
+${eventsJson}`;
+  // Call 2 of 2: per-person guidance + packing list. Runs concurrently with
+  // the events call, so it makes its OWN private tier/continuity judgments
+  // over the same event list (never emitted as output) rather than waiting on
+  // the events call's answers -- the two align closely in practice, and the
+  // mechanical block grouping (computeTripsyAttireBlocks) governs what the UI
+  // displays either way.
+  const guidancePrompt = `Build the per-person packing guidance for this trip, so the owner can pack the right outfits.
+
+${tripLine}
+
+Use exactly these 7 dress-code categories, from most relaxed to most formal:
+${TRIPSY_ATTIRE_TAXONOMY_GUIDE}
+
+First, privately judge each event in the current-events list below: which of the 7 tiers it calls for (weigh its venue/address, its own name/category, the time of day, and any explicit dress-code wording in its name or notes), and which consecutive SAME-DAY events flow directly into each other with realistically no opportunity to return to lodging and change outfits in between (e.g. a "Pre-concert Reception" -> "Concert" -> "Post-concert Reception" evening is one continuous stretch even with an hour or two between parts). Do NOT output any per-event data -- use these judgments only for the counting rules below.
+
 person_guidance covers TWO travelers on this trip, "him" and "her", both attending every event above -- for EACH person and EACH of the 7 categories, give:
-- COUNT EVERYTHING BELOW BY TIME-BLOCK, NEVER BY INDIVIDUAL EVENT. A time-block is a maximal run of consecutive same-day events worn as ONE outfit: each event after the first has continues_previous_event=true (and, within the 4 formal tiers, treat same-day events only a short gap apart as one block even across a category change, since a single outfit covers them). A pre-concert reception -> concert -> post-concert reception evening is ONE time-block = ONE wearing of the anchor garment (and, for him, ONE fresh shirt + tie), NOT three. So everywhere below, an "occasion" means one time-block, not one event -- collapse continuous events before you count.
+- COUNT EVERYTHING BELOW BY TIME-BLOCK, NEVER BY INDIVIDUAL EVENT. A time-block is a maximal run of consecutive same-day events worn as ONE outfit: each event after the first flows directly from the previous one per your continuity judgment above (and, within the 4 formal tiers, treat same-day events only a short gap apart as one block even across a category change, since a single outfit covers them). A pre-concert reception -> concert -> post-concert reception evening is ONE time-block = ONE wearing of the anchor garment (and, for him, ONE fresh shirt + tie), NOT three. DRESSIEST TIER WINS WITHIN A BLOCK: a time-block's tier is the DRESSIEST tier among its events -- the block counts ONCE under that dressiest tier ONLY, and the less-formal events inside it add NOTHING to their own tiers' counts (e.g. that cocktail-reception -> formal-concert -> cocktail-reception evening is ONE formal occasion and ZERO cocktail occasions). So everywhere below, an "occasion" means one time-block counted at its dressiest tier, not one event -- collapse continuous events before you count.
 - outfits: a short suggested count of DISTINCT OUTFITS TO PACK for that category (e.g. "2", "~5", "3-4") -- this is NOT the number of time-blocks in that category, it's how many separate looks are actually worth packing given how much they can be restyled/reused. For the 3 "mix and match" tiers (athletic, smart_casual, casual), pieces are meant to repeat and recombine across the whole trip. For the 4 "plan around this" tiers (semi_formal, cocktail, formal, black_tie), assume accessories (jewelry, ties, wraps, pocket squares) can restyle the SAME outfit across multiple time-blocks in that tier rather than needing a brand new look every time -- so outfits should usually be noticeably LOWER than the number of time-blocks in that tier once there are more than 2-3.
 - Typical real-world difference between the two: men more often reuse one suit/tux across several occasions in the same tier via a different tie/shirt; women more often want a bit more variety per tier. Reflect that when it's a natural fit, but don't force a difference that doesn't make sense for this specific trip.
 
@@ -14677,7 +14713,23 @@ Each person's packing_list is a REAL itemized garment-by-garment packing list, m
 ${weatherLines}
 
 Current events:
-${JSON.stringify(currentEventsForPrompt)}`;
+${eventsJson}`;
+  // Fire both calls CONCURRENTLY -- the whole point of the split (see the
+  // schema comment above). A failure in either rejects the pair, surfacing
+  // through runTripsyAttireGeneration's existing error/retry UI.
+  const [eventsResult, guidanceResult] = await Promise.all([
+    tripsyAttireClaudeCall(apiKey, eventsSchema, eventsPrompt),
+    tripsyAttireClaudeCall(apiKey, guidanceSchema, guidancePrompt),
+  ]);
+  return {
+    events: (eventsResult && eventsResult.events) || [],
+    person_guidance: (guidanceResult && guidanceResult.person_guidance) || null,
+  };
+}
+// One streamed structured-output Claude call for the Attire feature -- the
+// shared plumbing behind generateTripsyAttireCategories's two parallel calls
+// (same fetch/SSE-parse shape as compareTripsyItineraryPdf's own inline copy).
+async function tripsyAttireClaudeCall(apiKey, schema, promptText) {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -14690,11 +14742,10 @@ ${JSON.stringify(currentEventsForPrompt)}`;
       // Sonnet, not Opus -- same reasoning as compareTripsyItineraryPdf:
       // pure structured classification, not open-ended reasoning.
       model: 'claude-sonnet-5',
-      // Lighter per-event payload than compareTripsyItineraryPdf's rows
-      // (no field_corrections/multiple summaries) -- 32000 comfortably
-      // covers even a large (~50+ event) trip, with streaming (below)
-      // removing the HTTP-timeout risk regardless.
-      max_tokens: 32000,
+      // Generous headroom for either half of the split (the events array on a
+      // large ~60-event trip, or two people's guidance + packing lists);
+      // streaming removes the HTTP-timeout risk regardless.
+      max_tokens: 16000,
       stream: true,
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{ role: 'user', content: [{ type: 'text', text: promptText }] }],
@@ -18751,7 +18802,9 @@ async function generateTripsyAttireGuide(tripKey) {
         ...ev,
         category: (match && match.category) || 'casual',
         alternateCategory: (match && match.alternate_category) || '',
-        note: (match && match.note) || '',
+        // (per-event `note` was retired with the parallel-generation split --
+        // it was never rendered anywhere in the Attire UI; older saved guides
+        // may still carry a note field, which is simply ignored)
         continuesFromPrevious: !!(match && match.continues_previous_event),
       };
     });

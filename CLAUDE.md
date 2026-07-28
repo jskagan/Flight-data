@@ -404,18 +404,25 @@ that catches drift between them.
   the Update page itself (Accept/Add/Delete, and Modify Existing's jump into the real edit panel) are
   stamped `source: 'tripsy_update_page'` on the pending change they queue specifically so this check
   can tell those apart from an unrelated edit to the same event.
-- **Attire is a generated, saved packing guide, one Claude call per (re)generation**: a "👔 Attire"
+- **Attire is a generated, saved packing guide, two PARALLEL Claude calls per (re)generation**: a "👔 Attire"
   button on each trip card (`index.html:19741` area, between Itinerary and Search) opens
   `showTripsyAttireOverlay` (`index.html:16879`), which renders whatever's already saved
   (`driveData.tripsyAttireGuides`, `Store.getTripsyAttireGuide`/`saveTripsyAttireGuide`/
   `deleteTripsyAttireGuide`) or, for the owner, an empty state with a Generate button —
   `generateTripsyAttireGuide` (`index.html:17450`). Every event on the trip gets assigned one of 7
   dress-code tiers (Athletic / Casual / Smart Casual / Semi-formal / Cocktail / Formal / Black Tie,
-  `TRIPSY_ATTIRE_CATEGORY_COLOR`/`_LABEL`/`_ORDER`) by a single Claude call
-  (`generateTripsyAttireCategories`, `index.html:14312`, same `fetchAnthropicApiKeyFromDrive` +
-  streamed-`json_schema` pattern as `compareTripsyItineraryPdf`, `model: 'claude-sonnet-5'`) that
-  also writes a `person_guidance` object for two travelers ("him"/"her", both assumed to attend
-  every event) and, per event, a `continues_previous_event` boolean — Claude's own judgment (from
+  `TRIPSY_ATTIRE_CATEGORY_COLOR`/`_LABEL`/`_ORDER`) by `generateTripsyAttireCategories`
+  (`index.html:14312`, same `fetchAnthropicApiKeyFromDrive` + streamed-`json_schema` pattern as
+  `compareTripsyItineraryPdf`, `model: 'claude-sonnet-5'` for both calls) — which fires **two
+  concurrent Claude calls via `Promise.all`** (shared plumbing: `tripsyAttireClaudeCall`), because
+  on a large trip the single serial output stream WAS the generation wait: one call emits the
+  per-event array (category / `alternate_category` / `continues_previous_event` — the per-event
+  `note` field was retired in this split, it was stored but never rendered anywhere and cost about
+  half the events stream), and the other emits `person_guidance` for two travelers ("him"/"her",
+  both assumed to attend every event), making its own PRIVATE tier/continuity judgments over the
+  same event list (never emitted) rather than waiting on the events call — the two align closely in
+  practice and the mechanical block grouping governs what the UI displays either way. Per event,
+  `continues_previous_event` is a boolean — Claude's own judgment (from
   the event titles/venues and the clock time together, not a fixed threshold) on whether this event
   flows directly from the one before it with no realistic time to go back and change, e.g. a
   "Pre-concert Reception" → "Concert" → "Post-concert Reception" reads as one continuous evening
@@ -440,10 +447,11 @@ that catches drift between them.
   person's outfit suggestion (the underlying occasion count still drives `guide.counts` and the
   category drill-down, but isn't displayed on the row itself). Weather is fetched
   live via the same Open-Meteo pipeline the day-bar chips already use
-  (`tripsyWeatherTargetsByDay`/`tripsyLoadWeather`/`tripsyGetWeather`) and folded into the prompt so
-  per-event notes can mention a rain layer or a warm coat, but it's never stored in the guide itself
-  (re-fetched fresh each generation, same cache as everywhere else) and it can never change which
-  category an event gets, only what its note says. Unlike `tripsyUpdatePages` above, a saved guide
+  (`tripsyWeatherTargetsByDay`/`tripsyLoadWeather`/`tripsyGetWeather`) and folded into the GUIDANCE
+  call's prompt only (it informs essentials/packing items like a rain layer or warm coat; the events
+  call gets no weather at all, since weather was never allowed to change an event's category and the
+  per-event notes it used to color are retired) — never stored in the guide itself
+  (re-fetched fresh each generation, same cache as everywhere else). Unlike `tripsyUpdatePages` above, a saved guide
   never auto-invalidates on an unrelated edit — `showTripsyAttireOverlay` just recomputes a light,
   non-cryptographic fingerprint (`tripsyAttireFingerprint`) from the trip's current events and shows
   a non-blocking "may be out of date — Refresh" note if it no longer matches the saved one, since
@@ -594,8 +602,9 @@ that catches drift between them.
   the card's leftover height) — since the grid row already stretches both cards to equal height,
   this keeps the Him and Her buttons aligned on the same horizontal line regardless of how long
   either person's essentials list is. Seeded once from a
-  new `packing_list` field on `generateTripsyAttireCategories`'s existing `person_guidance` schema
-  (same call, no extra round trip) — the prompt asks for the same anchor-garment-plus-restyled-
+  new `packing_list` field on `generateTripsyAttireCategories`'s `person_guidance` schema
+  (part of the guidance half of that function's two parallel calls, no extra round trip beyond
+  them) — the prompt asks for the same anchor-garment-plus-restyled-
   accessories logic worked out by hand this session (suits/dresses counted low and reused; a fresh
   dress shirt *and* a different tie per formal **time-block** for him, since a shirt worn through one
   evening isn't practical to re-wear but the suit/tie are; different jewelry/scarves for her; casual
