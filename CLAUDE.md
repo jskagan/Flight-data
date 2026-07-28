@@ -449,7 +449,11 @@ that catches drift between them.
   for once-a-week laundry rotation. Plus that person's own `essentials[]`; the Attire overlay renders
   these as two "Him"/"Her" cards in the Packing Summary, each row being the category name with its
   garment lines beneath it, one garment per line (`.tripsy-attire-person-row` is a flex COLUMN for
-  this; the old right-aligned single-line `.tripsy-attire-person-count` is gone). A guide generated
+  this; the old right-aligned single-line `.tripsy-attire-person-count` is gone). A tie line under
+  **Cocktail** additionally renders a muted "Optional" tag — `tripsyAttireGarmentIsOptional`, a
+  deterministic renderer rule (NOT a model output) so the tag can't flicker between generations,
+  since a tie is genuinely optional at Cocktail but expected at Formal/Black Tie; its `\b` word
+  boundary is what keeps "ties" from matching inside words like "panties". A guide generated
   before `garments{}` existed still carries the old `outfits{}` string, which the row renderer falls
   back to as a single "N outfits" line rather than showing the tier empty. The underlying occasion
   count still drives `guide.counts` and the category drill-down, but isn't displayed on the row
