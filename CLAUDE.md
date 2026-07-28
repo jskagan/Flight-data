@@ -608,13 +608,15 @@ that catches drift between them.
   `continues_previous_event` signal that drives `computeTripsyAttireBlocks`, so the packing counts
   track the block-based occasion counts the UI shows — but it's the model's in-call grouping (the
   mechanical blocks aren't fed back into the same call), so the two align closely rather than by
-  construction. **A Refresh never touches an existing
-  `packingList`** — `generateTripsyAttireGuide` fetches the previously-saved guide first and, if it
-  already has a non-empty `packingList`, carries it over untouched into the freshly-regenerated
-  guide instead of reseeding from Claude's new output; only a first generation (or a guide from
-  before this field existed) seeds it. This is the same "owner's edits are sticky, no
-  auto-invalidation" philosophy as the category-override bullet above, just for a second kind of
-  edit. Every mutation (check/uncheck, rename, requantify, delete, add) is owner-gated exactly like
+  construction. **A Refresh re-generates the ENTIRE plan, `packingList` included** —
+  `generateTripsyAttireGuide` always seeds the packing list fresh from Claude's new output, the same
+  way it already re-derives every event's category from scratch, so a Refresh intentionally discards
+  hand-edited packing-list items (checked-off state, renames, custom quantities, manual adds) exactly
+  as it already discards manual category overrides. "Refresh" means regenerate, not update-in-place;
+  there is no carry-over of the prior `packingList`. (This reversed the earlier "packing edits are
+  sticky across Refresh" behavior, at the owner's request — the two kinds of manual edit, category
+  overrides and packing-list edits, now behave the same way on Refresh.) Every mutation
+  (check/uncheck, rename, requantify, delete, add) is owner-gated exactly like
   the rest of Attire (viewers see the same list read-only — checkboxes disabled, no Add/Edit/Delete
   — never fully hidden, since seeing what's packed needs no write access) and persists straight to
   `driveData` via the same `Store.saveTripsyAttireGuide`, since checked-state is real shared trip
