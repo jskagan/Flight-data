@@ -14792,10 +14792,16 @@ ${eventsJson}`;
   // Fire both calls CONCURRENTLY -- the whole point of the split (see the
   // schema comment above). A failure in either rejects the pair, surfacing
   // through runTripsyAttireGeneration's existing error/retry UI.
+  // Each call self-times to the console: parallelizing only buys you the
+  // SLOWER of the two, so when a generation feels slow the useful question
+  // is which half dominated -- guessing from total wall-clock alone sent us
+  // down the wrong path once already.
+  const pairStart = performance.now();
   const [eventsResult, guidanceResult] = await Promise.all([
     tripsyAttireClaudeCall(apiKey, eventsSchema, eventsPrompt, 'per-event categories'),
     tripsyAttireClaudeCall(apiKey, guidanceSchema, guidancePrompt, 'packing guidance'),
   ]);
+  console.log(`[attire timing] both Claude calls (parallel): ${Math.round(performance.now() - pairStart)}ms`);
   return {
     events: (eventsResult && eventsResult.events) || [],
     person_guidance: (guidanceResult && guidanceResult.person_guidance) || null,
@@ -14805,6 +14811,8 @@ ${eventsJson}`;
 // shared plumbing behind generateTripsyAttireCategories's two parallel calls
 // (same fetch/SSE-parse shape as compareTripsyItineraryPdf's own inline copy).
 async function tripsyAttireClaudeCall(apiKey, schema, promptText, label) {
+  const callStart = performance.now();
+  let firstTokenAt = null;
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -14854,12 +14862,20 @@ async function tripsyAttireClaudeCall(apiKey, schema, promptText, label) {
       let evt;
       try { evt = JSON.parse(line.slice(6)); } catch { continue; }
       if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
+        if (firstTokenAt == null) firstTokenAt = performance.now();
         text += evt.delta.text;
       } else if (evt.type === 'message_delta' && evt.delta && evt.delta.stop_reason) {
         stopReason = evt.delta.stop_reason;
       }
     }
   }
+  // Split the wait into think-time (request sent -> first token, which grows
+  // with PROMPT size/complexity) vs stream-time (first token -> done, which
+  // grows with OUTPUT size). Which number dominates says whether to trim the
+  // prompt or trim what's being asked for.
+  console.log(`[attire timing] ${label}: ${Math.round(performance.now() - callStart)}ms total`
+    + (firstTokenAt != null ? ` (${Math.round(firstTokenAt - callStart)}ms to first token, ${Math.round(performance.now() - firstTokenAt)}ms streaming)` : '')
+    + ` | prompt ${promptText.length} chars, output ${text.length} chars`);
   // Name the half that failed -- with two parallel calls, an unlabelled
   // "too large" error can't tell you whether it was the per-event pass or the
   // packing-guidance pass that blew the ceiling.
@@ -18993,13 +19009,20 @@ async function tripsyAttireLoadWeatherBar(trip, guide) {
 // staleness is handled separately (see showTripsyAttireOverlay) rather than
 // by keeping this data perfectly live.
 async function generateTripsyAttireGuide(tripKey) {
+  // Phase timings to the console alongside tripsyAttireClaudeCall's own -- a
+  // slow generation isn't necessarily the Claude calls (weather geocoding
+  // fans out per city, and the final Drive write can be large), so measure
+  // rather than assume.
+  const genStart = performance.now();
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) throw new Error('Trip not found.');
 
   const { effectiveTrip, days } = await tripsyAttireBuildDays(trip);
   const currentEventsForPrompt = days.flatMap(d => d.events);
   if (!currentEventsForPrompt.length) throw new Error('This trip has no events to generate an attire guide for.');
+  console.log(`[attire timing] buildDays: ${Math.round(performance.now() - genStart)}ms (${currentEventsForPrompt.length} events)`);
 
+  const weatherStart = performance.now();
   const weatherByDay = {};
   try {
     const { placesByDay, placeEvents } = await buildTripsyPrintDayData(trip);
@@ -19017,6 +19040,7 @@ async function generateTripsyAttireGuide(tripKey) {
     // hard requirement -- a failed fetch shouldn't block generation.
     console.error('Attire weather fetch failed (continuing without it):', e);
   }
+  console.log(`[attire timing] weather: ${Math.round(performance.now() - weatherStart)}ms`);
 
   const result = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay);
   const categoryById = new Map(result.events.map(e => [e.id, e]));
@@ -19094,7 +19118,10 @@ async function generateTripsyAttireGuide(tripKey) {
     personGuidance: result.person_guidance || null,
     packingList: { him: buildPackingList('him'), her: buildPackingList('her') },
   };
+  const saveStart = performance.now();
   const ok = await Store.saveTripsyAttireGuide(guide);
+  console.log(`[attire timing] save to Drive: ${Math.round(performance.now() - saveStart)}ms`);
+  console.log(`[attire timing] TOTAL generateTripsyAttireGuide: ${Math.round(performance.now() - genStart)}ms`);
   if (!ok) throw new Error('Could not save the attire guide.');
   return guide;
 }
