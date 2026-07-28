@@ -578,8 +578,8 @@ that catches drift between them.
   data, not a personal display preference (unlike `isTripsyTripCollapsed`/`tripsyUpdateShowMatches`,
   which are deliberately `localStorage`/session-only specifically because a non-owner viewer has no
   Drive write access to persist anything into the shared file at all). Clicking an item's name opens
-  a small popup listing exactly which event(s) it's linked to (date/time/name, resolved against
-  `guide.days`), each clickable to jump to that event on My Trips via the same
+  a small popup listing which event(s) it's linked to, grouped by date (a day header per day, time +
+  name per row), resolved against `guide.days`, each clickable to jump to that event on My Trips via the same
   `tripsyAttireGoToEvent` the Daily Dress Guide's own event titles already use — hiding the popup
   and the packing-list overlay first so nothing is left stacked on top of My Trips underneath.
   Adding a new item prompts "Link to specific events?"; accepting opens a checkbox picker over every
