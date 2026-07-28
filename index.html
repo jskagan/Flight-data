@@ -11866,22 +11866,54 @@ function tripsyTripGeographySummary(placeEvents, tripLocation) {
 // these the token must be kept as the city, not stripped as a "country" -- so
 // "10 Bayfront Ave, Singapore 018956" resolves to "Singapore", not "Bayfront Ave".
 const TRIPSY_CITY_STATES = new Set(['singapore', 'monaco', 'hong kong', 'macau', 'macao', 'vatican city', 'san marino', 'luxembourg', 'gibraltar']);
+const TRIPSY_STREET_SUFFIX_RE = /\b(?:road|rd|street|st|avenue|ave|av|boulevard|blvd|drive|dr|lane|ln|way|court|ct|place|pl|highway|hwy|parkway|pkwy|terrace|ter|circle|cir|square|sq|route|rte|close|crescent|cres|walk)\b\.?/gi;
 function tripsyPrimaryCityFromAddress(addr) {
-  const clean = String(addr || '').split(',')
+  const segs = String(addr || '').split(',')
     .map(p => p.split(/\s+/).filter(w => w && !/\d/.test(w)).join(' ').trim()) // drop digit-words (postcodes/house #s)
     .filter(Boolean);
-  // A city-state segment wins outright -- its name is both the country and the
-  // city, so it must not fall through to isDrop (which would strip it and leave
-  // the street). See TRIPSY_CITY_STATES above.
-  const cityState = clean.find(p => TRIPSY_CITY_STATES.has(p.toLowerCase().replace(/\.$/, '')));
-  if (cityState) return cityState;
-  const isDrop = p => {
-    const low = p.toLowerCase().replace(/\.$/, '');
-    return TRIPSY_COUNTRY_NAMES.has(low) || !!TRIPSY_COUNTRY_ALIASES[low] || TV_STRIP_LOC.has(low)
-      || /shire$/.test(low) || /\b(county|district|ward|prefecture|province)\b/.test(low);
+  if (!segs.length) return '';
+  // City-state (Singapore, Monaco, Hong Kong, ...): the name IS the city, so if
+  // it appears ANYWHERE in the address, use it. Their addresses often repeat it
+  // as both city and country ("... Singapore Singapore 039797") or fuse it onto
+  // the street with no comma, which the segment logic below can't isolate.
+  const addrLow = String(addr || '').toLowerCase();
+  for (const cs of TRIPSY_CITY_STATES) {
+    if (new RegExp('\\b' + cs.replace(/ /g, '\\s+') + '\\b').test(addrLow)) {
+      return cs.replace(/\b\w/g, c => c.toUpperCase());
+    }
+  }
+  // Strip a trailing country, then a trailing US-state/UK-county, from EACH
+  // segment -- matching multi-word names ("United Kingdom", "New York") by
+  // suffix, not whole-segment. This collapses a comma-less "Arizona 85255 USA"
+  // tail to nothing instead of mistaking it for the city.
+  const stripTrailing = (words, set, alias, maxLen) => {
+    for (let n = Math.min(maxLen, words.length); n >= 1; n--) {
+      const cand = words.slice(words.length - n).join(' ').toLowerCase().replace(/\.$/, '');
+      if (set.has(cand) || (alias && alias[cand])) return words.slice(0, words.length - n);
+    }
+    return words;
   };
-  const kept = clean.filter(p => !isDrop(p));
-  return kept.length ? kept[kept.length - 1] : (clean.length ? clean[clean.length - 1] : '');
+  const cleaned = segs.map(seg => {
+    let w = seg.split(/\s+/);
+    w = stripTrailing(w, TRIPSY_COUNTRY_NAMES, TRIPSY_COUNTRY_ALIASES, 3);
+    w = stripTrailing(w, TV_STRIP_LOC, null, 2);
+    return w.join(' ').trim();
+  }).filter(Boolean).filter(p => {
+    const low = p.toLowerCase();
+    return !/shire$/.test(low) && !/\b(county|district|ward|prefecture|province)\b/.test(low);
+  });
+  if (!cleaned.length) return segs[segs.length - 1];
+  let city = cleaned[cleaned.length - 1];
+  // If the city got fused onto a street ("... Hayden Road Scottsdale", because
+  // the comma was placed AFTER the city), the real city is what follows the last
+  // street-type word. Only fires when a street word is actually present, so a
+  // normal "Los Angeles"/"Scottsdale" segment is left untouched.
+  const m = [...city.matchAll(TRIPSY_STREET_SUFFIX_RE)];
+  if (m.length) {
+    const after = city.slice(m[m.length - 1].index + m[m.length - 1][0].length).trim();
+    if (after) city = after;
+  }
+  return city;
 }
 function tripsyTripHomeLocation(trip) {
   const byCity = new Map(); // cityKey -> { city, country (''=US/unknown), isUS, count, order }
