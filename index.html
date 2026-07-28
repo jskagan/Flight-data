@@ -15432,6 +15432,7 @@ async function buildTripsyPrintHtml(tripKey) {
           <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-refresh title="Try another photo">🔄</button>
           <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-gallery-btn title="Choose from other photos found for this place">${TRIPSY_GALLERY_ICON_SVG}</button>
           <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-search-toggle title="Search for a photo manually">🔍</button>
+          <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-paste-btn title="Paste a copied image — copy a picture anywhere first, then tap">📋</button>
           <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-skip-btn title="Omit this photo">🚫</button>
         </div>
         ${tripsyPhotoManualSearchBoxHtml(!photoDataUrl)}
@@ -15550,6 +15551,7 @@ async function buildTripsyPrintHtml(tripKey) {
           <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-refresh title="Try another photo">🔄</button>
           <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-gallery-btn title="Choose from other photos found">${TRIPSY_GALLERY_ICON_SVG}</button>
           <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-search-toggle title="Search for a photo manually">🔍</button>
+          <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-paste-btn title="Paste a copied image — copy a picture anywhere first, then tap">📋</button>
           <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-skip-btn title="Omit this photo">🚫</button>
         </div>
         ${tripsyPhotoManualSearchBoxHtml(!photoDataUrl)}
@@ -18991,6 +18993,23 @@ async function showTripsyItineraryStatus(trip) {
   document.body.appendChild(overlay);
 }
 
+// Reads an image off the OS clipboard for the 📋 Paste button on itinerary
+// photo cards -- returns a Blob (image/*) or null if the clipboard holds no
+// image. Needs a secure context (GitHub Pages is https) + a user gesture (the
+// button click supplies it); a browser without the async Clipboard API throws,
+// which the caller surfaces as a toast.
+async function tripsyReadImageFromClipboard() {
+  if (!navigator.clipboard || !navigator.clipboard.read) {
+    throw new Error('Clipboard image reading is not supported in this browser.');
+  }
+  const items = await navigator.clipboard.read();
+  for (const item of items) {
+    const imgType = (item.types || []).find(t => t.startsWith('image/'));
+    if (imgType) return await item.getType(imgType);
+  }
+  return null;
+}
+
 async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPicker, scrollToId, onExit } = {}) {
   _tripsyPreviewExitCallback = onExit || null;
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
@@ -19205,7 +19224,8 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
       const searchBtn = e.target.closest('[data-tripsy-photo-search-btn]');
       const searchCloseBtn = e.target.closest('[data-tripsy-photo-search-close-btn]');
       const skipBtn = e.target.closest('[data-tripsy-photo-skip-btn]');
-      if (!refreshBtn && !galleryBtn && !galleryCloseBtn && !galleryThumb && !searchToggleBtn && !searchBtn && !searchCloseBtn && !skipBtn) return;
+      const pasteBtn = e.target.closest('[data-tripsy-photo-paste-btn]');
+      if (!refreshBtn && !galleryBtn && !galleryCloseBtn && !galleryThumb && !searchToggleBtn && !searchBtn && !searchCloseBtn && !skipBtn && !pasteBtn) return;
 
       const card = e.target.closest('.tp-place-card');
       if (!card) return;
@@ -19245,6 +19265,47 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
         } finally {
           refreshBtn.disabled = false;
           refreshBtn.textContent = originalText;
+        }
+        return;
+      }
+
+      if (pasteBtn) {
+        // Drop in an image the owner copied anywhere (e.g. a browser image
+        // search) -- no download/upload dance. Reads the OS clipboard, shows it
+        // immediately, then persists it through the SAME conflict-resilient
+        // store the gallery/manual picks use, so it's a normal saved photo:
+        // honored on every reopen, offline, and in the PDF. A pasted photo is a
+        // deliberate user pick, so it's never de-duped/swapped away on open.
+        const originalText = pasteBtn.textContent;
+        pasteBtn.disabled = true;
+        pasteBtn.textContent = '⏳';
+        try {
+          const blob = await tripsyReadImageFromClipboard();
+          if (!blob) {
+            toast('No image on the clipboard. Copy a picture first (right-click it → Copy Image), then tap 📋.', 'error');
+            return;
+          }
+          swapCardPhoto(card, name, URL.createObjectURL(blob)); // show it now
+          const cacheKey = cardCacheKey();
+          const contentHash = await tripsyHashBlob(blob);
+          const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/png');
+          const existing = await Store.getTripsyPlacePhoto(cacheKey);
+          const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
+            driveFileId, photoName: `user-pasted-${Date.now()}`, contentHash,
+            triedPhotoNames: [...(existing?.triedPhotoNames || [])],
+          });
+          if (ok) toast('Photo pasted in.', 'success');
+          else toast('Image shown, but saving it to Drive failed — please try again.', 'error');
+        } catch (err) {
+          console.error('Paste photo failed:', err);
+          if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+            toast('Clipboard access was blocked. Allow clipboard permission in your browser, then tap 📋 again.', 'error');
+          } else {
+            toast('Could not read an image from the clipboard. Copy the picture again and retry.', 'error');
+          }
+        } finally {
+          pasteBtn.disabled = false;
+          pasteBtn.textContent = originalText;
         }
         return;
       }
