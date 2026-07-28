@@ -565,10 +565,18 @@ that catches drift between them.
   new `packing_list` field on `generateTripsyAttireCategories`'s existing `person_guidance` schema
   (same call, no extra round trip) — the prompt asks for the same anchor-garment-plus-restyled-
   accessories logic worked out by hand this session (suits/dresses counted low and reused; a fresh
-  dress shirt *and* a different tie per formal night for him, since a shirt worn a full evening
-  isn't practical to re-wear but the suit/tie are; different jewelry/scarves for her; casual basics
-  sized for realistic once-a-week laundry rotation, not one item per day), plus an `event_ids` per
-  item where it reasonably maps to specific occasions. **A Refresh never touches an existing
+  dress shirt *and* a different tie per formal **time-block** for him, since a shirt worn through one
+  evening isn't practical to re-wear but the suit/tie are; different jewelry/scarves for her; casual
+  basics sized for realistic once-a-week laundry rotation, not one item per day), plus an `event_ids`
+  per item where it reasonably maps to specific occasions. **All garment/outfit counting is done per
+  TIME-BLOCK, not per event** — the prompt explicitly redefines "occasion" to mean one time-block (a
+  maximal run of `continues_previous_event`-linked same-day events worn as one outfit, e.g. a
+  pre-concert reception → concert → post-concert reception evening = ONE wearing), so a continuous
+  evening counts as one anchor wearing / one fresh shirt, not one per sub-event. This uses the same
+  `continues_previous_event` signal that drives `computeTripsyAttireBlocks`, so the packing counts
+  track the block-based occasion counts the UI shows — but it's the model's in-call grouping (the
+  mechanical blocks aren't fed back into the same call), so the two align closely rather than by
+  construction. **A Refresh never touches an existing
   `packingList`** — `generateTripsyAttireGuide` fetches the previously-saved guide first and, if it
   already has a non-empty `packingList`, carries it over untouched into the freshly-regenerated
   guide instead of reseeding from Claude's new output; only a first generation (or a guide from
