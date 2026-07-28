@@ -11870,6 +11870,15 @@ const TRIPSY_CITY_STATES = new Set(['singapore', 'monaco', 'hong kong', 'macau',
 // followed by a state abbreviation ("New York, NY" / "Washington, DC").
 const TRIPSY_STATE_CITIES = new Set(['new york', 'washington']);
 const TRIPSY_STREET_SUFFIX_RE = /\b(?:road|rd|street|st|avenue|ave|av|boulevard|blvd|drive|dr|lane|ln|way|court|ct|place|pl|highway|hwy|parkway|pkwy|terrace|ter|circle|cir|square|sq|route|rte|close|crescent|cres|walk)\b\.?/gi;
+// East-Asian administrative prefixes that sit BEFORE the city inside one
+// comma-segment: Japanese/Korean wards & districts hyphenated onto a name
+// ("Chuo-ku Fukuoka", "Gangnam-gu Seoul") and the English words ward / district
+// / prefecture / province ("... Ward Da Nang"). Like a street suffix, the real
+// city is whatever FOLLOWS the last such marker, so we strip up to and including
+// it -- multi-word cities (Da Nang) survive because only the marker token goes.
+// A segment that is ONLY a marker ("Chuo-ku", "Sinsa-dong") collapses to empty
+// and drops out, which is also what we want.
+const TRIPSY_ADMIN_MARKER_RE = /(?:\b\S+-(?:ku|gu|do|si|ri|gun|dong|eup|myeon|cho|machi)\b|\b(?:ward|district|prefecture|province)\b)\.?/gi;
 function tripsyPrimaryCityFromAddress(addr) {
   const segs = String(addr || '').split(',')
     .map(p => p.split(/\s+/).filter(w => w && !/\d/.test(w)).join(' ').trim()) // drop digit-words (postcodes/house #s)
@@ -11918,10 +11927,18 @@ function tripsyPrimaryCityFromAddress(addr) {
     let w = seg.split(/\s+/);
     w = stripTrailing(w, TRIPSY_COUNTRY_NAMES, TRIPSY_COUNTRY_ALIASES, 3);
     w = stripTrailing(w, TV_STRIP_LOC, null, 2);
-    return w.join(' ').trim();
+    let s = w.join(' ').trim();
+    // Strip a leading East-Asian administrative prefix ("Chuo-ku Fukuoka" ->
+    // "Fukuoka", "Gangnam-gu Seoul" -> "Seoul", "... Ward Da Nang" -> "Da Nang"):
+    // keep what follows the last marker. A segment that IS only a marker becomes
+    // empty and is dropped below -- replacing the old whole-segment ward/district/
+    // prefecture/province drop, which threw away a city sharing that segment.
+    const am = [...s.matchAll(TRIPSY_ADMIN_MARKER_RE)];
+    if (am.length) s = s.slice(am[am.length - 1].index + am[am.length - 1][0].length).trim();
+    return s;
   }).filter(Boolean).filter(p => {
     const low = p.toLowerCase();
-    return !/shire$/.test(low) && !/\b(county|district|ward|prefecture|province)\b/.test(low);
+    return !/shire$/.test(low) && !/\bcounty\b/.test(low);
   });
   if (!cleaned.length) return segs[segs.length - 1];
   let city = cleaned[cleaned.length - 1];
