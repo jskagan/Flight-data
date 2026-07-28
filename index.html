@@ -8802,6 +8802,25 @@ function tripsyMultiDayEventOrder(a, b) {
   return null;
 }
 
+// Total, transitive ordering for the interleaved timeline -- used by BOTH the
+// My Trips list and the itinerary preview so they can never disagree. Sorts by
+// LOCAL calendar day FIRST (the same tripsyDayKey the timeline buckets group
+// on), THEN the same-day split-half / lodging<->transport rules, THEN time.
+// Day-first matters on a multi-timezone trip: sorting by the raw UTC instant
+// (new Date(start)) could place an event whose LOCAL day is Oct 22 after an
+// Oct-23-local event with an earlier instant, and the run-length day-bucketer
+// would then open a stray Oct 22 group amid the Oct 23 rows. Comparing dayKeys
+// (zero-padded YYYY-MM-DD, so lexicographic == chronological) keeps every day's
+// events contiguous and the intra-day rules from ever crossing a day boundary.
+function tripsyTimelineSortComparator(a, b) {
+  const aDay = tripsyDayKey(a.start) || '';
+  const bDay = tripsyDayKey(b.start) || '';
+  if (aDay !== bDay) return aDay < bDay ? -1 : 1;
+  const special = tripsyMultiDayEventOrder(a, b);
+  if (special != null) return special;
+  return new Date(a.start || 0) - new Date(b.start || 0);
+}
+
 const TRIPSY_LAYOVER_MAX_MINUTES = 20 * 60;
 function tripsyNormalizeAirportDesc(s) {
   return (s || '').trim().toLowerCase();
@@ -13265,11 +13284,7 @@ async function buildTripsyPrintDayData(trip) {
     return { ...display, id: `pending-create-${c.id}`, tripsyRaw: raw, _pendingCreate: c };
   });
   const allVisibleEvents = [...visibleEvents, ...pendingCreateEvents];
-  const chronologicalEvents = expandMultiDayTripsyEvents(allVisibleEvents).sort((a, b) => {
-    const special = tripsyMultiDayEventOrder(a, b);
-    if (special != null) return special;
-    return new Date(a.start || 0) - new Date(b.start || 0);
-  });
+  const chronologicalEvents = expandMultiDayTripsyEvents(allVisibleEvents).sort(tripsyTimelineSortComparator);
   const sortedEvents = insertTripsyLayovers(chronologicalEvents);
 
   const dayKeys = [];
@@ -21285,11 +21300,7 @@ async function renderTripsyEventsListImpl() {
     // (real or pending-create) are expanded into separate Check-in/
     // Check-out rows first so each half sorts independently by its own
     // date.
-    const chronologicalEvents = expandMultiDayTripsyEvents([...visibleEvents, ...pendingCreateEvents]).sort((a, b) => {
-      const special = tripsyMultiDayEventOrder(a, b);
-      if (special != null) return special;
-      return new Date(a.start || 0) - new Date(b.start || 0);
-    });
+    const chronologicalEvents = expandMultiDayTripsyEvents([...visibleEvents, ...pendingCreateEvents]).sort(tripsyTimelineSortComparator);
     // Inserts a synthetic layover row between any two connecting flights
     // (same airport, <=20h apart) and forces them adjacent in the render
     // order -- see insertTripsyLayovers.
