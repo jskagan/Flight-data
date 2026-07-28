@@ -11862,10 +11862,19 @@ function tripsyTripGeographySummary(placeEvents, tripLocation) {
 // states/UK counties (TV_STRIP_LOC) and county/district/ward/prefecture words. Takes
 // the last locality left; if stripping empties it (a city-state like Singapore or
 // Monaco whose only token is the country), keeps that token.
+// Country names that ARE also the city (city-states / city-like SARs). For
+// these the token must be kept as the city, not stripped as a "country" -- so
+// "10 Bayfront Ave, Singapore 018956" resolves to "Singapore", not "Bayfront Ave".
+const TRIPSY_CITY_STATES = new Set(['singapore', 'monaco', 'hong kong', 'macau', 'macao', 'vatican city', 'san marino', 'luxembourg', 'gibraltar']);
 function tripsyPrimaryCityFromAddress(addr) {
   const clean = String(addr || '').split(',')
     .map(p => p.split(/\s+/).filter(w => w && !/\d/.test(w)).join(' ').trim()) // drop digit-words (postcodes/house #s)
     .filter(Boolean);
+  // A city-state segment wins outright -- its name is both the country and the
+  // city, so it must not fall through to isDrop (which would strip it and leave
+  // the street). See TRIPSY_CITY_STATES above.
+  const cityState = clean.find(p => TRIPSY_CITY_STATES.has(p.toLowerCase().replace(/\.$/, '')));
+  if (cityState) return cityState;
   const isDrop = p => {
     const low = p.toLowerCase().replace(/\.$/, '');
     return TRIPSY_COUNTRY_NAMES.has(low) || !!TRIPSY_COUNTRY_ALIASES[low] || TV_STRIP_LOC.has(low)
@@ -11930,6 +11939,7 @@ const TRIPSY_WEATHER_GEOCODE_URL = 'https://geocoding-api.open-meteo.com/v1/sear
 const TRIPSY_WEATHER_HORIZON_DAYS = 15;   // Open-Meteo's forecast max is 16; stay just inside
 const TRIPSY_WEATHER_TYPICAL_YEARS = 5;   // how many past years feed a "typical" average
 const TRIPSY_WEATHER_FORECAST_TTL_MS = 6 * 3600 * 1000; // re-fetch a forecast once it's this stale
+const TRIPSY_WEATHER_MISS_TTL_MS = 12 * 3600 * 1000; // retry a geocode/typical MISS after this, so a transient failure (archive hiccup, one-off geocode fail) doesn't blank a far-future trip forever
 
 // WMO weather-interpretation codes -> [glyph (screen), plain phrase (print/PDF)].
 const TRIPSY_WMO = {
@@ -11979,7 +11989,11 @@ async function tripsyWeatherGeocode(city, country) {
   if (!driveData.tripsyWeatherGeocode) driveData.tripsyWeatherGeocode = {};
   const key = tripsyWeatherGeoKey(city, country);
   const cached = driveData.tripsyWeatherGeocode[key];
-  if (cached) return cached.miss ? null : cached;
+  if (cached && !cached.miss) return cached;
+  // A geocode MISS is retried after TRIPSY_WEATHER_MISS_TTL_MS rather than cached
+  // forever -- otherwise a one-off geocode failure blanks a city permanently
+  // (esp. far-future trips, whose weather never otherwise refetches).
+  if (cached && cached.miss && (Date.now() - (cached.fetchedAt || 0)) < TRIPSY_WEATHER_MISS_TTL_MS) return null;
   try {
     const j = await tripsyWeatherFetchJson(`${TRIPSY_WEATHER_GEOCODE_URL}?name=${encodeURIComponent(city)}&count=5&language=en&format=json`);
     const results = j.results || [];
@@ -11989,7 +12003,7 @@ async function tripsyWeatherGeocode(city, country) {
       pick = results.find(x => tripsyCanonicalCountryName(x.country || '').toLowerCase() === hint);
     }
     if (!pick) pick = results[0] || null;
-    const rec = pick ? { lat: pick.latitude, lon: pick.longitude, name: pick.name, country: pick.country } : { miss: true };
+    const rec = pick ? { lat: pick.latitude, lon: pick.longitude, name: pick.name, country: pick.country } : { miss: true, fetchedAt: Date.now() };
     driveData.tripsyWeatherGeocode[key] = rec;
     return rec.miss ? null : rec;
   } catch (e) { console.error('tripsyWeatherGeocode failed', city, e); return null; }
@@ -12096,9 +12110,12 @@ async function tripsyLoadWeather(targets) {
         if (!forecastByCoord.has(coordKey)) forecastByCoord.set(coordKey, { c, keys: new Set() });
         forecastByCoord.get(coordKey).keys.add(t.dateKey);
       } else {
-        // Beyond the forecast window (or a past date) -> climate normals. Normals
-        // don't go stale, so once cached (even a miss) we leave them.
-        if (existing) continue;
+        // Beyond the forecast window (or a past date) -> climate normals. A real
+        // normal never goes stale (keep it forever); but a MISS is retried after
+        // TRIPSY_WEATHER_MISS_TTL_MS so a transient archive hiccup doesn't blank a
+        // far-future trip permanently (this is what left Scottsdale/Singapore-type
+        // trips with no weather while near-term forecasts self-healed).
+        if (existing && (!existing.miss || (Date.now() - (existing.fetchedAt || 0)) < TRIPSY_WEATHER_MISS_TTL_MS)) continue;
         if (!typicalByCoord.has(coordKey)) typicalByCoord.set(coordKey, { c, keys: new Set() });
         typicalByCoord.get(coordKey).keys.add(t.dateKey);
       }
