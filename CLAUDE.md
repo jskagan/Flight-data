@@ -433,10 +433,21 @@ that catches drift between them.
   narrative calls (`generateTripsyItineraryNarrative`, `generateTripsySummaryBlurbs`,
   `generateTripsyEventNarrative`) are correctly left alone — adding `thinking` there would make them
   SLOWER, not faster. Check the model before assuming a call has this problem. Both halves are structured extraction against a
-  fixed schema, so deep chain-of-thought buys little: the events call is pure per-event
-  classification (thinking off), while the guidance call keeps thinking for its block/garment
-  arithmetic but at `medium` (for Sonnet 5 roughly Sonnet 4.6 at `high`). If garment counts ever
-  regress, raise the GUIDANCE call to `high` before changing anything else. Two calls, because
+  fixed schema, so deep chain-of-thought buys little for the EVENTS half — it's pure per-event
+  classification against a 7-value enum, so thinking is off there (measured: 108s → 18.7s, with
+  time-to-first-token collapsing 79,461ms → 2,607ms). The GUIDANCE half is the live tradeoff, and
+  **the only dial that moves total wall-clock** — the two run in parallel, so the total is whichever
+  is slower, and guidance always is. Measured on a 67-event trip:
+  | guidance setting | guidance time | total | packing-list output |
+  |---|---|---|---|
+  | *(no `thinking` param — the sonnet-5 default of adaptive+`high`)* | ~290–324s | ~5.2 min | 16.7–17.6K chars |
+  | `adaptive` + `medium` | 103s | 1.8 min | 9.2K chars — **owner reported missing garment lines** |
+  | `adaptive` + `high` | ~290s | ~5 min | detail restored |
+  | `adaptive` + `medium` + explicit COMPLETENESS-IS-REQUIRED prompt rule | *(current)* | | |
+  The last row is the open experiment: whether the thinness at `medium` was mere terseness (fixable
+  by telling it not to compress) rather than lost reasoning. **If the Detailed List is thin, go back
+  to `high`** — this list is what the owner actually packs from, so a missing line is a missing
+  garment, and correctness beats the clock. Judge it by opening the list, not by the timing log. Two calls, because
   on a large trip the single serial output stream WAS the generation wait: one call emits the
   per-event array (category / `alternate_category` / `continues_previous_event` — the per-event
   `note` field was retired in this split, it was stored but never rendered anywhere and cost about
