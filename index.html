@@ -14788,7 +14788,13 @@ function TRIPSY_ATTIRE_PERSON_GUIDANCE_SCHEMA(categoryEnum) {
     additionalProperties: false,
   };
 }
-async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay) {
+async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, opts = {}) {
+  // opts (Refresh-with-finalized-dress-codes path): tieredBlocks = the owner's
+  // authoritative time-blocks each tagged with its final tier; tierCounts = the
+  // per-tier occasion counts; skipEvents = don't re-categorize, only regenerate
+  // the packing guidance from those finalized counts.
+  const { tieredBlocks = null, tierCounts = null, skipEvents = false } = opts;
+  const authoritative = !!tieredBlocks;
   const apiKey = await fetchAnthropicApiKeyFromDrive();
   const categoryEnum = ['athletic', 'casual', 'smart_casual', 'semi_formal', 'cocktail', 'formal', 'black_tie'];
   // TWO schemas for TWO PARALLEL calls (fired via Promise.all below) instead of
@@ -14843,7 +14849,15 @@ async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPro
     : '';
   const tripLine = `Trip: ${effectiveTrip.name || ''}, ${formatTripDateRange(effectiveTrip.start, effectiveTrip.end)}${effectiveTrip.location ? `, ${effectiveTrip.location}` : ''}.`;
   const eventsJson = JSON.stringify(currentEventsForPrompt);
-  const timeBlocksJson = JSON.stringify(tripsyAttireComputeTimeBlocks(currentEventsForPrompt));
+  const timeBlocksJson = JSON.stringify(authoritative ? tieredBlocks : tripsyAttireComputeTimeBlocks(currentEventsForPrompt));
+  // When the owner has finalized the dress codes (a Refresh after manual tweaks),
+  // the per-tier occasion counts are AUTHORITATIVE and handed in -- the guidance
+  // call sizes every tier-anchored garment from these exact numbers and does NOT
+  // re-judge tiers. That both makes the counts match the owner's adjustments and
+  // removes the guidance call's heaviest reasoning (the block/garment arithmetic).
+  const authoritativeCountsLine = authoritative
+    ? `\n\nAUTHORITATIVE occasion counts per tier (FINAL -- size every tier-anchored garment from THESE exact counts; each TIME-BLOCK below already carries its final "tier", so do NOT re-judge or re-count tiers):\n${JSON.stringify(tierCounts || {})}`
+    : '';
   // Call 1 of 2: per-event categorization only. No weather block on purpose --
   // weather was only ever allowed to influence the (now-dropped) per-event
   // note, never the category itself, so it's dead input weight here.
@@ -14906,8 +14920,8 @@ Each person's packing_list is a REAL itemized garment-by-garment packing list, m
 - Set group on EVERY item to exactly one of: dress_wear, tops, pants, essentials, footwear, accessories. What belongs where: dress_wear = suits, tuxedos, blazers, sport coats, dress shirts, dress trousers, ties, DRESS socks, cummerbunds, gowns and cocktail dresses; tops = casual shirts, sweaters, t-shirts, blouses, polos, cardigans; pants = casual trousers, jeans, shorts, chinos, skirts; essentials = underwear, undershirts, CASUAL socks, sleepwear (the washable base layers); footwear = every kind of shoe or boot; accessories = belts, scarves, jewelry, watches, hats, bags, gloves, cuff links, pocket squares, sunglasses. Note the two deliberate splits: dress socks are dress_wear but casual socks are essentials, and dress trousers are dress_wear but casual trousers/jeans are pants.
 ${weatherLines}
 
-TIME-BLOCKS (pre-computed, authoritative -- one outfit per block; count occasions from THESE, not from the event list):
-${timeBlocksJson}
+TIME-BLOCKS (pre-computed, authoritative -- one outfit per block${authoritative ? `, each already tagged with its FINAL "tier"; count occasions from THESE and do NOT re-judge` : `; count occasions from THESE, not from the event list`}):
+${timeBlocksJson}${authoritativeCountsLine}
 
 Current events:
 ${eventsJson}`;
@@ -14918,6 +14932,17 @@ ${eventsJson}`;
   // SLOWER of the two, so when a generation feels slow the useful question
   // is which half dominated -- guessing from total wall-clock alone sent us
   // down the wrong path once already.
+  // Refresh with finalized dress codes: the categories are reused verbatim, so
+  // ONLY the guidance call runs, and it's handed the counts rather than deriving
+  // them -- no wasted events call and less reasoning, so this path is faster than
+  // the two-call generate below while producing counts that match the owner's
+  // adjustments.
+  if (skipEvents) {
+    const gStart = performance.now();
+    const guidanceResult = await tripsyAttireClaudeCall(apiKey, guidanceSchema, guidancePrompt, 'packing guidance (authoritative counts)', { thinking: true, effort: 'medium' });
+    console.log(`[attire timing] guidance-only Claude call: ${Math.round(performance.now() - gStart)}ms`);
+    return { events: [], person_guidance: (guidanceResult && guidanceResult.person_guidance) || null };
+  }
   const pairStart = performance.now();
   const [eventsResult, guidanceResult] = await Promise.all([
     // Per-event classification against a fixed 7-value enum -- no thinking.
@@ -15239,6 +15264,29 @@ function computeTripsyAttireBlocks(days) {
   });
 
   return { blocks, counts };
+}
+// Authoritative counterpart of tripsyAttireComputeTimeBlocks: the SAME runs
+// computeTripsyAttireBlocks derives (identical tripsyAttireOutfitChangeNeeded
+// boundaries), but each tagged with its final dressiest `tier` -- handed to the
+// guidance call on a Refresh so it counts from the owner's finalized dress codes
+// instead of re-judging them.
+function tripsyAttireTieredTimeBlocks(days) {
+  const rankOf = c => TRIPSY_ATTIRE_CATEGORY_ORDER.indexOf(c);
+  const flattened = [];
+  for (const day of (days || [])) for (const ev of (day.events || [])) flattened.push({ ...ev, dayKey: day.dayKey, _ref: ev });
+  const runs = [];
+  let cur = null, prev = null;
+  for (const item of flattened) {
+    const boundary = !prev || prev.dayKey !== item.dayKey || tripsyAttireOutfitChangeNeeded(prev, item);
+    if (boundary || !cur) { cur = { dayKey: item.dayKey, items: [] }; runs.push(cur); }
+    cur.items.push(item);
+    prev = item;
+  }
+  return runs.map((r, i) => {
+    let tier = r.items[0].category;
+    for (const it of r.items) if (rankOf(it.category) > rankOf(tier)) tier = it.category;
+    return { block: i + 1, date: r.dayKey, tier, events: r.items.map(it => ({ id: it.id, name: it.name, startTime: it.startTime })) };
+  });
 }
 // The tier shown for an event everywhere in the Attire UI: its block's
 // dressiest tier (displayCategory, stamped by computeTripsyAttireBlocks),
@@ -19335,31 +19383,86 @@ async function generateTripsyAttireGuide(tripKey) {
   }
   console.log(`[attire timing] weather: ${Math.round(performance.now() - weatherStart)}ms`);
 
-  const result = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay);
-  const categoryById = new Map(result.events.map(e => [e.id, e]));
-  for (const day of days) {
-    day.events = day.events.map(ev => {
-      const match = categoryById.get(ev.id);
-      return {
-        ...ev,
-        category: (match && match.category) || 'casual',
-        alternateCategory: (match && match.alternate_category) || '',
-        // (per-event `note` was retired with the parallel-generation split --
-        // it was never rendered anywhere in the Attire UI; older saved guides
-        // may still carry a note field, which is simply ignored)
-        continuesFromPrevious: !!(match && match.continues_previous_event),
-      };
-    });
+  // Load the previous guide (if any) so a Refresh can (a) PRESERVE the owner's
+  // manual per-event dress-code overrides across regeneration, and (b) when the
+  // trip's events are unchanged since that guide -- i.e. the owner only tweaked
+  // dress codes -- SKIP re-categorization entirely and hand the guidance call
+  // the finalized per-tier occasion counts. That makes the packing numbers match
+  // the owner's tweaks (the whole point) AND is faster: one guidance call, no
+  // wasted events call, and no block arithmetic for the model to redo.
+  const existing = await Store.getTripsyAttireGuide(tripKey);
+  const priorById = new Map();
+  if (existing && Array.isArray(existing.days)) existing.days.forEach(d => (d.events || []).forEach(e => priorById.set(e.id, e)));
+  const fingerprint = tripsyAttireFingerprint(currentEventsForPrompt);
+  const eventsUnchanged = !!(existing && existing.eventFingerprint
+    && existing.eventFingerprint.hash === fingerprint.hash
+    && existing.eventFingerprint.count === fingerprint.count
+    && priorById.size);
+
+  let result;
+  if (eventsUnchanged) {
+    // Reuse the finalized categories + overrides verbatim; no events call.
+    for (const day of days) {
+      day.events = day.events.map(ev => {
+        const prior = priorById.get(ev.id);
+        return {
+          ...ev,
+          category: (prior && prior.category) || 'casual',
+          alternateCategory: (prior && prior.alternateCategory) || '',
+          continuesFromPrevious: !!(prior && prior.continuesFromPrevious),
+          categoryOverridden: !!(prior && prior.categoryOverridden),
+        };
+      });
+    }
+    // Authoritative per-tier counts (from the finalized categories) drive the
+    // guidance call; also stamps displayCategory on each event for the id-linking
+    // reconciliation below.
+    const authCounts = computeTripsyAttireBlocks(days).counts;
+    const tierCounts = {};
+    TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(cat => { const n = authCounts[TRIPSY_ATTIRE_CAMEL_KEY[cat]] || 0; if (n) tierCounts[cat] = n; });
+    const tieredBlocks = tripsyAttireTieredTimeBlocks(days);
+    const guidance = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { tieredBlocks, tierCounts, skipEvents: true });
+    result = { events: [], person_guidance: guidance.person_guidance };
+  } else {
+    // First generate, or the trip's events actually changed: re-categorize from
+    // scratch (parallel with the guidance call, as before), but still PRESERVE
+    // any manual override the owner had set on an event that still exists.
+    result = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay);
+    const categoryById = new Map(result.events.map(e => [e.id, e]));
+    for (const day of days) {
+      day.events = day.events.map(ev => {
+        const match = categoryById.get(ev.id);
+        const prior = priorById.get(ev.id);
+        if (prior && prior.categoryOverridden) {
+          return {
+            ...ev,
+            category: prior.category,
+            alternateCategory: prior.alternateCategory || (match && match.alternate_category) || '',
+            continuesFromPrevious: !!(match && match.continues_previous_event),
+            categoryOverridden: true,
+          };
+        }
+        return {
+          ...ev,
+          category: (match && match.category) || 'casual',
+          alternateCategory: (match && match.alternate_category) || '',
+          // (per-event `note` was retired with the parallel-generation split --
+          // it was never rendered anywhere in the Attire UI; older saved guides
+          // may still carry a note field, which is simply ignored)
+          continuesFromPrevious: !!(match && match.continues_previous_event),
+        };
+      });
+    }
   }
 
   const { blocks, counts } = computeTripsyAttireBlocks(days);
-  // A Refresh re-generates the ENTIRE plan for the trip from Claude's fresh
-  // output -- categories, per-person guidance, occasion counts, AND the packing
-  // list -- the same way it already re-derives every event's category from
-  // scratch (so manual category overrides and hand-edited packing-list items
-  // alike are intentionally NOT carried over: "Refresh" means regenerate, not
-  // update-in-place). The packing list is therefore always seeded fresh here,
-  // whether or not a prior guide/packingList exists.
+  // A Refresh re-generates the per-person guidance + packing list fresh from
+  // Claude every time (hand-edited packing-list items are NOT carried over). But
+  // the owner's manual per-event dress-code OVERRIDES now ARE preserved across a
+  // Refresh (see the reuse/full branch above): they're what the counts key off,
+  // so discarding them was exactly what made the packing numbers ignore the
+  // owner's adjustments. When the trip's events are unchanged, categories are
+  // reused wholesale and only the guidance is regenerated.
   const validEventIds = new Set(currentEventsForPrompt.map(ev => ev.id));
   // The events call and the guidance call run in parallel and never see each
   // other's output (see generateTripsyAttireCategories's own comment), so the
