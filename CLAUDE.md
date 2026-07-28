@@ -497,9 +497,12 @@ that catches drift between them.
   (`tripsyAttireGoToEvent`, available to every viewer, not owner-gated — viewing that detail panel
   on My Trips needs no write access either): hides (not destroys) the Attire overlay, navigates to
   `tripsytrips`, strips the Attire guide's own `-checkin`/`-checkout`/`-begin`/`-end` suffix (from
-  `expandMultiDayTripsyEvents`) back to the base `tripsyEventKey` the timeline's
+  `expandMultiDayTripsyEvents`) and converts the guide's `<resource>-<id>` hyphen event id to the
+  `<resource>:<id>` colon form `tripsyEventKey` produces — the form the timeline's
   `data-tripsy-view-event`/`data-tripsy-edit-panel` are keyed by (that panel is shared by both
-  halves of a split multi-day event), then clicks that event's own row to open it. There are 3
+  halves of a split multi-day event); suffix-stripping alone left the hyphen form, so the row lookup
+  never matched and the jump timed out straight back to Attire (fixed 2026-07-27). Then clicks that
+  event's own row to open it. There are 3
   separate places the My Trips timeline can close that panel (the row-toggle click, the panel's own
   Close button, `tripsyCloseOpenViewPanels`' outside-click handler) with no shared choke point, so
   rather than patching all 3, `tripsyAttireWatchEventPanelClose` polls the panel's `data-mode`
