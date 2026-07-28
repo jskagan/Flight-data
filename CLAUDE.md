@@ -636,14 +636,26 @@ that catches drift between them.
   as it already discards manual category overrides. "Refresh" means regenerate, not update-in-place;
   there is no carry-over of the prior `packingList`. (This reversed the earlier "packing edits are
   sticky across Refresh" behavior, at the owner's request — the two kinds of manual edit, category
-  overrides and packing-list edits, now behave the same way on Refresh.) Every mutation
-  (check/uncheck, rename, requantify, delete, add) is owner-gated exactly like
+  overrides and packing-list edits, now behave the same way on Refresh.) **Items are grouped by
+  garment type** into Dress Wear / Tops / Pants / Essentials / Footwear / Accessories
+  (`TRIPSY_ATTIRE_PACKING_GROUPS`, rendered in that order, empty groups skipped). Claude sets each
+  item's `group` via a schema enum, and `tripsyAttirePackingGroupOf` resolves it — preferring the
+  stored value but INFERRING one from the item name when it's missing or unrecognized, so a list
+  saved before groups existed still sections correctly instead of collapsing into one bucket. Two
+  splits in that taxonomy are deliberate and order-dependent in the inference regexes: *dress* socks
+  are Dress Wear while plain/casual socks are Essentials, and plain/dress trousers are Dress Wear
+  while *casual* trousers and jeans are Pants. The owner can reassign an item's group from a select
+  in its Edit box, and picks one when adding an item. Every mutation
+  (check/uncheck, rename, requantify, regroup, delete, add) is owner-gated exactly like
   the rest of Attire (viewers see the same list read-only — checkboxes disabled, no Add/Edit/Delete
   — never fully hidden, since seeing what's packed needs no write access) and persists straight to
   `driveData` via the same `Store.saveTripsyAttireGuide`, since checked-state is real shared trip
   data, not a personal display preference (unlike `isTripsyTripCollapsed`/`tripsyUpdateShowMatches`,
   which are deliberately `localStorage`/session-only specifically because a non-owner viewer has no
-  Drive write access to persist anything into the shared file at all). Clicking an item's name opens
+  Drive write access to persist anything into the shared file at all). An item with linked events
+  shows that tally next to its name as an explicit "N events" (NOT a bare "(N)" — that read as a
+  quantity and genuinely confused the owner, who saw "Ties (11)" and asked why 11 ties were being
+  packed when the quantity was "5-6" and the 11 was the linked-event count). Clicking an item's name opens
   a small popup listing exactly which event(s) it's linked to (date/time/name, resolved against
   `guide.days`), each clickable to jump to that event on My Trips via the same
   `tripsyAttireGoToEvent` the Daily Dress Guide's own event titles already use — hiding the popup
