@@ -627,7 +627,7 @@ that catches drift between them.
   prominent amber/orange "View Detailed List" button (`.tripsy-attire-packinglist-btn`, the one CTA
   each card wants to draw the eye to, deliberately styled apart from the plain outline buttons
   elsewhere in Attire) opens `showTripsyAttirePackingListOverlay`, an overlay listing
-  `guide.packingList.{him,her}[]` (`{id, name, quantity, checked, eventIds}`). The button always
+  `guide.packingList.{him,her}[]` (`{id, name, quantity, group, category, checked, eventIds}`). The button always
   sits flush at the bottom of its card (`.tripsy-attire-person-card` is a flex column;
   `.tripsy-attire-person-card-body` wraps the rows+essentials above it with `flex:1` so IT absorbs
   the card's leftover height) — since the grid row already stretches both cards to equal height,
@@ -635,20 +635,36 @@ that catches drift between them.
   either person's essentials list is. Seeded once from a
   new `packing_list` field on `generateTripsyAttireCategories`'s `person_guidance` schema
   (part of the guidance half of that function's two parallel calls, no extra round trip beyond
-  them) — the prompt asks for the same anchor-garment-plus-restyled-
-  accessories logic worked out by hand this session (suits/dresses counted low and reused; a fresh
-  dress shirt *and* a different tie per formal **time-block** for him, since a shirt worn through one
-  evening isn't practical to re-wear but the suit/tie are; different jewelry/scarves for her; casual
-  basics sized for realistic once-a-week laundry rotation, not one item per day), plus an `event_ids`
-  per item where it reasonably maps to specific occasions. **All garment/outfit counting is done per
-  TIME-BLOCK, not per event** — "occasion" means one time-block (events with no time to change
-  between them, worn as one outfit, e.g. a pre-concert reception → concert → post-concert reception
-  evening = ONE wearing), so a continuous evening counts as one anchor wearing / one fresh shirt, not
-  one per sub-event. The blocks are **given to the call as input** rather than re-derived by it (see
-  `tripsyAttireComputeTimeBlocks` under the two-parallel-calls bullet above), and the prompt states
-  outright that a garment worn once per occasion must never be quantified above its tier's BLOCK
-  count. Judgment is preserved — how many ties N formal blocks warrants is still the model's call —
-  but it can no longer disagree with the app about what the blocks are. **A Refresh re-generates the ENTIRE plan, `packingList` included** —
+  them) — the prompt asks for the same anchor-garment-plus-restyled-accessories logic worked out by
+  hand this session, now pinned to EXACT re-wear multipliers per garment type (given explicitly by
+  the owner after the model's own looser "once-a-week rotation" phrasing produced inconsistent
+  counts) rather than left to the model's own judgment call: suits/dresses counted low and reused
+  across time-blocks; **tops/shirts (dress shirts, casual tops, blouses) and underwear/socks get
+  exactly ONE wearing each** before a wash, so quantity matches the block/day count 1:1 within one
+  laundry cycle; **ties get TWO wearings each**, so quantity is roughly HALF the formal/cocktail-tier
+  time-block count (rounded up, minimum 1) — for her, jewelry/scarves/wraps restyle the same repeat
+  dresses the same way ties restyle a repeat suit; **casual/smart-casual BOTTOMS (trousers, jeans,
+  shorts) get up to SIX wearings each**, a much lower count than tops need for the same span. Each
+  item also carries an `event_ids` link where it reasonably maps to specific occasions.
+  **All garment/outfit counting is done per TIME-BLOCK, not per event** — "occasion" means one
+  time-block (events with no time to change between them, worn as one outfit, e.g. a pre-concert
+  reception → concert → post-concert reception evening = ONE wearing), so a continuous evening counts
+  as one anchor wearing / one fresh shirt, not one per sub-event. The blocks are **given to the call
+  as input** rather than re-derived by it (see `tripsyAttireComputeTimeBlocks` under the
+  two-parallel-calls bullet above), and the prompt states outright that a garment worn once per
+  occasion must never be quantified above its tier's BLOCK count times its own re-wear multiplier.
+  **Each `packing_list` item
+  also carries its own `category`** (the single dress-code tier it's packed for, `''` only for
+  genuinely tier-agnostic items) specifically so its `event_ids` can be validated rather than trusted
+  outright: the events call and the guidance call run in parallel and never see each other's output,
+  so their PRIVATE per-event tier judgments can genuinely diverge for a borderline event (e.g. the
+  guidance call privately reading a reception+concert as Formal while the events call calls it
+  Semi-formal) — left unchecked, that produced a real bug where a "Ties (formal)" item ended up
+  linked to an event the app displays everywhere else as Semi-formal. `generateTripsyAttireGuide`
+  fixes this in JS: `days` already carries each event's AUTHORITATIVE `displayCategory` (block-
+  dressiest tier, stamped by `computeTripsyAttireBlocks`) by the time the packing list is built, so
+  every item's `event_ids` is filtered down to only the ids that actually belong to that item's own
+  `category` under `displayCategory` — a mismatched link is dropped rather than kept. **A Refresh re-generates the ENTIRE plan, `packingList` included** —
   `generateTripsyAttireGuide` always seeds the packing list fresh from Claude's new output, the same
   way it already re-derives every event's category from scratch, so a Refresh intentionally discards
   hand-edited packing-list items (checked-off state, renames, custom quantities, manual adds) exactly
