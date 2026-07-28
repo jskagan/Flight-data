@@ -379,7 +379,10 @@ that catches drift between them.
   shared file.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's Itinerary → Modify → Update menu, which calls
-  `compareTripsyItineraryPdf` and shows a row per PDF/Tripsy difference (match/conflict/pdf_only/
+  `compareTripsyItineraryPdf` (`claude-sonnet-5`, streamed `json_schema`; sets `thinking:
+  {type:'adaptive'}` + `effort: 'medium'` EXPLICITLY — see the Attire section's note on Sonnet 5's
+  adaptive-thinking-by-default trap, which this call had too; raise to `high` first if comparison
+  accuracy regresses) and shows a row per PDF/Tripsy difference (match/conflict/pdf_only/
   tripsy_only) for the owner to Accept/Ignore/Modify/Add/Delete one at a time — a `pdf_only` row's
   "Modify New" combines Add Event's instant `create_event` queue with immediately opening that new
   pending item's own edit form (the same one the timeline's pencil icon on a pending-create row
@@ -414,7 +417,26 @@ that catches drift between them.
   `TRIPSY_ATTIRE_CATEGORY_COLOR`/`_LABEL`/`_ORDER`) by `generateTripsyAttireCategories`
   (`index.html:14312`, same `fetchAnthropicApiKeyFromDrive` + streamed-`json_schema` pattern as
   `compareTripsyItineraryPdf`, `model: 'claude-sonnet-5'` for both calls) — which fires **two
-  concurrent Claude calls via `Promise.all`** (shared plumbing: `tripsyAttireClaudeCall`), because
+  concurrent Claude calls via `Promise.all`** (shared plumbing: `tripsyAttireClaudeCall`), each
+  passing an EXPLICIT `thinking`/`effort` (events: `{type:'disabled'}` + `low`; guidance:
+  `{type:'adaptive'}` + `medium`). **Setting these explicitly is the single biggest latency lever
+  here, and the default is a trap**: `claude-sonnet-5` runs *adaptive thinking by default* when
+  `thinking` is omitted, at the default effort of `high`. Omitting it made one refresh take ~5.5
+  minutes (~107s events / ~284s guidance before their first text token) — and because thinking
+  blocks stream with EMPTY text under the default `display:"omitted"`, none of that time appeared as
+  streaming; the timing logs blamed "time to first token" and it looked like the API was stalling.
+  `tripsyAttireClaudeCall` now also timestamps the thinking `content_block_start` separately so that
+  time can never hide inside the TTFT number again. **This default is MODEL-SPECIFIC, which is why
+  only some of this app's Claude calls were affected**: on `claude-sonnet-5` omitting `thinking` runs
+  adaptive, but on `claude-opus-4-8` omitting it runs *without* thinking. So both Sonnet 5 call sites
+  (this one and `compareTripsyItineraryPdf`) now set `thinking` explicitly, while the three Opus 4.8
+  narrative calls (`generateTripsyItineraryNarrative`, `generateTripsySummaryBlurbs`,
+  `generateTripsyEventNarrative`) are correctly left alone — adding `thinking` there would make them
+  SLOWER, not faster. Check the model before assuming a call has this problem. Both halves are structured extraction against a
+  fixed schema, so deep chain-of-thought buys little: the events call is pure per-event
+  classification (thinking off), while the guidance call keeps thinking for its block/garment
+  arithmetic but at `medium` (for Sonnet 5 roughly Sonnet 4.6 at `high`). If garment counts ever
+  regress, raise the GUIDANCE call to `high` before changing anything else. Two calls, because
   on a large trip the single serial output stream WAS the generation wait: one call emits the
   per-event array (category / `alternate_category` / `continues_previous_event` — the per-event
   `note` field was retired in this split, it was stored but never rendered anywhere and cost about

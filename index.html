@@ -14531,7 +14531,22 @@ ${JSON.stringify(currentEventsForPrompt)}`;
       // instead of a cryptic parse error.
       max_tokens: 64000,
       stream: true,
-      output_config: { format: { type: 'json_schema', schema } },
+      // Set thinking/effort EXPLICITLY -- claude-sonnet-5 runs adaptive
+      // thinking by DEFAULT at effort `high` when `thinking` is omitted, and
+      // thinking blocks stream with empty text, so that time is invisible and
+      // looks like the API stalling. That default silently dominated the
+      // Attire generation's wall clock (see tripsyAttireClaudeCall for the
+      // measured numbers) and this call had the identical recipe: sonnet-5 +
+      // streamed json_schema + a large max_tokens with no thinking set. The
+      // long max_tokens history in the comment above -- 8192 -> 16000 ->
+      // 32000, then streaming -- was fighting output size; thinking was the
+      // other half of the wait the whole time. Kept ADAPTIVE rather than
+      // disabled because matching every PDF event to a current Tripsy event
+      // (plus field_corrections) is real judgment, not enum classification --
+      // but at `medium`, which on Sonnet 5 is roughly Sonnet 4.6 at `high`.
+      // If comparison accuracy ever regresses, raise this to `high` first.
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'medium', format: { type: 'json_schema', schema } },
       messages: [{
         role: 'user',
         content: [
@@ -14798,8 +14813,10 @@ ${eventsJson}`;
   // down the wrong path once already.
   const pairStart = performance.now();
   const [eventsResult, guidanceResult] = await Promise.all([
-    tripsyAttireClaudeCall(apiKey, eventsSchema, eventsPrompt, 'per-event categories'),
-    tripsyAttireClaudeCall(apiKey, guidanceSchema, guidancePrompt, 'packing guidance'),
+    // Per-event classification against a fixed 7-value enum -- no thinking.
+    tripsyAttireClaudeCall(apiKey, eventsSchema, eventsPrompt, 'per-event categories', { thinking: false, effort: 'low' }),
+    // Keeps thinking (it does real block/garment arithmetic) but at medium.
+    tripsyAttireClaudeCall(apiKey, guidanceSchema, guidancePrompt, 'packing guidance', { thinking: true, effort: 'medium' }),
   ]);
   console.log(`[attire timing] both Claude calls (parallel): ${Math.round(performance.now() - pairStart)}ms`);
   return {
@@ -14810,9 +14827,10 @@ ${eventsJson}`;
 // One streamed structured-output Claude call for the Attire feature -- the
 // shared plumbing behind generateTripsyAttireCategories's two parallel calls
 // (same fetch/SSE-parse shape as compareTripsyItineraryPdf's own inline copy).
-async function tripsyAttireClaudeCall(apiKey, schema, promptText, label) {
+async function tripsyAttireClaudeCall(apiKey, schema, promptText, label, { thinking = true, effort = 'medium' } = {}) {
   const callStart = performance.now();
   let firstTokenAt = null;
+  let thinkingStartedAt = null;
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -14838,7 +14856,23 @@ async function tripsyAttireClaudeCall(apiKey, schema, promptText, label) {
       // risk that originally motivated small caps.
       max_tokens: 64000,
       stream: true,
-      output_config: { format: { type: 'json_schema', schema } },
+      // THE latency lever, and an easy one to miss: claude-sonnet-5 runs
+      // ADAPTIVE THINKING BY DEFAULT when `thinking` is omitted, at the
+      // default effort of `high`. Left unset, a refresh spent ~107s (events)
+      // and ~284s (guidance) before its first text token -- and because
+      // thinking blocks stream with EMPTY text under the default
+      // display:"omitted", none of that showed up as streaming time; it
+      // looked like the API was simply stalling. Both halves are structured
+      // extraction against an explicit schema, so deep chain-of-thought buys
+      // little here: the events call is pure per-event classification
+      // (thinking off outright), and the guidance call keeps thinking for its
+      // block/garment arithmetic but at `medium`, which for Sonnet 5 is
+      // roughly Sonnet 4.6 at `high`. If garment counts ever regress, raise
+      // the guidance call to `high` before touching anything else.
+      ...(thinking === false
+        ? { thinking: { type: 'disabled' } }
+        : { thinking: { type: 'adaptive' } }),
+      output_config: { effort, format: { type: 'json_schema', schema } },
       messages: [{ role: 'user', content: [{ type: 'text', text: promptText }] }],
     }),
   });
@@ -14861,7 +14895,12 @@ async function tripsyAttireClaudeCall(apiKey, schema, promptText, label) {
       if (!line.startsWith('data: ')) continue;
       let evt;
       try { evt = JSON.parse(line.slice(6)); } catch { continue; }
-      if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
+      if (evt.type === 'content_block_start' && evt.content_block && evt.content_block.type === 'thinking') {
+        // Thinking blocks stream with EMPTY text under display:"omitted", so
+        // without this marker their entire duration silently inflates the
+        // "time to first token" number and looks like an API stall.
+        if (thinkingStartedAt == null) thinkingStartedAt = performance.now();
+      } else if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
         if (firstTokenAt == null) firstTokenAt = performance.now();
         text += evt.delta.text;
       } else if (evt.type === 'message_delta' && evt.delta && evt.delta.stop_reason) {
@@ -14869,12 +14908,14 @@ async function tripsyAttireClaudeCall(apiKey, schema, promptText, label) {
       }
     }
   }
-  // Split the wait into think-time (request sent -> first token, which grows
-  // with PROMPT size/complexity) vs stream-time (first token -> done, which
-  // grows with OUTPUT size). Which number dominates says whether to trim the
-  // prompt or trim what's being asked for.
+  // Split the wait three ways: prompt-processing (request sent -> first
+  // signal), THINKING (an invisible content block, see above), and streaming
+  // (first text token -> done, which grows with OUTPUT size). Which number
+  // dominates says whether to change effort/thinking, trim the prompt, or
+  // trim what's being asked for.
   console.log(`[attire timing] ${label}: ${Math.round(performance.now() - callStart)}ms total`
-    + (firstTokenAt != null ? ` (${Math.round(firstTokenAt - callStart)}ms to first token, ${Math.round(performance.now() - firstTokenAt)}ms streaming)` : '')
+    + (thinkingStartedAt != null ? ` | thinking began at ${Math.round(thinkingStartedAt - callStart)}ms` : ' | no thinking block')
+    + (firstTokenAt != null ? `, first text token at ${Math.round(firstTokenAt - callStart)}ms, ${Math.round(performance.now() - firstTokenAt)}ms streaming` : '')
     + ` | prompt ${promptText.length} chars, output ${text.length} chars`);
   // Name the half that failed -- with two parallel calls, an unlabelled
   // "too large" error can't tell you whether it was the per-event pass or the
