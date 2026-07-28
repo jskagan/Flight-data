@@ -439,13 +439,21 @@ that catches drift between them.
   long as the gap is short and same-day; the 3 "mix and match" tiers (Athletic/Smart Casual/Casual)
   still only chain within an exact match there, since those are just counted (`counts{}`, a flat
   block-count per ALL 7 tiers, shared between both people), never itemized. Per person,
-  `person_guidance.{him,her}.outfits{}` gives a SEPARATE
-  suggested outfit count per tier (deliberately not the same number as the block count — e.g. 7
-  black-tie occasions can still often share 3-4 restyled outfits via accessories, which is Claude's
-  judgment call, not JS's) plus that person's own `essentials[]`; the Attire overlay renders these
-  as two "Him"/"Her" cards in the Packing Summary, each row showing just the category name and that
-  person's outfit suggestion (the underlying occasion count still drives `guide.counts` and the
-  category drill-down, but isn't displayed on the row itself). Weather is fetched
+  `person_guidance.{him,her}.garments{}` gives, per tier, the ACTUAL GARMENTS to pack — an `items[]`
+  of `{name, quantity}` (e.g. 2 suits / 5 dress shirts / 5 ties) plus a `reuse_note` string — rather
+  than a single "N outfits" count. The rule the prompt enforces: say only what is NEEDED, never prose
+  about how things get restyled; and when a tier needs no additional copy of an anchor garment
+  because a DRESSIER tier's already covers it, that garment is omitted from `items[]` and named in
+  `reuse_note` instead (rendered parenthetically, e.g. "(use one Formal suit)"), so each tier lists
+  only what's genuinely ADDITIONAL. The 3 mix-and-match tiers itemize TOPS and BOTTOMS counts sized
+  for once-a-week laundry rotation. Plus that person's own `essentials[]`; the Attire overlay renders
+  these as two "Him"/"Her" cards in the Packing Summary, each row being the category name with its
+  garment lines beneath it, one garment per line (`.tripsy-attire-person-row` is a flex COLUMN for
+  this; the old right-aligned single-line `.tripsy-attire-person-count` is gone). A guide generated
+  before `garments{}` existed still carries the old `outfits{}` string, which the row renderer falls
+  back to as a single "N outfits" line rather than showing the tier empty. The underlying occasion
+  count still drives `guide.counts` and the category drill-down, but isn't displayed on the row
+  itself. Weather is fetched
   live via the same Open-Meteo pipeline the day-bar chips already use
   (`tripsyWeatherTargetsByDay`/`tripsyLoadWeather`/`tripsyGetWeather`) and folded into the GUIDANCE
   call's prompt only (it informs essentials/packing items like a rain layer or warm coat; the events

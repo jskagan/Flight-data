@@ -1087,10 +1087,17 @@
   @media (max-width: 640px) { .tripsy-attire-persons { grid-template-columns: 1fr; } }
   .tripsy-attire-person-card { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; background: var(--panel-2); }
   .tripsy-attire-person-card h4 { font-size: 14px; margin: 0 0 10px; }
-  .tripsy-attire-person-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); }
+  /* One tier per row: the category name, then its needed garments listed one
+     per line beneath it (rather than a single right-aligned "N outfits"). */
+  .tripsy-attire-person-row { display: flex; flex-direction: column; align-items: stretch; gap: 3px; padding: 8px 0; border-top: 1px solid var(--line); }
   .tripsy-attire-person-row:first-of-type { border-top: none; }
-  .tripsy-attire-person-label { font-size: 13px; }
-  .tripsy-attire-person-count { font-family: var(--mono); font-size: 12.5px; font-weight: 700; white-space: nowrap; padding-left: 10px; color: var(--text); }
+  .tripsy-attire-person-label { font-size: 13px; font-weight: 600; }
+  .tripsy-attire-person-garments { display: flex; flex-direction: column; gap: 2px; padding-left: 12px; }
+  /* "(use one Formal suit)" -- what's carried over from a dressier tier instead
+     of packed again, so the lines below it are only what's ADDITIONAL. */
+  .tripsy-attire-person-reuse { font-size: 12px; color: var(--muted); font-style: italic; }
+  .tripsy-attire-person-garment { display: flex; gap: 6px; font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+  .tripsy-attire-person-garment-qty { font-weight: 700; }
   /* Every rendered person-row has a data-tripsy-attire-category-link (rows
      for a tier with zero occasions are filtered out before this point), so
      the whole class is always clickable -- drills into the specific events
@@ -14574,19 +14581,41 @@ ${JSON.stringify(currentEventsForPrompt)}`;
 const TRIPSY_ATTIRE_TAXONOMY_GUIDE = TRIPSY_ATTIRE_CATEGORY_ORDER
   .map(category => `- ${category}: ${TRIPSY_ATTIRE_CATEGORY_DESCRIPTION[category]}`)
   .join('\n');
-// One person's packing guidance: how many distinct outfits they actually
-// need per tier (NOT the same as the block/occasion count -- e.g. 7 black-
-// tie occasions might still only need 3-4 outfits, restyled with different
-// accessories, which is exactly the kind of judgment call Claude is suited
-// for and a raw block count can't express) plus a short essentials list.
+// One person's packing guidance: the actual GARMENTS they need per tier (not a
+// "N outfits" count -- what the owner wants to read is "2 suits / 5 shirts /
+// 5 ties", itemized, with anything reused from a dressier tier called out
+// instead of double-counted), plus a short essentials list.
 // Used for both "him" and "her" in generateTripsyAttireCategories's schema.
 function TRIPSY_ATTIRE_PERSON_GUIDANCE_SCHEMA(categoryEnum) {
-  const outfitsProps = {};
-  categoryEnum.forEach(c => { outfitsProps[c] = { type: 'string' }; });
+  // Per category, the GARMENTS actually needed rather than a single "N outfits"
+  // count: `items` is the itemized list (one line each in the Packing Summary),
+  // and `reuse_note` names anything carried over from a dressier tier instead of
+  // packed again (e.g. Cocktail reusing the Formal suit) so the list shows only
+  // what's genuinely ADDITIONAL for that tier.
+  const garmentsProps = {};
+  categoryEnum.forEach(c => {
+    garmentsProps[c] = {
+      type: 'object',
+      properties: {
+        reuse_note: { type: 'string' },
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { name: { type: 'string' }, quantity: { type: 'string' } },
+            required: ['name', 'quantity'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['reuse_note', 'items'],
+      additionalProperties: false,
+    };
+  });
   return {
     type: 'object',
     properties: {
-      outfits: { type: 'object', properties: outfitsProps, required: [...categoryEnum], additionalProperties: false },
+      garments: { type: 'object', properties: garmentsProps, required: [...categoryEnum], additionalProperties: false },
       essentials: { type: 'array', items: { type: 'string' } },
       packing_list: {
         type: 'array',
@@ -14602,7 +14631,7 @@ function TRIPSY_ATTIRE_PERSON_GUIDANCE_SCHEMA(categoryEnum) {
         },
       },
     },
-    required: ['outfits', 'essentials', 'packing_list'],
+    required: ['garments', 'essentials', 'packing_list'],
     additionalProperties: false,
   };
 }
@@ -14698,7 +14727,10 @@ First, privately judge each event in the current-events list below: which of the
 
 person_guidance covers TWO travelers on this trip, "him" and "her", both attending every event above -- for EACH person and EACH of the 7 categories, give:
 - COUNT EVERYTHING BELOW BY TIME-BLOCK, NEVER BY INDIVIDUAL EVENT. A time-block is a maximal run of consecutive same-day events worn as ONE outfit: each event after the first flows directly from the previous one per your continuity judgment above (and, within the 4 formal tiers, treat same-day events only a short gap apart as one block even across a category change, since a single outfit covers them). A pre-concert reception -> concert -> post-concert reception evening is ONE time-block = ONE wearing of the anchor garment (and, for him, ONE fresh shirt + tie), NOT three. DRESSIEST TIER WINS WITHIN A BLOCK: a time-block's tier is the DRESSIEST tier among its events -- the block counts ONCE under that dressiest tier ONLY, and the less-formal events inside it add NOTHING to their own tiers' counts (e.g. that cocktail-reception -> formal-concert -> cocktail-reception evening is ONE formal occasion and ZERO cocktail occasions). So everywhere below, an "occasion" means one time-block counted at its dressiest tier, not one event -- collapse continuous events before you count.
-- outfits: a short suggested count of DISTINCT OUTFITS TO PACK for that category (e.g. "2", "~5", "3-4") -- this is NOT the number of time-blocks in that category, it's how many separate looks are actually worth packing given how much they can be restyled/reused. For the 3 "mix and match" tiers (athletic, smart_casual, casual), pieces are meant to repeat and recombine across the whole trip. For the 4 "plan around this" tiers (semi_formal, cocktail, formal, black_tie), assume accessories (jewelry, ties, wraps, pocket squares) can restyle the SAME outfit across multiple time-blocks in that tier rather than needing a brand new look every time -- so outfits should usually be noticeably LOWER than the number of time-blocks in that tier once there are more than 2-3.
+- garments: the ACTUAL GARMENTS TO PACK for that tier, itemized -- NOT a count of outfits, and NOT a description of how things get restyled. Each entry in items[] is one garment line: name (e.g. "suits", "dress shirts", "ties", "cocktail dresses", "tops", "trousers") and quantity (e.g. "2", "5", "3-4"). Say only what is NEEDED. Example for a formal tier: [{"name":"suits","quantity":"2"},{"name":"dress shirts","quantity":"5"},{"name":"ties","quantity":"5"}]. Never write prose like "restyled with different accessories" in a garment name.
+- Anchor garments are counted LOW and re-worn across time-blocks in the tier (see the packing_list rules below for the exact reuse logic: a suit/dress repeats, but a dress shirt worn through a whole evening does not). Items that DO repeat per time-block (dress shirts, ties for him; jewelry/scarves for her) should be quantified per time-block in that tier.
+- reuse_note: when a tier needs NO additional copy of an anchor garment because a DRESSIER tier's one already covers it, do NOT list that garment in items[] -- instead put a short parenthetical-style note here naming what to reuse, e.g. "use one Formal suit" or "use the Black Tie tuxedo shirt", and list only the genuinely ADDITIONAL garments for this tier in items[]. When nothing is being reused from another tier, set reuse_note to an empty string ''.
+- For the 3 "mix and match" tiers (athletic, smart_casual, casual), items[] must give the number of TOPS and BOTTOMS needed (e.g. [{"name":"tops","quantity":"7"},{"name":"trousers/jeans","quantity":"3"}]) plus any other distinct garment for that tier -- these repeat and recombine across the trip, so size them for realistic once-a-week laundry rotation rather than one per day.
 - Typical real-world difference between the two: men more often reuse one suit/tux across several occasions in the same tier via a different tie/shirt; women more often want a bit more variety per tier. Reflect that when it's a natural fit, but don't force a difference that doesn't make sense for this specific trip.
 
 Each person's essentials is a short flat list of packing essentials for THAT person specifically, driven by the weather, the events above, and their own outfits -- weather-driven items (a rain layer, a warm coat for an outdoor evening event) as well as clothing-type essentials (formal shoes, a specific garment, accessories). Not a full packing list, just the notable items -- a shared item like a rain jacket can appear in both lists if both people need one.
@@ -18248,16 +18280,37 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
   // share 3-4 restyled outfits). Both people see the same occasion counts
   // (it's the same trip) but can get different outfit suggestions.
   const personCardHtml = (personKey, label) => {
-    const pg = (guide.personGuidance && guide.personGuidance[personKey]) || { outfits: {}, essentials: [] };
+    const pg = (guide.personGuidance && guide.personGuidance[personKey]) || { garments: {}, essentials: [] };
     const rows = TRIPSY_ATTIRE_CATEGORY_ORDER.slice().reverse().map(category => {
       const camel = TRIPSY_ATTIRE_CAMEL_KEY[category];
       const blockCount = (guide.counts && guide.counts[camel]) || 0;
       if (!blockCount) return '';
-      const outfits = pg.outfits && pg.outfits[category];
+      // Itemized garments for this tier -- one line each, with anything carried
+      // over from a dressier tier shown as a parenthetical reuse note instead of
+      // being listed (and counted) again. A guide generated before this field
+      // existed still has the old single `outfits` string, so fall back to
+      // rendering that as one line rather than showing an empty tier.
+      const g = (pg.garments && pg.garments[category]) || null;
+      const items = (g && Array.isArray(g.items)) ? g.items.filter(it => it && it.name) : [];
+      const reuseNote = (g && g.reuse_note) ? String(g.reuse_note).trim() : '';
+      const legacyOutfits = (!g && pg.outfits) ? pg.outfits[category] : '';
+      const detailHtml = (reuseNote || items.length)
+        ? `
+          ${reuseNote ? `<div class="tripsy-attire-person-reuse">(${esc(reuseNote)})</div>` : ''}
+          ${items.map(it => `
+            <div class="tripsy-attire-person-garment">
+              <span class="tripsy-attire-person-garment-qty">${esc(it.quantity || '')}</span>
+              <span class="tripsy-attire-person-garment-name">${esc(it.name)}</span>
+            </div>
+          `).join('')}
+        `
+        : (legacyOutfits
+          ? `<div class="tripsy-attire-person-garment"><span class="tripsy-attire-person-garment-qty">${esc(legacyOutfits)}</span><span class="tripsy-attire-person-garment-name">outfit${String(legacyOutfits).trim() === '1' ? '' : 's'}</span></div>`
+          : `<div class="tripsy-attire-person-garment"><span class="tripsy-attire-person-garment-name">—</span></div>`);
       return `
         <div class="tripsy-attire-person-row" data-tripsy-attire-category-link="${esc(category)}" role="button" tabindex="0" title="Show ${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[category])} events">
           <div class="tripsy-attire-person-label">${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[category])}</div>
-          <div class="tripsy-attire-person-count">${outfits ? esc(outfits) : '—'}${outfits ? ` outfit${outfits.trim() === '1' ? '' : 's'}` : ''}</div>
+          <div class="tripsy-attire-person-garments">${detailHtml}</div>
         </div>
       `;
     }).join('');
