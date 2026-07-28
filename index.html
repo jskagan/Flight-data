@@ -1247,6 +1247,12 @@
   .tripsy-attire-packinglist-head h2 { font-size: 16px; margin: 0; }
   .tripsy-attire-packing-row { padding: 8px 0; border-top: 1px solid var(--line); }
   .tripsy-attire-packing-list > .tripsy-attire-packing-row:first-child { border-top: none; }
+  /* Garment-type sections (Dress Wear / Tops / Pants / Essentials / Footwear /
+     Accessories). The first row under each header drops its top border so the
+     header's own rule reads as the separator. */
+  .tripsy-attire-packing-group { margin-bottom: 18px; }
+  .tripsy-attire-packing-group-title { font-family: var(--mono); font-weight: 700; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--amber); padding: 6px 0; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .tripsy-attire-packing-group > .tripsy-attire-packing-row:first-of-type { border-top: none; }
   .tripsy-attire-packing-row-main { display: flex; align-items: center; gap: 10px; }
   .tripsy-attire-packing-row-actions { display: flex; gap: 8px; margin: 6px 0 0 26px; }
   .tripsy-attire-packing-name {
@@ -14635,9 +14641,10 @@ function TRIPSY_ATTIRE_PERSON_GUIDANCE_SCHEMA(categoryEnum) {
           properties: {
             name: { type: 'string' },
             quantity: { type: 'string' },
+            group: { type: 'string', enum: TRIPSY_ATTIRE_PACKING_GROUPS },
             event_ids: { type: 'array', items: { type: 'string' } },
           },
-          required: ['name', 'quantity', 'event_ids'],
+          required: ['name', 'quantity', 'group', 'event_ids'],
           additionalProperties: false,
         },
       },
@@ -14701,6 +14708,7 @@ async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPro
     : '';
   const tripLine = `Trip: ${effectiveTrip.name || ''}, ${formatTripDateRange(effectiveTrip.start, effectiveTrip.end)}${effectiveTrip.location ? `, ${effectiveTrip.location}` : ''}.`;
   const eventsJson = JSON.stringify(currentEventsForPrompt);
+  const timeBlocksJson = JSON.stringify(tripsyAttireComputeTimeBlocks(currentEventsForPrompt));
   // Call 1 of 2: per-event categorization only. No weather block on purpose --
   // weather was only ever allowed to influence the (now-dropped) per-event
   // note, never the category itself, so it's dead input weight here.
@@ -14734,10 +14742,12 @@ ${tripLine}
 Use exactly these 7 dress-code categories, from most relaxed to most formal:
 ${TRIPSY_ATTIRE_TAXONOMY_GUIDE}
 
-First, privately judge each event in the current-events list below: which of the 7 tiers it calls for (weigh its venue/address, its own name/category, the time of day, and any explicit dress-code wording in its name or notes), and which consecutive SAME-DAY events flow directly into each other with realistically no opportunity to return to lodging and change outfits in between (e.g. a "Pre-concert Reception" -> "Concert" -> "Post-concert Reception" evening is one continuous stretch even with an hour or two between parts). Do NOT output any per-event data -- use these judgments only for the counting rules below.
+The TIME-BLOCKS list below is PRE-COMPUTED and authoritative -- do NOT re-derive or re-split it. Each block is a run of events with no realistic chance to change clothes between them, so ONE outfit is worn across the whole block. Treat each block as exactly ONE wearing/occasion.
+
+Your job is to judge, privately: which of the 7 tiers each event calls for (weigh its venue/address, its own name, the time of day, and any explicit dress-code wording), and from that, each BLOCK's tier = the DRESSIEST tier among its events (that's the outfit actually worn for that block; the less-formal events inside it get no outfit of their own). Do NOT output any per-event or per-block data -- use these judgments only for the counting rules below.
 
 person_guidance covers TWO travelers on this trip, "him" and "her", both attending every event above -- for EACH person and EACH of the 7 categories, give:
-- COUNT EVERYTHING BELOW BY TIME-BLOCK, NEVER BY INDIVIDUAL EVENT. A time-block is a maximal run of consecutive same-day events worn as ONE outfit: each event after the first flows directly from the previous one per your continuity judgment above (and, within the 4 formal tiers, treat same-day events only a short gap apart as one block even across a category change, since a single outfit covers them). A pre-concert reception -> concert -> post-concert reception evening is ONE time-block = ONE wearing of the anchor garment (and, for him, ONE fresh shirt + tie), NOT three. DRESSIEST TIER WINS WITHIN A BLOCK: a time-block's tier is the DRESSIEST tier among its events -- the block counts ONCE under that dressiest tier ONLY, and the less-formal events inside it add NOTHING to their own tiers' counts (e.g. that cocktail-reception -> formal-concert -> cocktail-reception evening is ONE formal occasion and ZERO cocktail occasions). So everywhere below, an "occasion" means one time-block counted at its dressiest tier, not one event -- collapse continuous events before you count.
+- COUNT EVERYTHING BELOW BY TIME-BLOCK (from the pre-computed TIME-BLOCKS list), NEVER BY INDIVIDUAL EVENT. Each block counts ONCE, under its dressiest tier ONLY; the less-formal events inside a block add NOTHING to their own tiers' counts. So a pre-concert reception -> concert -> post-concert reception evening is ONE formal occasion requiring ONE wearing of the anchor garment (and, for him, ONE fresh shirt + tie) -- not three, and it contributes ZERO cocktail occasions. Everywhere below, "occasion" means one time-block at its dressiest tier. Before you count anything, work out how many blocks fall in each tier, and let those numbers -- not the raw event count -- drive every quantity you give. A garment worn once per occasion should never be quantified above that tier's BLOCK count.
 - garments: the ACTUAL GARMENTS TO PACK for that tier, itemized -- NOT a count of outfits, and NOT a description of how things get restyled. Each entry in items[] is one garment line: name (e.g. "suits", "dress shirts", "ties", "cocktail dresses", "tops", "trousers") and quantity (e.g. "2", "5", "3-4"). Say only what is NEEDED. Example for a formal tier: [{"name":"suits","quantity":"2"},{"name":"dress shirts","quantity":"5"},{"name":"ties","quantity":"5"}]. Never write prose like "restyled with different accessories" in a garment name.
 - Anchor garments are counted LOW and re-worn across time-blocks in the tier (see the packing_list rules below for the exact reuse logic: a suit/dress repeats, but a dress shirt worn through a whole evening does not). Items that DO repeat per time-block (dress shirts, ties for him; jewelry/scarves for her) should be quantified per time-block in that tier.
 - At the COCKTAIL tier specifically, a tie is optional rather than expected (an open collar reads fine there, unlike Formal/Black Tie) -- still list ties if they're worth packing for that tier, but size the quantity accordingly; the UI labels that line "Optional" on its own.
@@ -14754,7 +14764,11 @@ Each person's packing_list is a REAL itemized garment-by-garment packing list, m
 - Underwear/socks/undershirts are washable base layers -- pool them as one line each (e.g. "8-9 days underwear"), not itemized per night.
 - Set event_ids to the specific event id(s) (copied verbatim from the current-events list below) this item is actually needed for, when it reasonably maps to one or more specific events (e.g. a swimsuit -> the pool/spa event ids; formal shoes -> every formal-tier event id). General items with no specific occasion (a packable rain jacket carried all trip, base-layer underwear) get an empty event_ids array. Never invent an id that isn't in the current-events list.
 - Include footwear, outerwear, and accessories as their own line items, not folded into essentials.
+- Set group on EVERY item to exactly one of: dress_wear, tops, pants, essentials, footwear, accessories. What belongs where: dress_wear = suits, tuxedos, blazers, sport coats, dress shirts, dress trousers, ties, DRESS socks, cummerbunds, gowns and cocktail dresses; tops = casual shirts, sweaters, t-shirts, blouses, polos, cardigans; pants = casual trousers, jeans, shorts, chinos, skirts; essentials = underwear, undershirts, CASUAL socks, sleepwear (the washable base layers); footwear = every kind of shoe or boot; accessories = belts, scarves, jewelry, watches, hats, bags, gloves, cuff links, pocket squares, sunglasses. Note the two deliberate splits: dress socks are dress_wear but casual socks are essentials, and dress trousers are dress_wear but casual trousers/jeans are pants.
 ${weatherLines}
+
+TIME-BLOCKS (pre-computed, authoritative -- one outfit per block; count occasions from THESE, not from the event list):
+${timeBlocksJson}
 
 Current events:
 ${eventsJson}`;
@@ -14873,6 +14887,34 @@ function tripsyAttireGapWithinThreeHours(prevEvent, ev) {
   const prevEndMinutes = tripsyAttireMinutesOf(prevEvent.endTime) ?? tripsyAttireMinutesOf(prevEvent.startTime);
   const thisStartMinutes = tripsyAttireMinutesOf(ev.startTime);
   return (prevEndMinutes == null || thisStartMinutes == null) ? true : (thisStartMinutes - prevEndMinutes) <= 180;
+}
+// Clusters the prompt's event list into candidate TIME-BLOCKS -- consecutive
+// same-day events with no realistic chance to change clothes between them
+// (gap of 3 hours or less, unknown times treated as continuous, matching
+// tripsyAttireGapWithinThreeHours). Computed in plain JS BEFORE the generation
+// calls and handed to the guidance call as input, so its garment counts are
+// grounded in an explicit block structure instead of a private per-event
+// re-derivation -- the model still exercises judgment about how many garments a
+// given number of blocks actually warrants, it just no longer has to guess what
+// the blocks ARE. Deliberately category-free (the attire tiers don't exist yet
+// at this point, since the two calls run concurrently), so this is the timing
+// half of the real rule; the model applies the dressiest-tier-wins half.
+function tripsyAttireComputeTimeBlocks(events) {
+  const blocks = [];
+  let current = null;
+  let prev = null;
+  for (const ev of events) {
+    const prevEnd = prev ? (tripsyAttireMinutesOf(prev.endTime) ?? tripsyAttireMinutesOf(prev.startTime)) : null;
+    const thisStart = tripsyAttireMinutesOf(ev.startTime);
+    const withinGap = (prevEnd == null || thisStart == null) ? true : (thisStart - prevEnd) <= 180;
+    if (!prev || prev.date !== ev.date || !withinGap) {
+      current = { date: ev.date, events: [] };
+      blocks.push(current);
+    }
+    current.events.push({ id: ev.id, name: ev.name, startTime: ev.startTime });
+    prev = ev;
+  }
+  return blocks.map((b, i) => ({ block: i + 1, date: b.date, events: b.events }));
 }
 // Does `ev` belong in the same named TIME-BLOCK as `prevEvent`, for
 // occasion-COUNTING purposes (computeTripsyAttireBlocks) -- same day, and
@@ -17918,13 +17960,46 @@ function showTripsyAttirePackingListOverlay(guide, person) {
   renderTripsyAttirePackingListContent(guide, person);
   overlay.style.display = 'flex';
 }
+// Packing-list garment groups, in display order. Claude assigns one per item at
+// generation time (see the packing_list schema/prompt); the owner can change it
+// from an item's Edit box.
+const TRIPSY_ATTIRE_PACKING_GROUPS = ['dress_wear', 'tops', 'pants', 'essentials', 'footwear', 'accessories'];
+const TRIPSY_ATTIRE_PACKING_GROUP_LABEL = {
+  dress_wear: 'Dress Wear',
+  tops: 'Tops',
+  pants: 'Pants',
+  essentials: 'Essentials',
+  footwear: 'Footwear',
+  accessories: 'Accessories',
+};
+// The group an item belongs to. Prefers the stored `group`, but falls back to
+// inferring one from the item NAME so a packing list saved before groups existed
+// still lands in sensible sections instead of dumping everything into one
+// bucket. Order of the tests matters -- the specific cases come first, because
+// the taxonomy deliberately splits some near-identical names across groups:
+// "dress socks" are Dress Wear while plain/casual socks are Essentials, and
+// "casual trousers" are Pants while plain trousers are Dress Wear.
+function tripsyAttirePackingGroupOf(item) {
+  const stored = item && item.group;
+  if (stored && TRIPSY_ATTIRE_PACKING_GROUPS.includes(stored)) return stored;
+  const n = String((item && item.name) || '').toLowerCase();
+  if (/\b(dress|formal|evening)\s+socks?\b/.test(n)) return 'dress_wear';
+  if (/\bcasual\s+(trousers?|pants?|slacks?)\b/.test(n)) return 'pants';
+  if (/\b(shoes?|boots?|sneakers?|trainers?|loafers?|sandals?|heels?|pumps?|oxfords?|flip[- ]?flops?|slippers?)\b/.test(n)) return 'footwear';
+  if (/\b(underwear|undershirts?|briefs?|boxers?|bras?|socks?|pajamas?|pyjamas?|sleepwear|nightwear)\b/.test(n)) return 'essentials';
+  if (/\b(suits?|tuxedos?|tux|blazers?|sport\s*coats?|sportcoats?|dress\s+shirts?|ties?|bow\s*ties?|neckties?|gowns?|cocktail\s+dress(es)?|cummerbunds?|waistcoats?|tailcoats?|trousers?|slacks?)\b/.test(n)) return 'dress_wear';
+  if (/\b(jeans?|shorts?|chinos?|khakis?|pants?|leggings?|skirts?)\b/.test(n)) return 'pants';
+  if (/\b(shirts?|sweaters?|t-?shirts?|tees?|blouses?|polos?|cardigans?|tops?|jumpers?|turtlenecks?)\b/.test(n)) return 'tops';
+  if (/\b(belts?|scarves|scarf|jewel(le)?ry|watch(es)?|hats?|caps?|sunglasses|bags?|purses?|clutch(es)?|cuff\s*links?|cufflinks?|pocket\s+squares?|gloves?|wraps?|shawls?)\b/.test(n)) return 'accessories';
+  return 'accessories';
+}
 function tripsyAttirePackingItemRowHtml(item) {
   const linkedCount = (item.eventIds || []).length;
   return `
     <div class="tripsy-attire-packing-row">
       <div class="tripsy-attire-packing-row-main">
         <input type="checkbox" data-tripsy-attire-packing-toggle data-item-id="${esc(item.id)}" ${item.checked ? 'checked' : ''} ${isOwner ? '' : 'disabled'}>
-        <button type="button" class="tripsy-attire-packing-name${item.checked ? ' tripsy-attire-packing-name-checked' : ''}" data-tripsy-attire-packing-name data-item-id="${esc(item.id)}">${esc(item.name)}${linkedCount ? ` <span class="tripsy-attire-packing-link-count">(${linkedCount})</span>` : ''}</button>
+        <button type="button" class="tripsy-attire-packing-name${item.checked ? ' tripsy-attire-packing-name-checked' : ''}" data-tripsy-attire-packing-name data-item-id="${esc(item.id)}">${esc(item.name)}${linkedCount ? ` <span class="tripsy-attire-packing-link-count">${linkedCount} event${linkedCount === 1 ? '' : 's'}</span>` : ''}</button>
         <span class="tripsy-attire-packing-qty">${esc(item.quantity)}</span>
       </div>
       ${isOwner ? `
@@ -17938,6 +18013,9 @@ function tripsyAttirePackingItemRowHtml(item) {
       <div class="tripsy-attire-packing-inline-box" data-tripsy-attire-packing-edit-box data-item-id="${esc(item.id)}" style="display:none;">
         <input type="text" data-tripsy-attire-packing-edit-name value="${esc(item.name)}" placeholder="Item name">
         <input type="text" data-tripsy-attire-packing-edit-qty value="${esc(item.quantity)}" placeholder="Quantity">
+        <select data-tripsy-attire-packing-edit-group>
+          ${TRIPSY_ATTIRE_PACKING_GROUPS.map(g => `<option value="${esc(g)}"${g === tripsyAttirePackingGroupOf(item) ? ' selected' : ''}>${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[g])}</option>`).join('')}
+        </select>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
           <button type="button" class="btn primary" data-tripsy-attire-packing-edit-save data-item-id="${esc(item.id)}">Save</button>
           <button type="button" class="btn" data-tripsy-attire-packing-edit-cancel data-item-id="${esc(item.id)}">Cancel</button>
@@ -17953,8 +18031,22 @@ function renderTripsyAttirePackingListContent(guide, person) {
   if (!guide.packingList) guide.packingList = { him: [], her: [] };
   if (!guide.packingList[person]) guide.packingList[person] = [];
   const items = guide.packingList[person];
+  // Grouped by garment type, in TRIPSY_ATTIRE_PACKING_GROUPS order, with each
+  // item keeping its original position within its group. Empty groups are
+  // skipped entirely rather than rendering a bare header.
+  const byGroup = new Map(TRIPSY_ATTIRE_PACKING_GROUPS.map(g => [g, []]));
+  items.forEach(item => { byGroup.get(tripsyAttirePackingGroupOf(item)).push(item); });
   const rowsHtml = items.length
-    ? items.map(tripsyAttirePackingItemRowHtml).join('')
+    ? TRIPSY_ATTIRE_PACKING_GROUPS.map(g => {
+        const groupItems = byGroup.get(g);
+        if (!groupItems.length) return '';
+        return `
+          <div class="tripsy-attire-packing-group">
+            <div class="tripsy-attire-packing-group-title">${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[g])}</div>
+            ${groupItems.map(tripsyAttirePackingItemRowHtml).join('')}
+          </div>
+        `;
+      }).join('')
     : `<p style="color:var(--muted); font-size:13px;">No items yet.</p>`;
   content.innerHTML = `
     ${isOwner ? `
@@ -17964,6 +18056,9 @@ function renderTripsyAttirePackingListContent(guide, person) {
       <div class="tripsy-attire-packing-inline-box" data-tripsy-attire-packing-add-box style="display:none;">
         <input type="text" data-tripsy-attire-packing-add-name placeholder="Item name">
         <input type="text" data-tripsy-attire-packing-add-qty placeholder="Quantity">
+        <select data-tripsy-attire-packing-add-group>
+          ${TRIPSY_ATTIRE_PACKING_GROUPS.map(g => `<option value="${esc(g)}">${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[g])}</option>`).join('')}
+        </select>
         <div style="display:flex; gap:8px;">
           <button type="button" class="btn primary" data-tripsy-attire-packing-add-save>Save</button>
           <button type="button" class="btn" data-tripsy-attire-packing-add-cancel>Cancel</button>
@@ -18000,7 +18095,8 @@ function renderTripsyAttirePackingListContent(guide, person) {
     const name = content.querySelector('[data-tripsy-attire-packing-add-name]').value.trim();
     const quantity = content.querySelector('[data-tripsy-attire-packing-add-qty]').value.trim();
     if (!name) { toast('Enter an item name.', 'error'); return; }
-    const newItem = { id: crypto.randomUUID(), name, quantity: quantity || '1', checked: false, eventIds: [] };
+    const group = content.querySelector('[data-tripsy-attire-packing-add-group]').value;
+    const newItem = { id: crypto.randomUUID(), name, quantity: quantity || '1', group, checked: false, eventIds: [] };
     items.push(newItem);
     await Store.saveTripsyAttireGuide(guide);
     renderTripsyAttirePackingListContent(guide, person);
@@ -18032,6 +18128,8 @@ function renderTripsyAttirePackingListContent(guide, person) {
       if (!item) return;
       item.name = name;
       item.quantity = quantity || item.quantity;
+      const groupSel = box.querySelector('[data-tripsy-attire-packing-edit-group]');
+      if (groupSel && groupSel.value) item.group = groupSel.value;
       await Store.saveTripsyAttireGuide(guide);
       renderTripsyAttirePackingListContent(guide, person);
     });
@@ -18924,6 +19022,9 @@ async function generateTripsyAttireGuide(tripKey) {
       id: crypto.randomUUID(),
       name: item.name,
       quantity: item.quantity,
+      // Trust Claude's group when it's one of ours, else fall back to inferring
+      // it from the name (tripsyAttirePackingGroupOf handles both).
+      group: tripsyAttirePackingGroupOf(item),
       checked: false,
       eventIds: (item.event_ids || []).filter(id => validEventIds.has(id)),
     }));

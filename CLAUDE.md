@@ -419,9 +419,16 @@ that catches drift between them.
   per-event array (category / `alternate_category` / `continues_previous_event` — the per-event
   `note` field was retired in this split, it was stored but never rendered anywhere and cost about
   half the events stream), and the other emits `person_guidance` for two travelers ("him"/"her",
-  both assumed to attend every event), making its own PRIVATE tier/continuity judgments over the
-  same event list (never emitted) rather than waiting on the events call — the two align closely in
-  practice and the mechanical block grouping governs what the UI displays either way. Per event,
+  both assumed to attend every event). The guidance call does NOT wait on the events call; instead
+  it's handed a **pre-computed, authoritative TIME-BLOCKS list** as input
+  (`tripsyAttireComputeTimeBlocks`, plain JS run before both calls: consecutive same-day events ≤3h
+  apart, unknown times treated as continuous — the timing half of
+  `tripsyAttireOutfitChangeNeeded`, category-free because the attire tiers don't exist yet when the
+  two calls fire concurrently). It privately judges each event's tier and takes each block's tier as
+  its DRESSIEST event, then counts every quantity per BLOCK. This is what keeps judgment (how many
+  ties N formal blocks actually warrant is still the model's call) while removing the guesswork about
+  what the blocks ARE — previously it re-derived grouping per event and drifted, e.g. quoting "5-6
+  ties" across 11 tie-linked events that mechanically form just 4 blocks. Per event,
   `continues_previous_event` is a boolean — Claude's own judgment (from
   the event titles/venues and the clock time together, not a fixed threshold) on whether this event
   flows directly from the one before it with no realistic time to go back and change, e.g. a
@@ -628,28 +635,40 @@ that catches drift between them.
   evening isn't practical to re-wear but the suit/tie are; different jewelry/scarves for her; casual
   basics sized for realistic once-a-week laundry rotation, not one item per day), plus an `event_ids`
   per item where it reasonably maps to specific occasions. **All garment/outfit counting is done per
-  TIME-BLOCK, not per event** — the prompt explicitly redefines "occasion" to mean one time-block (a
-  maximal run of `continues_previous_event`-linked same-day events worn as one outfit, e.g. a
-  pre-concert reception → concert → post-concert reception evening = ONE wearing), so a continuous
-  evening counts as one anchor wearing / one fresh shirt, not one per sub-event. This uses the same
-  `continues_previous_event` signal that drives `computeTripsyAttireBlocks`, so the packing counts
-  track the block-based occasion counts the UI shows — but it's the model's in-call grouping (the
-  mechanical blocks aren't fed back into the same call), so the two align closely rather than by
-  construction. **A Refresh re-generates the ENTIRE plan, `packingList` included** —
+  TIME-BLOCK, not per event** — "occasion" means one time-block (events with no time to change
+  between them, worn as one outfit, e.g. a pre-concert reception → concert → post-concert reception
+  evening = ONE wearing), so a continuous evening counts as one anchor wearing / one fresh shirt, not
+  one per sub-event. The blocks are **given to the call as input** rather than re-derived by it (see
+  `tripsyAttireComputeTimeBlocks` under the two-parallel-calls bullet above), and the prompt states
+  outright that a garment worn once per occasion must never be quantified above its tier's BLOCK
+  count. Judgment is preserved — how many ties N formal blocks warrants is still the model's call —
+  but it can no longer disagree with the app about what the blocks are. **A Refresh re-generates the ENTIRE plan, `packingList` included** —
   `generateTripsyAttireGuide` always seeds the packing list fresh from Claude's new output, the same
   way it already re-derives every event's category from scratch, so a Refresh intentionally discards
   hand-edited packing-list items (checked-off state, renames, custom quantities, manual adds) exactly
   as it already discards manual category overrides. "Refresh" means regenerate, not update-in-place;
   there is no carry-over of the prior `packingList`. (This reversed the earlier "packing edits are
   sticky across Refresh" behavior, at the owner's request — the two kinds of manual edit, category
-  overrides and packing-list edits, now behave the same way on Refresh.) Every mutation
-  (check/uncheck, rename, requantify, delete, add) is owner-gated exactly like
+  overrides and packing-list edits, now behave the same way on Refresh.) **Items are grouped by
+  garment type** into Dress Wear / Tops / Pants / Essentials / Footwear / Accessories
+  (`TRIPSY_ATTIRE_PACKING_GROUPS`, rendered in that order, empty groups skipped). Claude sets each
+  item's `group` via a schema enum, and `tripsyAttirePackingGroupOf` resolves it — preferring the
+  stored value but INFERRING one from the item name when it's missing or unrecognized, so a list
+  saved before groups existed still sections correctly instead of collapsing into one bucket. Two
+  splits in that taxonomy are deliberate and order-dependent in the inference regexes: *dress* socks
+  are Dress Wear while plain/casual socks are Essentials, and plain/dress trousers are Dress Wear
+  while *casual* trousers and jeans are Pants. The owner can reassign an item's group from a select
+  in its Edit box, and picks one when adding an item. Every mutation
+  (check/uncheck, rename, requantify, regroup, delete, add) is owner-gated exactly like
   the rest of Attire (viewers see the same list read-only — checkboxes disabled, no Add/Edit/Delete
   — never fully hidden, since seeing what's packed needs no write access) and persists straight to
   `driveData` via the same `Store.saveTripsyAttireGuide`, since checked-state is real shared trip
   data, not a personal display preference (unlike `isTripsyTripCollapsed`/`tripsyUpdateShowMatches`,
   which are deliberately `localStorage`/session-only specifically because a non-owner viewer has no
-  Drive write access to persist anything into the shared file at all). Clicking an item's name opens
+  Drive write access to persist anything into the shared file at all). An item with linked events
+  shows that tally next to its name as an explicit "N events" (NOT a bare "(N)" — that read as a
+  quantity and genuinely confused the owner, who saw "Ties (11)" and asked why 11 ties were being
+  packed when the quantity was "5-6" and the 11 was the linked-event count). Clicking an item's name opens
   a small popup listing exactly which event(s) it's linked to (date/time/name, resolved against
   `guide.days`), each clickable to jump to that event on My Trips via the same
   `tripsyAttireGoToEvent` the Daily Dress Guide's own event titles already use — hiding the popup
