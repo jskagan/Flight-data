@@ -14609,30 +14609,37 @@ function TRIPSY_ATTIRE_PERSON_GUIDANCE_SCHEMA(categoryEnum) {
   // and `reuse_note` names anything carried over from a dressier tier instead of
   // packed again (e.g. Cocktail reusing the Formal suit) so the list shows only
   // what's genuinely ADDITIONAL for that tier.
-  const garmentsProps = {};
-  categoryEnum.forEach(c => {
-    garmentsProps[c] = {
-      type: 'object',
-      properties: {
-        reuse_note: { type: 'string' },
-        items: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: { name: { type: 'string' }, quantity: { type: 'string' } },
-            required: ['name', 'quantity'],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ['reuse_note', 'items'],
-      additionalProperties: false,
-    };
-  });
+  // garments is an ARRAY keyed by a `category` enum, deliberately NOT an object
+  // with one property per tier. The object form spelled out 7 nested tier
+  // definitions (each containing an array of objects) per person = 14 in the
+  // schema, and the API rejected the request outright: "The compiled grammar is
+  // too large, which would cause performance issues." One repeated item shape
+  // plus a 7-value enum expresses exactly the same data with a fraction of the
+  // grammar. Keep it flat if this ever needs extending.
   return {
     type: 'object',
     properties: {
-      garments: { type: 'object', properties: garmentsProps, required: [...categoryEnum], additionalProperties: false },
+      garments: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            category: { type: 'string', enum: categoryEnum },
+            reuse_note: { type: 'string' },
+            items: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: { name: { type: 'string' }, quantity: { type: 'string' } },
+                required: ['name', 'quantity'],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ['category', 'reuse_note', 'items'],
+          additionalProperties: false,
+        },
+      },
       essentials: { type: 'array', items: { type: 'string' } },
       packing_list: {
         type: 'array',
@@ -14748,7 +14755,7 @@ Your job is to judge, privately: which of the 7 tiers each event calls for (weig
 
 person_guidance covers TWO travelers on this trip, "him" and "her", both attending every event above -- for EACH person and EACH of the 7 categories, give:
 - COUNT EVERYTHING BELOW BY TIME-BLOCK (from the pre-computed TIME-BLOCKS list), NEVER BY INDIVIDUAL EVENT. Each block counts ONCE, under its dressiest tier ONLY; the less-formal events inside a block add NOTHING to their own tiers' counts. So a pre-concert reception -> concert -> post-concert reception evening is ONE formal occasion requiring ONE wearing of the anchor garment (and, for him, ONE fresh shirt + tie) -- not three, and it contributes ZERO cocktail occasions. Everywhere below, "occasion" means one time-block at its dressiest tier. Before you count anything, work out how many blocks fall in each tier, and let those numbers -- not the raw event count -- drive every quantity you give. A garment worn once per occasion should never be quantified above that tier's BLOCK count.
-- garments: the ACTUAL GARMENTS TO PACK for that tier, itemized -- NOT a count of outfits, and NOT a description of how things get restyled. Each entry in items[] is one garment line: name (e.g. "suits", "dress shirts", "ties", "cocktail dresses", "tops", "trousers") and quantity (e.g. "2", "5", "3-4"). Say only what is NEEDED. Example for a formal tier: [{"name":"suits","quantity":"2"},{"name":"dress shirts","quantity":"5"},{"name":"ties","quantity":"5"}]. Never write prose like "restyled with different accessories" in a garment name.
+- garments: an ARRAY with ONE ENTRY PER TIER that actually has occasions on this trip (set that entry's category to the tier; omit tiers with no occasions entirely -- do not emit empty entries). Each entry lists the ACTUAL GARMENTS TO PACK for that tier, itemized -- NOT a count of outfits, and NOT a description of how things get restyled. Each element of that entry's items[] is one garment line: name (e.g. "suits", "dress shirts", "ties", "cocktail dresses", "tops", "trousers") and quantity (e.g. "2", "5", "3-4"). Say only what is NEEDED. Example entry: {"category":"formal","reuse_note":"","items":[{"name":"suits","quantity":"2"},{"name":"dress shirts","quantity":"4"},{"name":"ties","quantity":"4"}]}. Never write prose like "restyled with different accessories" in a garment name.
 - Anchor garments are counted LOW and re-worn across time-blocks in the tier (see the packing_list rules below for the exact reuse logic: a suit/dress repeats, but a dress shirt worn through a whole evening does not). Items that DO repeat per time-block (dress shirts, ties for him; jewelry/scarves for her) should be quantified per time-block in that tier.
 - At the COCKTAIL tier specifically, a tie is optional rather than expected (an open collar reads fine there, unlike Formal/Black Tie) -- still list ties if they're worth packing for that tier, but size the quantity accordingly; the UI labels that line "Optional" on its own.
 - reuse_note: when a tier needs NO additional copy of an anchor garment because a DRESSIER tier's one already covers it, do NOT list that garment in items[] -- instead put a short parenthetical-style note here naming what to reuse, e.g. "use one Formal suit" or "use the Black Tie tuxedo shirt", and list only the genuinely ADDITIONAL garments for this tier in items[]. When nothing is being reused from another tier, set reuse_note to an empty string ''.
@@ -15055,6 +15062,18 @@ function computeTripsyAttireBlocks(days) {
 // recompute).
 function tripsyAttireDisplayCategory(ev) {
   return (ev && ev.displayCategory) || (ev && ev.category) || null;
+}
+// One tier's garment entry ({reuse_note, items[]}) out of a person's guidance,
+// tolerating all three shapes a saved guide can carry: the current ARRAY keyed
+// by `category` (flattened to keep the structured-output grammar small -- see
+// TRIPSY_ATTIRE_PERSON_GUIDANCE_SCHEMA), the short-lived OBJECT map keyed by
+// tier, and neither (a guide predating garments entirely, which the caller
+// falls back to rendering from the old `outfits` string).
+function tripsyAttireGarmentEntry(pg, category) {
+  const g = pg && pg.garments;
+  if (!g) return null;
+  if (Array.isArray(g)) return g.find(entry => entry && entry.category === category) || null;
+  return g[category] || null;
 }
 // Marks a Packing Summary garment line "Optional". Deterministic (a rule here,
 // not something asked of Claude) so the tag can't come and go between
@@ -18421,7 +18440,7 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
       // being listed (and counted) again. A guide generated before this field
       // existed still has the old single `outfits` string, so fall back to
       // rendering that as one line rather than showing an empty tier.
-      const g = (pg.garments && pg.garments[category]) || null;
+      const g = tripsyAttireGarmentEntry(pg, category);
       const items = (g && Array.isArray(g.items)) ? g.items.filter(it => it && it.name) : [];
       const reuseNote = (g && g.reuse_note) ? String(g.reuse_note).trim() : '';
       const legacyOutfits = (!g && pg.outfits) ? pg.outfits[category] : '';

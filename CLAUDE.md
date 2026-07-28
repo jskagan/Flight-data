@@ -446,7 +446,13 @@ that catches drift between them.
   long as the gap is short and same-day; the 3 "mix and match" tiers (Athletic/Smart Casual/Casual)
   still only chain within an exact match there, since those are just counted (`counts{}`, a flat
   block-count per ALL 7 tiers, shared between both people), never itemized. Per person,
-  `person_guidance.{him,her}.garments{}` gives, per tier, the ACTUAL GARMENTS to pack — an `items[]`
+  `person_guidance.{him,her}.garments[]` — an ARRAY of `{category, reuse_note, items[]}`, one entry
+  per tier that has occasions — gives the ACTUAL GARMENTS to pack. It is deliberately an array keyed
+  by a `category` enum rather than an object with one property per tier: the object form spelled out
+  7 nested tier definitions per person (14 across him+her) and the API rejected the request outright
+  with *"The compiled grammar is too large"*. Keep this flat if it ever needs extending, and read it
+  through `tripsyAttireGarmentEntry`, which tolerates the array form, the short-lived object-map
+  form, and neither. Each entry has an `items[]`
   of `{name, quantity}` (e.g. 2 suits / 5 dress shirts / 5 ties) plus a `reuse_note` string — rather
   than a single "N outfits" count. The rule the prompt enforces: say only what is NEEDED, never prose
   about how things get restyled; and when a tier needs no additional copy of an anchor garment
