@@ -597,6 +597,26 @@ that catches drift between them.
   in case Claude doesn't fully comply), so days the PDF doesn't mention at all never get flagged as
   "missing." When the PDF's range is narrower than the trip's, the owner sees a blocking `alert()`
   stating exactly which dates were compared before the Update page renders.
+- **The Itinerary Preview/Print build never changes a photo on a plain open, and reuses its last
+  build when nothing changed**: `previewTripsyItinerary` opens the overlay; `buildTripsyPrintHtml`
+  is the single builder shared by Preview, Print, and the PDF export (one magazine-style card per
+  event). **Hard rule: a place photo may only change when the owner changes it — never on a
+  reopen.** Place-card photos resolve through `tripsyDedupedPlacePhotoUrl`, which returns an
+  already-cached photo *verbatim* and only ever fetches a new one or de-dups/swaps to a different
+  image while `_tripsyAllowPhotoFetch` is true — a flag set ONLY around the generation/regeneration
+  passes, never on a plain open/print. Both place-card builders (`tripsyPlaceCardHtml` inline in
+  `buildTripsyPrintHtml`, and the PDF builder `drawTripsyDetailedItineraryPdf`) share that one
+  guarded helper; an earlier inline copy in `tripsyPlaceCardHtml` ran the de-dup/swap ungated and
+  could silently swap or drop a photo on a plain open (via `tripsyFindUnusedPlacePhoto`, which hits
+  the Places API and uploads to Drive) — that's the bug this rule guards against, so don't re-inline
+  ungated photo logic here. Separately, `previewTripsyItinerary` reuses the last built HTML for a
+  trip when a content fingerprint (`tripsyItineraryFingerprint` over this trip's events + pending
+  changes, its narrative entries, the whole photo-cache state, `isOwner`,
+  `TRIPSY_SNAPSHOT_GENERATED_AT`, the P/S reservation sync stamp, and a 6h weather bucket) is
+  unchanged — a session-only `tripsyBuiltItineraryCache`, never persisted (the built HTML embeds
+  page-load-scoped `blob:` photo URLs from `tripsyPhotoObjectUrlCache`). Any real change flips the
+  fingerprint and rebuilds; there is no manual invalidation. Print and the generation pre-fetch
+  always bypass the cache and call `buildTripsyPrintHtml` fresh.
 
 ### Review / ambiguity resolution
 
