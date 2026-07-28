@@ -17678,6 +17678,87 @@ function tripsyAttireConfirmCascade(ev, newCategory, cascaded) {
     overlay.onclick = e => { if (e.target === overlay) cleanup(false); };
   });
 }
+// The other events sharing `targetEv`'s outfit time-block -- the same-day "run"
+// of consecutive events with no outfit change between them that
+// computeTripsyAttireBlocks groups on (same tripsyAttireOutfitChangeNeeded
+// boundaries). Read-only, recomputed from the CURRENT categories so it reflects
+// the pick just applied. Empty when the event stands on its own.
+function tripsyAttireBlockNeighbors(days, targetEv) {
+  const flattened = [];
+  for (const day of (days || [])) for (const e of (day.events || [])) flattened.push({ ...e, dayKey: day.dayKey, _ref: e });
+  const runs = [];
+  let cur = null, prev = null;
+  for (const item of flattened) {
+    const boundary = !prev || prev.dayKey !== item.dayKey || tripsyAttireOutfitChangeNeeded(prev, item);
+    if (boundary || !cur) { cur = []; runs.push(cur); }
+    cur.push(item);
+    prev = item;
+  }
+  const run = runs.find(r => r.some(it => it._ref === targetEv));
+  return run ? run.filter(it => it._ref !== targetEv).map(it => it._ref) : [];
+}
+// Body-level confirm modal for the DOWNGRADE choice: the picked tier is LESS
+// formal than a dressier event sharing its time-block, so the binding rule would
+// otherwise display the picked event at that dressier tier. Offers to bring
+// those neighbours DOWN to the pick (resolve true) or leave them as-is (resolve
+// false / click-outside). Its own overlay so it stacks above the Attire screen.
+function getOrCreateTripsyAttireDowngradeOverlay() {
+  let overlay = document.getElementById('tripsy-attire-downgrade-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-attire-downgrade-overlay';
+  overlay.style.cssText = 'display:none; position:fixed; inset:0; z-index:2147483000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; max-width:520px; width:100%; max-height:85vh; overflow:auto; padding:22px; color:var(--text);">
+      <h2 style="margin:0 0 12px; font-size:17px;">Match the time-block?</h2>
+      <div id="tripsy-attire-downgrade-content"></div>
+      <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:18px;">
+        <button class="btn" data-tripsy-attire-downgrade-keep>Keep them as they are</button>
+        <button class="btn primary" data-tripsy-attire-downgrade-apply>Bring them down</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+function tripsyAttireConfirmDowngrade(ev, newCategory, dressier) {
+  return new Promise(resolve => {
+    const overlay = getOrCreateTripsyAttireDowngradeOverlay();
+    const badgeOf = c => c ? tripsyAttireBadgeHtml(c) : '<span style="color:var(--muted);">—</span>';
+    const one = dressier.length === 1;
+    const rowsHtml = dressier.map(n => `
+      <div style="display:flex; align-items:center; gap:10px; padding:7px 0; border-top:1px solid var(--line);">
+        <div style="flex:1; min-width:0;">
+          <div style="font-weight:600;">${esc(n.name || '')}</div>
+          <div style="font-size:11px; color:var(--muted);">${esc(tripsyDayHeaderLabel(n.date || ''))}${n.startTime ? ` · ${esc(n.startTime)}` : ''}</div>
+        </div>
+        <div style="flex-shrink:0; display:flex; align-items:center; gap:6px;">${badgeOf(n.category)} <span style="color:var(--muted);">→</span> ${badgeOf(newCategory)}</div>
+      </div>
+    `).join('');
+    overlay.querySelector('#tripsy-attire-downgrade-content').innerHTML = `
+      <p style="margin:0 0 12px; font-size:14px; line-height:1.5;">You set <strong>${esc(ev.name || 'this event')}</strong> to ${badgeOf(newCategory)}, but it shares a time-block with ${dressier.length} dressier event${one ? '' : 's'} — with no time to change between them you'd normally wear the one dressiest outfit to all of them. Bring ${one ? 'it' : 'them'} down to ${badgeOf(newCategory)} too, or keep ${one ? 'it as it is' : 'them as they are'}?</p>
+      ${rowsHtml}
+    `;
+    overlay.style.display = 'flex';
+    const cleanup = result => { overlay.style.display = 'none'; resolve(result); };
+    overlay.querySelector('[data-tripsy-attire-downgrade-apply]').onclick = () => cleanup(true);
+    overlay.querySelector('[data-tripsy-attire-downgrade-keep]').onclick = () => cleanup(false);
+    overlay.onclick = e => { if (e.target === overlay) cleanup(false); };
+  });
+}
+// Shared by both override paths: if the just-picked tier is less formal than a
+// dressier event still sharing its time-block, ask whether to bring those
+// neighbours DOWN to the pick. Mutates the guide (overrides those neighbours +
+// recomputes blocks) only when the owner chooses to; a no-op otherwise.
+async function tripsyAttireMaybeDowngradeBlock(guide, ev, newCategory) {
+  const rankOf = c => TRIPSY_ATTIRE_CATEGORY_ORDER.indexOf(c);
+  const dressier = tripsyAttireBlockNeighbors(guide.days, ev).filter(n => rankOf(n.category) > rankOf(newCategory));
+  if (!dressier.length) return;
+  const bringDown = await tripsyAttireConfirmDowngrade(ev, newCategory, dressier);
+  if (!bringDown) return;
+  dressier.forEach(n => { n.category = newCategory; n.categoryOverridden = true; });
+  computeTripsyAttireBlocks(guide.days);
+}
 // Applies a manual base-tier override to one event, re-derives the block
 // grouping (which restamps every event's displayCategory and refreshes the
 // per-tier occasion counts / itemized block lists -- see
@@ -17695,18 +17776,25 @@ async function tripsyAttireOverrideCategory(guide, dayKey, eventId, newCategory,
   const day = (guide.days || []).find(d => d.dayKey === dayKey);
   const ev = day && day.events.find(e => e.id === eventId);
   if (!ev) return;
-  // Picking the tier the event is ALREADY leaning toward -- e.g. clicking the
-  // "Formal" side of an ambiguous "Formal / Cocktail" pair: the base category
-  // doesn't change, but still record it as the owner's OWN pick
-  // (categoryOverridden) and persist, so both badges are genuinely selectable,
-  // the two-badge picker resolves, and the choice sticks. No block re-derive is
-  // needed since the tier is unchanged.
+  // Snapshot every event's tier up front so a failed save -- or a neighbour this
+  // override downgrades -- can be rolled back wholesale, not just for `ev`.
+  const snapshot = [];
+  (guide.days || []).forEach(d => (d.events || []).forEach(e => snapshot.push({ e, category: e.category, overridden: !!e.categoryOverridden })));
+  const restoreAll = () => { snapshot.forEach(s => { s.e.category = s.category; s.e.categoryOverridden = s.overridden; }); return computeTripsyAttireBlocks(guide.days); };
+  // Picking the tier the event is ALREADY at -- e.g. clicking the "Formal" side
+  // of an ambiguous "Formal / Cocktail" pair, or picking its own tier from the
+  // menu: the base category doesn't change, but record it as the owner's OWN
+  // pick (categoryOverridden) so both badges are selectable and the choice
+  // sticks. Still offer the downgrade in case the event is being shown at a
+  // dressier neighbour's tier.
   if (ev.category === newCategory) {
     if (ev.categoryOverridden) return; // already a resolved user pick
     ev.categoryOverridden = true;
+    await tripsyAttireMaybeDowngradeBlock(guide, ev, newCategory);
+    const r = computeTripsyAttireBlocks(guide.days); guide.blocks = r.blocks; guide.counts = r.counts;
     renderTripsyAttireOverlayContent(guide, renderOpts); // paint the pick instantly; the Drive save runs after
     const saved = await Store.saveTripsyAttireGuide(guide);
-    if (!saved) { ev.categoryOverridden = false; renderTripsyAttireOverlayContent(guide, renderOpts); toast('Could not save the dress code.', 'error'); return; }
+    if (!saved) { const re = restoreAll(); guide.blocks = re.blocks; guide.counts = re.counts; renderTripsyAttireOverlayContent(guide, renderOpts); toast('Could not save the dress code.', 'error'); return; }
     toast('Dress code set.', 'success');
     return;
   }
@@ -17735,14 +17823,19 @@ async function tripsyAttireOverrideCategory(guide, dayKey, eventId, newCategory,
     computeTripsyAttireBlocks(guide.days);
   }
 
+  // If the pick is LESS formal than a dressier event still sharing its
+  // time-block (independently dressier -- not something this change forced),
+  // offer to bring those neighbours down to it too, or leave them as they are.
+  await tripsyAttireMaybeDowngradeBlock(guide, ev, newCategory);
+
   const { blocks, counts } = computeTripsyAttireBlocks(guide.days);
   guide.blocks = blocks;
   guide.counts = counts;
   renderTripsyAttireOverlayContent(guide, renderOpts); // paint the change instantly; the Drive save runs after
   const saved = await Store.saveTripsyAttireGuide(guide);
   if (!saved) {
-    restore();
-    const re = computeTripsyAttireBlocks(guide.days); guide.blocks = re.blocks; guide.counts = re.counts;
+    const re = restoreAll();
+    guide.blocks = re.blocks; guide.counts = re.counts;
     renderTripsyAttireOverlayContent(guide, renderOpts);
     toast('Could not save the category change.', 'error');
     return;
