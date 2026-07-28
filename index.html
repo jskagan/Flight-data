@@ -14718,8 +14718,8 @@ ${eventsJson}`;
   // schema comment above). A failure in either rejects the pair, surfacing
   // through runTripsyAttireGeneration's existing error/retry UI.
   const [eventsResult, guidanceResult] = await Promise.all([
-    tripsyAttireClaudeCall(apiKey, eventsSchema, eventsPrompt),
-    tripsyAttireClaudeCall(apiKey, guidanceSchema, guidancePrompt),
+    tripsyAttireClaudeCall(apiKey, eventsSchema, eventsPrompt, 'per-event categories'),
+    tripsyAttireClaudeCall(apiKey, guidanceSchema, guidancePrompt, 'packing guidance'),
   ]);
   return {
     events: (eventsResult && eventsResult.events) || [],
@@ -14729,7 +14729,7 @@ ${eventsJson}`;
 // One streamed structured-output Claude call for the Attire feature -- the
 // shared plumbing behind generateTripsyAttireCategories's two parallel calls
 // (same fetch/SSE-parse shape as compareTripsyItineraryPdf's own inline copy).
-async function tripsyAttireClaudeCall(apiKey, schema, promptText) {
+async function tripsyAttireClaudeCall(apiKey, schema, promptText, label) {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -14742,10 +14742,18 @@ async function tripsyAttireClaudeCall(apiKey, schema, promptText) {
       // Sonnet, not Opus -- same reasoning as compareTripsyItineraryPdf:
       // pure structured classification, not open-ended reasoning.
       model: 'claude-sonnet-5',
-      // Generous headroom for either half of the split (the events array on a
-      // large ~60-event trip, or two people's guidance + packing lists);
-      // streaming removes the HTTP-timeout risk regardless.
-      max_tokens: 16000,
+      // Match compareTripsyItineraryPdf's hard-won 64000 rather than guessing
+      // lower. When the single attire call was split in two, this was dropped
+      // 32000 -> 16000 on the assumption each half must be well under the old
+      // combined ceiling -- but the GUIDANCE half alone (two people's full
+      // packing lists, whose event_ids arrays can each enumerate dozens of
+      // event ids) blew straight through 16000 and every generation failed
+      // with the "too large and got cut off" error. max_tokens is only a
+      // CEILING, not a reservation: raising it costs nothing in latency or
+      // tokens actually billed, while setting it too low is a hard failure.
+      // So keep it generous -- streaming already removes the HTTP-timeout
+      // risk that originally motivated small caps.
+      max_tokens: 64000,
       stream: true,
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{ role: 'user', content: [{ type: 'text', text: promptText }] }],
@@ -14777,10 +14785,13 @@ async function tripsyAttireClaudeCall(apiKey, schema, promptText) {
       }
     }
   }
+  // Name the half that failed -- with two parallel calls, an unlabelled
+  // "too large" error can't tell you whether it was the per-event pass or the
+  // packing-guidance pass that blew the ceiling.
   if (stopReason === 'max_tokens') {
-    throw new Error('The attire guide was too large and got cut off (hit the response size limit). Try again.');
+    throw new Error(`The attire guide's ${label || 'response'} was too large and got cut off (hit the response size limit). Try again.`);
   }
-  if (!text) throw new Error('Claude API returned no text content');
+  if (!text) throw new Error(`Claude API returned no text content for the attire guide's ${label || 'response'}`);
   return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(text));
 }
 
