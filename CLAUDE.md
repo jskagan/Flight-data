@@ -509,7 +509,13 @@ that catches drift between them.
   Him/Her category row is clickable
   (`data-tripsy-attire-category-link`, wired at the end of `renderTripsyAttireOverlayContent`) and
   opens a small drill-down modal (`getOrCreateTripsyAttireDetailOverlay`/
-  `showTripsyAttireCategoryEvents`) listing the SPECIFIC events behind that occasion count, oldest
+  `showTripsyAttireCategoryEvents`) listing the SPECIFIC events behind that occasion count **grouped
+  by date** — one amber day header per date, with that day's events beneath it as an indented time +
+  name (the date is no longer repeated per row, and the address is not shown; this is a "when am I
+  dressed like this" list, not the itinerary). Day groups are formed by collapsing runs of the same
+  `dayKey` in `tripsyAttireEventsForCategory`'s output, which already walks `guide.days` in order, so
+  both the day order and the within-day time order come for free without re-sorting formatted
+  "4:25 PM" strings (which don't sort chronologically). Events are oldest
   first (`tripsyAttireEventsForCategory`, a plain filter over `guide.days` by **`displayCategory`** —
   the block-dressiest tier, not the per-event base) — e.g. clicking "Formal" under Him shows the
   Concert **and** the two Cocktail receptions folded into the same time-block around it, since with
