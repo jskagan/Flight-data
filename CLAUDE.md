@@ -490,9 +490,13 @@ that catches drift between them.
   (`data-tripsy-attire-category-link`, wired at the end of `renderTripsyAttireOverlayContent`) and
   opens a small drill-down modal (`getOrCreateTripsyAttireDetailOverlay`/
   `showTripsyAttireCategoryEvents`) listing the SPECIFIC events behind that occasion count, oldest
-  first (`tripsyAttireEventsForCategory`, a plain filter over `guide.days` by category) — e.g.
-  clicking "Formal" under Him shows only the Concert, not the two Cocktail receptions folded into
-  the same time-block around it.
+  first (`tripsyAttireEventsForCategory`, a plain filter over `guide.days` by **`displayCategory`** —
+  the block-dressiest tier, not the per-event base) — e.g. clicking "Formal" under Him shows the
+  Concert **and** the two Cocktail receptions folded into the same time-block around it, since with
+  no time to change between them all three are worn (and displayed) at Formal. (This is the
+  block-dress-level-propagation model — see the `displayCategory` note under the manual-override
+  bullet below; before it, the receptions kept their own Cocktail tier and this drill-down showed
+  only the Concert.)
 - **An event's title jumps to its own read-only detail view on My Trips, and back again**
   (`tripsyAttireGoToEvent`, available to every viewer, not owner-gated — viewing that detail panel
   on My Trips needs no write access either): hides (not destroys) the Attire overlay, navigates to
@@ -524,20 +528,48 @@ that catches drift between them.
   it to appear instead of assuming a fixed delay is enough. A too-short fixed wait here looks exactly
   like "click bounces straight back to Attire," but is a render-timing race, not the row genuinely
   missing — this bit a real trip with enough events that a small mocked test never would.
+- **Block dress-level propagation (`displayCategory`)**: adjacent events with no time to change
+  between them form one "time-block" and are all worn as — and displayed as — the block's DRESSIEST
+  tier. `computeTripsyAttireBlocks` is the single grouping for this: it splits each day into runs at
+  `tripsyAttireOutfitChangeNeeded` boundaries (the SAME rule that draws the Daily Dress Guide's "⇄
+  change" markers), takes each run's most-formal BASE tier, and stamps it onto every event in the run
+  as `displayCategory` (`tripsyAttireDisplayCategory(ev)` falls back to the base `category` for a
+  guide saved before this existed). **Every screen shows `displayCategory`**, not the per-event base:
+  the daily-guide badges (`tripsyAttireEventBadgeHtml`); the "Start the day in…"/"⇄ Change to…"
+  instructions (a marker now appears exactly when `displayCategory` differs from the previous event,
+  so the designation is constant within a block and only ever changes at a marker — no more per-event
+  base tiers showing mid-block); the Him/Her occasion counts (`guide.counts`, now one per run at its
+  dressiest tier, so a cocktail→formal→cocktail evening is ONE Formal occasion and ZERO Cocktail);
+  and the tier drill-down (`tripsyAttireEventsForCategory`). `ev.category` stays the per-event BASE
+  tier (Claude's pick or a manual override) so runs can always be re-derived; `displayCategory` is
+  the derived block tier. It's recomputed in-memory at the top of `renderTripsyAttireOverlayContent`
+  (so existing guides pick it up on open, no regeneration) and persisted on generate/override. This
+  one grouping deliberately unifies the displayed tier, the change markers, and the occasion counts —
+  which also retired the old casual↔formal count-elevation edge (a non-itemized event no longer
+  breaks a run). Since `computeTripsyAttireBlocks` no longer calls `tripsyAttireContinuesPrevious`,
+  that function is now unused (kept as documentation of the older continuity-first grouping).
 - **Owner-only manual category override, per event**: in the day-by-day table, each event's badge
   is itself a clickable trigger (`tripsyAttireEventBadgeHtml` — viewers get the same plain,
   non-interactive badge everywhere else in the guide instead) opening a 7-item dropdown
   (`getOrCreateTripsyAttireCategoryMenu`, same `positionTripsyFixedMenu` anchoring every other
-  Tripsy dropdown uses) to reassign that one event's category by hand. Picking a genuinely
-  different category (`tripsyAttireOverrideCategory`) marks the event `categoryOverridden: true` —
-  shown as " (selected)" next to the badge, visible to viewers too, not just the owner — recomputes
-  `blocks`/`counts` from scratch via `computeTripsyAttireBlocks` (so the itemized block lists and
-  every Him/Her occasion count update immediately, and the event may re-chain into a different
-  time-block entirely), and saves the guide. Deliberately does **not** re-run
-  `generateTripsyAttireCategories` or touch `personGuidance`/`essentials` — those are
-  Claude's own judgment calls from the full trip context, not something one event's category swap
-  can cheaply/correctly redo; only what's mechanically re-derivable from `(dayKey, category, gap)`
-  actually updates. Picking the SAME category as already shown is a no-op (no save, no re-render).
+  Tripsy dropdown uses) to reassign that one event's BASE category by hand (the badge shows
+  `displayCategory`, so on a lesser event in a dressier block the dropdown sets a base tier that may
+  or may not change what's displayed). Picking a genuinely different category
+  (`tripsyAttireOverrideCategory`) sets `ev.category`, marks it `categoryOverridden: true` — shown as
+  " (selected)" next to the badge, visible to viewers too — then re-derives
+  `displayCategory`/`blocks`/`counts` via `computeTripsyAttireBlocks` and saves. **Cascade
+  confirmation**: because an override can move its time-block's dressiest tier, it can change the
+  DISPLAYED tier of the block's other members (who share one outfit with it). When it would,
+  `tripsyAttireOverrideCategory` first snapshots every event's `displayCategory`, applies the change
+  tentatively, diffs, and if any OTHER event moved it REVERTS and shows a confirm dialog
+  (`tripsyAttireConfirmCascade` / `getOrCreateTripsyAttireConfirmOverlay`) listing each affected event
+  and its before→after tier; the owner confirms (re-applies + saves) or cancels (nothing changes). An
+  override that affects no other event applies directly with no dialog. The ambiguous two-badge pick
+  is only offered on the block-DOMINANT event (`disp === ev.category`), since resolving a lesser
+  event's ambiguity can't change what's worn. Deliberately does **not** re-run
+  `generateTripsyAttireCategories` or touch `personGuidance`/`essentials` — those are Claude's own
+  judgment calls from the full trip context; only what's mechanically re-derivable (`displayCategory`,
+  block lists, counts) updates. Picking the SAME category as already shown is a no-op.
 - **Genuinely ambiguous events show both candidate categories as a pickable pair**: alongside each
   event's `category`, `generateTripsyAttireCategories` may also return a non-empty
   `alternate_category` — reserved for real ambiguity (e.g. a private dinner that could honestly read

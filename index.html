@@ -14816,13 +14816,14 @@ function tripsyAttireOutfitChangeNeeded(prevEvent, ev) {
 // Chains consecutive events into "time-blocks" -- a cocktail pre-concert
 // reception that flows into the (formal) concert and then a cocktail
 // post-concert reception all read as ONE evening, one outfit, not three
-// separate changes (see tripsyAttireContinuesPrevious for the exact
-// chaining rule, which leans on Claude's own continuesFromPrevious
-// judgment first and a mechanical gap+category fallback second). The
+// separate changes (runs are split at tripsyAttireOutfitChangeNeeded
+// boundaries -- the SAME rule that draws the Daily Dress Guide's "⇄ change"
+// markers, so the displayed tier, the markers, and the counts all agree). The
 // block's overall category becomes whichever event in it is the MOST
 // formal (you dress for the most formal moment; that outfit covers the
-// less-formal parts around it). The 3 mix-and-match tiers are just
-// counted, never itemized into named blocks. This function itself is
+// less-formal parts around it), and that tier is stamped onto every event in
+// the run as its displayCategory. All 7 tiers are grouped into runs this way;
+// only the 4 itemized tiers additionally get named block lists. This function itself is
 // pure, deterministic JS over already-decided per-event data -- see
 // generateTripsyAttireCategories's own comment for why the category
 // assignment is asked of Claude. `days` must already be sorted by dayKey,
@@ -14830,57 +14831,65 @@ function tripsyAttireOutfitChangeNeeded(prevEvent, ev) {
 // sorted by start time (generateTripsyAttireGuide does this before
 // calling in).
 function computeTripsyAttireBlocks(days) {
-  const flattened = [];
-  for (const day of days) {
-    for (const ev of day.events) flattened.push({ ...ev, dayKey: day.dayKey });
-  }
-  const isItemized = category => TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(category);
   const rankOf = category => TRIPSY_ATTIRE_CATEGORY_ORDER.indexOf(category);
 
-  const itemizedBlocks = []; // flat, chronological, possibly mixed-category
-  const blockCounts = {};
-  let prevEvent = null;
-  let currentBlock = null;
+  // Flatten every event with its dayKey plus a reference back to the real
+  // object, so the derived displayCategory can be stamped onto it in place.
+  const flattened = [];
+  for (const day of days) {
+    for (const ev of day.events) flattened.push({ ...ev, dayKey: day.dayKey, _ref: ev });
+  }
 
-  for (const ev of flattened) {
-    const continuesPrev = tripsyAttireContinuesPrevious(prevEvent, ev);
-    if (isItemized(ev.category)) {
-      if (continuesPrev && currentBlock) {
-        currentBlock.eventIds.push(ev.id);
-        currentBlock.events.push(ev);
-      } else {
-        currentBlock = { dayKey: ev.dayKey, eventIds: [ev.id], events: [ev] };
-        itemizedBlocks.push(currentBlock);
-      }
+  // Group into "runs": maximal chains of consecutive same-day events with no
+  // outfit change between them (tripsyAttireOutfitChangeNeeded -- the SAME
+  // boundary that draws the Daily Dress Guide's "⇄ change" markers). Every
+  // event in a run is worn as the run's DRESSIEST base tier, so that tier
+  // becomes each member's displayCategory (what every screen shows) AND the
+  // run counts as ONE occasion at that tier. This deliberately unifies three
+  // things onto one grouping: the displayed tier, the change markers, and the
+  // occasion counts (see the Attire section of CLAUDE.md). ev.category stays
+  // the per-event BASE tier (Claude's pick or a manual override) so runs can
+  // be re-derived when an event is edited; displayCategory is the derived
+  // block-dressiest tier shown to the user.
+  const runs = [];
+  let currentRun = null;
+  let prevItem = null;
+  for (const item of flattened) {
+    const boundary = !prevItem || prevItem.dayKey !== item.dayKey || tripsyAttireOutfitChangeNeeded(prevItem, item);
+    if (boundary || !currentRun) {
+      currentRun = { dayKey: item.dayKey, items: [item] };
+      runs.push(currentRun);
     } else {
-      currentBlock = null;
-      blockCounts[ev.category] = (blockCounts[ev.category] || 0) + (continuesPrev ? 0 : 1);
+      currentRun.items.push(item);
     }
-    prevEvent = ev;
+    prevItem = item;
   }
 
-  // Each mixed-category block's overall category is its most formal event.
-  const blocksByCategory = {};
-  for (const block of itemizedBlocks) {
-    let category = block.events[0].category;
-    for (const ev of block.events) {
-      if (rankOf(ev.category) > rankOf(category)) category = ev.category;
+  const blockCounts = {};
+  const runsByCategory = {};
+  for (const run of runs) {
+    let category = run.items[0].category;
+    for (const it of run.items) {
+      if (rankOf(it.category) > rankOf(category)) category = it.category;
     }
-    if (!blocksByCategory[category]) blocksByCategory[category] = [];
-    blocksByCategory[category].push(block);
+    run.category = category;
+    run.items.forEach(it => { it._ref.displayCategory = category; });
     blockCounts[category] = (blockCounts[category] || 0) + 1;
+    (runsByCategory[category] = runsByCategory[category] || []).push(run);
   }
 
+  // Itemized-tier occasion lists (drive the tier drill-downs) -- one entry per
+  // run whose dressiest tier is that itemized tier.
   const blocks = {};
   for (const category of TRIPSY_ATTIRE_ITEMIZED_CATEGORIES) {
-    const list = blocksByCategory[category] || [];
+    const list = runsByCategory[category] || [];
     const countsByDay = {};
-    list.forEach(b => { countsByDay[b.dayKey] = (countsByDay[b.dayKey] || 0) + 1; });
-    blocks[TRIPSY_ATTIRE_ITEMIZED_KEY[category]] = list.map(b => ({
-      dayKey: b.dayKey,
-      daypart: countsByDay[b.dayKey] > 1 ? tripsyAttireDaypart(b.events[0].startTime) : null,
-      eventIds: b.eventIds,
-      summary: b.events.map(e => e.name).filter(Boolean).join(' → '),
+    list.forEach(r => { countsByDay[r.dayKey] = (countsByDay[r.dayKey] || 0) + 1; });
+    blocks[TRIPSY_ATTIRE_ITEMIZED_KEY[category]] = list.map(r => ({
+      dayKey: r.dayKey,
+      daypart: countsByDay[r.dayKey] > 1 ? tripsyAttireDaypart(r.items[0].startTime) : null,
+      eventIds: r.items.map(it => it.id),
+      summary: r.items.map(it => it.name).filter(Boolean).join(' → '),
     }));
   }
 
@@ -14890,6 +14899,14 @@ function computeTripsyAttireBlocks(days) {
   });
 
   return { blocks, counts };
+}
+// The tier shown for an event everywhere in the Attire UI: its block's
+// dressiest tier (displayCategory, stamped by computeTripsyAttireBlocks),
+// falling back to its own base category if the derived value isn't present yet
+// (e.g. a guide saved before display-propagation existed, before its first
+// recompute).
+function tripsyAttireDisplayCategory(ev) {
+  return (ev && ev.displayCategory) || (ev && ev.category) || null;
 }
 // Non-cryptographic change-detection fingerprint (djb2-style hash) over the
 // current event list -- used only for the light "may be out of date" hint
@@ -17181,14 +17198,20 @@ function tripsyAttireBadgeHtml(category) {
 // appended and is stored with categoryOverridden:true so it stays visually
 // distinguishable from Claude's own pick after a save/reload.
 function tripsyAttireEventBadgeHtml(dayKey, ev) {
-  // Genuine ambiguity Claude flagged (alternateCategory, not yet resolved)
-  // -- show BOTH candidate categories as independently pickable badges
-  // rather than silently forcing one. Picking either
-  // (tripsyAttireOverrideCategory, wired alongside data-tripsy-attire-
-  // event-badge below) behaves exactly like the existing manual override:
-  // sets categoryOverridden:true, so it's just as sticky afterward and
-  // this split view never shows again for that event.
-  if (ev.alternateCategory && !ev.categoryOverridden) {
+  const disp = tripsyAttireDisplayCategory(ev);
+  // "Dominant" = this event's own base tier IS the block's dressiest, i.e. it's
+  // the event driving the displayed tier for its whole run. Only a dominant
+  // event surfaces the ambiguous two-badge pick (resolving a lesser event's
+  // ambiguity can't change what's worn) and only its override moves the block.
+  const dominant = disp === ev.category;
+  // Genuine ambiguity Claude flagged (alternateCategory, not yet resolved) on
+  // the block-dominant event -- show BOTH candidate base categories as
+  // independently pickable badges rather than silently forcing one. Picking
+  // either (tripsyAttireOverrideCategory, wired alongside data-tripsy-attire-
+  // event-badge below) behaves exactly like the manual override: sets
+  // categoryOverridden:true and may cascade to the rest of the block (with a
+  // confirm dialog), so this split view never shows again for that event.
+  if (ev.alternateCategory && !ev.categoryOverridden && dominant) {
     const primaryBadge = tripsyAttireBadgeHtml(ev.category);
     const altBadge = tripsyAttireBadgeHtml(ev.alternateCategory);
     if (!isOwner) return `${primaryBadge} / ${altBadge}`;
@@ -17200,7 +17223,11 @@ function tripsyAttireEventBadgeHtml(dayKey, ev) {
       </span>
     `;
   }
-  const badge = tripsyAttireBadgeHtml(ev.category);
+  // Otherwise the badge shows the block's dressiest tier (displayCategory). The
+  // "(selected)" tag marks a manual base override on THIS event; a lesser event
+  // merely following its block's dressier tier (disp !== ev.category) is not
+  // "selected", it's derived.
+  const badge = tripsyAttireBadgeHtml(disp);
   const selectedTag = ev.categoryOverridden ? ` <span class="tripsy-attire-selected-tag">(selected)</span>` : '';
   if (!isOwner) return `${badge}${selectedTag}`;
   return `<button type="button" class="tripsy-attire-badge-btn" data-tripsy-attire-event-badge data-day-key="${esc(dayKey)}" data-event-id="${esc(ev.id)}">${badge}${selectedTag}</button>`;
@@ -17237,31 +17264,105 @@ function tripsyAttireOpenCategoryMenu(btn, guide, renderOpts) {
     };
   });
 }
-// Applies a manual category override to one event, recomputes the
-// (mechanical) blocks/counts from the updated day list, saves the guide,
-// and re-renders. Deliberately does NOT re-run generateTripsyAttireCategories
-// or touch personGuidance/essentials -- those are Claude's own
-// judgment calls from the full trip context, not something a single
-// event's category swap can cheaply/correctly redo; only the itemized
-// block lists and the shared per-tier occasion counts (both pure
-// (dayKey,category,gap) reductions -- see computeTripsyAttireBlocks) are
-// mechanically re-derivable, so those are what actually update everywhere.
-// `renderOpts` ({stale, weatherTargetsByDay, tripStartDayKey}) is just
-// passed straight through to the re-render -- weather doesn't change from
-// a category edit, so there's no reason to refetch it.
+// Body-level confirm modal (its own high z-index so it stacks above the Attire
+// overlay that triggers it). Inline-styled rather than class-based so it needs
+// no dedicated CSS block. Reused for every cascade confirmation.
+function getOrCreateTripsyAttireConfirmOverlay() {
+  let overlay = document.getElementById('tripsy-attire-confirm-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-attire-confirm-overlay';
+  overlay.style.cssText = 'display:none; position:fixed; inset:0; z-index:2147483000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; max-width:520px; width:100%; max-height:85vh; overflow:auto; padding:22px; color:var(--text);">
+      <h2 style="margin:0 0 12px; font-size:17px;">Confirm dress-level change</h2>
+      <div id="tripsy-attire-confirm-content"></div>
+      <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:18px;">
+        <button class="btn" data-tripsy-attire-confirm-cancel>Cancel</button>
+        <button class="btn primary" data-tripsy-attire-confirm-ok>Confirm change</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+// Shows the events a base-tier override would cascade to -- the other members of
+// its time-block, which are worn at (and displayed as) the block's dressiest
+// tier -- and resolves true on Confirm, false on Cancel / click-outside.
+// Handlers are rebound per open since the change set differs each time.
+function tripsyAttireConfirmCascade(ev, newCategory, cascaded) {
+  return new Promise(resolve => {
+    const overlay = getOrCreateTripsyAttireConfirmOverlay();
+    const badgeOf = c => c ? tripsyAttireBadgeHtml(c) : '<span style="color:var(--muted);">—</span>';
+    const rowsHtml = cascaded.map(ch => `
+      <div style="display:flex; align-items:center; gap:10px; padding:7px 0; border-top:1px solid var(--line);">
+        <div style="flex:1; min-width:0;">
+          <div style="font-weight:600;">${esc(ch.ev.name || '')}</div>
+          <div style="font-size:11px; color:var(--muted);">${esc(tripsyDayHeaderLabel(ch.ev.date || ''))}${ch.ev.startTime ? ` · ${esc(ch.ev.startTime)}` : ''}</div>
+        </div>
+        <div style="flex-shrink:0; display:flex; align-items:center; gap:6px;">${badgeOf(ch.from)} <span style="color:var(--muted);">→</span> ${badgeOf(ch.to)}</div>
+      </div>
+    `).join('');
+    overlay.querySelector('#tripsy-attire-confirm-content').innerHTML = `
+      <p style="margin:0 0 12px; font-size:14px; line-height:1.5;">Setting <strong>${esc(ev.name || 'this event')}</strong> to ${badgeOf(newCategory)} also changes the dress level of ${cascaded.length} other event${cascaded.length === 1 ? '' : 's'} in the same time-block — with no time to change between them, you'd wear the dressiest outfit to all of them:</p>
+      ${rowsHtml}
+    `;
+    overlay.style.display = 'flex';
+    const cleanup = result => { overlay.style.display = 'none'; resolve(result); };
+    overlay.querySelector('[data-tripsy-attire-confirm-ok]').onclick = () => cleanup(true);
+    overlay.querySelector('[data-tripsy-attire-confirm-cancel]').onclick = () => cleanup(false);
+    overlay.onclick = e => { if (e.target === overlay) cleanup(false); };
+  });
+}
+// Applies a manual base-tier override to one event, re-derives the block
+// grouping (which restamps every event's displayCategory and refreshes the
+// per-tier occasion counts / itemized block lists -- see
+// computeTripsyAttireBlocks), saves the guide, and re-renders. If the change
+// would move the dressiest tier of the event's time-block -- and so change the
+// DISPLAYED tier of its neighbours (who share one outfit with it) -- the owner
+// is first shown a confirm dialog listing exactly which events change and how,
+// and can cancel. Deliberately does NOT re-run generateTripsyAttireCategories or
+// touch personGuidance/essentials -- those are Claude's judgment calls from the
+// full trip context, not something one event's tier swap can cheaply redo; only
+// what's mechanically re-derivable (displayCategory, block lists, counts)
+// updates. `renderOpts` is passed straight through to the re-render -- weather
+// doesn't change from a category edit, so there's no reason to refetch it.
 async function tripsyAttireOverrideCategory(guide, dayKey, eventId, newCategory, renderOpts) {
   const day = (guide.days || []).find(d => d.dayKey === dayKey);
   const ev = day && day.events.find(e => e.id === eventId);
   if (!ev || ev.category === newCategory) return;
+
+  const allEvents = [];
+  (guide.days || []).forEach(d => (d.events || []).forEach(e => allEvents.push(e)));
+  const before = new Map(allEvents.map(e => [e.id, tripsyAttireDisplayCategory(e)]));
+  const prevCategory = ev.category;
+  const prevOverridden = !!ev.categoryOverridden;
+  const restore = () => { ev.category = prevCategory; ev.categoryOverridden = prevOverridden; computeTripsyAttireBlocks(guide.days); };
+
+  // Apply tentatively and re-derive so we can see which OTHER events this moves.
   ev.category = newCategory;
   ev.categoryOverridden = true;
+  computeTripsyAttireBlocks(guide.days);
+  const cascaded = allEvents
+    .filter(e => e.id !== eventId && (before.get(e.id) || null) !== tripsyAttireDisplayCategory(e))
+    .map(e => ({ ev: e, from: before.get(e.id) || null, to: tripsyAttireDisplayCategory(e) }));
+
+  if (cascaded.length) {
+    restore(); // don't leave the tentative change applied while the dialog is open
+    const ok = await tripsyAttireConfirmCascade(ev, newCategory, cascaded);
+    if (!ok) { renderTripsyAttireOverlayContent(guide, renderOpts); return; }
+    ev.category = newCategory;
+    ev.categoryOverridden = true;
+    computeTripsyAttireBlocks(guide.days);
+  }
+
   const { blocks, counts } = computeTripsyAttireBlocks(guide.days);
   guide.blocks = blocks;
   guide.counts = counts;
-  const ok = await Store.saveTripsyAttireGuide(guide);
-  if (!ok) { toast('Could not save the category change.', 'error'); return; }
+  const saved = await Store.saveTripsyAttireGuide(guide);
+  if (!saved) { restore(); renderTripsyAttireOverlayContent(guide, renderOpts); toast('Could not save the category change.', 'error'); return; }
   renderTripsyAttireOverlayContent(guide, renderOpts);
-  toast('Category updated.', 'success');
+  toast(cascaded.length ? 'Dress level updated across the time-block.' : 'Category updated.', 'success');
 }
 // One lazily-created, body-level overlay for the Attire feature (My Trips
 // -> Attire button). Same fixed full-screen modal shape/click-outside-to-
@@ -17441,10 +17542,13 @@ function showTripsyAttireDefinitions() {
 // category row (see renderTripsyAttireOverlayContent's row wiring) so the
 // owner can see exactly which occasions a given outfit count is covering.
 function tripsyAttireEventsForCategory(guide, category) {
+  // Group by the DISPLAYED tier (block-dressiest), so clicking e.g. "Formal"
+  // surfaces every event worn at Formal -- including the lesser events folded
+  // into a formal evening's time-block, not just the ones Claude tagged Formal.
   const rows = [];
   (guide.days || []).forEach(day => {
     (day.events || []).forEach(ev => {
-      if (ev.category === category) rows.push({ dayKey: day.dayKey, ev });
+      if (tripsyAttireDisplayCategory(ev) === category) rows.push({ dayKey: day.dayKey, ev });
     });
   });
   return rows;
@@ -18001,6 +18105,17 @@ function tripsyAttireDayBarHtml(dayKey, weatherTargetsByDay, tripStartDayKey) {
 }
 function renderTripsyAttireOverlayContent(guide, renderOpts) {
   const { stale, weatherTargetsByDay, tripStartDayKey } = renderOpts || {};
+  // Derive each event's block-dressiest displayCategory (and refresh the
+  // occasion counts / itemized block lists) from the current per-event base
+  // tiers before rendering, so a guide generated before display-propagation
+  // existed picks it up the moment it's opened -- no regeneration needed. This
+  // is in-memory only (not persisted here): viewers have no Drive write access,
+  // and the owner's next override or regeneration is what saves it.
+  if (guide && Array.isArray(guide.days)) {
+    const { blocks, counts } = computeTripsyAttireBlocks(guide.days);
+    guide.blocks = blocks;
+    guide.counts = counts;
+  }
   const overlay = getOrCreateTripsyAttireOverlay();
   const content = overlay.querySelector('#tripsy-attire-content');
   const refreshBtn = overlay.querySelector('#tripsy-attire-refresh-btn');
@@ -18032,10 +18147,16 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
     if (!events.length) return '';
     const rows = events.map((ev, i) => {
       const prev = i > 0 ? events[i - 1] : null;
+      const disp = tripsyAttireDisplayCategory(ev);
+      // The daily guide's dress designation is the block-dressiest tier
+      // (displayCategory) -- constant within a run, changing only where the
+      // displayed tier actually differs from the previous event. So a "⇄ Change
+      // to" marker appears exactly when (and only when) the worn tier changes,
+      // never within a block whose events merely carry different BASE tiers.
       const leadIn = i === 0
-        ? `<div class="tripsy-attire-dressguide-instruction">Start the day in ${tripsyAttireBadgeHtml(ev.category)}</div>`
-        : (tripsyAttireOutfitChangeNeeded(prev, ev)
-          ? `<div class="tripsy-attire-dressguide-instruction">⇄ Change to ${tripsyAttireBadgeHtml(ev.category)} before ${ev.startTime ? esc(ev.startTime) : 'this event'} — ${esc(ev.name || '')}</div>`
+        ? `<div class="tripsy-attire-dressguide-instruction">Start the day in ${tripsyAttireBadgeHtml(disp)}</div>`
+        : (disp !== tripsyAttireDisplayCategory(prev)
+          ? `<div class="tripsy-attire-dressguide-instruction">⇄ Change to ${tripsyAttireBadgeHtml(disp)} before ${ev.startTime ? esc(ev.startTime) : 'this event'} — ${esc(ev.name || '')}</div>`
           : '');
       const timeRange = ev.startTime && ev.endTime ? `${ev.startTime} – ${ev.endTime}` : (ev.startTime || '');
       return `
