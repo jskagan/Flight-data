@@ -1084,6 +1084,15 @@
   .tw-field input[type=text], .tw-field select { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font-size: 14px; }
   .tw-tier-opts { display: flex; flex-wrap: wrap; gap: 8px; }
   .tw-tier-opt { display: flex; align-items: center; gap: 5px; font-size: 12.5px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel-2); cursor: pointer; }
+  .tw-import-row { display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .tw-import-thumb { width: 84px; height: 84px; flex-shrink: 0; border-radius: 8px; font-size: 26px; aspect-ratio: auto; }
+  .tw-import-fields { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .tw-import-inc { font-size: 12px; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 6px; }
+  .tw-import-name { width: 100%; padding: 7px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font-size: 13.5px; }
+  .tw-import-row2 { display: flex; gap: 8px; }
+  .tw-import-row2 select, .tw-import-row2 input { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font-size: 13px; }
+  .tw-import-tiers { gap: 6px; }
+  .tw-import-tiers .tw-tier-opt { font-size: 11.5px; padding: 3px 7px; }
   .tripsy-attire-paper {
     width: 100%; max-width: 980px; background: var(--panel); border: 1px solid var(--line);
     border-radius: 12px; padding: 26px 28px; box-shadow: 0 20px 60px rgba(0,0,0,0.45); color: var(--text);
@@ -7328,15 +7337,19 @@ async function renderUtilitiesWardrobe() {
   if (!isOwner) { main.innerHTML = `<div class="page-title">Wardrobe</div><div class="empty-state">Owner only.</div>`; return; }
   const garments = await Store.listWardrobe();
   main.innerHTML = `
-    <div class="page-title" style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+    <div class="page-title" style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
       <span>Wardrobe</span>
-      <button class="btn primary" id="tw-add-btn">+ Add garment</button>
+      <div style="display:flex; gap:8px;">
+        <button class="btn" id="tw-import-btn">Import from Drive folder</button>
+        <button class="btn primary" id="tw-add-btn">+ Add garment</button>
+      </div>
     </div>
     <div class="page-sub">Your full wardrobe, photographed once. Add each garment with its type, the dress codes it works for, and its color. On a trip's 👔 Attire panel you can then pick which pieces to bring.</div>
     <div id="tw-library">${tripsyWardrobeGroupedHtml(garments)}</div>`;
   const libEl = document.getElementById('tw-library');
   tripsyWardrobeLoadPhotos(libEl);
   document.getElementById('tw-add-btn').addEventListener('click', () => showWardrobeGarmentForm(null, renderUtilitiesWardrobe));
+  document.getElementById('tw-import-btn').addEventListener('click', () => tripsyWardrobeOpenImport(renderUtilitiesWardrobe));
   libEl.addEventListener('click', async e => {
     const editId = e.target.closest('[data-tw-edit]')?.getAttribute('data-tw-edit');
     if (editId) { const g = (await Store.listWardrobe()).find(x => x.id === editId); if (g) showWardrobeGarmentForm(g, renderUtilitiesWardrobe); return; }
@@ -7399,6 +7412,142 @@ async function tripsyWardrobePackForTrip(tripKey, tripName) {
   ov.querySelector('#tw-select-done').onclick = () => { ov.style.display = 'none'; };
   ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
   ov.style.display = 'flex';
+}
+
+// ---- Bulk import from the "Travel Wardrobe" Drive folder ----
+// Reads the folder, auto-fills name/color/type from each filename, lets the
+// owner code the dress tiers per garment in a review grid, then downloads +
+// downscales + re-uploads each (so the wardrobe owns its own copy and the folder
+// can be cleared). Re-runnable: files already imported (by sourceFileId) are
+// skipped, so new drops in the folder can be imported later in a batch.
+const TRIPSY_WARDROBE_IMPORT_FOLDER = 'Travel Wardrobe';
+
+async function tripsyFindWardrobeImportFolder() {
+  try {
+    const q = encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='${TRIPSY_WARDROBE_IMPORT_FOLDER}' and trashed=false`);
+    const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
+    const json = await res.json();
+    return (json.files && json.files[0] && json.files[0].id) || null;
+  } catch (e) { console.error('find wardrobe folder failed', e); return null; }
+}
+async function tripsyListWardrobeFolderImages(folderId) {
+  const q = encodeURIComponent(`'${folderId}' in parents and mimeType contains 'image/' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType)&pageSize=200`);
+  const json = await res.json();
+  return json.files || [];
+}
+// Pull name/color/type from a filename like "Light Blue Bonobos Trousers".
+function tripsyParseGarmentFilename(title) {
+  const name = String(title || '').replace(/\.(jpe?g|png|heic|heif|webp|gif)$/i, '').trim();
+  const low = name.toLowerCase();
+  const tokens = name.split(/\s+/);
+  let color = '';
+  for (const n of [2, 1]) { // longest leading color first ("light blue")
+    const cand = tokens.slice(0, n).join(' ').toLowerCase().replace(/,$/, '');
+    if (TRIPSY_WARDROBE_COLORS.includes(cand) || ['gray', 'off-white', 'dark blue', 'light grey', 'light gray'].includes(cand)) { color = tokens.slice(0, n).join(' '); break; }
+  }
+  if (!color && /[\/-]/.test(tokens[0] || '')) color = tokens[0]; // "Grey/Black", "Blue-Grey"
+  let group = 'tops';
+  if (/\b(dress shirt|tuxedo|\btux\b|suit|blazer|sport ?coat|dress trousers|dress pants|cummerbund|waistcoat|tie|bow tie|necktie|gown|cocktail dress)\b/.test(low)) group = 'dress_wear';
+  else if (/\b(trousers|chinos|jeans|shorts|slacks|pants|skirt)\b/.test(low)) group = 'pants';
+  else if (/\b(shoe|boot|loafer|sneaker|oxford|sandal|heel)\b/.test(low)) group = 'footwear';
+  else if (/\b(belt|scarf|jewelry|watch|hat|\bbag\b|glove|cufflink|pocket square|sunglass)\b/.test(low)) group = 'accessories';
+  else if (/\b(shirt|polo|sweater|tee|t-shirt|blouse|top|cardigan|pullover|henley|vest)\b/.test(low)) group = 'tops';
+  return { name, color, group };
+}
+
+function tripsyWardrobeImportRowHtml(file, parsed) {
+  return `
+    <div class="tw-import-row" data-tw-src="${esc(file.id)}">
+      <div class="tw-photo tw-import-thumb" data-tw-photo="${esc(file.id)}">👕</div>
+      <div class="tw-import-fields">
+        <label class="tw-import-inc"><input type="checkbox" data-tw-inc checked> Import</label>
+        <input type="text" class="tw-import-name" value="${esc(parsed.name)}">
+        <div class="tw-import-row2">
+          <select class="tw-import-group">${TRIPSY_ATTIRE_PACKING_GROUPS.map(g => `<option value="${g}" ${parsed.group === g ? 'selected' : ''}>${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[g])}</option>`).join('')}</select>
+          <input type="text" class="tw-import-color" list="tw-import-color-list" value="${esc(parsed.color)}" placeholder="color">
+        </div>
+        <div class="tw-tier-opts tw-import-tiers">${TRIPSY_ATTIRE_CATEGORY_ORDER.map(t => `<label class="tw-tier-opt"><input type="checkbox" data-tw-tier="${t}">${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[t])}</label>`).join('')}</div>
+      </div>
+    </div>`;
+}
+
+function getOrCreateWardrobeImportOverlay() {
+  let ov = document.getElementById('tw-import-overlay');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'tw-import-overlay';
+  ov.className = 'tw-modal';
+  ov.innerHTML = `
+    <div class="tw-modal-paper tw-wide">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;">
+        <h2 style="margin:0; font-size:18px;">Import from “Travel Wardrobe” folder</h2>
+        <button class="btn" id="tw-import-close">Close</button>
+      </div>
+      <div style="font-size:12.5px; color:var(--muted); line-height:1.5; margin-bottom:12px;">Name, type, and color are read from each filename. <b>Tick the dress codes each garment works for</b>, adjust anything, then import. Already-imported photos are skipped.</div>
+      <div id="tw-import-body"></div>
+      <datalist id="tw-import-color-list">${TRIPSY_WARDROBE_COLORS.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:16px; position:sticky; bottom:0; background:var(--panel); padding-top:10px;">
+        <div id="tw-import-status" style="font-size:12px; color:var(--muted);"></div>
+        <button class="btn primary" id="tw-import-go">Import</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  return ov;
+}
+
+async function tripsyWardrobeOpenImport(onDone) {
+  const ov = getOrCreateWardrobeImportOverlay();
+  const bodyEl = ov.querySelector('#tw-import-body');
+  const statusEl = ov.querySelector('#tw-import-status');
+  const goBtn = ov.querySelector('#tw-import-go');
+  ov.querySelector('#tw-import-close').onclick = () => { ov.style.display = 'none'; };
+  ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
+  bodyEl.innerHTML = `<div style="padding:24px 0; color:var(--muted);">Looking for the “Travel Wardrobe” folder…</div>`;
+  ov.style.display = 'flex';
+  const folderId = await tripsyFindWardrobeImportFolder();
+  if (!folderId) { bodyEl.innerHTML = `<div class="empty-state">Couldn't find a Drive folder named “Travel Wardrobe”. Create one under your Travel Reservation Tracking folder and drop garment photos (JPEG) in it.</div>`; goBtn.style.display = 'none'; return; }
+  const [files, existing] = await Promise.all([tripsyListWardrobeFolderImages(folderId), Store.listWardrobe()]);
+  const alreadyImported = new Set(existing.map(g => g.sourceFileId).filter(Boolean));
+  const newFiles = files.filter(f => !alreadyImported.has(f.id));
+  if (!newFiles.length) { bodyEl.innerHTML = `<div class="empty-state">Nothing new to import — every photo in the folder is already in your wardrobe (${files.length} total).</div>`; goBtn.style.display = 'none'; return; }
+  goBtn.style.display = '';
+  goBtn.textContent = `Import ${newFiles.length}`;
+  statusEl.textContent = '';
+  bodyEl.innerHTML = newFiles.map(f => tripsyWardrobeImportRowHtml(f, tripsyParseGarmentFilename(f.title || f.name))).join('');
+  tripsyWardrobeLoadPhotos(bodyEl);
+  goBtn.disabled = false;
+  goBtn.onclick = async () => {
+    const rows = [...bodyEl.querySelectorAll('.tw-import-row')].filter(r => r.querySelector('[data-tw-inc]').checked);
+    if (!rows.length) { statusEl.textContent = 'Nothing ticked to import.'; return; }
+    goBtn.disabled = true;
+    let done = 0, failed = 0;
+    for (const row of rows) {
+      const srcId = row.getAttribute('data-tw-src');
+      statusEl.textContent = `Importing ${done + 1} of ${rows.length}…`;
+      try {
+        const blob = await downloadDriveFileBlob(srcId);
+        const small = await tripsyResizeImageBlob(blob);
+        const driveFileId = await uploadBlobToDrive(small, `wardrobe-photo-${Date.now()}`, 'image/jpeg');
+        const garment = {
+          id: crypto.randomUUID(),
+          name: row.querySelector('.tw-import-name').value.trim() || 'Untitled',
+          group: row.querySelector('.tw-import-group').value,
+          tiers: [...row.querySelectorAll('.tw-import-tiers input[data-tw-tier]:checked')].map(el => el.getAttribute('data-tw-tier')),
+          color: row.querySelector('.tw-import-color').value.trim(),
+          driveFileId,
+          sourceFileId: srcId,
+          addedAt: new Date().toISOString(),
+        };
+        const ok = await Store.saveWardrobeGarment(garment);
+        if (ok) { done++; row.style.opacity = '0.4'; } else failed++;
+      } catch (e) { console.error('import row failed', e); failed++; }
+    }
+    statusEl.textContent = `Imported ${done}${failed ? `, ${failed} failed` : ''}.`;
+    goBtn.disabled = false;
+    if (done && onDone) onDone();
+    if (done && !failed) setTimeout(() => { ov.style.display = 'none'; }, 900);
+  };
 }
 
 // Populates the live "Authorized Users" card on the Users utility page --
