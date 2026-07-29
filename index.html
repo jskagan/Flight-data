@@ -14834,10 +14834,14 @@ async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPro
     required: ['events'],
     additionalProperties: false,
   };
-  const guidanceSchema = {
+  // Per-person guidance schema: the packing call is split into two PARALLEL
+  // calls (him, her) so each only produces half the (long) output -> faster
+  // wall-clock at the same reasoning quality. Each returns just its own person
+  // plus the trip-level laundry_days (computed in both; merged by taking him's).
+  const guidanceSchemaFor = person => ({
     type: 'object',
     properties: {
-      // Recommended laundry day(s): one wash per ~10 travel days, each on the
+      // Recommended laundry day(s): one wash per ~9 travel days, each on the
       // most efficient day. Empty when the trip is short enough to need none.
       laundry_days: {
         type: 'array',
@@ -14850,17 +14854,14 @@ async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPro
       },
       person_guidance: {
         type: 'object',
-        properties: {
-          him: TRIPSY_ATTIRE_PERSON_GUIDANCE_SCHEMA(categoryEnum),
-          her: TRIPSY_ATTIRE_PERSON_GUIDANCE_SCHEMA(categoryEnum),
-        },
-        required: ['him', 'her'],
+        properties: { [person]: TRIPSY_ATTIRE_PERSON_GUIDANCE_SCHEMA(categoryEnum) },
+        required: [person],
         additionalProperties: false,
       },
     },
     required: ['person_guidance', 'laundry_days'],
     additionalProperties: false,
-  };
+  });
   const weatherLines = Object.keys(weatherByDay || {}).length
     ? `\n\nPer-day weather:\n${JSON.stringify(weatherByDay)}`
     : '';
@@ -14901,7 +14902,9 @@ ${eventsJson}`;
   // the events call's answers -- the two align closely in practice, and the
   // mechanical block grouping (computeTripsyAttireBlocks) governs what the UI
   // displays either way.
-  const guidancePrompt = `Build the per-person packing guidance for this trip, so the owner can pack the right outfits.
+  const buildGuidancePrompt = person => {
+   const personLabel = person === 'him' ? 'the MAN ("him")' : 'the WOMAN ("her")';
+   return `Build the packing guidance for ${personLabel} on this trip, so the owner can pack the right outfits.
 
 ${tripLine}
 
@@ -14912,7 +14915,7 @@ The TIME-BLOCKS list below is PRE-COMPUTED and authoritative -- do NOT re-derive
 
 Your job is to judge, privately: which of the 7 tiers each event calls for (weigh its venue/address, its own name, the time of day, and any explicit dress-code wording), and from that, each BLOCK's tier = the DRESSIEST tier among its events (that's the outfit actually worn for that block; the less-formal events inside it get no outfit of their own). Do NOT output any per-event or per-block data -- use these judgments only for the counting rules below.
 
-person_guidance covers TWO travelers on this trip, "him" and "her", both attending every event above -- for EACH person and EACH of the 7 categories, give:
+person_guidance is for ONE person only: ${personLabel}, attending every event above. Output ONLY that person's guidance (the schema contains only "${person}"). For ${person} and EACH of the 7 categories, give:
 - COUNT EVERYTHING BELOW BY TIME-BLOCK (from the pre-computed TIME-BLOCKS list), NEVER BY INDIVIDUAL EVENT. Each block counts ONCE, under its dressiest tier ONLY; the less-formal events inside a block add NOTHING to their own tiers' counts. So a pre-concert reception -> concert -> post-concert reception evening is ONE formal occasion requiring ONE wearing of the anchor garment (and, for him, ONE fresh shirt + tie) -- not three, and it contributes ZERO cocktail occasions. Everywhere below, "occasion" means one time-block at its dressiest tier. Before you count anything, work out how many blocks fall in each tier, and let those numbers -- not the raw event count -- drive every quantity you give. A garment worn once per occasion should never be quantified above that tier's BLOCK count.
 - garments: an ARRAY with ONE ENTRY PER TIER that actually has occasions on this trip (set that entry's category to the tier; omit tiers with no occasions entirely -- do not emit empty entries). Each entry lists the ACTUAL GARMENTS TO PACK for that tier, itemized -- NOT a count of outfits, and NOT a description of how things get restyled. Each element of that entry's items[] is one garment line: name (e.g. "suits", "dress shirts", "ties", "cocktail dresses", "tops", "trousers") and quantity (e.g. "2", "5", "3-4"). Say only what is NEEDED. Example entry for a tier with 6 time-blocks: {"category":"formal","reuse_note":"","items":[{"name":"suits","quantity":"2"},{"name":"dress shirts","quantity":"6"},{"name":"ties","quantity":"3"}]} -- note ties is roughly HALF the dress-shirt/block count, per the re-wear rule below, not equal to it. Never write prose like "restyled with different accessories" in a garment name.
 - Anchor garments are counted LOW and re-worn across time-blocks in the tier (see the packing_list rules below for the exact reuse logic -- a suit/dress repeats across blocks; a DRESS specifically is re-worn up to 6 TIMES before washing, restyled each time with different accessories to read as a new outfit, so it's quantified at roughly a SIXTH of that tier's occasion count, rounded up, at least 1; a dress shirt does not repeat and is quantified 1-per-block; a tie is re-worn twice so at FORMAL/BLACK TIE (a tie every block) it's quantified at roughly HALF the block count, and at COCKTAIL (a tie worn to only half the occasions) at roughly a QUARTER of the block count; jewelry/scarves for her restyle repeats the same way ties do).
@@ -14939,7 +14942,7 @@ Each person's packing_list is a REAL itemized garment-by-garment packing list, m
 - Set category to the SINGLE dress-code tier this item is packed for -- the same tier as the garments[] entry it belongs to (e.g. "Ties (formal)" -> category "formal"). Use '' only for genuinely tier-agnostic items that aren't tied to one dress code (a rain jacket carried the whole trip, base-layer underwear).
 - Set event_ids to the specific event id(s) (copied verbatim from the current-events list below) this item is actually needed for, when it reasonably maps to one or more specific events (e.g. a swimsuit -> the pool/spa event ids; formal shoes -> every formal-tier event id). CRITICAL: every id in event_ids must be an event you judged to be THIS ITEM'S OWN category (or, for a tier-agnostic item, any event at all) -- never link a tier-specific item (e.g. a formal tie) to an event of a DIFFERENT tier, even one nearby in the same time-block. General items with no specific occasion get an empty event_ids array. Never invent an id that isn't in the current-events list.
 - Include footwear, outerwear, and accessories as their own line items, not folded into essentials.
-- COMPLETENESS IS REQUIRED, and matters more than brevity. This is the packing list the owner actually packs from, so a missing line means a missing garment in the suitcase. Emit EVERY item needed for the whole trip as its own entry, across all 6 groups, for BOTH people. Do not compress, abbreviate, summarize, merge distinct garments onto one line, or stop early because the list is getting long -- there is no length limit and a long list is the expected, correct result. Before you finish, re-read the tiers that have occasions on this trip and confirm each one's garments, footwear, outerwear, and accessories are all present for each person.
+- COMPLETENESS IS REQUIRED, and matters more than brevity. This is the packing list the owner actually packs from, so a missing line means a missing garment in the suitcase. Emit EVERY item ${person} needs for the whole trip as its own entry, across all 6 groups. Do not compress, abbreviate, summarize, merge distinct garments onto one line, or stop early because the list is getting long -- there is no length limit and a long list is the expected, correct result. Before you finish, re-read the tiers that have occasions on this trip and confirm each one's garments, footwear, outerwear, and accessories are all present for ${person}.
 - Set group on EVERY item to exactly one of: dress_wear, tops, pants, essentials, footwear, accessories. What belongs where: dress_wear = suits, tuxedos, blazers, sport coats, dress shirts, dress trousers, ties, DRESS socks, cummerbunds, gowns and cocktail dresses; tops = casual shirts, sweaters, t-shirts, blouses, polos, cardigans; pants = casual trousers, jeans, shorts, chinos, skirts; essentials = underwear, undershirts, CASUAL socks, sleepwear (the washable base layers); footwear = every kind of shoe or boot; accessories = belts, scarves, jewelry, watches, hats, bags, gloves, cuff links, pocket squares, sunglasses. Note the two deliberate splits: dress socks are dress_wear but casual socks are essentials, and dress trousers are dress_wear but casual trousers/jeans are pants.
 ${weatherLines}
 
@@ -14948,6 +14951,19 @@ ${timeBlocksJson}${authoritativeCountsLine}
 
 Current events:
 ${eventsJson}`;
+  };
+  // One guidance call for a single person (him or her). Run in parallel so each
+  // only emits half the long packing list -> faster wall-clock, same reasoning.
+  const runGuidance = person => tripsyAttireClaudeCall(apiKey, guidanceSchemaFor(person), buildGuidancePrompt(person), `packing guidance (${person})`, { thinking: true, effort: 'medium' });
+  // Merge the two per-person results back into one { person_guidance:{him,her},
+  // laundry_days }. laundry_days is produced by both (trip-level); take him's.
+  const mergeGuidance = (himR, herR) => ({
+    person_guidance: {
+      him: (himR && himR.person_guidance && himR.person_guidance.him) || null,
+      her: (herR && herR.person_guidance && herR.person_guidance.her) || null,
+    },
+    laundry_days: (himR && himR.laundry_days && himR.laundry_days.length) ? himR.laundry_days : ((herR && herR.laundry_days) || []),
+  });
   // Fire both calls CONCURRENTLY -- the whole point of the split (see the
   // schema comment above). A failure in either rejects the pair, surfacing
   // through runTripsyAttireGeneration's existing error/retry UI.
@@ -14962,39 +14978,35 @@ ${eventsJson}`;
   // adjustments.
   if (skipEvents) {
     const gStart = performance.now();
-    // effort 'medium' (was briefly 'low'): even with the counts handed in, the
-    // cross-tier REUSE + versatility reasoning (reuse the formal suit for
-    // cocktail, sport-coat-not-a-2nd-suit, trousers shared with smart-casual)
-    // needs real thinking -- 'low' produced wrong counts (a spurious 2nd cocktail
-    // dark suit, inflated chinos). Keep 'medium'; reclaim speed via the him/her
-    // parallel split instead, not by lowering effort here.
-    const guidanceResult = await tripsyAttireClaudeCall(apiKey, guidanceSchema, guidancePrompt, 'packing guidance (authoritative counts)', { thinking: true, effort: 'medium' });
-    console.log(`[attire timing] guidance-only Claude call: ${Math.round(performance.now() - gStart)}ms`);
-    return { events: [], person_guidance: (guidanceResult && guidanceResult.person_guidance) || null, laundry_days: (guidanceResult && guidanceResult.laundry_days) || [] };
+    // Him + her in PARALLEL (runGuidance) -- half the output each, so faster
+    // wall-clock while both keep full 'medium' reasoning. Effort stays 'medium'
+    // here (NOT 'low'): the cross-tier reuse/versatility judgment (reuse the
+    // formal suit for cocktail, sport-coat-not-a-2nd-suit, trousers shared with
+    // smart-casual) needs it -- 'low' produced a spurious 2nd cocktail suit +
+    // inflated chinos. The split, not lower effort, is how we buy back the speed.
+    const [himR, herR] = await Promise.all([runGuidance('him'), runGuidance('her')]);
+    console.log(`[attire timing] guidance him+her (parallel): ${Math.round(performance.now() - gStart)}ms`);
+    const merged = mergeGuidance(himR, herR);
+    return { events: [], person_guidance: merged.person_guidance, laundry_days: merged.laundry_days };
   }
   const pairStart = performance.now();
-  const [eventsResult, guidanceResult] = await Promise.all([
-    // Per-event classification against a fixed 7-value enum -- no thinking.
+  // Events categorization (fast, no-thinking) + the TWO per-person guidance
+  // calls, all in parallel. The guidance halves used to be ONE call at 'medium'
+  // (~103s, the long pole; 'high' ~290s, 'low' too terse/wrong); splitting it
+  // per person keeps 'medium' quality while roughly halving each call's output,
+  // so wall-clock drops toward one person's time. Correctness of this list beats
+  // the clock (it's what actually gets packed from), so effort stays 'medium'.
+  const [eventsResult, himR, herR] = await Promise.all([
     tripsyAttireClaudeCall(apiKey, eventsSchema, eventsPrompt, 'per-event categories', { thinking: false, effort: 'low' }),
-    // Keeps thinking -- it does the real block/garment arithmetic. Effort is
-    // the live tradeoff here and the ONLY dial that moves total wall-clock,
-    // since these two run in parallel and this call is always the long pole
-    // (the events call finishes in ~19s). History, so nobody re-derives it:
-    // no thinking param at all (i.e. the sonnet-5 default of adaptive+high)
-    // = ~290-324s; `medium` = 103s but the packing list came back visibly
-    // thinner (output 17.6K -> 9.2K chars, owner reported missing garment
-    // lines); `high` = back to ~290s with the detail restored. Now on
-    // `medium` PLUS an explicit COMPLETENESS-IS-REQUIRED rule in the prompt,
-    // testing whether the thinness was terseness rather than lost reasoning.
-    // If the Detailed List is still thin, go back to `high` -- correctness of
-    // this list beats the clock, since it's what actually gets packed from.
-    tripsyAttireClaudeCall(apiKey, guidanceSchema, guidancePrompt, 'packing guidance', { thinking: true, effort: 'medium' }),
+    runGuidance('him'),
+    runGuidance('her'),
   ]);
-  console.log(`[attire timing] both Claude calls (parallel): ${Math.round(performance.now() - pairStart)}ms`);
+  console.log(`[attire timing] events + guidance him+her (parallel): ${Math.round(performance.now() - pairStart)}ms`);
+  const merged = mergeGuidance(himR, herR);
   return {
     events: (eventsResult && eventsResult.events) || [],
-    person_guidance: (guidanceResult && guidanceResult.person_guidance) || null,
-    laundry_days: (guidanceResult && guidanceResult.laundry_days) || [],
+    person_guidance: merged.person_guidance,
+    laundry_days: merged.laundry_days,
   };
 }
 // One streamed structured-output Claude call for the Attire feature -- the
