@@ -1196,6 +1196,11 @@
     font-size: 12.5px; font-weight: 600; color: var(--amber); margin: 14px 0 6px;
     padding: 5px 10px; background: rgba(227,164,56,0.12); border-radius: 6px; display: inline-block;
   }
+  /* When outfits are composed, the dress-code box is a button that opens the
+     block's outfit -- give it a clear tappable affordance. */
+  .tripsy-attire-dressguide-instruction--outfit { cursor: pointer; border: 1px solid rgba(227,164,56,0.45); }
+  .tripsy-attire-dressguide-instruction--outfit:hover { background: rgba(227,164,56,0.22); }
+  .tripsy-attire-outfit-cue { margin-left: 8px; font-weight: 700; opacity: 0.9; white-space: nowrap; }
   /* flex-wrap so an ambiguous event's badge PAIR (wider than a single
      badge) drops to its own line rather than overflowing the row at
      narrower widths -- the single-badge case still fits inline as before,
@@ -2572,6 +2577,28 @@ const Store = {
       console.error('Store.deleteTripsyAttireGuide failed:', e);
       return false;
     }
+  },
+  // Composed outfits for a trip (Attire panel -> Compose Outfits), one entry per
+  // trip, keyed off the trip's saved attire guide + Pack-For-Trip selection. Kept
+  // separate from the guide itself so recomposing (or a guide Refresh) doesn't
+  // entangle the two, same replace-by-key shape as the guide store. Writes use the
+  // conflict-resilient apply()+retry helper (a compose can land while another
+  // device is writing the shared file).
+  async getTripsyTripOutfits(tripKey) {
+    return (driveData.tripsyTripOutfits || []).find(o => o.tripKey === tripKey) || null;
+  },
+  async saveTripsyTripOutfits(outfits) {
+    return persistTripsyNarrativeCacheWithRetry(() => {
+      if (!driveData.tripsyTripOutfits) driveData.tripsyTripOutfits = [];
+      driveData.tripsyTripOutfits = driveData.tripsyTripOutfits.filter(o => o.tripKey !== outfits.tripKey);
+      driveData.tripsyTripOutfits.push(outfits);
+    });
+  },
+  async deleteTripsyTripOutfits(tripKey) {
+    if (!driveData.tripsyTripOutfits || !driveData.tripsyTripOutfits.length) return true;
+    return persistTripsyNarrativeCacheWithRetry(() => {
+      driveData.tripsyTripOutfits = (driveData.tripsyTripOutfits || []).filter(o => o.tripKey !== tripKey);
+    });
   },
   // `keepOffline` is the one shared, cross-device marker for "this doc
   // should be cached locally for offline viewing" -- stored here (synced
@@ -7503,6 +7530,67 @@ function tripsyWardrobeChooseQty(max, garmentName, verb = 'pack') {
       else if (e.target === ov) { ov.style.display = 'none'; resolve(null); }
     };
   });
+}
+
+// Shows the composed outfit for the time-block an event belongs to (photos + names,
+// the stylist's coordination note, and any gaps). Shared by the Daily Dress Guide's
+// tappable dress-code boxes and Travel View's event taps; the block is found by
+// eventIds membership on the saved outfit. `opts.onDetails`, when given, adds a footer
+// button (Travel View passes it so the event-detail panel stays reachable).
+async function showTripsyOutfitModal(tripKey, eventId, opts = {}) {
+  let ov = document.getElementById('tw-outfit-overlay');
+  if (!ov) {
+    ov = document.createElement('div'); ov.id = 'tw-outfit-overlay'; ov.className = 'tw-modal';
+    document.body.appendChild(ov);
+    ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+  }
+  const close = () => { ov.style.display = 'none'; };
+  const outfits = await Store.getTripsyTripOutfits(tripKey);
+  const block = outfits && (outfits.blocks || []).find(b => (b.eventIds || []).includes(eventId));
+  if (!block) {
+    ov.innerHTML = `<div class="tw-modal-paper" style="max-width:420px; text-align:center;"><h2 style="margin:0 0 10px; font-size:17px;">No outfit yet</h2><div style="color:var(--muted); font-size:13px;">Compose outfits from the Attire panel first.</div><div style="margin-top:16px;"><button class="btn" data-tw-outfit-close>Close</button></div></div>`;
+    ov.style.display = 'flex';
+    ov.querySelector('[data-tw-outfit-close]').onclick = close;
+    return;
+  }
+  const garments = await Store.listWardrobe();
+  const byId = new Map(garments.map(g => [g.id, g]));
+  const cards = (block.garmentIds || []).map(id => byId.get(id)).filter(Boolean);
+  const label = TRIPSY_ATTIRE_CATEGORY_LABEL[block.category] || block.category || '';
+  // "May be out of date" if the guide's events or the packing selection changed since compose.
+  let stale = false;
+  try {
+    const guide = await Store.getTripsyAttireGuide(tripKey);
+    const sel = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey));
+    stale = !!(guide && guide.eventFingerprint && outfits.guideFingerprint && guide.eventFingerprint.hash !== outfits.guideFingerprint.hash)
+      || !!(outfits.selectionFingerprint && tripsyOutfitSelectionFingerprint(sel).hash !== outfits.selectionFingerprint.hash);
+  } catch (e) { /* staleness is best-effort */ }
+  const cardHtml = cards.length ? cards.map(g => `
+    <div class="tw-card" data-tw-id="${esc(g.id)}">
+      <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : '👕'}</div>
+      <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}</div><div class="tw-meta">${esc(tripsyGarmentTypeBucket(g).label)}${g.color ? ` · ${esc(g.color)}` : ''}</div></div>
+    </div>`).join('') : `<div style="color:var(--muted); padding:12px 0;">No garments were assigned to this block.</div>`;
+  const gapsHtml = (block.gaps || []).length
+    ? `<div style="margin-top:12px; display:flex; flex-direction:column; gap:4px;">${block.gaps.map(x => `<div style="color:var(--amber, #D4A24C); font-size:13px;">⚠ ${esc(x)}</div>`).join('')}</div>`
+    : '';
+  ov.innerHTML = `
+    <div class="tw-modal-paper tw-wide">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
+        <h2 style="margin:0; font-size:18px;">${esc(label)} outfit</h2>
+        <button class="btn" data-tw-outfit-close>Close</button>
+      </div>
+      ${block.label ? `<div style="color:var(--muted); font-size:13px; margin-bottom:12px;">${esc(block.label)}</div>` : ''}
+      ${stale ? `<div class="tripsy-attire-stale-note" style="margin-bottom:12px;">Your events or packing selection changed since these outfits were composed — recompose from the Attire panel to update.</div>` : ''}
+      ${block.note ? `<div style="background:var(--panel-2); border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:12px;">${esc(block.note)}</div>` : ''}
+      <div class="tw-grid">${cardHtml}</div>
+      ${gapsHtml}
+      ${opts.onDetails ? `<div style="margin-top:16px; text-align:right;"><button class="btn" data-tw-outfit-details>View event details</button></div>` : ''}
+    </div>`;
+  ov.style.display = 'flex';
+  ov.querySelector('[data-tw-outfit-close]').onclick = close;
+  const detailsBtn = ov.querySelector('[data-tw-outfit-details]');
+  if (detailsBtn && opts.onDetails) detailsBtn.onclick = () => { close(); opts.onDetails(); };
+  tripsyWardrobeLoadPhotos(ov);
 }
 
 // "Pack For Trip" — pick which wardrobe pieces to bring. The selection GRID is
@@ -15891,7 +15979,10 @@ async function tripsyAttireClaudeCall(apiKey, schema, promptText, label, { think
         ? { thinking: { type: 'disabled' } }
         : { thinking: { type: 'adaptive' } }),
       output_config: { effort, format: { type: 'json_schema', schema } },
-      messages: [{ role: 'user', content: [{ type: 'text', text: promptText }] }],
+      // promptText is normally a plain string (one text block); Compose Outfits
+      // passes a ready-made content array (labeled garment images + a final text
+      // block) so the same SSE/json_schema plumbing serves the vision call too.
+      messages: [{ role: 'user', content: Array.isArray(promptText) ? promptText : [{ type: 'text', text: promptText }] }],
     }),
   });
   if (!res.ok) {
@@ -15934,7 +16025,7 @@ async function tripsyAttireClaudeCall(apiKey, schema, promptText, label, { think
   console.log(`[attire timing] ${label}: ${Math.round(performance.now() - callStart)}ms total`
     + (thinkingStartedAt != null ? ` | thinking began at ${Math.round(thinkingStartedAt - callStart)}ms` : ' | no thinking block')
     + (firstTokenAt != null ? `, first text token at ${Math.round(firstTokenAt - callStart)}ms, ${Math.round(performance.now() - firstTokenAt)}ms streaming` : '')
-    + ` | prompt ${promptText.length} chars, output ${text.length} chars`);
+    + ` | prompt ${Array.isArray(promptText) ? promptText.length + ' blocks' : promptText.length + ' chars'}, output ${text.length} chars`);
   // Name the half that failed -- with two parallel calls, an unlabelled
   // "too large" error can't tell you whether it was the per-event pass or the
   // packing-guidance pass that blew the ceiling.
@@ -16162,6 +16253,41 @@ function tripsyAttireTieredTimeBlocks(days) {
     for (const it of r.items) if (rankOf(it.category) > rankOf(tier)) tier = it.category;
     return { block: i + 1, date: r.dayKey, tier, events: r.items.map(it => ({ id: it.id, name: it.name, startTime: it.startTime })) };
   });
+}
+// Enumerate every outfit TIME-BLOCK across all 7 tiers (not just the 4 itemized
+// ones computeTripsyAttireBlocks exposes) -- the unit Compose Outfits dresses. A
+// block here is a maximal run of consecutive same-day events with a constant
+// displayCategory, which is exactly the stretch the Daily Dress Guide shows under
+// one lead-in/change designation (the "descriptor box" the owner taps). Both
+// display surfaces then locate an event's block by eventIds membership on the
+// SAVED outfit, so this ordering only needs to match what compose stored. Stamps
+// displayCategory first (a guide opened without a recompute may lack it).
+function tripsyEnumerateAttireBlocks(guide) {
+  const days = (guide && guide.days) || [];
+  computeTripsyAttireBlocks(days);
+  const blocks = [];
+  for (const day of days) {
+    let cur = null;
+    for (const ev of (day.events || [])) {
+      const cat = tripsyAttireDisplayCategory(ev);
+      if (!cur || cur.category !== cat) {
+        cur = { dayKey: day.dayKey, category: cat, eventIds: [], firstEventId: ev.id, startTime: ev.startTime || '', names: [] };
+        blocks.push(cur);
+      }
+      cur.eventIds.push(ev.id);
+      if (ev.name) cur.names.push(ev.name);
+    }
+  }
+  return blocks.map((b, i) => ({ ...b, blockId: `B${i + 1}`, label: b.names.join(' → ') }));
+}
+// Light change-detection hash over a Pack-For-Trip selection ({id,qty}[]), so a
+// saved outfit set can flag itself "may be out of date" if the owner changed what
+// they're bringing since composing. Same djb2 style as tripsyAttireFingerprint.
+function tripsyOutfitSelectionFingerprint(selection) {
+  const joined = (selection || []).map(e => `${e.id}:${e.qty}`).sort().join('|');
+  let hash = 5381;
+  for (let i = 0; i < joined.length; i++) hash = ((hash << 5) + hash + joined.charCodeAt(i)) | 0;
+  return { hash, count: (selection || []).length };
 }
 // The tier shown for an event everywhere in the Attire UI: its block's
 // dressiest tier (displayCategory, stamped by computeTripsyAttireBlocks),
@@ -18783,6 +18909,7 @@ function getOrCreateTripsyAttireOverlay() {
       <div class="tripsy-attire-toolbar-title" data-tripsy-attire-title></div>
       <div class="tripsy-attire-toolbar-actions">
         <button class="tripsy-update-btn" id="tripsy-attire-definitions-btn">Definitions</button>
+        <button class="tripsy-update-btn" id="tripsy-attire-outfits-btn" style="display:none;">✨ Compose Outfits</button>
         <button class="tripsy-update-btn" id="tripsy-attire-refresh-btn" style="display:none;"></button>
         <button class="tripsy-update-btn" id="tripsy-attire-close-btn">Close</button>
       </div>
@@ -18799,6 +18926,10 @@ function getOrCreateTripsyAttireOverlay() {
   overlay.querySelector('#tripsy-attire-refresh-btn').addEventListener('click', () => {
     if (!tripsyAttireOverlayTripKey) return;
     runTripsyAttireGeneration(tripsyAttireOverlayTripKey, { isRefresh: true });
+  });
+  overlay.querySelector('#tripsy-attire-outfits-btn').addEventListener('click', () => {
+    if (!tripsyAttireOverlayTripKey) return;
+    runTripsyOutfitComposition(tripsyAttireOverlayTripKey);
   });
   // Available to every viewer (not owner-gated) -- it's just a static
   // legend for the badges already visible in the guide, not an action.
@@ -19510,6 +19641,9 @@ async function showTripsyAttireOverlay(tripKey) {
   const saved = await Store.getTripsyAttireGuide(tripKey);
   refreshBtn.style.display = isOwner ? 'inline-block' : 'none';
   refreshBtn.textContent = saved ? 'Refresh' : 'Generate';
+  // Compose Outfits needs a saved guide (for the block schedule) + owner rights.
+  const outfitsBtn = overlay.querySelector('#tripsy-attire-outfits-btn');
+  if (outfitsBtn) outfitsBtn.style.display = (isOwner && saved) ? 'inline-block' : 'none';
   if (saved) {
     let stale = false;
     try {
@@ -19546,6 +19680,8 @@ async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
     const { weatherTargetsByDay, tripStartDayKey } = trip ? await tripsyAttireLoadWeatherBar(trip, guide) : { weatherTargetsByDay: new Map(), tripStartDayKey: null };
     renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
     refreshBtn.textContent = 'Refresh';
+    const outfitsBtn = overlay.querySelector('#tripsy-attire-outfits-btn');
+    if (outfitsBtn && isOwner) outfitsBtn.style.display = 'inline-block';
     toast(isRefresh ? 'Attire guide refreshed.' : 'Attire guide generated.', 'success');
   } catch (e) {
     console.error('Attire generation failed:', e);
@@ -19624,6 +19760,12 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
   // The day header is the same bar (date + weather chip + Day N) My Trips'
   // own timeline uses (tripsyAttireDayBarHtml).
   const laundryByDay = new Map((guide.laundryDays || []).map(l => [l.dayKey, l.reason]));
+  // Composed outfits (if any) make each time-block's dress-code box tappable -- read
+  // synchronously from the already-loaded driveData (no round-trip on render). A box
+  // is clickable only when its block actually has garments assigned.
+  const tripOutfits = (driveData.tripsyTripOutfits || []).find(o => o.tripKey === guide.tripKey) || null;
+  const outfitEventIds = new Set();
+  if (tripOutfits) (tripOutfits.blocks || []).forEach(b => { if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => outfitEventIds.add(id)); });
   const dailyDressGuideHtml = (guide.days || []).map(day => {
     const events = (day.events || []).map(ev => ({ ...ev, dayKey: day.dayKey }));
     if (!events.length) return '';
@@ -19640,11 +19782,17 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
       // displayed tier actually differs from the previous event. So a "⇄ Change
       // to" marker appears exactly when (and only when) the worn tier changes,
       // never within a block whose events merely carry different BASE tiers.
-      const leadIn = i === 0
-        ? `<div class="tripsy-attire-dressguide-instruction">${singleCategoryDay ? 'Entire day is' : 'Start the day in'} ${tripsyAttireBadgeHtml(disp)}</div>`
+      const leadInText = i === 0
+        ? `${singleCategoryDay ? 'Entire day is' : 'Start the day in'} ${tripsyAttireBadgeHtml(disp)}`
         : (disp !== tripsyAttireDisplayCategory(prev)
-          ? `<div class="tripsy-attire-dressguide-instruction">⇄ Change to ${tripsyAttireBadgeHtml(disp)} before ${ev.startTime ? esc(ev.startTime) : 'this event'} — ${esc(ev.name || '')}</div>`
-          : '');
+          ? `⇄ Change to ${tripsyAttireBadgeHtml(disp)} before ${ev.startTime ? esc(ev.startTime) : 'this event'} — ${esc(ev.name || '')}`
+          : null);
+      // When outfits have been composed, the block's dress-code box is a button that
+      // opens that block's outfit (looked up by this first event's id).
+      const hasOutfit = outfitEventIds.has(ev.id);
+      const leadIn = leadInText == null ? '' : (hasOutfit
+        ? `<div class="tripsy-attire-dressguide-instruction tripsy-attire-dressguide-instruction--outfit" role="button" tabindex="0" data-tripsy-outfit-block="${esc(ev.id)}" title="Tap to see the outfit for this block">${leadInText}<span class="tripsy-attire-outfit-cue">👔 See outfit</span></div>`
+        : `<div class="tripsy-attire-dressguide-instruction">${leadInText}</div>`);
       const timeRange = ev.startTime && ev.endTime ? `${ev.startTime} – ${ev.endTime}` : (ev.startTime || '');
       return `
         ${leadIn}
@@ -19755,6 +19903,12 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
     row.addEventListener('keydown', e => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showTripsyAttireCategoryEvents(guide, row.dataset.tripsyAttireCategoryLink); }
     });
+  });
+  // Tappable dress-code boxes -> the composed outfit for that time-block.
+  content.querySelectorAll('[data-tripsy-outfit-block]').forEach(el => {
+    const open = () => showTripsyOutfitModal(guide.tripKey, el.dataset.tripsyOutfitBlock);
+    el.addEventListener('click', open);
+    el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
   });
   content.querySelectorAll('[data-tripsy-attire-event-badge]').forEach(btn => {
     btn.addEventListener('click', e => {
@@ -20410,6 +20564,144 @@ async function generateTripsyAttireGuide(tripKey) {
   console.log(`[attire timing] TOTAL generateTripsyAttireGuide: ${Math.round(performance.now() - genStart)}ms`);
   if (!ok) throw new Error('Could not save the attire guide.');
   return guide;
+}
+
+// Compose one coordinated outfit per attire TIME-BLOCK from the garments the owner
+// Packed For Trip. A single Claude vision call: each selected garment's photo (down-
+// sized to 512px to keep a 20-40 image request in budget) goes in as a labeled image
+// block -- mirroring compareTripsyItineraryPdf's document-block precedent, swapping
+// {type:'document'} for {type:'image'} -- followed by the block schedule + the same
+// re-wear/laundry rules the packing counts use. Output is saved to tripsyTripOutfits,
+// looked up by eventIds membership on both display surfaces (Daily Dress Guide boxes,
+// Travel View event taps). Needs a saved attire guide (for the schedule) AND a non-
+// empty Pack-For-Trip selection.
+async function composeTripsyOutfits(tripKey) {
+  const guide = await Store.getTripsyAttireGuide(tripKey);
+  if (!guide) throw new Error('Generate an attire guide for this trip first.');
+  const [garments, selectedRaw, apiKey] = await Promise.all([
+    Store.listWardrobe(), Store.getTripWardrobe(tripKey), fetchAnthropicApiKeyFromDrive(),
+  ]);
+  const selection = tripsyNormalizeTripSelection(selectedRaw);
+  if (!selection.length) throw new Error('Pack For Trip first — no garments are selected for this trip.');
+  const garmentById = new Map(garments.map(g => [g.id, g]));
+  const chosen = selection.map(sel => (garmentById.get(sel.id) ? { g: garmentById.get(sel.id), qty: sel.qty } : null)).filter(Boolean);
+  if (!chosen.length) throw new Error('None of the selected garments are still in your wardrobe.');
+  const blocks = tripsyEnumerateAttireBlocks(guide);
+  if (!blocks.length) throw new Error('This trip has no events to compose outfits for.');
+
+  // Labeled garment images, then the schedule + rules as the final text block.
+  const content = [];
+  const idByTag = new Map();
+  let n = 0;
+  for (const { g, qty } of chosen) {
+    const tag = `G${++n}`;
+    idByTag.set(tag, g.id);
+    const tiers = (g.tiers || []).map(t => TRIPSY_ATTIRE_CATEGORY_LABEL[t] || t).join('/') || 'any';
+    const typeKey = tripsyGarmentTypeKey(g.name || '') || g.group || '';
+    const meta = `[${tag}] ${g.name || 'garment'} — ${[g.color, typeKey, tiers, qty > 1 ? `own ${qty}` : ''].filter(Boolean).join(', ')}`;
+    content.push({ type: 'text', text: meta });
+    if (g.driveFileId) {
+      try {
+        const blob = await downloadDriveFileBlob(g.driveFileId);
+        const small = await tripsyResizeImageBlob(blob, 512, 0.8);
+        const data = await tripsyFileToBase64(small);
+        content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } });
+      } catch (e) { console.error('Outfit compose: photo load failed for', g.id, e); }
+    }
+  }
+  const scheduleLines = blocks.map(b => {
+    const label = TRIPSY_ATTIRE_CATEGORY_LABEL[b.category] || b.category || 'Casual';
+    return `${b.blockId} | ${b.dayKey}${b.startTime ? ' ' + b.startTime : ''} | ${label} | ${b.label || '(no events named)'}`;
+  }).join('\n');
+  const laundry = (guide.laundryDays || []).map(l => l.dayKey).join(', ') || 'none';
+  const prompt = `You are a menswear stylist composing packing outfits from ONE traveler's selected garments — each shown above as a photo with a [G#] tag and metadata (name, color, type, the dress codes it works for, and how many they own).
+
+Selected garments: ${chosen.length}. Wash day(s) that RESET wear counts: ${laundry}.
+
+TIME-BLOCKS to dress — assign ONE coordinated outfit to each. Format is "BLOCK | date time | dress code | events":
+${scheduleLines}
+
+Rules:
+- Each outfit is a list of garment tags that COORDINATE by color and suit that block's dress code. Prefer a complete look: for suited tiers, a suit/blazer + shirt + trousers + shoes (+ a tie for formal/black-tie/most cocktail); for casual tiers, a top + bottom + shoes.
+- Re-wear limits ACROSS the whole trip, resetting on each wash day above: a dress shirt or any top is worn ONCE before it must be washed; a tie twice; trousers/jeans up to ~10×; suits, blazers, and dresses can be reused freely with a fresh shirt/tie; shoes and belts reused freely.
+- Never assign the same shirt/top to two blocks that fall between the same pair of wash days — rotate shirts and ties so the limits hold.
+- Coordinate color sensibly (e.g. brown shoes/belt with blues and earth tones; black shoes with charcoal/grey; a tie that complements the shirt and jacket).
+- If a block needs a garment TYPE that isn't in the selection (e.g. no dress shirt for a formal block, no shoes), still assign what you can and add a short gap string like "No dress shirt packed".
+- Use ONLY the [G#] tags shown. EVERY block above must appear exactly once in the output, even if you can only partially fill it.`;
+  content.push({ type: 'text', text: prompt });
+
+  const schema = {
+    type: 'object', additionalProperties: false,
+    properties: {
+      blocks: {
+        type: 'array',
+        items: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            block_id: { type: 'string' },
+            garment_tags: { type: 'array', items: { type: 'string' } },
+            note: { type: 'string' },
+            gaps: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['block_id', 'garment_tags', 'note', 'gaps'],
+        },
+      },
+    },
+    required: ['blocks'],
+  };
+  const result = await tripsyAttireClaudeCall(apiKey, schema, content, 'outfit composition', { thinking: true, effort: 'medium' });
+
+  const byBlockId = new Map(blocks.map(b => [b.blockId, b]));
+  const outBlocks = [];
+  for (const r of (result.blocks || [])) {
+    const b = byBlockId.get(r.block_id);
+    if (!b) continue;
+    const garmentIds = (r.garment_tags || []).map(t => idByTag.get(t)).filter(Boolean);
+    outBlocks.push({
+      dayKey: b.dayKey,
+      category: b.category,
+      eventIds: b.eventIds,
+      label: b.label,
+      garmentIds,
+      note: String(r.note || '').trim(),
+      gaps: (r.gaps || []).map(x => String(x || '').trim()).filter(Boolean),
+    });
+  }
+  if (!outBlocks.length) throw new Error('No outfits came back — try again.');
+  const outfits = {
+    tripKey,
+    generatedAt: new Date().toISOString(),
+    guideFingerprint: guide.eventFingerprint || null,
+    selectionFingerprint: tripsyOutfitSelectionFingerprint(selection),
+    blocks: outBlocks,
+  };
+  const ok = await Store.saveTripsyTripOutfits(outfits);
+  if (!ok) throw new Error('Could not save the composed outfits.');
+  return outfits;
+}
+// Runs Compose Outfits from the Attire toolbar button, then re-renders the guide so
+// the Daily Dress Guide's dress-code boxes become tappable. Toasts on success/failure;
+// the button shows its own busy state (this call can take a minute on a big trip).
+async function runTripsyOutfitComposition(tripKey) {
+  const overlay = getOrCreateTripsyAttireOverlay();
+  const btn = overlay.querySelector('#tripsy-attire-outfits-btn');
+  const prevLabel = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Composing…'; }
+  try {
+    await composeTripsyOutfits(tripKey);
+    const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+    const guide = await Store.getTripsyAttireGuide(tripKey);
+    if (trip && guide) {
+      const { weatherTargetsByDay, tripStartDayKey } = await tripsyAttireLoadWeatherBar(trip, guide);
+      renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
+    }
+    toast('Outfits composed — tap a dress-code box in the Daily Dress Guide to see each one.', 'success');
+  } catch (e) {
+    console.error('Outfit composition failed:', e);
+    toast(`Could not compose outfits — ${e.message || 'unknown error'}.`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = prevLabel || '✨ Compose Outfits'; }
+  }
 }
 
 // Orchestrates one full Update run: reads the picked file, snapshots the
@@ -26141,6 +26433,14 @@ async function renderTravelView(chosenTripKey) {
     }
   } catch (e) { console.error('Travel View: attire guide load failed', e); }
 
+  // Composed outfits (if any): tapping an event whose block has an outfit opens it
+  // (Jon's ask), keyed by the same event ids the attire map uses.
+  const tvOutfitEventIds = new Set();
+  try {
+    const to = await Store.getTripsyTripOutfits(trip.key);
+    if (to && Array.isArray(to.blocks)) to.blocks.forEach(b => { if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => tvOutfitEventIds.add(id)); });
+  } catch (e) { console.error('Travel View: outfits load failed', e); }
+
   // ---- Day strip (horizontal) ----
   const stripCellHtml = dayKey => {
     if (dayKey === 'undated') return '';
@@ -26348,7 +26648,14 @@ async function renderTravelView(chosenTripKey) {
     if (docBtn) { showTripsyTravelDocs(attByEvent.get(docBtn.dataset.tvDoc) || []); return; }
     const row = e.target.closest('[data-tv-ev]');
     if (!row) return;
-    const ev = eventById.get(row.dataset.tvEv);
+    const evId = row.dataset.tvEv;
+    const ev = eventById.get(evId);
+    // If this event's time-block has a composed outfit, show it (event detail stays
+    // reachable via the modal's "View event details" button).
+    if (tvOutfitEventIds.has(evId)) {
+      showTripsyOutfitModal(trip.key, evId, { onDetails: ev ? () => showTripsyTravelEventDetail(ev) : null });
+      return;
+    }
     if (ev) showTripsyTravelEventDetail(ev);
   });
 
