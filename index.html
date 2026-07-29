@@ -25000,6 +25000,14 @@ function ensureTravelViewStyles() {
     .tv-attire-leadin, .tv-laundry-banner { display:none; }
     .tv-root.tv-attire-on .tv-attire-leadin { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:13.5px; font-weight:700; color:var(--text); margin:10px 0 4px; }
     .tv-root.tv-attire-on .tv-laundry-banner { display:flex; align-items:center; gap:12px; font-size:18px; font-weight:800; line-height:1.35; color:#fff; background:var(--red); border-radius:10px; padding:16px 20px; margin:10px 0 14px; box-shadow:0 2px 10px rgba(226,85,75,0.35); }
+    /* Category BACKGROUND on each time-block: the run's category colour tinted
+       (color-mix), spanning its rows -- flush rows read as one continuous banded
+       block, with the first/last row rounded. The connector line is hidden in
+       this mode since the colour bands carry the structure. */
+    .tv-root.tv-attire-on .tv-timeline::before { display:none; }
+    .tv-root.tv-attire-on .tv-abrow { background:color-mix(in srgb, var(--tv-block-color, var(--muted)) 26%, transparent); padding-left:10px; padding-right:10px; }
+    .tv-root.tv-attire-on .tv-abrow.tv-abfirst { border-top-left-radius:10px; border-top-right-radius:10px; }
+    .tv-root.tv-attire-on .tv-abrow.tv-ablast { border-bottom-left-radius:10px; border-bottom-right-radius:10px; margin-bottom:2px; }
     .tv-searchbar { display:flex; gap:8px; align-items:center; margin-top:10px; }
     .tv-search-input { flex:1; min-width:0; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px 12px; color:var(--text); font-size:14px; }
     .tv-filter-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
@@ -25307,7 +25315,7 @@ async function renderTravelView(chosenTripKey) {
   };
 
   // ---- One event row ----
-  const rowHtml = ev => {
+  const rowHtml = (ev, attire) => {
     if (ev._ps) return psRowHtml(ev);
     const raw = ev.tripsyRaw || {};
     const isHotel = raw.resource === 'hosting';
@@ -25337,13 +25345,13 @@ async function renderTravelView(chosenTripKey) {
     const evKey = (ev.tripsyRaw && ev.tripsyRaw.id != null) ? tripsyEventKey(ev.tripsyRaw) : null;
     const atts = evKey ? (attByEvent.get(evKey) || []) : [];
     const docBtn = atts.length ? `<button class="tv-docbtn" data-tv-doc="${esc(evKey)}" title="Attached document${atts.length > 1 ? 's' : ''}">📄</button>` : '';
-    // Attire-mode colouring: this event's category colour, applied to the title
-    // by the toggle handler (data attr so it's a no-op until attire mode is on).
-    const attireCat = tvAttireCatByEvent.get(ev.id);
-    const attireColorAttr = attireCat && TRIPSY_ATTIRE_CATEGORY_COLOR[attireCat]
-      ? ` data-tv-attire-color="${esc(TRIPSY_ATTIRE_CATEGORY_COLOR[attireCat])}"` : '';
+    // Attire-mode time-block background: this run's category colour (tinted via
+    // CSS color-mix, applied only under .tv-attire-on), with the run's first/last
+    // rows rounded so consecutive same-category rows read as one banded block.
+    const abClass = attire ? ` tv-abrow${attire.first ? ' tv-abfirst' : ''}${attire.last ? ' tv-ablast' : ''}` : '';
+    const abStyle = attire && attire.color ? ` style="--tv-block-color:${esc(attire.color)}"` : '';
     return `
-      <div class="tv-row" data-tv-ev="${esc(ev.id)}" data-tv-cat="${esc(cat)}" data-tv-text="${esc(searchText)}"${attireColorAttr}>
+      <div class="tv-row${abClass}" data-tv-ev="${esc(ev.id)}" data-tv-cat="${esc(cat)}" data-tv-text="${esc(searchText)}"${abStyle}>
         <div class="tv-icon" style="background:${bg};">${esc(glyph)}</div>
         <div class="tv-body">
           <div class="tv-evtitle">${esc(title || 'Event')}</div>
@@ -25374,22 +25382,23 @@ async function renderTravelView(chosenTripKey) {
     const laundryHtml = laundryReason !== undefined
       ? `<div class="tv-laundry-banner"><span style="font-size:26px; line-height:1; flex-shrink:0;">🧺</span><span>Best day for laundry${laundryReason ? ` — ${esc(laundryReason)}` : ''}</span></div>`
       : '';
-    const dayCats = evs.map(ev => tvAttireCatByEvent.get(ev.id)).filter(Boolean);
+    const catList = evs.map(ev => tvAttireCatByEvent.get(ev.id) || null);
+    const dayCats = catList.filter(Boolean);
     const singleCat = dayCats.length > 0 && dayCats.every(c => c === dayCats[0]);
-    let prevCat = null;
-    const rowsHtml = evs.map(ev => {
-      const cat = tvAttireCatByEvent.get(ev.id);
+    let seenCat = false;
+    const rowsHtml = evs.map((ev, i) => {
+      const cat = catList[i];
+      const isFirstOfRun = !!cat && (i === 0 || catList[i - 1] !== cat);
+      const isLastOfRun = !!cat && (i === evs.length - 1 || catList[i + 1] !== cat);
       let cue = '';
-      if (cat) {
-        if (prevCat === null) {
-          cue = `<div class="tv-attire-leadin">${singleCat ? 'Entire day is' : 'Start the day in'} ${tripsyAttireBadgeHtml(cat)}</div>`;
-        } else if (cat !== prevCat) {
-          const ct = formatTripTime(ev.start);
-          cue = `<div class="tv-attire-leadin">⇄ Change to ${tripsyAttireBadgeHtml(cat)}${ct ? ` before ${esc(ct)}` : ''}</div>`;
-        }
-        prevCat = cat;
+      if (cat && isFirstOfRun) {
+        cue = !seenCat
+          ? `<div class="tv-attire-leadin">${singleCat ? 'Entire day is' : 'Start the day in'} ${tripsyAttireBadgeHtml(cat)}</div>`
+          : (() => { const ct = formatTripTime(ev.start); return `<div class="tv-attire-leadin">⇄ Change to ${tripsyAttireBadgeHtml(cat)}${ct ? ` before ${esc(ct)}` : ''}</div>`; })();
       }
-      return cue + rowHtml(ev);
+      if (cat) seenCat = true;
+      const attire = cat ? { color: TRIPSY_ATTIRE_CATEGORY_COLOR[cat], first: isFirstOfRun, last: isLastOfRun } : null;
+      return cue + rowHtml(ev, attire);
     }).join('');
     return `
       <div class="tv-daysec" id="tv-day-${esc(dayKey)}">
@@ -25486,13 +25495,12 @@ async function renderTravelView(chosenTripKey) {
   const attireBtn = main.querySelector('#tv-attire-btn');
   if (attireBtn && tvRootEl) {
     const applyAttireMode = on => {
+      // Just a class flip -- the block backgrounds, cues, banner, and connector
+      // hide are all pure CSS under .tv-attire-on. Recompute the connector for
+      // when it's turned back OFF (cues/banner had shifted row positions).
       tvRootEl.classList.toggle('tv-attire-on', on);
       attireBtn.classList.toggle('tv-active', on);
-      tvRootEl.querySelectorAll('[data-tv-attire-color]').forEach(el => {
-        const titleEl = el.querySelector('.tv-evtitle');
-        if (titleEl) titleEl.style.color = on ? (el.getAttribute('data-tv-attire-color') || '') : '';
-      });
-      updateSpine(); // cues/banner change row positions -> recompute the connector
+      updateSpine();
     };
     attireBtn.addEventListener('click', () => { tvAttireMode = !tvAttireMode; applyAttireMode(tvAttireMode); });
     if (tvAttireMode) applyAttireMode(true); // persist across re-renders this session
