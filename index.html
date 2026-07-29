@@ -1058,6 +1058,32 @@
   }
   .tripsy-attire-toolbar-title { color: #fff; font-size: 14px; font-weight: 600; }
   .tripsy-attire-toolbar-actions { display: flex; gap: 8px; }
+  /* ---- Wardrobe (Phase 1: garment library + per-trip selection) ---- */
+  .tw-group { margin-bottom: 22px; }
+  .tw-group-title { font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+  .tw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 12px; }
+  .tw-card { display: flex; flex-direction: column; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .tw-photo { width: 100%; aspect-ratio: 1 / 1; background: #2a2a3a center/cover no-repeat; display: flex; align-items: center; justify-content: center; font-size: 34px; }
+  .tw-info { padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; flex: 1; }
+  .tw-name { font-size: 13.5px; font-weight: 700; color: var(--text); line-height: 1.25; }
+  .tw-meta { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .tw-color { text-transform: capitalize; }
+  .tw-tiers { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+  .tw-actions { display: flex; gap: 6px; padding: 0 10px 10px; }
+  .tw-actions .btn { flex: 1; font-size: 12px; padding: 5px 8px; }
+  .tw-check { display: flex; align-items: center; justify-content: center; padding: 8px; pointer-events: none; }
+  .tw-check input { width: 22px; height: 22px; }
+  .tw-card-select { cursor: pointer; }
+  .tw-selected { outline: 2px solid var(--amber); outline-offset: -2px; }
+  .tw-modal { display: none; position: fixed; inset: 0; z-index: 2147483000; background: rgba(0,0,0,0.6); align-items: center; justify-content: center; padding: 16px; }
+  .tw-modal-paper { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; max-width: 520px; width: 100%; max-height: 88vh; overflow: auto; padding: 20px; color: var(--text); }
+  .tw-modal-paper.tw-wide { max-width: 780px; }
+  .tw-form-photo { width: 150px; aspect-ratio: 1 / 1; border-radius: 10px; background: #2a2a3a center/cover no-repeat; border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; font-size: 40px; margin: 0 auto 10px; }
+  .tw-field { margin-bottom: 14px; }
+  .tw-field > label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 5px; }
+  .tw-field input[type=text], .tw-field select { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font-size: 14px; }
+  .tw-tier-opts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tw-tier-opt { display: flex; align-items: center; gap: 5px; font-size: 12.5px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel-2); cursor: pointer; }
   .tripsy-attire-paper {
     width: 100%; max-width: 980px; background: var(--panel); border: 1px solid var(--line);
     border-radius: 12px; padding: 26px 28px; box-shadow: 0 20px 60px rgba(0,0,0,0.45); color: var(--text);
@@ -1400,6 +1426,7 @@
     <div id="utilities-submenu" class="collapsed">
       <button class="rail-item rail-subitem" data-view="utilitiesusers">Users</button>
       <button class="rail-item rail-subitem" data-view="utilitiestripsonly">Trips-Only Access</button>
+      <button class="rail-item rail-subitem" data-view="utilitieswardrobe">Wardrobe</button>
       <button class="rail-item rail-subitem" id="utilities-refresh-all-btn">Refresh All</button>
       <button class="rail-item rail-subitem" data-view="utilitiesdeletepsreservations">Delete P/S Reservations</button>
       <button class="rail-item rail-subitem" data-view="utilitiesreparsepsreservations">Re-Parse P/S Reservations</button>
@@ -3123,6 +3150,66 @@ const Store = {
       console.error('Store.clearTripsyPlacePhotoCache failed:', e);
       return false;
     }
+  },
+  // ---- Wardrobe (persistent garment library + per-trip selection) ----
+  // driveData.tripsyWardrobe = array of garments { id, name, group, tiers[],
+  // color, driveFileId, addedAt }. driveData.tripsyTripWardrobe = { tripKey:
+  // [garmentId,...] } (which pieces to bring on a trip -- independent of the
+  // regenerated attire packing list, so it survives every Refresh). All writes
+  // are conflict-resilient (the same apply()+silentConflict+bounded-retry as
+  // saveTripsyPlacePhoto), so a second device/session can't clobber the file.
+  async listWardrobe() {
+    return [...(driveData.tripsyWardrobe || [])];
+  },
+  async saveWardrobeGarment(garment) {
+    try {
+      const apply = () => {
+        if (!driveData.tripsyWardrobe) driveData.tripsyWardrobe = [];
+        const i = driveData.tripsyWardrobe.findIndex(g => g.id === garment.id);
+        if (i >= 0) driveData.tripsyWardrobe[i] = garment; else driveData.tripsyWardrobe.push(garment);
+      };
+      apply();
+      for (let attempt = 0; ; attempt++) {
+        try { await persistDriveData({ silentConflict: true }); return true; }
+        catch (e) { if (e && e.conflict && attempt < 2) { apply(); continue; } throw e; }
+      }
+    } catch (e) { console.error('Store.saveWardrobeGarment failed:', e); return false; }
+  },
+  async deleteWardrobeGarment(id) {
+    try {
+      const garment = (driveData.tripsyWardrobe || []).find(g => g.id === id);
+      const apply = () => {
+        driveData.tripsyWardrobe = (driveData.tripsyWardrobe || []).filter(g => g.id !== id);
+        const sel = driveData.tripsyTripWardrobe || {};
+        for (const k of Object.keys(sel)) sel[k] = (sel[k] || []).filter(gid => gid !== id);
+        driveData.tripsyTripWardrobe = sel;
+      };
+      apply();
+      for (let attempt = 0; ; attempt++) {
+        try { await persistDriveData({ silentConflict: true }); break; }
+        catch (e) { if (e && e.conflict && attempt < 2) { apply(); continue; } throw e; }
+      }
+      // The garment's photo file is now unreachable from driveData -- clean it up
+      // (fire-and-forget, like cacheTripsyPlacePhotoLocal's orphan delete).
+      if (garment && garment.driveFileId) deleteDriveFile(garment.driveFileId).catch(e => console.error('Failed to delete wardrobe photo:', e));
+      return true;
+    } catch (e) { console.error('Store.deleteWardrobeGarment failed:', e); return false; }
+  },
+  async getTripWardrobe(tripKey) {
+    return [...((driveData.tripsyTripWardrobe || {})[tripKey] || [])];
+  },
+  async setTripWardrobe(tripKey, ids) {
+    try {
+      const apply = () => {
+        if (!driveData.tripsyTripWardrobe) driveData.tripsyTripWardrobe = {};
+        driveData.tripsyTripWardrobe[tripKey] = [...ids];
+      };
+      apply();
+      for (let attempt = 0; ; attempt++) {
+        try { await persistDriveData({ silentConflict: true }); return true; }
+        catch (e) { if (e && e.conflict && attempt < 2) { apply(); continue; } throw e; }
+      }
+    } catch (e) { console.error('Store.setTripWardrobe failed:', e); return false; }
   },
   // Cache of AI-generated (or owner-written custom) itinerary narrative
   // sections (see tripsyGenerateNarrativeSections / renderTripsyNarrativeSelectionScreen),
@@ -4864,7 +4951,7 @@ function setActiveNav(view, param) {
   document.getElementById("psreservations-submenu").classList.toggle("collapsed", !isPsReservationsView);
   document.getElementById("psreservations-caret").textContent = isPsReservationsView ? "▾" : "▸";
 
-  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiestripsonly" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiestripsyrefresh" || view === "utilitiesparsingdocs" || view === "utilitiesitineraryphotos";
+  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiestripsonly" || view === "utilitieswardrobe" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiestripsyrefresh" || view === "utilitiesparsingdocs" || view === "utilitiesitineraryphotos";
   document.getElementById("utilities-toggle").classList.toggle("active", isUtilitiesView);
   document.getElementById("utilities-submenu").classList.toggle("collapsed", !isUtilitiesView);
   document.getElementById("utilities-caret").textContent = isUtilitiesView ? "▾" : "▸";
@@ -4913,6 +5000,7 @@ async function navigate(view, param) {
     else if (view === "utilitiestripsyrefresh") await renderUtilitiesTripsyRefresh();
     else if (view === "utilitiesparsingdocs") await renderUtilitiesParsingDocs();
     else if (view === "utilitiesitineraryphotos") await renderUtilitiesItineraryPhotos();
+    else if (view === "utilitieswardrobe") await renderUtilitiesWardrobe();
     else if (view === "passengers") await renderPassengerReport(param || "totals");
     else if (view === "travelview") await renderTravelView();
   } catch (e) {
@@ -7061,6 +7149,256 @@ async function renderUtilitiesItineraryPhotos() {
       if (ok) renderUtilitiesItineraryPhotos();
     });
   }
+}
+
+// ==== Wardrobe (Phase 1: persistent garment library + per-trip selection) ====
+// Library lives on the Utilities menu (renderUtilitiesWardrobe); per-trip
+// selection opens from a trip's Attire panel (tripsyWardrobePackForTrip). Both
+// render the same grouped garment grid. Photos are their own Drive files (like
+// itinerary place photos) and displayed through tripsyPlacePhotoDisplayUrl.
+const TRIPSY_WARDROBE_COLORS = ['navy', 'charcoal', 'black', 'white', 'grey', 'light blue', 'blue', 'brown', 'tan', 'khaki', 'olive', 'burgundy', 'green', 'red', 'pink', 'purple', 'beige', 'cream', 'silver', 'gold'];
+
+// Canvas-downscale an image Blob to a JPEG Blob (keeps phone photos small before
+// upload). Falls back to the original blob if anything goes wrong.
+function tripsyResizeImageBlob(blob, maxDim = 1200, quality = 0.82) {
+  return new Promise(resolve => {
+    try {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          canvas.toBlob(out => { URL.revokeObjectURL(url); resolve(out || blob); }, 'image/jpeg', quality);
+        } catch (e) { URL.revokeObjectURL(url); resolve(blob); }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(blob); };
+      img.src = url;
+    } catch (e) { resolve(blob); }
+  });
+}
+
+function tripsyWardrobeCardHtml(g, opts = {}) {
+  const groupLabel = TRIPSY_ATTIRE_PACKING_GROUP_LABEL[g.group] || g.group || '';
+  const tierBadges = (g.tiers || []).map(t => tripsyAttireBadgeHtml(t)).join(' ');
+  return `
+    <div class="tw-card${opts.selectMode ? ' tw-card-select' : ''}${opts.selected ? ' tw-selected' : ''}" data-tw-id="${esc(g.id)}">
+      <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : '👕'}</div>
+      <div class="tw-info">
+        <div class="tw-name">${esc(g.name || 'Untitled')}</div>
+        <div class="tw-meta"><span>${esc(groupLabel)}</span>${g.color ? `<span class="tw-color">· ${esc(g.color)}</span>` : ''}</div>
+        ${tierBadges ? `<div class="tw-tiers">${tierBadges}</div>` : ''}
+      </div>
+      ${opts.selectMode
+        ? `<label class="tw-check"><input type="checkbox" data-tw-select="${esc(g.id)}" ${opts.selected ? 'checked' : ''}></label>`
+        : `<div class="tw-actions"><button class="btn" data-tw-edit="${esc(g.id)}">Edit</button><button class="btn" data-tw-del="${esc(g.id)}">Delete</button></div>`}
+    </div>`;
+}
+
+// Grid grouped by the 6 packing groups (same buckets the packing list uses).
+function tripsyWardrobeGroupedHtml(garments, opts = {}) {
+  const buckets = new Map(TRIPSY_ATTIRE_PACKING_GROUPS.map(grp => [grp, []]));
+  for (const g of garments) {
+    const grp = TRIPSY_ATTIRE_PACKING_GROUPS.includes(g.group) ? g.group : 'accessories';
+    buckets.get(grp).push(g);
+  }
+  const sel = opts.selectedIds ? new Set(opts.selectedIds) : null;
+  const html = TRIPSY_ATTIRE_PACKING_GROUPS.filter(grp => buckets.get(grp).length).map(grp => `
+    <div class="tw-group">
+      <div class="tw-group-title">${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[grp])}</div>
+      <div class="tw-grid">${buckets.get(grp).map(g => tripsyWardrobeCardHtml(g, { selectMode: opts.selectMode, selected: sel ? sel.has(g.id) : false })).join('')}</div>
+    </div>`).join('');
+  return html || `<div class="empty-state" style="margin-top:16px;">No garments${opts.selectMode ? ' in your wardrobe yet — add some under Utilities → Wardrobe.' : ' yet. Tap "Add garment" to start building your wardrobe.'}</div>`;
+}
+
+// Lazily load each card's photo (driveFileId -> object URL) into its .tw-photo.
+async function tripsyWardrobeLoadPhotos(container) {
+  for (const node of container.querySelectorAll('.tw-photo[data-tw-photo]')) {
+    const id = node.getAttribute('data-tw-photo');
+    if (!id) continue;
+    try { node.style.backgroundImage = `url("${await tripsyPlacePhotoDisplayUrl(id)}")`; node.textContent = ''; }
+    catch (e) { node.textContent = '👕'; }
+  }
+}
+
+// Add/Edit garment form (modal). `existing` is a garment object or null (add).
+// Resolves the caller's onSaved() after a successful save so the grid refreshes.
+function getOrCreateWardrobeFormOverlay() {
+  let ov = document.getElementById('tw-form-overlay');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'tw-form-overlay';
+  ov.className = 'tw-modal';
+  ov.innerHTML = `
+    <div class="tw-modal-paper">
+      <h2 id="tw-form-title" style="margin:0 0 16px; font-size:18px;"></h2>
+      <div class="tw-form-photo" id="tw-form-photo">👕</div>
+      <div style="display:flex; gap:8px; justify-content:center; margin-bottom:16px;">
+        <button class="btn" id="tw-form-pick">Take / choose photo</button>
+        <button class="btn" id="tw-form-paste">Paste</button>
+      </div>
+      <input type="file" id="tw-form-file" accept="image/*" capture="environment" style="display:none;">
+      <div class="tw-field"><label>Name</label><input type="text" id="tw-form-name" placeholder="e.g. Navy pinstripe suit" autocomplete="off"></div>
+      <div class="tw-field"><label>Type</label><select id="tw-form-group"></select></div>
+      <div class="tw-field"><label>Works for these dress codes</label><div class="tw-tier-opts" id="tw-form-tiers"></div></div>
+      <div class="tw-field"><label>Color</label><input type="text" id="tw-form-color" list="tw-color-list" placeholder="e.g. navy" autocomplete="off"><datalist id="tw-color-list">${TRIPSY_WARDROBE_COLORS.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
+      <div id="tw-form-status" style="font-size:12px; color:var(--muted); min-height:16px; margin-bottom:8px;"></div>
+      <div style="display:flex; gap:10px; justify-content:flex-end;">
+        <button class="btn" id="tw-form-cancel">Cancel</button>
+        <button class="btn primary" id="tw-form-save">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+  return ov;
+}
+
+function showWardrobeGarmentForm(existing, onSaved) {
+  const ov = getOrCreateWardrobeFormOverlay();
+  const $ = id => ov.querySelector(id);
+  const g = existing || {};
+  let pendingBlob = null;                 // a newly captured photo not yet uploaded
+  let photoFileId = g.driveFileId || '';  // the current stored photo id (kept if unchanged)
+  $('#tw-form-title').textContent = existing ? 'Edit garment' : 'Add garment';
+  $('#tw-form-name').value = g.name || '';
+  $('#tw-form-color').value = g.color || '';
+  $('#tw-form-group').innerHTML = TRIPSY_ATTIRE_PACKING_GROUPS.map(grp => `<option value="${grp}" ${g.group === grp ? 'selected' : ''}>${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[grp])}</option>`).join('');
+  const tierSet = new Set(g.tiers || []);
+  $('#tw-form-tiers').innerHTML = TRIPSY_ATTIRE_CATEGORY_ORDER.map(t => `<label class="tw-tier-opt"><input type="checkbox" data-tw-tier="${t}" ${tierSet.has(t) ? 'checked' : ''}>${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[t])}</label>`).join('');
+  const photoBox = $('#tw-form-photo');
+  photoBox.textContent = photoFileId ? '' : '👕';
+  photoBox.style.backgroundImage = '';
+  if (photoFileId) tripsyPlacePhotoDisplayUrl(photoFileId).then(u => { photoBox.style.backgroundImage = `url("${u}")`; photoBox.textContent = ''; }).catch(() => {});
+  $('#tw-form-status').textContent = '';
+  const showPreview = blob => { const u = URL.createObjectURL(blob); photoBox.style.backgroundImage = `url("${u}")`; photoBox.textContent = ''; };
+
+  const fileInput = $('#tw-form-file');
+  fileInput.value = '';
+  fileInput.onchange = () => { const f = fileInput.files && fileInput.files[0]; if (f) { pendingBlob = f; showPreview(f); } };
+  $('#tw-form-pick').onclick = () => fileInput.click();
+  $('#tw-form-paste').onclick = async () => {
+    try { const blob = await tripsyReadImageFromClipboard(); if (blob) { pendingBlob = blob; showPreview(blob); } else $('#tw-form-status').textContent = 'No image found on the clipboard.'; }
+    catch (e) { $('#tw-form-status').textContent = 'Could not read the clipboard.'; }
+  };
+  $('#tw-form-cancel').onclick = () => { ov.style.display = 'none'; };
+  $('#tw-form-save').onclick = async () => {
+    const name = $('#tw-form-name').value.trim();
+    if (!name) { $('#tw-form-status').textContent = 'Please enter a name.'; return; }
+    const saveBtn = $('#tw-form-save');
+    saveBtn.disabled = true;
+    $('#tw-form-status').textContent = pendingBlob ? 'Uploading photo…' : 'Saving…';
+    try {
+      if (pendingBlob) {
+        const small = await tripsyResizeImageBlob(pendingBlob);
+        const newId = await uploadBlobToDrive(small, `wardrobe-photo-${Date.now()}`, 'image/jpeg');
+        // Free the previous photo file if we're replacing one.
+        if (photoFileId && photoFileId !== newId) deleteDriveFile(photoFileId).catch(() => {});
+        photoFileId = newId;
+      }
+      const tiers = [...$('#tw-form-tiers').querySelectorAll('input[data-tw-tier]:checked')].map(el => el.getAttribute('data-tw-tier'));
+      const garment = {
+        id: g.id || crypto.randomUUID(),
+        name,
+        group: $('#tw-form-group').value,
+        tiers,
+        color: $('#tw-form-color').value.trim(),
+        driveFileId: photoFileId || '',
+        addedAt: g.addedAt || new Date().toISOString(),
+      };
+      const ok = await Store.saveWardrobeGarment(garment);
+      if (!ok) { $('#tw-form-status').textContent = 'Could not save — storage error.'; saveBtn.disabled = false; return; }
+      ov.style.display = 'none';
+      saveBtn.disabled = false;
+      if (onSaved) onSaved();
+    } catch (e) {
+      console.error('Wardrobe save failed:', e);
+      $('#tw-form-status').textContent = 'Could not save the photo. Please try again.';
+      saveBtn.disabled = false;
+    }
+  };
+  ov.style.display = 'flex';
+}
+
+// The Utilities → Wardrobe library PAGE (owner-only, manage mode).
+async function renderUtilitiesWardrobe() {
+  if (!isOwner) { main.innerHTML = `<div class="page-title">Wardrobe</div><div class="empty-state">Owner only.</div>`; return; }
+  const garments = await Store.listWardrobe();
+  main.innerHTML = `
+    <div class="page-title" style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+      <span>Wardrobe</span>
+      <button class="btn primary" id="tw-add-btn">+ Add garment</button>
+    </div>
+    <div class="page-sub">Your full wardrobe, photographed once. Add each garment with its type, the dress codes it works for, and its color. On a trip's 👔 Attire panel you can then pick which pieces to bring.</div>
+    <div id="tw-library">${tripsyWardrobeGroupedHtml(garments)}</div>`;
+  const libEl = document.getElementById('tw-library');
+  tripsyWardrobeLoadPhotos(libEl);
+  document.getElementById('tw-add-btn').addEventListener('click', () => showWardrobeGarmentForm(null, renderUtilitiesWardrobe));
+  libEl.addEventListener('click', async e => {
+    const editId = e.target.closest('[data-tw-edit]')?.getAttribute('data-tw-edit');
+    if (editId) { const g = (await Store.listWardrobe()).find(x => x.id === editId); if (g) showWardrobeGarmentForm(g, renderUtilitiesWardrobe); return; }
+    const delId = e.target.closest('[data-tw-del]')?.getAttribute('data-tw-del');
+    if (delId) {
+      const g = (await Store.listWardrobe()).find(x => x.id === delId);
+      if (!g || !confirm(`Delete "${g.name}" from your wardrobe? This also removes it from any trip's selection.`)) return;
+      const ok = await Store.deleteWardrobeGarment(delId);
+      if (ok) renderUtilitiesWardrobe(); else toast('Could not delete — storage error.', 'error');
+    }
+  });
+}
+
+// Per-trip "Pack from Wardrobe" (modal, SELECT mode), opened from a trip's
+// Attire panel. Checked garments are saved to driveData.tripsyTripWardrobe[tripKey].
+function getOrCreateWardrobeSelectOverlay() {
+  let ov = document.getElementById('tw-select-overlay');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'tw-select-overlay';
+  ov.className = 'tw-modal';
+  ov.innerHTML = `
+    <div class="tw-modal-paper tw-wide">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;">
+        <h2 id="tw-select-title" style="margin:0; font-size:18px;">Pack from Wardrobe</h2>
+        <button class="btn" id="tw-select-done">Done</button>
+      </div>
+      <div id="tw-select-count" style="font-size:12px; color:var(--muted); margin-bottom:14px;"></div>
+      <div id="tw-select-body"></div>
+    </div>`;
+  document.body.appendChild(ov);
+  return ov;
+}
+
+async function tripsyWardrobePackForTrip(tripKey, tripName) {
+  const ov = getOrCreateWardrobeSelectOverlay();
+  const [garments, selected] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
+  const chosen = new Set(selected);
+  const bodyEl = ov.querySelector('#tw-select-body');
+  const countEl = ov.querySelector('#tw-select-count');
+  ov.querySelector('#tw-select-title').textContent = `Pack from Wardrobe${tripName ? ` — ${tripName}` : ''}`;
+  const updateCount = () => { countEl.textContent = `${chosen.size} piece${chosen.size === 1 ? '' : 's'} selected for this trip`; };
+  bodyEl.innerHTML = tripsyWardrobeGroupedHtml(garments, { selectMode: true, selectedIds: [...chosen] });
+  tripsyWardrobeLoadPhotos(bodyEl);
+  updateCount();
+  const persist = () => Store.setTripWardrobe(tripKey, [...chosen]);
+  bodyEl.onclick = e => {
+    // The checkbox is pointer-events:none (purely visual); a click anywhere on
+    // the card is the single toggle, so no double-flip.
+    const card = e.target.closest('.tw-card-select');
+    if (!card) return;
+    const id = card.getAttribute('data-tw-id');
+    if (chosen.has(id)) chosen.delete(id); else chosen.add(id);
+    const box = card.querySelector('input[data-tw-select]');
+    if (box) box.checked = chosen.has(id);
+    card.classList.toggle('tw-selected', chosen.has(id));
+    updateCount();
+    persist();
+  };
+  ov.querySelector('#tw-select-done').onclick = () => { ov.style.display = 'none'; };
+  ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
+  ov.style.display = 'flex';
 }
 
 // Populates the live "Authorized Users" card on the Users utility page --
@@ -17950,6 +18288,7 @@ function getOrCreateTripsyAttireOverlay() {
       <div class="tripsy-attire-toolbar-title" data-tripsy-attire-title></div>
       <div class="tripsy-attire-toolbar-actions">
         <button class="tripsy-update-btn" id="tripsy-attire-definitions-btn">Definitions</button>
+        <button class="tripsy-update-btn" id="tripsy-attire-wardrobe-btn" style="display:none;">👕 Pack from Wardrobe</button>
         <button class="tripsy-update-btn" id="tripsy-attire-refresh-btn" style="display:none;"></button>
         <button class="tripsy-update-btn" id="tripsy-attire-close-btn">Close</button>
       </div>
@@ -17966,6 +18305,13 @@ function getOrCreateTripsyAttireOverlay() {
   overlay.querySelector('#tripsy-attire-refresh-btn').addEventListener('click', () => {
     if (!tripsyAttireOverlayTripKey) return;
     runTripsyAttireGeneration(tripsyAttireOverlayTripKey, { isRefresh: true });
+  });
+  // Owner-only: pick which wardrobe pieces to bring on this trip (independent of
+  // the packing list, persisted per trip -- survives a Refresh).
+  overlay.querySelector('#tripsy-attire-wardrobe-btn').addEventListener('click', () => {
+    if (!isOwner || !tripsyAttireOverlayTripKey) return;
+    const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripsyAttireOverlayTripKey);
+    tripsyWardrobePackForTrip(tripsyAttireOverlayTripKey, trip && trip.name);
   });
   // Available to every viewer (not owner-gated) -- it's just a static
   // legend for the badges already visible in the guide, not an action.
@@ -18677,6 +19023,8 @@ async function showTripsyAttireOverlay(tripKey) {
   const saved = await Store.getTripsyAttireGuide(tripKey);
   refreshBtn.style.display = isOwner ? 'inline-block' : 'none';
   refreshBtn.textContent = saved ? 'Refresh' : 'Generate';
+  const wardrobeBtn = overlay.querySelector('#tripsy-attire-wardrobe-btn');
+  if (wardrobeBtn) wardrobeBtn.style.display = isOwner ? 'inline-block' : 'none';
   if (saved) {
     let stale = false;
     try {
