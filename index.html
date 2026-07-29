@@ -24964,6 +24964,10 @@ function tripsyGuessCity(address) {
 // resize listener that keeps the sticky day-headers' offset in sync with the
 // frozen header's measured height.
 let _tvResizeHandler = null;
+// Travel View "attire mode" (the 👔 toggle): colours each event by its attire
+// category, shows the Daily Dress Guide's change-into cues + the laundry banner.
+// Session-scoped so it survives day navigation / re-renders but resets each open.
+let tvAttireMode = false;
 
 // Haptic pulse when the Travel View selected date changes. Uses the Vibration
 // API only (Android/Chrome). iOS Safari has no web haptic API and no reliable
@@ -24992,6 +24996,10 @@ function ensureTravelViewStyles() {
     .tv-head-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
     .tv-iconbtn { flex-shrink:0; width:36px; height:36px; border-radius:8px; border:1px solid var(--line); background:var(--panel-2); color:var(--text); font-size:15px; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
     .tv-iconbtn.tv-active { border-color:var(--amber); color:var(--amber); }
+    /* Attire mode (the 👔 toggle) -- cues/banner hidden until .tv-attire-on. */
+    .tv-attire-leadin, .tv-laundry-banner { display:none; }
+    .tv-root.tv-attire-on .tv-attire-leadin { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:13.5px; font-weight:700; color:var(--text); margin:10px 0 4px; }
+    .tv-root.tv-attire-on .tv-laundry-banner { display:flex; align-items:center; gap:12px; font-size:18px; font-weight:800; line-height:1.35; color:#fff; background:var(--red); border-radius:10px; padding:16px 20px; margin:10px 0 14px; box-shadow:0 2px 10px rgba(226,85,75,0.35); }
     .tv-searchbar { display:flex; gap:8px; align-items:center; margin-top:10px; }
     .tv-search-input { flex:1; min-width:0; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px 12px; color:var(--text); font-size:14px; }
     .tv-filter-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
@@ -25240,6 +25248,27 @@ async function renderTravelView(chosenTripKey) {
   const catChipsHtml = categories.map(c => `<button class="tv-cat-chip tv-on" data-tv-cat-chip="${esc(c)}">${esc(c)}</button>`).join('');
   const TV_FUNNEL_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>`;
 
+  // Attire overlay data for the 👔 toggle: the trip's saved attire guide, if any.
+  // Per-event displayCategory drives both the event colouring and the "change
+  // into X" cues (same block-dressiest tier the Daily Dress Guide uses); the
+  // laundry day(s) drive the red banner. Loaded up front so the toggle is instant
+  // (a class flip + colour apply, no refetch). Empty maps when no guide exists.
+  const tvAttireCatByEvent = new Map();
+  const tvAttireLaundry = new Map();
+  let tvHasAttire = false;
+  try {
+    const ag = await Store.getTripsyAttireGuide(trip.key);
+    if (ag && Array.isArray(ag.days) && ag.days.length) {
+      computeTripsyAttireBlocks(ag.days); // stamp displayCategory in place
+      ag.days.forEach(dd => (dd.events || []).forEach(e => {
+        const c = tripsyAttireDisplayCategory(e);
+        if (c && e.id) tvAttireCatByEvent.set(e.id, c);
+      }));
+      (ag.laundryDays || []).forEach(l => { if (l && l.dayKey) tvAttireLaundry.set(l.dayKey, l.reason || ''); });
+      tvHasAttire = tvAttireCatByEvent.size > 0 || tvAttireLaundry.size > 0;
+    }
+  } catch (e) { console.error('Travel View: attire guide load failed', e); }
+
   // ---- Day strip (horizontal) ----
   const stripCellHtml = dayKey => {
     if (dayKey === 'undated') return '';
@@ -25308,8 +25337,13 @@ async function renderTravelView(chosenTripKey) {
     const evKey = (ev.tripsyRaw && ev.tripsyRaw.id != null) ? tripsyEventKey(ev.tripsyRaw) : null;
     const atts = evKey ? (attByEvent.get(evKey) || []) : [];
     const docBtn = atts.length ? `<button class="tv-docbtn" data-tv-doc="${esc(evKey)}" title="Attached document${atts.length > 1 ? 's' : ''}">📄</button>` : '';
+    // Attire-mode colouring: this event's category colour, applied to the title
+    // by the toggle handler (data attr so it's a no-op until attire mode is on).
+    const attireCat = tvAttireCatByEvent.get(ev.id);
+    const attireColorAttr = attireCat && TRIPSY_ATTIRE_CATEGORY_COLOR[attireCat]
+      ? ` data-tv-attire-color="${esc(TRIPSY_ATTIRE_CATEGORY_COLOR[attireCat])}"` : '';
     return `
-      <div class="tv-row" data-tv-ev="${esc(ev.id)}" data-tv-cat="${esc(cat)}" data-tv-text="${esc(searchText)}">
+      <div class="tv-row" data-tv-ev="${esc(ev.id)}" data-tv-cat="${esc(cat)}" data-tv-text="${esc(searchText)}"${attireColorAttr}>
         <div class="tv-icon" style="background:${bg};">${esc(glyph)}</div>
         <div class="tv-body">
           <div class="tv-evtitle">${esc(title || 'Event')}</div>
@@ -25332,10 +25366,35 @@ async function renderTravelView(chosenTripKey) {
     // used to be, falling back to "Day N" on days with no weather.
     const wxChip = dayKey === 'undated' ? '' : tvWeatherChipFor(dayKey);
     const rightSlot = wxChip || (dayLabel ? `<span class="tv-dayhead-ord">${esc(dayLabel)}</span>` : '');
+    // Attire-mode extras (hidden unless the 👔 toggle is on): the big red laundry
+    // banner for a recommended wash day, plus "Start the day in / Change to X"
+    // cues interleaved before the events where the worn tier changes -- same
+    // block-dressiest transitions the Daily Dress Guide shows.
+    const laundryReason = tvAttireLaundry.get(dayKey);
+    const laundryHtml = laundryReason !== undefined
+      ? `<div class="tv-laundry-banner"><span style="font-size:26px; line-height:1; flex-shrink:0;">🧺</span><span>Best day for laundry${laundryReason ? ` — ${esc(laundryReason)}` : ''}</span></div>`
+      : '';
+    const dayCats = evs.map(ev => tvAttireCatByEvent.get(ev.id)).filter(Boolean);
+    const singleCat = dayCats.length > 0 && dayCats.every(c => c === dayCats[0]);
+    let prevCat = null;
+    const rowsHtml = evs.map(ev => {
+      const cat = tvAttireCatByEvent.get(ev.id);
+      let cue = '';
+      if (cat) {
+        if (prevCat === null) {
+          cue = `<div class="tv-attire-leadin">${singleCat ? 'Entire day is' : 'Start the day in'} ${tripsyAttireBadgeHtml(cat)}</div>`;
+        } else if (cat !== prevCat) {
+          const ct = formatTripTime(ev.start);
+          cue = `<div class="tv-attire-leadin">⇄ Change to ${tripsyAttireBadgeHtml(cat)}${ct ? ` before ${esc(ct)}` : ''}</div>`;
+        }
+        prevCat = cat;
+      }
+      return cue + rowHtml(ev);
+    }).join('');
     return `
       <div class="tv-daysec" id="tv-day-${esc(dayKey)}">
         <div class="tv-dayhead"><span><span class="tv-dayhead-main">${esc(headMain)}</span>${loc ? `<span class="tv-dayhead-city"> ${esc(loc)}</span>` : ''}</span>${rightSlot}</div>
-        <div class="tv-events">${evs.map(rowHtml).join('')}</div>
+        <div class="tv-events">${laundryHtml}${rowsHtml}</div>
       </div>`;
   };
 
@@ -25370,6 +25429,7 @@ async function renderTravelView(chosenTripKey) {
       <div class="tv-titlerow">
         <div class="tv-title">${esc(trip.name || 'Trip')}</div>
         <div class="tv-head-actions">
+          ${tvHasAttire ? `<button class="tv-iconbtn${tvAttireMode ? ' tv-active' : ''}" id="tv-attire-btn" title="Attire mode — color events by dress code, show change-into cues + laundry day">👔</button>` : ''}
           <button class="tv-iconbtn" id="tv-search-btn" title="Search">🔍</button>
           ${categories.length ? `<button class="tv-iconbtn" id="tv-filter-btn" title="Filter by category">${TV_FUNNEL_SVG}</button>` : ''}
           ${closeBtnHtml}
@@ -25418,6 +25478,25 @@ async function renderTravelView(chosenTripKey) {
     const ev = eventById.get(row.dataset.tvEv);
     if (ev) showTripsyTravelEventDetail(ev);
   });
+
+  // ---- Attire mode (👔) ----
+  // Toggles a class on .tv-root (which reveals the change-into cues + laundry
+  // banner via CSS) and paints each event title its attire-category colour. Kept
+  // as a class flip + inline-colour pass rather than a re-render, so it's instant.
+  const attireBtn = main.querySelector('#tv-attire-btn');
+  if (attireBtn && tvRootEl) {
+    const applyAttireMode = on => {
+      tvRootEl.classList.toggle('tv-attire-on', on);
+      attireBtn.classList.toggle('tv-active', on);
+      tvRootEl.querySelectorAll('[data-tv-attire-color]').forEach(el => {
+        const titleEl = el.querySelector('.tv-evtitle');
+        if (titleEl) titleEl.style.color = on ? (el.getAttribute('data-tv-attire-color') || '') : '';
+      });
+      updateSpine(); // cues/banner change row positions -> recompute the connector
+    };
+    attireBtn.addEventListener('click', () => { tvAttireMode = !tvAttireMode; applyAttireMode(tvAttireMode); });
+    if (tvAttireMode) applyAttireMode(true); // persist across re-renders this session
+  }
 
   // ---- Search + category filter ----
   // Live-filters the event rows by search text (title/subtitle/location/notes)
