@@ -3190,7 +3190,7 @@ const Store = {
       const apply = () => {
         driveData.tripsyWardrobe = (driveData.tripsyWardrobe || []).filter(g => g.id !== id);
         const sel = driveData.tripsyTripWardrobe || {};
-        for (const k of Object.keys(sel)) sel[k] = (sel[k] || []).filter(gid => gid !== id);
+        for (const k of Object.keys(sel)) sel[k] = (sel[k] || []).filter(e => (typeof e === 'string' ? e : e && e.id) !== id);
         driveData.tripsyTripWardrobe = sel;
       };
       apply();
@@ -7199,7 +7199,7 @@ function tripsyWardrobeCardHtml(g, opts = {}) {
       <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : '👕'}</div>
       <div class="tw-info">
         <div class="tw-name">${esc(g.name || 'Untitled')}</div>
-        <div class="tw-meta"><span>${esc(groupLabel)}</span>${g.color ? `<span class="tw-color">· ${esc(g.color)}</span>` : ''}</div>
+        <div class="tw-meta"><span>${esc(groupLabel)}</span>${g.color ? `<span class="tw-color">· ${esc(g.color)}</span>` : ''}${(g.quantity || 1) > 1 ? `<span style="color:var(--muted);">· ×${g.quantity} available</span>` : ''}</div>
         ${tierBadges ? `<div class="tw-tiers">${tierBadges}</div>` : ''}
       </div>
       ${opts.selectMode
@@ -7255,6 +7255,7 @@ function getOrCreateWardrobeFormOverlay() {
       <div class="tw-field"><label>Type</label><select id="tw-form-group"></select></div>
       <div class="tw-field"><label>Works for these dress codes</label><div class="tw-tier-opts" id="tw-form-tiers"></div></div>
       <div class="tw-field"><label>Color</label><input type="text" id="tw-form-color" list="tw-color-list" placeholder="e.g. navy" autocomplete="off"><datalist id="tw-color-list">${TRIPSY_WARDROBE_COLORS.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
+      <div class="tw-field"><label>Quantity owned</label><select id="tw-form-qty">${Array.from({ length: 20 }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join('')}</select></div>
       <div id="tw-form-status" style="font-size:12px; color:var(--muted); min-height:16px; margin-bottom:8px;"></div>
       <div style="display:flex; gap:10px; justify-content:flex-end;">
         <button class="btn" id="tw-form-cancel">Cancel</button>
@@ -7275,6 +7276,7 @@ function showWardrobeGarmentForm(existing, onSaved) {
   $('#tw-form-title').textContent = existing ? 'Edit garment' : 'Add garment';
   $('#tw-form-name').value = g.name || '';
   $('#tw-form-color').value = g.color || '';
+  $('#tw-form-qty').value = String(Math.min(20, Math.max(1, g.quantity || 1)));
   $('#tw-form-group').innerHTML = TRIPSY_ATTIRE_PACKING_GROUPS.map(grp => `<option value="${grp}" ${g.group === grp ? 'selected' : ''}>${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[grp])}</option>`).join('');
   const tierSet = new Set(g.tiers || []);
   $('#tw-form-tiers').innerHTML = TRIPSY_ATTIRE_CATEGORY_ORDER.map(t => `<label class="tw-tier-opt"><input type="checkbox" data-tw-tier="${t}" ${tierSet.has(t) ? 'checked' : ''}>${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[t])}</label>`).join('');
@@ -7316,6 +7318,7 @@ function showWardrobeGarmentForm(existing, onSaved) {
         group: $('#tw-form-group').value,
         tiers,
         color: $('#tw-form-color').value.trim(),
+        quantity: parseInt($('#tw-form-qty').value, 10) || 1,
         driveFileId: photoFileId || '',
         addedAt: g.addedAt || new Date().toISOString(),
       };
@@ -7391,16 +7394,221 @@ function getOrCreateWardrobeSelectOverlay() {
 // Recommended garment count PER dress-code tier = sum of the attire packing
 // list's garment quantities for that tier, EXCLUDING essentials (underwear/
 // socks/undershirts). One wardrobe = Jon's (packingList.him).
+// Canonical garment-type key from a free-text name (wardrobe name OR packing-list
+// line name), so a selected garment can be matched to the packing-list line it
+// fulfils. Order matters (specific before generic). '' = generic (fall back to
+// the packing group). Most-specific keywords first.
+function tripsyGarmentTypeKey(name) {
+  const n = String(name || '').toLowerCase();
+  if (/\bdress shirt/.test(n)) return 'dress-shirt';
+  if (/\b(tux|tuxedo)\b/.test(n)) return 'tuxedo';
+  if (/\bsuit/.test(n)) return 'suit';
+  if (/\b(blazer|sport ?coat|sportcoat)/.test(n)) return 'blazer';
+  if (/\bpolo/.test(n)) return 'polo';
+  if (/\b(t-shirt|tee)\b/.test(n)) return 'tee';
+  if (/\b(sweater|pullover|cardigan|jumper|hoodie)/.test(n)) return 'sweater';
+  if (/\b(button-?up|button-?down|linen shirt|casual shirt|oxford shirt|shirt|blouse)/.test(n)) return 'shirt';
+  if (/\b(chinos|trousers|slacks|dress pants|khakis|pants)/.test(n)) return 'trousers';
+  if (/\bjeans/.test(n)) return 'jeans';
+  if (/\bshorts/.test(n)) return 'shorts';
+  if (/\bskirt/.test(n)) return 'skirt';
+  if (/\b(bow ?tie|necktie|ties?)\b/.test(n)) return 'tie';
+  if (/\b(oxford|loafer|derby|brogue|dress shoe|shoes?|boots?|sneaker|sandal|heels?)\b/.test(n)) return 'shoes';
+  if (/\bbelt/.test(n)) return 'belt';
+  return '';
+}
+// A per-trip selection entry is {id, qty}; older data was a bare id string.
+function tripsyNormalizeTripSelection(arr) {
+  return (arr || []).map(e => (typeof e === 'string' ? { id: e, qty: 1 } : { id: e.id, qty: Math.max(1, e.qty || 1) })).filter(e => e.id);
+}
+// Per dress-code tier, the packing-list garment LINES (name + quantity), excluding
+// essentials. `guide.packingList.him` (single wardrobe = Jon's). Each line carries
+// its typeKey + group so packed garments can be matched to it.
 function tripsyWardrobeNeedByTier(guide) {
-  const need = {};
+  const byTier = {};
+  TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(tier => { byTier[tier] = []; });
   const items = (guide && guide.packingList && guide.packingList.him) || [];
   const parseQty = q => { const m = String(q || '').match(/\d+/g); return m ? Math.max(...m.map(Number)) : 0; };
-  TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(tier => {
-    need[tier] = items
-      .filter(it => it.category === tier && tripsyAttirePackingGroupOf(it) !== 'essentials')
-      .reduce((s, it) => s + parseQty(it.quantity), 0);
+  for (const it of items) {
+    if (!it || !byTier[it.category]) continue;
+    const group = tripsyAttirePackingGroupOf(it);
+    if (group === 'essentials') continue;
+    const need = parseQty(it.quantity);
+    if (!need) continue;
+    byTier[it.category].push({ name: it.name || 'garment', typeKey: tripsyGarmentTypeKey(it.name), group, need });
+  }
+  return byTier;
+}
+// How many of each packing line the packed garments fill, in one tier. Run
+// PER TIER (a garment tagged for several dress codes fills a line in EACH of
+// them), so multi-category garments decrement every category they belong to.
+// Match: the line with the garment's exact typeKey, else a GENERIC group-level
+// line ("tops"/"bottoms", typeKey '') of the same group -- never a different
+// specific type (so a dress shirt can't wrongly fill a "sport coat" line).
+function tripsyWardrobeAssignFill(lines, packed) {
+  const fill = lines.map(() => 0);
+  for (const { g, qty } of packed) {
+    const gType = tripsyGarmentTypeKey(g.name);
+    const gGroup = g.group || tripsyAttirePackingGroupOf(g);
+    let idx = gType ? lines.findIndex(ln => ln.typeKey === gType) : -1;
+    if (idx < 0) idx = lines.findIndex(ln => !ln.typeKey && ln.group === gGroup);
+    if (idx >= 0) fill[idx] += qty;
+  }
+  return fill;
+}
+// "How many are you packing?" chooser (1..max). Resolves the number, or null on cancel.
+function tripsyWardrobeChooseQty(max, garmentName) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tw-qty-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-qty-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:380px; text-align:center;">
+        <h2 style="margin:0 0 6px; font-size:17px;">How many to pack?</h2>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:14px;">${esc(garmentName || '')} — ${max} available</div>
+        <div style="display:flex; flex-wrap:wrap; gap:8px; justify-content:center;">${Array.from({ length: max }, (_, i) => `<button class="btn" data-qty="${i + 1}" style="min-width:44px;">${i + 1}</button>`).join('')}</div>
+        <div style="margin-top:14px;"><button class="btn" data-qty="0">Cancel</button></div>
+      </div>`;
+    ov.style.display = 'flex';
+    ov.onclick = e => {
+      const b = e.target.closest('[data-qty]');
+      if (b) { ov.style.display = 'none'; const n = parseInt(b.getAttribute('data-qty'), 10); resolve(n > 0 ? n : null); }
+      else if (e.target === ov) { ov.style.display = 'none'; resolve(null); }
+    };
   });
-  return need;
+}
+
+// "Pack For Trip" — select which wardrobe pieces to bring, grouped by dress code.
+// Each tier shows the SPECIFIC garment types the packing list needs (shirts,
+// trousers, …) counting DOWN as matching pieces are packed. A garment counts
+// toward every dress code it's tagged for; owning >1 prompts how many to pack.
+async function tripsyWardrobePackForTrip(tripKey, tripName) {
+  const ov = getOrCreateWardrobeSelectOverlay();
+  const bodyEl = ov.querySelector('#tw-select-body');
+  const countEl = ov.querySelector('#tw-select-count');
+  ov.querySelector('#tw-select-title').textContent = `Pack For Trip${tripName ? ` — ${tripName}` : ''}`;
+  bodyEl.innerHTML = `<div style="padding:24px 0; color:var(--muted);">Loading…</div>`;
+  ov.querySelector('#tw-select-done').onclick = () => { ov.style.display = 'none'; };
+  ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
+  ov.style.display = 'flex';
+
+  const [garments, selectedRaw, guide] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripsyAttireGuide(tripKey)]);
+  const chosen = new Map(tripsyNormalizeTripSelection(selectedRaw).map(e => [e.id, e.qty]));
+  const garmentById = new Map(garments.map(g => [g.id, g]));
+  const needLines = tripsyWardrobeNeedByTier(guide);
+  const mostToLeast = TRIPSY_ATTIRE_CATEGORY_ORDER.slice().reverse();
+  let tiers;
+  if (guide && guide.counts) {
+    tiers = mostToLeast.filter(t => (guide.counts[TRIPSY_ATTIRE_CAMEL_KEY[t]] || 0) > 0);
+  } else {
+    const covered = new Set();
+    garments.forEach(g => { if (g.group !== 'essentials') (g.tiers || []).forEach(t => covered.add(t)); });
+    tiers = mostToLeast.filter(t => covered.has(t));
+  }
+  const persist = () => Store.setTripWardrobe(tripKey, [...chosen].map(([id, qty]) => ({ id, qty })));
+
+  const render = () => {
+    const total = [...chosen.values()].reduce((a, b) => a + b, 0);
+    countEl.textContent = `${total} piece${total === 1 ? '' : 's'} selected for this trip`;
+    const sections = tiers.map(tier => {
+      const lines = needLines[tier] || [];
+      const packedForTier = [...chosen].map(([id, qty]) => ({ g: garmentById.get(id), qty })).filter(x => x.g && x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
+      const filled = tripsyWardrobeAssignFill(lines, packedForTier);
+      const needsHtml = lines.length
+        ? `<div style="font-size:12px; margin:2px 0 8px; line-height:1.7;">${lines.map((ln, i) => { const r = Math.max(0, ln.need - (filled[i] || 0)); return `<span style="color:${r ? 'var(--amber)' : 'var(--home-green)'};">${esc(ln.name)} ${r || '✓'}</span>`; }).join('<span style="color:var(--muted); margin:0 5px;">·</span>')}</div>`
+        : '';
+      const items = garments.filter(g => g.group !== 'essentials' && (g.tiers || []).includes(tier) && !chosen.has(g.id));
+      const grid = items.length
+        ? `<div class="tw-grid">${items.map(g => tripsyWardrobeCardHtml(g, { selectMode: true })).join('')}</div>`
+        : `<div style="font-size:12px; color:var(--muted); padding:2px 0 8px;">No more matching pieces to add.</div>`;
+      return `<div class="tw-group"><div class="tw-group-title" style="text-transform:none; letter-spacing:0; font-size:14px;">${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[tier] || tier)}</div>${needsHtml}${grid}</div>`;
+    }).join('');
+    bodyEl.innerHTML = (guide ? '' : `<div style="font-size:12.5px; color:var(--muted); margin-bottom:12px;">Generate an Attire guide for this trip to see the garment types it needs — you can still select pieces below.</div>`)
+      + (sections || `<div class="empty-state">No wardrobe items to pack. Add garments under Utilities → Wardrobe.</div>`);
+    tripsyWardrobeLoadPhotos(bodyEl);
+  };
+  bodyEl.onclick = async e => {
+    const card = e.target.closest('.tw-card-select');
+    if (!card) return; // grid shows only UNselected items → a click adds it
+    const id = card.getAttribute('data-tw-id');
+    const g = garmentById.get(id);
+    let qty = 1;
+    if (g && (g.quantity || 1) > 1) { const n = await tripsyWardrobeChooseQty(g.quantity, g.name); if (!n) return; qty = n; }
+    chosen.set(id, qty);
+    persist();
+    render();
+  };
+  render();
+}
+
+function getOrCreateWardrobePackingListOverlay() {
+  let ov = document.getElementById('tw-packlist-overlay');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'tw-packlist-overlay';
+  ov.className = 'tw-modal';
+  ov.innerHTML = `
+    <div class="tw-modal-paper tw-wide">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;">
+        <h2 id="tw-packlist-title" style="margin:0; font-size:18px;">Packing List</h2>
+        <button class="btn" id="tw-packlist-done">Done</button>
+      </div>
+      <div id="tw-packlist-body"></div>
+    </div>`;
+  document.body.appendChild(ov);
+  return ov;
+}
+
+// "Packing List" — every selected piece (photo + name + tier badges + how many
+// packing) plus, per dress code, the specific garment types still needed.
+async function tripsyWardrobePackingList(tripKey, tripName) {
+  const ov = getOrCreateWardrobePackingListOverlay();
+  const bodyEl = ov.querySelector('#tw-packlist-body');
+  ov.querySelector('#tw-packlist-title').textContent = `Packing List${tripName ? ` — ${tripName}` : ''}`;
+  ov.querySelector('#tw-packlist-done').onclick = () => { ov.style.display = 'none'; };
+  ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
+  bodyEl.innerHTML = `<div style="padding:24px 0; color:var(--muted);">Loading…</div>`;
+  ov.style.display = 'flex';
+
+  const [garments, selectedRaw, guide] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripsyAttireGuide(tripKey)]);
+  const chosen = new Map(tripsyNormalizeTripSelection(selectedRaw).map(e => [e.id, e.qty]));
+  const garmentById = new Map(garments.map(g => [g.id, g]));
+  const needLines = tripsyWardrobeNeedByTier(guide);
+  const persist = () => Store.setTripWardrobe(tripKey, [...chosen].map(([id, qty]) => ({ id, qty })));
+
+  const render = () => {
+    const entries = [...chosen].map(([id, qty]) => ({ g: garmentById.get(id), qty })).filter(x => x.g);
+    const total = entries.reduce((a, x) => a + x.qty, 0);
+    const stillHtml = TRIPSY_ATTIRE_CATEGORY_ORDER.slice().reverse().map(tier => {
+      const lines = needLines[tier] || [];
+      if (!lines.length) return '';
+      const packedForTier = entries.filter(x => x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
+      const filled = tripsyWardrobeAssignFill(lines, packedForTier);
+      const gaps = lines.map((ln, i) => ({ name: ln.name, remaining: Math.max(0, ln.need - (filled[i] || 0)) })).filter(x => x.remaining > 0);
+      if (!gaps.length) return '';
+      return `<div style="padding:7px 0; border-top:1px solid var(--line);"><div style="font-weight:700; font-size:12.5px;">${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[tier])}</div><div style="font-size:12.5px; color:var(--amber); margin-top:2px;">${gaps.map(x => `${esc(x.name)} ×${x.remaining}`).join(', ')}</div></div>`;
+    }).join('');
+    const listHtml = entries.length
+      ? `<div class="tw-grid">${entries.map(({ g, qty }) => `
+          <div class="tw-card" data-tw-id="${esc(g.id)}">
+            <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : '👕'}</div>
+            <div class="tw-info"><div class="tw-name">${esc(g.name || '')}</div><div class="tw-meta">${qty > 1 ? `<span style="color:var(--amber); font-weight:700;">×${qty} packing</span>` : 'packing 1'}</div>${(g.tiers || []).length ? `<div class="tw-tiers">${(g.tiers || []).map(t => tripsyAttireBadgeHtml(t)).join(' ')}</div>` : ''}</div>
+            <div class="tw-actions"><button class="btn" data-tw-remove="${esc(g.id)}">Remove</button></div>
+          </div>`).join('')}</div>`
+      : `<div class="empty-state" style="margin-top:12px;">Nothing packed yet — use "Pack For Trip" to select pieces.</div>`;
+    bodyEl.innerHTML = `
+      <div style="font-size:12px; color:var(--muted); margin-bottom:12px;">${total} piece${total === 1 ? '' : 's'} selected for this trip.</div>
+      ${listHtml}
+      ${stillHtml ? `<div style="margin-top:20px;"><div class="tw-group-title">Still needed</div>${stillHtml}</div>` : ''}`;
+    tripsyWardrobeLoadPhotos(bodyEl);
+  };
+  bodyEl.onclick = e => {
+    const rm = e.target.closest('[data-tw-remove]');
+    if (!rm) return;
+    chosen.delete(rm.getAttribute('data-tw-remove'));
+    persist();
+    render();
+  };
+  render();
 }
 
 // "Pack For Trip" — select which wardrobe pieces to bring, grouped by dress code,
