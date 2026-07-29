@@ -7310,6 +7310,7 @@ function showWardrobeGarmentForm(existing, onSaved) {
       }
       const tiers = [...$('#tw-form-tiers').querySelectorAll('input[data-tw-tier]:checked')].map(el => el.getAttribute('data-tw-tier'));
       const garment = {
+        ...g,  // preserve sourceFileId (import-dedup key) + any other fields
         id: g.id || crypto.randomUUID(),
         name,
         group: $('#tw-form-group').value,
@@ -7339,7 +7340,8 @@ async function renderUtilitiesWardrobe() {
   main.innerHTML = `
     <div class="page-title" style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
       <span>Wardrobe</span>
-      <div style="display:flex; gap:8px;">
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        ${garments.length ? `<button class="btn" id="tw-bulk-btn">Edit all</button>` : ''}
         <button class="btn" id="tw-import-btn">Import from Drive folder</button>
         <button class="btn primary" id="tw-add-btn">+ Add garment</button>
       </div>
@@ -7350,6 +7352,8 @@ async function renderUtilitiesWardrobe() {
   tripsyWardrobeLoadPhotos(libEl);
   document.getElementById('tw-add-btn').addEventListener('click', () => showWardrobeGarmentForm(null, renderUtilitiesWardrobe));
   document.getElementById('tw-import-btn').addEventListener('click', () => tripsyWardrobeOpenImport(renderUtilitiesWardrobe));
+  const bulkBtn = document.getElementById('tw-bulk-btn');
+  if (bulkBtn) bulkBtn.addEventListener('click', () => tripsyWardrobeOpenBulkEdit(renderUtilitiesWardrobe));
   libEl.addEventListener('click', async e => {
     const editId = e.target.closest('[data-tw-edit]')?.getAttribute('data-tw-edit');
     if (editId) { const g = (await Store.listWardrobe()).find(x => x.id === editId); if (g) showWardrobeGarmentForm(g, renderUtilitiesWardrobe); return; }
@@ -7548,6 +7552,89 @@ async function tripsyWardrobeOpenImport(onDone) {
     if (done && onDone) onDone();
     if (done && !failed) setTimeout(() => { ov.style.display = 'none'; }, 900);
   };
+}
+
+// ---- Bulk edit (every garment's name/type/color/tiers inline in one grid) ----
+// Reuses the import-row layout; edits ONLY the fields shown (photo/sourceFileId/
+// addedAt are preserved via a spread of the current garment). Faster than opening
+// the per-card Edit modal for each item, especially after a big import.
+function tripsyWardrobeEditRowHtml(g) {
+  const tierSet = new Set(g.tiers || []);
+  return `
+    <div class="tw-import-row" data-tw-id="${esc(g.id)}">
+      <div class="tw-photo tw-import-thumb" data-tw-photo="${esc(g.driveFileId || '')}">👕</div>
+      <div class="tw-import-fields">
+        <input type="text" class="tw-import-name" value="${esc(g.name || '')}">
+        <div class="tw-import-row2">
+          <select class="tw-import-group">${TRIPSY_ATTIRE_PACKING_GROUPS.map(grp => `<option value="${grp}" ${g.group === grp ? 'selected' : ''}>${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[grp])}</option>`).join('')}</select>
+          <input type="text" class="tw-import-color" list="tw-bulk-color-list" value="${esc(g.color || '')}" placeholder="color">
+        </div>
+        <div class="tw-tier-opts tw-import-tiers">${TRIPSY_ATTIRE_CATEGORY_ORDER.map(t => `<label class="tw-tier-opt"><input type="checkbox" data-tw-tier="${t}" ${tierSet.has(t) ? 'checked' : ''}>${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[t])}</label>`).join('')}</div>
+      </div>
+    </div>`;
+}
+
+function getOrCreateWardrobeBulkEditOverlay() {
+  let ov = document.getElementById('tw-bulkedit-overlay');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'tw-bulkedit-overlay';
+  ov.className = 'tw-modal';
+  ov.innerHTML = `
+    <div class="tw-modal-paper tw-wide">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;">
+        <h2 style="margin:0; font-size:18px;">Edit wardrobe</h2>
+        <button class="btn" id="tw-bulk-close">Close</button>
+      </div>
+      <div style="font-size:12.5px; color:var(--muted); line-height:1.5; margin-bottom:12px;">Adjust each garment's name, type, color, and the dress codes it works for, then Save. (Change a photo via a card's Edit button.)</div>
+      <div id="tw-bulk-body"></div>
+      <datalist id="tw-bulk-color-list">${TRIPSY_WARDROBE_COLORS.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:16px; position:sticky; bottom:0; background:var(--panel); padding-top:10px;">
+        <div id="tw-bulk-status" style="font-size:12px; color:var(--muted);"></div>
+        <button class="btn primary" id="tw-bulk-save">Save changes</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  return ov;
+}
+
+async function tripsyWardrobeOpenBulkEdit(onDone) {
+  const ov = getOrCreateWardrobeBulkEditOverlay();
+  const bodyEl = ov.querySelector('#tw-bulk-body');
+  const statusEl = ov.querySelector('#tw-bulk-status');
+  const saveBtn = ov.querySelector('#tw-bulk-save');
+  ov.querySelector('#tw-bulk-close').onclick = () => { ov.style.display = 'none'; };
+  ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
+  const garments = await Store.listWardrobe();
+  if (!garments.length) { bodyEl.innerHTML = `<div class="empty-state">No garments yet.</div>`; saveBtn.style.display = 'none'; ov.style.display = 'flex'; return; }
+  saveBtn.style.display = '';
+  statusEl.textContent = '';
+  bodyEl.innerHTML = garments.map(tripsyWardrobeEditRowHtml).join('');
+  tripsyWardrobeLoadPhotos(bodyEl);
+  const byId = new Map(garments.map(g => [g.id, g]));
+  saveBtn.onclick = async () => {
+    saveBtn.disabled = true;
+    let saved = 0, failed = 0;
+    const rows = [...bodyEl.querySelectorAll('.tw-import-row')];
+    for (const row of rows) {
+      const g = byId.get(row.getAttribute('data-tw-id'));
+      if (!g) continue;
+      const updated = {
+        ...g,
+        name: row.querySelector('.tw-import-name').value.trim() || g.name,
+        group: row.querySelector('.tw-import-group').value,
+        color: row.querySelector('.tw-import-color').value.trim(),
+        tiers: [...row.querySelectorAll('.tw-import-tiers input[data-tw-tier]:checked')].map(el => el.getAttribute('data-tw-tier')),
+      };
+      const ok = await Store.saveWardrobeGarment(updated);
+      if (ok) saved++; else failed++;
+    }
+    statusEl.textContent = `Saved ${saved}${failed ? `, ${failed} failed` : ''}.`;
+    saveBtn.disabled = false;
+    if (saved && onDone) onDone();
+    if (saved && !failed) setTimeout(() => { ov.style.display = 'none'; }, 800);
+  };
+  ov.style.display = 'flex';
 }
 
 // Populates the live "Authorized Users" card on the Users utility page --
