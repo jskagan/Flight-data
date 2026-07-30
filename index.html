@@ -1050,8 +1050,15 @@
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9000;
     overflow-y: auto; padding: 32px 16px; flex-direction: column; align-items: center;
   }
+  /* The Daily Dress Guide is its own page, opened from the Attire toolbar -- above the
+     Attire panel (9000) so it stacks on top without closing it, but below the category-
+     override menu / cascade dialog (9200) so those still appear over it. */
+  #tripsy-attire-dressguide-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9100;
+    overflow-y: auto; padding: 32px 16px; flex-direction: column; align-items: center;
+  }
   @media print {
-    #tripsy-attire-overlay { display: none !important; }
+    #tripsy-attire-overlay, #tripsy-attire-dressguide-overlay { display: none !important; }
   }
   .tripsy-attire-toolbar {
     max-width: 980px; width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px;
@@ -19080,9 +19087,9 @@ async function tripsyAttireOverrideCategory(guide, dayKey, eventId, newCategory,
     ev.categoryOverridden = true;
     await tripsyAttireMaybeDowngradeBlock(guide, ev, newCategory);
     const r = computeTripsyAttireBlocks(guide.days); guide.blocks = r.blocks; guide.counts = r.counts;
-    renderTripsyAttireOverlayContent(guide, renderOpts); // paint the pick instantly; the Drive save runs after
+    tripsyAttireRepaint(guide, renderOpts); // paint the pick instantly; the Drive save runs after
     const saved = await Store.saveTripsyAttireGuide(guide);
-    if (!saved) { const re = restoreAll(); guide.blocks = re.blocks; guide.counts = re.counts; renderTripsyAttireOverlayContent(guide, renderOpts); toast('Could not save the dress code.', 'error'); return; }
+    if (!saved) { const re = restoreAll(); guide.blocks = re.blocks; guide.counts = re.counts; tripsyAttireRepaint(guide, renderOpts); toast('Could not save the dress code.', 'error'); return; }
     toast('Dress code set.', 'success');
     return;
   }
@@ -19105,7 +19112,7 @@ async function tripsyAttireOverrideCategory(guide, dayKey, eventId, newCategory,
   if (cascaded.length) {
     restore(); // don't leave the tentative change applied while the dialog is open
     const ok = await tripsyAttireConfirmCascade(ev, newCategory, cascaded);
-    if (!ok) { renderTripsyAttireOverlayContent(guide, renderOpts); return; }
+    if (!ok) { tripsyAttireRepaint(guide, renderOpts); return; }
     ev.category = newCategory;
     ev.categoryOverridden = true;
     computeTripsyAttireBlocks(guide.days);
@@ -19119,12 +19126,12 @@ async function tripsyAttireOverrideCategory(guide, dayKey, eventId, newCategory,
   const { blocks, counts } = computeTripsyAttireBlocks(guide.days);
   guide.blocks = blocks;
   guide.counts = counts;
-  renderTripsyAttireOverlayContent(guide, renderOpts); // paint the change instantly; the Drive save runs after
+  tripsyAttireRepaint(guide, renderOpts); // paint the change instantly; the Drive save runs after
   const saved = await Store.saveTripsyAttireGuide(guide);
   if (!saved) {
     const re = restoreAll();
     guide.blocks = re.blocks; guide.counts = re.counts;
-    renderTripsyAttireOverlayContent(guide, renderOpts);
+    tripsyAttireRepaint(guide, renderOpts);
     toast('Could not save the category change.', 'error');
     return;
   }
@@ -19144,6 +19151,7 @@ function getOrCreateTripsyAttireOverlay() {
       <div class="tripsy-attire-toolbar-title" data-tripsy-attire-title></div>
       <div class="tripsy-attire-toolbar-actions">
         <button class="tripsy-update-btn" id="tripsy-attire-definitions-btn">Definitions</button>
+        <button class="tripsy-update-btn" id="tripsy-attire-dressguide-btn" style="display:none;">📅 Daily Dress Guide</button>
         <div id="tripsy-attire-packmenu-wrap" style="position:relative; display:none;">
           <button class="tripsy-update-btn" id="tripsy-attire-packmenu-btn">🧳 Packing ▾</button>
           <div id="tripsy-attire-packmenu" style="display:none; position:absolute; right:0; top:calc(100% + 4px); background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:30; min-width:170px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
@@ -19171,6 +19179,9 @@ function getOrCreateTripsyAttireOverlay() {
   overlay.querySelector('#tripsy-attire-packmenu-btn').addEventListener('click', e => {
     e.stopPropagation();
     packMenu.style.display = packMenu.style.display === 'none' ? 'block' : 'none';
+  });
+  overlay.querySelector('#tripsy-attire-dressguide-btn').addEventListener('click', () => {
+    if (tripsyAttireOverlayTripKey) showTripsyDailyDressGuide(tripsyAttireOverlayTripKey);
   });
   overlay.querySelector('#tripsy-attire-refresh-btn').addEventListener('click', () => {
     if (!tripsyAttireOverlayTripKey) return;
@@ -19416,7 +19427,7 @@ async function showTripsyAttireCategoryEvents(guide, category) {
   // behind it to that event's row (amber flash), so the count -> event -> screen
   // path lands the owner right on the corresponding item.
   content.querySelectorAll('[data-tripsy-attire-detail-goto]').forEach(row => {
-    const go = () => { overlay.style.display = 'none'; tripsyAttireScrollToEventRow(row.dataset.tripsyAttireDetailGoto); };
+    const go = () => { overlay.style.display = 'none'; showTripsyDailyDressGuide(guide.tripKey, row.dataset.tripsyAttireDetailGoto); };
     row.addEventListener('click', go);
     row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
   });
@@ -19496,7 +19507,7 @@ let tripsyAttireOverlayTripKey = null;
 // outline -- same convention tripsyGoToTripDay already uses for its own
 // day-bar scroll-to.
 function tripsyAttireScrollToEventRow(eventId) {
-  const content = document.getElementById('tripsy-attire-content');
+  const content = document.getElementById('tripsy-attire-dressguide-content');
   const row = content && content.querySelector(`[data-tripsy-attire-event-row="${CSS.escape(eventId)}"]`);
   if (!row) return;
   row.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -19574,6 +19585,10 @@ function tripsyAttireWaitForEventTrigger(baseEventKey) {
 async function tripsyAttireGoToEvent(tripKey, attireEventId) {
   const overlay = getOrCreateTripsyAttireOverlay();
   overlay.style.display = 'none';
+  // The Daily Dress Guide page (where the event title lives) sits on top of the attire
+  // panel -- hide it too so the jump actually reveals My Trips.
+  const dgOverlay = document.getElementById('tripsy-attire-dressguide-overlay');
+  if (dgOverlay) dgOverlay.style.display = 'none';
   // The Attire guide stores each event's id as ev.id -- the snapshot's
   // "<resource>-<id>" hyphen form (tripsyAttireBuildDays, index.html) -- while
   // the My Trips timeline keys data-tripsy-view-event/data-tripsy-edit-panel on
@@ -19605,14 +19620,13 @@ async function tripsyAttireGoToEvent(tripKey, attireEventId) {
     // Couldn't find it on My Trips even after waiting (deleted/hidden
     // since the guide was generated, etc.) -- come straight back rather
     // than stranding the owner on an otherwise-unrelated My Trips page.
-    showTripsyAttireOverlay(tripKey);
+    showTripsyDailyDressGuide(tripKey);
     return;
   }
   trigger.click();
   trigger.scrollIntoView({ behavior: 'smooth', block: 'center' });
   tripsyAttireWatchEventPanelClose(baseEventKey, async () => {
-    await showTripsyAttireOverlay(tripKey);
-    tripsyAttireScrollToEventRow(attireEventId);
+    await showTripsyDailyDressGuide(tripKey, attireEventId);
   });
 }
 // ---- Detailed Packing List (Him/Her) --------------------------------
@@ -19993,6 +20007,9 @@ async function showTripsyAttireOverlay(tripKey) {
   // don't require a guide (they work off the wardrobe selection, guide just adds counts).
   const packMenuWrap = overlay.querySelector('#tripsy-attire-packmenu-wrap');
   if (packMenuWrap) packMenuWrap.style.display = isOwner ? 'inline-block' : 'none';
+  // Daily Dress Guide is its own page now -- available to everyone once a guide exists.
+  const dressGuideBtn = overlay.querySelector('#tripsy-attire-dressguide-btn');
+  if (dressGuideBtn) dressGuideBtn.style.display = saved ? 'inline-block' : 'none';
   if (saved) {
     let stale = false;
     try {
@@ -20030,6 +20047,8 @@ async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
     renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
     refreshBtn.textContent = 'Refresh';
     await refreshTripsyOutfitsButton(tripKey, true);
+    const dgb = overlay.querySelector('#tripsy-attire-dressguide-btn');
+    if (dgb) dgb.style.display = 'inline-block';
     toast(isRefresh ? 'Attire guide refreshed.' : 'Attire guide generated.', 'success');
   } catch (e) {
     console.error('Attire generation failed:', e);
@@ -20091,80 +20110,6 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
     catch { return ''; }
   })();
 
-  // Daily Dress Guide: for each day, what to wear before the first event,
-  // then every event (title + start-stop time only -- no address/note,
-  // this is a dressing schedule, not the itinerary), with a change marker
-  // inserted right before any event that actually needs a different
-  // outfit from the one before it (see tripsyAttireOutfitChangeNeeded --
-  // this applies to ALL 7 tiers, not just the 4 itemized ones, since "when
-  // do I need to change" is just as real a question for a casual->athletic
-  // transition; an identical category never triggers a marker no matter
-  // how much time passed, unlike the separate occasion-counting rule
-  // computeTripsyAttireBlocks uses for the trip-wide summary above).
-  // Both the "Start the day in" lead-in and the "Change to" marker are
-  // instructions, not commentary, so they share the same highlighted
-  // treatment (.tripsy-attire-dressguide-instruction). Each event's own
-  // badge stays the click-to-override trigger (tripsyAttireEventBadgeHtml).
-  // The day header is the same bar (date + weather chip + Day N) My Trips'
-  // own timeline uses (tripsyAttireDayBarHtml).
-  const laundryByDay = new Map((guide.laundryDays || []).map(l => [l.dayKey, l.reason]));
-  // Composed outfits (if any) make each time-block's dress-code box tappable -- read
-  // synchronously from the already-loaded driveData (no round-trip on render). A box
-  // is clickable only when its block actually has garments assigned.
-  const tripOutfits = (driveData.tripsyTripOutfits || []).find(o => o.tripKey === guide.tripKey) || null;
-  const outfitEventIds = new Set();
-  if (tripOutfits) (tripOutfits.blocks || []).forEach(b => { if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => outfitEventIds.add(id)); });
-  const dailyDressGuideHtml = (guide.days || []).map(day => {
-    const events = (day.events || []).map(ev => ({ ...ev, dayKey: day.dayKey }));
-    if (!events.length) return '';
-    // If every event this day shows the same dress tier (no "Change to" all
-    // day), the first-event lead-in reads "Entire day is X" instead of "Start
-    // the day in X".
-    const dayDispCats = events.map(ev => tripsyAttireDisplayCategory(ev));
-    const singleCategoryDay = dayDispCats.every(c => c === dayDispCats[0]);
-    const rows = events.map((ev, i) => {
-      const prev = i > 0 ? events[i - 1] : null;
-      const disp = tripsyAttireDisplayCategory(ev);
-      // The daily guide's dress designation is the block-dressiest tier
-      // (displayCategory) -- constant within a run, changing only where the
-      // displayed tier actually differs from the previous event. So a "⇄ Change
-      // to" marker appears exactly when (and only when) the worn tier changes,
-      // never within a block whose events merely carry different BASE tiers.
-      const leadInText = i === 0
-        ? `${singleCategoryDay ? 'Entire day is' : 'Start the day in'} ${tripsyAttireBadgeHtml(disp)}`
-        : (disp !== tripsyAttireDisplayCategory(prev)
-          ? `⇄ Change to ${tripsyAttireBadgeHtml(disp)} before ${ev.startTime ? esc(ev.startTime) : 'this event'} — ${esc(ev.name || '')}`
-          : null);
-      // When outfits have been composed, the block's dress-code box is a button that
-      // opens that block's outfit (looked up by this first event's id).
-      const hasOutfit = outfitEventIds.has(ev.id);
-      const leadIn = leadInText == null ? '' : (hasOutfit
-        ? `<div class="tripsy-attire-dressguide-instruction tripsy-attire-dressguide-instruction--outfit" role="button" tabindex="0" data-tripsy-outfit-block="${esc(ev.id)}" title="Tap to see the outfit for this block">${leadInText}<span class="tripsy-attire-outfit-cue">👔 See outfit</span></div>`
-        : `<div class="tripsy-attire-dressguide-instruction">${leadInText}</div>`);
-      const timeRange = ev.startTime && ev.endTime ? `${ev.startTime} – ${ev.endTime}` : (ev.startTime || '');
-      return `
-        ${leadIn}
-        <div class="tripsy-attire-dressguide-event" data-tripsy-attire-event-row="${esc(ev.id)}">
-          <div class="tripsy-attire-col-time">${esc(timeRange)}</div>
-          <div class="tripsy-attire-dressguide-event-main">
-            <button type="button" class="tripsy-attire-event-title-link" data-tripsy-attire-goto-event data-trip-key="${esc(guide.tripKey)}" data-event-id="${esc(ev.id)}">${esc(ev.name || '')}</button>
-          </div>
-          <div class="tripsy-attire-dressguide-badge">${tripsyAttireEventBadgeHtml(day.dayKey, ev)}</div>
-        </div>
-      `;
-    }).join('');
-    const laundryReason = laundryByDay.get(day.dayKey);
-    const laundryHtml = laundryReason !== undefined
-      ? `<div class="tripsy-attire-laundry-note"><div class="tripsy-attire-laundry-date">${esc(tripsyDayHeaderLabel(day.dayKey))}</div><div class="tripsy-attire-laundry-main"><span style="font-size:30px; line-height:1; flex-shrink:0;">🧺</span><span>Best day for laundry${laundryReason ? ` — ${esc(laundryReason)}` : ''}</span></div></div>`
-      : '';
-    return `
-      <div class="tripsy-attire-day-section">
-        ${tripsyAttireDayBarHtml(day.dayKey, weatherTargetsByDay, tripStartDayKey)}
-        ${laundryHtml}
-        ${rows}
-      </div>
-    `;
-  }).join('');
 
   // Per-person (Him/Her) cards: for each of the 7 tiers, the shared
   // occasion/block count (guide.counts, real -- computed by
@@ -20240,11 +20185,6 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
       <h3 class="tripsy-attire-heading">Packing Summary</h3>
       ${personsHtml}
     </div>
-    <div class="tripsy-attire-daybyday">
-      <h3 class="tripsy-attire-heading">Daily Dress Guide</h3>
-      <p class="tripsy-attire-heading-sub">What to wear before your first event each day, and when to change if the plan calls for it.</p>
-      ${dailyDressGuideHtml}
-    </div>
   `;
   content.querySelectorAll('[data-tripsy-attire-category-link]').forEach(row => {
     row.addEventListener('click', () => showTripsyAttireCategoryEvents(guide, row.dataset.tripsyAttireCategoryLink));
@@ -20252,41 +20192,134 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showTripsyAttireCategoryEvents(guide, row.dataset.tripsyAttireCategoryLink); }
     });
   });
-  // Tappable dress-code boxes -> the composed outfit for that time-block.
+  // (Daily Dress Guide handlers -- outfit boxes, override badges, goto-event -- moved
+  // to renderTripsyDressGuideInto with the guide itself.)
+  content.querySelectorAll('[data-tripsy-attire-packinglist-btn]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      showTripsyAttirePackingListOverlay(guide, btn.dataset.person);
+    });
+  });
+}
+
+// Repaint the surface that owns the dress-code badges after an override. Badges now
+// live on the standalone Daily Dress Guide page, whose renderOpts carries a `rerender`
+// closure; anything without one falls back to the main Attire panel content.
+function tripsyAttireRepaint(guide, renderOpts) {
+  if (renderOpts && typeof renderOpts.rerender === 'function') renderOpts.rerender();
+  else renderTripsyAttireOverlayContent(guide, renderOpts);
+}
+
+// Renders the Daily Dress Guide (day-by-day dressing schedule) into `content`.
+// Extracted from renderTripsyAttireOverlayContent so it can be its own page
+// (showTripsyDailyDressGuide). renderOpts = { weatherTargetsByDay, tripStartDayKey,
+// rerender } -- `rerender` repaints THIS surface when an override changes a tier.
+function renderTripsyDressGuideInto(content, guide, renderOpts) {
+  const { weatherTargetsByDay, tripStartDayKey } = renderOpts || {};
+  // Fresh displayCategory / block counts from the current per-event base tiers.
+  if (guide && Array.isArray(guide.days)) {
+    const { blocks, counts } = computeTripsyAttireBlocks(guide.days);
+    guide.blocks = blocks;
+    guide.counts = counts;
+  }
+  const laundryByDay = new Map((guide.laundryDays || []).map(l => [l.dayKey, l.reason]));
+  const tripOutfits = (driveData.tripsyTripOutfits || []).find(o => o.tripKey === guide.tripKey) || null;
+  const outfitEventIds = new Set();
+  if (tripOutfits) (tripOutfits.blocks || []).forEach(b => { if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => outfitEventIds.add(id)); });
+  const dailyDressGuideHtml = (guide.days || []).map(day => {
+    const events = (day.events || []).map(ev => ({ ...ev, dayKey: day.dayKey }));
+    if (!events.length) return '';
+    const dayDispCats = events.map(ev => tripsyAttireDisplayCategory(ev));
+    const singleCategoryDay = dayDispCats.every(c => c === dayDispCats[0]);
+    const rows = events.map((ev, i) => {
+      const prev = i > 0 ? events[i - 1] : null;
+      const disp = tripsyAttireDisplayCategory(ev);
+      const leadInText = i === 0
+        ? `${singleCategoryDay ? 'Entire day is' : 'Start the day in'} ${tripsyAttireBadgeHtml(disp)}`
+        : (disp !== tripsyAttireDisplayCategory(prev)
+          ? `⇄ Change to ${tripsyAttireBadgeHtml(disp)} before ${ev.startTime ? esc(ev.startTime) : 'this event'} — ${esc(ev.name || '')}`
+          : null);
+      const hasOutfit = outfitEventIds.has(ev.id);
+      const leadIn = leadInText == null ? '' : (hasOutfit
+        ? `<div class="tripsy-attire-dressguide-instruction tripsy-attire-dressguide-instruction--outfit" role="button" tabindex="0" data-tripsy-outfit-block="${esc(ev.id)}" title="Tap to see the outfit for this block">${leadInText}<span class="tripsy-attire-outfit-cue">👔 See outfit</span></div>`
+        : `<div class="tripsy-attire-dressguide-instruction">${leadInText}</div>`);
+      const timeRange = ev.startTime && ev.endTime ? `${ev.startTime} – ${ev.endTime}` : (ev.startTime || '');
+      return `
+        ${leadIn}
+        <div class="tripsy-attire-dressguide-event" data-tripsy-attire-event-row="${esc(ev.id)}">
+          <div class="tripsy-attire-col-time">${esc(timeRange)}</div>
+          <div class="tripsy-attire-dressguide-event-main">
+            <button type="button" class="tripsy-attire-event-title-link" data-tripsy-attire-goto-event data-trip-key="${esc(guide.tripKey)}" data-event-id="${esc(ev.id)}">${esc(ev.name || '')}</button>
+          </div>
+          <div class="tripsy-attire-dressguide-badge">${tripsyAttireEventBadgeHtml(day.dayKey, ev)}</div>
+        </div>
+      `;
+    }).join('');
+    const laundryReason = laundryByDay.get(day.dayKey);
+    const laundryHtml = laundryReason !== undefined
+      ? `<div class="tripsy-attire-laundry-note"><div class="tripsy-attire-laundry-date">${esc(tripsyDayHeaderLabel(day.dayKey))}</div><div class="tripsy-attire-laundry-main"><span style="font-size:30px; line-height:1; flex-shrink:0;">🧺</span><span>Best day for laundry${laundryReason ? ` — ${esc(laundryReason)}` : ''}</span></div></div>`
+      : '';
+    return `
+      <div class="tripsy-attire-day-section">
+        ${tripsyAttireDayBarHtml(day.dayKey, weatherTargetsByDay, tripStartDayKey)}
+        ${laundryHtml}
+        ${rows}
+      </div>
+    `;
+  }).join('');
+
+  content.innerHTML = `
+    <p class="tripsy-attire-heading-sub">What to wear before your first event each day, and when to change if the plan calls for it.</p>
+    ${dailyDressGuideHtml || `<div style="padding:40px 20px; text-align:center; color:var(--muted);">No events to dress for.</div>`}
+  `;
   content.querySelectorAll('[data-tripsy-outfit-block]').forEach(el => {
     const open = () => showTripsyOutfitModal(guide.tripKey, el.dataset.tripsyOutfitBlock);
     el.addEventListener('click', open);
     el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
   });
   content.querySelectorAll('[data-tripsy-attire-event-badge]').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      tripsyAttireOpenCategoryMenu(btn, guide, renderOpts);
-    });
+    btn.addEventListener('click', e => { e.stopPropagation(); tripsyAttireOpenCategoryMenu(btn, guide, renderOpts); });
   });
-  // Picking either side of an ambiguous event's split badge resolves it
-  // exactly like the full dropdown override -- same call, same
-  // categoryOverridden:true stickiness, just without opening the menu.
   content.querySelectorAll('[data-tripsy-attire-ambiguous-pick]').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      tripsyAttireOverrideCategory(guide, btn.dataset.dayKey, btn.dataset.eventId, btn.dataset.category, renderOpts);
-    });
+    btn.addEventListener('click', e => { e.stopPropagation(); tripsyAttireOverrideCategory(guide, btn.dataset.dayKey, btn.dataset.eventId, btn.dataset.category, renderOpts); });
   });
-  // Available to every viewer (not owner-gated) -- jumping to the read-only
-  // event detail view on My Trips needs no write access, same as any
-  // viewer already being able to open it directly from there.
   content.querySelectorAll('[data-tripsy-attire-goto-event]').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      tripsyAttireGoToEvent(btn.dataset.tripKey, btn.dataset.eventId);
-    });
+    btn.addEventListener('click', e => { e.stopPropagation(); tripsyAttireGoToEvent(btn.dataset.tripKey, btn.dataset.eventId); });
   });
-  content.querySelectorAll('[data-tripsy-attire-packinglist-btn]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      showTripsyAttirePackingListOverlay(guide, btn.dataset.person);
-    });
-  });
+}
+
+// The Daily Dress Guide as its OWN page (own overlay, opened from the Attire toolbar).
+function getOrCreateTripsyDressGuideOverlay() {
+  let overlay = document.getElementById('tripsy-attire-dressguide-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-attire-dressguide-overlay';
+  overlay.innerHTML = `
+    <div class="tripsy-attire-toolbar">
+      <div class="tripsy-attire-toolbar-title" data-tripsy-dressguide-title></div>
+      <div class="tripsy-attire-toolbar-actions">
+        <button class="tripsy-update-btn" id="tripsy-attire-dressguide-close-btn">Close</button>
+      </div>
+    </div>
+    <div class="tripsy-attire-paper" id="tripsy-attire-dressguide-content"></div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#tripsy-attire-dressguide-close-btn').addEventListener('click', () => { overlay.style.display = 'none'; });
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.style.display = 'none'; });
+  return overlay;
+}
+async function showTripsyDailyDressGuide(tripKey, scrollToEventId) {
+  const guide = await Store.getTripsyAttireGuide(tripKey);
+  if (!guide) return;
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  const overlay = getOrCreateTripsyDressGuideOverlay();
+  overlay.querySelector('[data-tripsy-dressguide-title]').textContent = `Daily Dress Guide${trip && trip.name ? ` — ${trip.name}` : ''}`;
+  overlay.style.display = 'flex';
+  const content = overlay.querySelector('#tripsy-attire-dressguide-content');
+  const { weatherTargetsByDay, tripStartDayKey } = trip ? await tripsyAttireLoadWeatherBar(trip, guide) : { weatherTargetsByDay: new Map(), tripStartDayKey: null };
+  const renderOpts = { weatherTargetsByDay, tripStartDayKey };
+  renderOpts.rerender = () => renderTripsyDressGuideInto(content, guide, renderOpts);
+  renderTripsyDressGuideInto(content, guide, renderOpts);
+  if (scrollToEventId) tripsyAttireScrollToEventRow(scrollToEventId);
 }
 
 function getOrCreateTripsyUpdateOverlay() {
