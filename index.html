@@ -2679,20 +2679,24 @@ const Store = {
   // entangle the two, same replace-by-key shape as the guide store. Writes use the
   // conflict-resilient apply()+retry helper (a compose can land while another
   // device is writing the shared file).
-  async getTripsyTripOutfits(tripKey) {
-    return (driveData.tripsyTripOutfits || []).find(o => o.tripKey === tripKey) || null;
+  // Composed outfits are now stored one record per (tripKey, person). A legacy
+  // record with no `person` reads as 'him', so today's composed sets stay His.
+  async getTripsyTripOutfits(tripKey, person = 'him') {
+    return (driveData.tripsyTripOutfits || []).find(o => o.tripKey === tripKey && (o.person || 'him') === person) || null;
   },
   async saveTripsyTripOutfits(outfits) {
+    const person = outfits.person || 'him';
     return persistTripsyNarrativeCacheWithRetry(() => {
       if (!driveData.tripsyTripOutfits) driveData.tripsyTripOutfits = [];
-      driveData.tripsyTripOutfits = driveData.tripsyTripOutfits.filter(o => o.tripKey !== outfits.tripKey);
+      driveData.tripsyTripOutfits = driveData.tripsyTripOutfits.filter(o => !(o.tripKey === outfits.tripKey && (o.person || 'him') === person));
       driveData.tripsyTripOutfits.push(outfits);
     });
   },
-  async deleteTripsyTripOutfits(tripKey) {
+  // person null => drop BOTH persons' sets for the trip; else just that person's.
+  async deleteTripsyTripOutfits(tripKey, person = null) {
     if (!driveData.tripsyTripOutfits || !driveData.tripsyTripOutfits.length) return true;
     return persistTripsyNarrativeCacheWithRetry(() => {
-      driveData.tripsyTripOutfits = (driveData.tripsyTripOutfits || []).filter(o => o.tripKey !== tripKey);
+      driveData.tripsyTripOutfits = (driveData.tripsyTripOutfits || []).filter(o => o.tripKey !== tripKey || (person !== null && (o.person || 'him') !== person));
     });
   },
   // `keepOffline` is the one shared, cross-device marker for "this doc
@@ -7736,7 +7740,7 @@ function tripsyWardrobeChooseQty(max, garmentName, verb = 'pack') {
 // tappable dress-code boxes and Travel View's event taps; the block is found by
 // eventIds membership on the saved outfit. `opts.onDetails`, when given, adds a footer
 // button (Travel View passes it so the event-detail panel stays reachable).
-async function showTripsyOutfitModal(tripKey, eventId, opts = {}) {
+async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}) {
   let ov = document.getElementById('tw-outfit-overlay');
   if (!ov) {
     ov = document.createElement('div'); ov.id = 'tw-outfit-overlay'; ov.className = 'tw-modal';
@@ -7744,7 +7748,7 @@ async function showTripsyOutfitModal(tripKey, eventId, opts = {}) {
     ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
   }
   const close = () => { ov.style.display = 'none'; };
-  const outfits = await Store.getTripsyTripOutfits(tripKey);
+  const outfits = await Store.getTripsyTripOutfits(tripKey, person);
   const block = outfits && (outfits.blocks || []).find(b => (b.eventIds || []).includes(eventId));
   if (!block) {
     ov.innerHTML = `<div class="tw-modal-paper" style="max-width:420px; text-align:center;"><h2 style="margin:0 0 10px; font-size:17px;">No outfit yet</h2><div style="color:var(--muted); font-size:13px;">Compose outfits from the Attire panel first.</div><div style="margin-top:16px;"><button class="btn" data-tw-outfit-close>Close</button></div></div>`;
@@ -7797,13 +7801,13 @@ async function showTripsyOutfitModal(tripKey, eventId, opts = {}) {
   if (isOwner) ov.querySelectorAll('[data-tw-outfit-swap]').forEach(btn => {
     btn.onclick = async () => {
       const currentId = btn.dataset.twOutfitSwap;
-      const chosenId = await tripsyOutfitSwapPicker(tripKey, block, currentId);
+      const chosenId = await tripsyOutfitSwapPicker(tripKey, block, currentId, person);
       if (!chosenId || chosenId === currentId) return;
       const i = (block.garmentIds || []).indexOf(currentId);
       if (i >= 0) block.garmentIds[i] = chosenId;
       const ok = await Store.saveTripsyTripOutfits(outfits);
       if (!ok) { toast('Could not save the swap.', 'error'); return; }
-      showTripsyOutfitModal(tripKey, eventId, opts);
+      showTripsyOutfitModal(tripKey, eventId, person, opts);
     };
   });
   tripsyWardrobeLoadPhotos(ov);
@@ -7812,16 +7816,17 @@ async function showTripsyOutfitModal(tripKey, eventId, opts = {}) {
 // Same-type swap picker for one outfit slot: a small modal grid of the trip's PACKED
 // garments whose type bucket matches the slot's, minus pieces already worn in this
 // block. Resolves the chosen garment id, or null on cancel / no alternatives.
-async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId) {
+async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person = 'him') {
   const [garments, selectedRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
   const byId = new Map(garments.map(g => [g.id, g]));
   const current = byId.get(currentGarmentId);
   const bucketKey = current ? tripsyGarmentTypeBucket(current).key : null;
   const typeLabel = current ? tripsyGarmentTypeBucket(current).label : 'garment';
   const wornElsewhere = new Set((block.garmentIds || []).filter(id => id !== currentGarmentId));
+  // Only offer this person's packed garments as swap candidates.
   const candidates = tripsyNormalizeTripSelection(selectedRaw)
     .map(e => byId.get(e.id))
-    .filter(g => g && g.id !== currentGarmentId && !wornElsewhere.has(g.id) && (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey));
+    .filter(g => g && (g.person || 'him') === person && g.id !== currentGarmentId && !wornElsewhere.has(g.id) && (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey));
   return new Promise(resolve => {
     let ov = document.getElementById('tw-swap-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tw-swap-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -20445,7 +20450,7 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
     const names = items.map(it => esc(it.name)).join(', ');
     return `<div style="margin:1px 0 7px; padding-left:2px; font-size:12.5px; color:var(--muted); line-height:1.5;">${names}${reuse ? `${names ? ' · ' : ''}<span style="opacity:0.85;">(${esc(reuse)})</span>` : ''}</div>`;
   };
-  const tripOutfits = (driveData.tripsyTripOutfits || []).find(o => o.tripKey === guide.tripKey) || null;
+  const tripOutfits = (driveData.tripsyTripOutfits || []).find(o => o.tripKey === guide.tripKey && (o.person || 'him') === person) || null;
   const outfitEventIds = new Set();
   if (tripOutfits) (tripOutfits.blocks || []).forEach(b => { if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => outfitEventIds.add(id)); });
   const dailyDressGuideHtml = (guide.days || []).map(day => {
@@ -20499,7 +20504,7 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
     ${dailyDressGuideHtml || `<div style="padding:40px 20px; text-align:center; color:var(--muted);">No events to dress for.</div>`}
   `;
   content.querySelectorAll('[data-tripsy-outfit-block]').forEach(el => {
-    const open = () => showTripsyOutfitModal(guide.tripKey, el.dataset.tripsyOutfitBlock);
+    const open = () => showTripsyOutfitModal(guide.tripKey, el.dataset.tripsyOutfitBlock, person);
     el.addEventListener('click', open);
     el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
   });
@@ -21220,7 +21225,7 @@ async function generateTripsyAttireGuide(tripKey) {
 // looked up by eventIds membership on both display surfaces (Daily Dress Guide boxes,
 // Travel View event taps). Needs a saved attire guide (for the schedule) AND a non-
 // empty Pack-For-Trip selection.
-async function composeTripsyOutfits(tripKey) {
+async function composeTripsyOutfits(tripKey, person = 'him') {
   const guide = await Store.getTripsyAttireGuide(tripKey);
   if (!guide) throw new Error('Generate an attire guide for this trip first.');
   const [garments, selectedRaw, apiKey] = await Promise.all([
@@ -21229,8 +21234,11 @@ async function composeTripsyOutfits(tripKey) {
   const selection = tripsyNormalizeTripSelection(selectedRaw);
   if (!selection.length) throw new Error('Plan your packing list first — no garments are selected for this trip.');
   const garmentById = new Map(garments.map(g => [g.id, g]));
-  const chosen = selection.map(sel => (garmentById.get(sel.id) ? { g: garmentById.get(sel.id), qty: sel.qty } : null)).filter(Boolean);
-  if (!chosen.length) throw new Error('None of the selected garments are still in your wardrobe.');
+  // Only THIS person's selected garments feed the composition (the prompt is
+  // already written for one traveler); the other person composes separately.
+  const chosen = selection.map(sel => (garmentById.get(sel.id) ? { g: garmentById.get(sel.id), qty: sel.qty } : null))
+    .filter(x => x && (x.g.person || 'him') === person);
+  if (!chosen.length) throw new Error(`No ${person === 'her' ? 'Hers' : 'His'} garments are selected for this trip — plan the packing list first.`);
   const blocks = tripsyEnumerateAttireBlocks(guide);
   if (!blocks.length) throw new Error('This trip has no events to compose outfits for.');
 
@@ -21316,6 +21324,7 @@ Rules:
   if (!outBlocks.length) throw new Error('No outfits came back — try again.');
   const outfits = {
     tripKey,
+    person,
     generatedAt: new Date().toISOString(),
     guideFingerprint: guide.eventFingerprint || null,
     selectionFingerprint: tripsyOutfitSelectionFingerprint(selection),
@@ -21328,12 +21337,12 @@ Rules:
 // Runs Compose Outfits from the Attire toolbar button, then re-renders the guide so
 // the Daily Dress Guide's dress-code boxes become tappable. Toasts on success/failure;
 // the button shows its own busy state (this call can take a minute on a big trip).
-async function runTripsyOutfitComposition(tripKey) {
-  // Triggered from a trip card's 👔 menu; toast covers the wait, and My Trips is
-  // re-rendered afterward so the card's outfits item flips Compose -> View.
-  toast('Composing outfits — this can take a minute…');
+async function runTripsyOutfitComposition(tripKey, person = 'him') {
+  // Triggered from the outfit list's per-person Compose/Recompose; toast covers the
+  // wait, and My Trips is re-rendered afterward so the card's outfits item flips.
+  toast(`Composing ${person === 'her' ? 'Hers' : 'His'} outfits — this can take a minute…`);
   try {
-    await composeTripsyOutfits(tripKey);
+    await composeTripsyOutfits(tripKey, person);
     const overlay = getOrCreateTripsyAttireOverlay();
     const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
     const guide = await Store.getTripsyAttireGuide(tripKey);
@@ -21351,7 +21360,7 @@ async function runTripsyOutfitComposition(tripKey) {
 }
 // The day-grouped outfit list ("View Outfits"): each day lists its composed outfit(s);
 // tapping one opens showTripsyOutfitModal with that block's photos. Owner gets a Recompose.
-async function showTripsyOutfitList(tripKey) {
+async function showTripsyOutfitList(tripKey, person = 'him') {
   let ov = document.getElementById('tw-outfit-list-overlay');
   if (!ov) {
     ov = document.createElement('div'); ov.id = 'tw-outfit-list-overlay'; ov.className = 'tw-modal';
@@ -21359,7 +21368,7 @@ async function showTripsyOutfitList(tripKey) {
     document.body.appendChild(ov);
     ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
   }
-  const outfits = await Store.getTripsyTripOutfits(tripKey);
+  const outfits = await Store.getTripsyTripOutfits(tripKey, person);
   const blocks = (outfits && outfits.blocks) || [];
   const days = [];
   for (const b of blocks) {
@@ -21379,25 +21388,28 @@ async function showTripsyOutfitList(tripKey) {
         </button>`;
       }).join('')}
     </div>`).join('');
+  const hasOutfits = blocks.length > 0;
   ov.innerHTML = `
     <div class="tw-modal-paper tw-wide">
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap;">
         <h2 style="margin:0; font-size:18px;">Outfits</h2>
-        <div style="display:flex; gap:8px;">
-          ${isOwner ? `<button class="btn" data-outfit-recompose>Recompose</button>` : ''}
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <span data-outfit-person>${tripsyPersonToggleHtml(person)}</span>
+          ${isOwner ? `<button class="btn" data-outfit-recompose>${hasOutfits ? 'Recompose' : 'Compose'}</button>` : ''}
           <button class="btn" data-outfit-list-close>Close</button>
         </div>
       </div>
-      ${daysHtml || `<div class="empty-state">No outfits yet — compose them first.</div>`}
+      ${daysHtml || `<div class="empty-state">No ${person === 'her' ? 'Hers' : 'His'} outfits yet${isOwner ? ' — tap Compose to build them from this person\'s packed garments.' : '.'}</div>`}
     </div>`;
   ov.style.display = 'flex';
   ov.querySelector('[data-outfit-list-close]').onclick = () => { ov.style.display = 'none'; };
+  wireTripsyPersonToggle(ov.querySelector('[data-outfit-person]'), p => { if (p !== person) showTripsyOutfitList(tripKey, p); });
   const recompose = ov.querySelector('[data-outfit-recompose]');
-  if (recompose) recompose.onclick = async () => { ov.style.display = 'none'; await runTripsyOutfitComposition(tripKey); showTripsyOutfitList(tripKey); };
+  if (recompose) recompose.onclick = async () => { ov.style.display = 'none'; await runTripsyOutfitComposition(tripKey, person); showTripsyOutfitList(tripKey, person); };
   ov.onclick = e => {
     if (e.target === ov) { ov.style.display = 'none'; return; }
     const row = e.target.closest('[data-outfit-ev]');
-    if (row && row.dataset.outfitEv) showTripsyOutfitModal(tripKey, row.dataset.outfitEv);
+    if (row && row.dataset.outfitEv) showTripsyOutfitModal(tripKey, row.dataset.outfitEv, person);
   };
 }
 
@@ -23743,9 +23755,11 @@ async function renderTripsyEventsListImpl() {
     // inside the overlay). Item labels/visibility are state-driven, read
     // SYNCHRONOUSLY from driveData at render: Clothing Summary + Daily Dress Guide
     // need a saved guide (any viewer); Pack For Trip / Packing List are owner-only;
-    // the outfits item is View Outfits once composed (any viewer) else Compose
-    // Outfits (owner + guide); Refresh/Generate is owner-only. The whole menu is
-    // hidden when it would be empty (a viewer with no guide).
+    // the outfits item is labelled View Outfits once EITHER person is composed (any
+    // viewer) else Compose Outfits (owner + guide) -- both open the same per-person
+    // outfit list, where His/Hers is toggled and Compose/Recompose lives; Refresh/
+    // Generate is owner-only. The whole menu is hidden when it would be empty (a
+    // viewer with no guide).
     const attireHasGuide = !!(driveData.tripsyAttireGuides || []).find(g => g.tripKey === trip.key);
     const attireHasOutfits = !!(driveData.tripsyTripOutfits || []).find(o => o.tripKey === trip.key && (o.blocks || []).some(b => b.garmentIds && b.garmentIds.length));
     const attireMenuItems = [
@@ -23755,8 +23769,8 @@ async function renderTripsyEventsListImpl() {
       isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="packlist" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '📋', 'Packing Status') : '',
       isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="wardrobe"`, '🗄️', 'Wardrobe') : '',
       attireHasOutfits
-        ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-mode="view" data-key="${esc(trip.key)}"`, '✨', 'View Outfits')
-        : (isOwner && attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-mode="compose" data-key="${esc(trip.key)}"`, '✨', 'Compose Outfits') : ''),
+        ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-key="${esc(trip.key)}"`, '✨', 'View Outfits')
+        : (isOwner && attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-key="${esc(trip.key)}"`, '✨', 'Compose Outfits') : ''),
       isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="refresh" data-mode="${attireHasGuide ? 'refresh' : 'generate'}" data-key="${esc(trip.key)}"`, '🔄', attireHasGuide ? 'Refresh' : 'Generate') : '',
     ].join('');
     const attireButtonHtml = (!collapsed && (attireHasGuide || isOwner)) ? iconLabelButton(`
@@ -24076,7 +24090,7 @@ async function renderTripsyEventsListImpl() {
         case 'pack': tripsyWardrobePackForTrip(key, name); break;
         case 'packlist': tripsyWardrobePackingList(key, name); break;
         case 'wardrobe': navigate('utilitieswardrobe'); break;
-        case 'outfits': if (btn.dataset.mode === 'view') showTripsyOutfitList(key); else runTripsyOutfitComposition(key); break;
+        case 'outfits': showTripsyOutfitList(key); break; // per-person list; Compose lives inside it
         case 'refresh': runTripsyAttireGeneration(key, { isRefresh: btn.dataset.mode === 'refresh' }); break;
       }
     });
@@ -27151,9 +27165,10 @@ async function renderTravelView(chosenTripKey) {
 
   // Composed outfits (if any): tapping an event whose block has an outfit opens it
   // (Jon's ask), keyed by the same event ids the attire map uses.
+  // Travel View has no His/Hers UI; it surfaces His outfits (the historical set).
   const tvOutfitEventIds = new Set();
   try {
-    const to = await Store.getTripsyTripOutfits(trip.key);
+    const to = await Store.getTripsyTripOutfits(trip.key, 'him');
     if (to && Array.isArray(to.blocks)) to.blocks.forEach(b => { if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => tvOutfitEventIds.add(id)); });
   } catch (e) { console.error('Travel View: outfits load failed', e); }
 
@@ -27369,7 +27384,7 @@ async function renderTravelView(chosenTripKey) {
     // If this event's time-block has a composed outfit, show it (event detail stays
     // reachable via the modal's "View event details" button).
     if (tvOutfitEventIds.has(evId)) {
-      showTripsyOutfitModal(trip.key, evId, { onDetails: ev ? () => showTripsyTravelEventDetail(ev) : null });
+      showTripsyOutfitModal(trip.key, evId, 'him', { onDetails: ev ? () => showTripsyTravelEventDetail(ev) : null });
       return;
     }
     if (ev) showTripsyTravelEventDetail(ev);
