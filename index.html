@@ -7633,7 +7633,7 @@ function tripsyWardrobeNeedByTier(guide) {
   const items = (guide && guide.packingList && guide.packingList.him) || [];
   const parseQty = q => { const m = String(q || '').match(/\d+/g); return m ? Math.max(...m.map(Number)) : 0; };
   for (const it of items) {
-    if (!it) continue;
+    if (!it || tripsyAttireIsExcludedPackingItem(it.name)) continue;
     const group = tripsyAttirePackingGroupOf(it);
     const need = parseQty(it.quantity);
     if (!need) continue;
@@ -16117,6 +16117,7 @@ Each person's packing_list is a REAL itemized garment-by-garment packing list, m
 - Include footwear, outerwear, and accessories as their own line items, not folded into essentials.
 - COMPLETENESS IS REQUIRED, and matters more than brevity. This is the packing list the owner actually packs from, so a missing line means a missing garment in the suitcase. Emit EVERY item ${person} needs for the whole trip as its own entry, across all 6 groups. Do not compress, abbreviate, summarize, merge distinct garments onto one line, or stop early because the list is getting long -- there is no length limit and a long list is the expected, correct result. Before you finish, re-read the tiers that have occasions on this trip and confirm each one's garments, footwear, outerwear, and accessories are all present for ${person}.
 - Set group on EVERY item to exactly one of: dress_wear, outerwear, tops, pants, essentials, footwear, accessories. What belongs where: dress_wear = suits, tuxedos, blazers, sport coats, dress shirts, dress trousers, ties, DRESS socks, cummerbunds, gowns and cocktail dresses; outerwear = jackets, coats, raincoats, overcoats, sweaters, cardigans, fleeces, vests, overshirts (outer LAYERS worn over other clothes); tops = casual shirts, t-shirts, blouses, polos (NOT sweaters -- those are outerwear); pants = casual trousers, jeans, shorts, chinos, skirts; essentials = underwear, undershirts, CASUAL socks, sleepwear (the washable base layers -- this group is shown to the user as "Underwear"); footwear = every kind of shoe or boot; accessories = belts, scarves, jewelry, watches, hats, bags, gloves, cuff links, pocket squares, sunglasses. Note the deliberate splits: dress socks are dress_wear but casual socks are essentials; dress trousers are dress_wear but casual trousers/jeans are pants; blazers/sport coats are dress_wear but casual jackets/coats/sweaters are outerwear.
+- NEVER include sleepwear/pajamas, belts, umbrellas, or watches anywhere in the output (not in garments, not in essentials, not in packing_list) -- the owner does not want those listed.
 ${weatherLines}
 
 TIME-BLOCKS (pre-computed, authoritative -- one outfit per block${authoritative ? `, each already tagged with its FINAL "tier"; count occasions from THESE and do NOT re-judge` : `; count occasions from THESE, not from the event list`}):
@@ -16576,6 +16577,13 @@ function tripsyAttireGarmentEntry(pg, category) {
 function tripsyAttireGarmentIsOptional(category, garmentName) {
   if (category !== 'cocktail') return false;
   return /\b(bow\s+|neck)?ties?\b/i.test(String(garmentName || ''));
+}
+// Items the owner never wants shown on any packing list or summary. Filtered
+// deterministically at every render (a rule here, not model output) so it applies to
+// existing guides too, without needing a Refresh -- the generation prompt is also told
+// not to produce them, but this is the reliable safety net.
+function tripsyAttireIsExcludedPackingItem(name) {
+  return /\b(sleepwear|nightwear|pajamas?|pyjamas?|belts?|umbrellas?|watch(es)?)\b/i.test(String(name || ''));
 }
 // Non-cryptographic change-detection fingerprint (djb2-style hash) over the
 // current event list -- used only for the light "may be out of date" hint
@@ -19793,7 +19801,7 @@ function renderTripsyAttirePackingListContent(guide, person) {
   // item keeping its original position within its group. Empty groups are
   // skipped entirely rather than rendering a bare header.
   const byGroup = new Map(TRIPSY_ATTIRE_PACKING_GROUPS.map(g => [g, []]));
-  items.forEach(item => { byGroup.get(tripsyAttirePackingGroupOf(item)).push(item); });
+  items.forEach(item => { if (item && tripsyAttireIsExcludedPackingItem(item.name)) return; byGroup.get(tripsyAttirePackingGroupOf(item)).push(item); });
   const rowsHtml = items.length
     ? TRIPSY_ATTIRE_PACKING_GROUPS.map(g => {
         const groupItems = byGroup.get(g);
@@ -20142,7 +20150,7 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
       // existed still has the old single `outfits` string, so fall back to
       // rendering that as one line rather than showing an empty tier.
       const g = tripsyAttireGarmentEntry(pg, category);
-      const items = (g && Array.isArray(g.items)) ? g.items.filter(it => it && it.name) : [];
+      const items = (g && Array.isArray(g.items)) ? g.items.filter(it => it && it.name && !tripsyAttireIsExcludedPackingItem(it.name)) : [];
       const reuseNote = (g && g.reuse_note) ? String(g.reuse_note).trim() : '';
       const legacyOutfits = (!g && pg.outfits) ? pg.outfits[category] : '';
       const detailHtml = (reuseNote || items.length)
@@ -20166,10 +20174,11 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
         </div>
       `;
     }).join('');
-    const essentialsHtml = (pg.essentials || []).length ? `
+    const essList = (pg.essentials || []).filter(item => !tripsyAttireIsExcludedPackingItem(item));
+    const essentialsHtml = essList.length ? `
       <div class="tripsy-attire-essentials">
         <div class="tripsy-attire-essentials-title">Essentials</div>
-        <ul>${pg.essentials.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+        <ul>${essList.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
       </div>
     ` : '';
     return `
