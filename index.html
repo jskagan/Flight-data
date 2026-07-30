@@ -1110,6 +1110,12 @@
     background: rgba(227,164,56,0.12); color: var(--amber); border-radius: 8px;
     padding: 10px 14px; font-size: 12.5px; margin-bottom: 18px;
   }
+  /* Small ⚠️ overlaid on the My Trips 👔 button when the trip's events have
+     changed since the attire guide was generated (see tripsyFlagStaleAttireButtons). */
+  .tripsy-attire-stale-badge {
+    position: absolute; top: -4px; right: -4px; font-size: 11px; line-height: 1;
+    pointer-events: none; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.5));
+  }
   .tripsy-attire-generated-line { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
   .tripsy-attire-day-section { margin-bottom: 24px; }
   .tripsy-attire-day-section:last-child { margin-bottom: 0; }
@@ -16623,6 +16629,50 @@ function tripsyAttireFingerprint(currentEventsForPrompt) {
   }
   return { count: currentEventsForPrompt.length, hash: hash.toString(36) };
 }
+// True when the trip's CURRENT events no longer match the fingerprint saved with
+// its attire guide -- i.e. the itinerary changed in a way that would affect what
+// to pack. Same check showTripsyAttireOverlay's "may be out of date" note uses.
+// Async (buildTripsyPrintDayData is CPU-only -- no network), best-effort: any
+// failure reports "not stale" rather than throwing.
+async function tripsyAttireGuideIsStale(trip, guide) {
+  if (!guide || !guide.eventFingerprint) return false;
+  try {
+    const { days } = await tripsyAttireBuildDays(trip);
+    const fp = tripsyAttireFingerprint(days.flatMap(d => d.events));
+    return fp.hash !== guide.eventFingerprint.hash || fp.count !== guide.eventFingerprint.count;
+  } catch (e) {
+    console.error('Attire staleness check failed (non-fatal):', e);
+    return false;
+  }
+}
+// Adds/removes the ⚠️ "out of date" badge on one My Trips 👔 button.
+function tripsySetAttireStaleBadge(btn, stale) {
+  if (!btn) return;
+  let badge = btn.querySelector('.tripsy-attire-stale-badge');
+  if (stale && !badge) {
+    badge = document.createElement('span');
+    badge.className = 'tripsy-attire-stale-badge';
+    badge.textContent = '⚠️';
+    badge.title = 'Itinerary changed since the attire guide was generated — open Attire and Refresh.';
+    badge.setAttribute('aria-label', 'Attire may be out of date');
+    btn.appendChild(badge);
+  } else if (!stale && badge) {
+    badge.remove();
+  }
+}
+// Fire-and-forget pass over the rendered trip cards: for each trip whose saved
+// attire guide is now out of date, flag its 👔 button with a ⚠️. Re-queries the
+// live card node per trip (container = the persistent #tripsy-card), so a
+// background re-render landing mid-pass is harmless -- the next render re-runs it.
+async function tripsyFlagStaleAttireButtons(container, trips) {
+  const guides = driveData.tripsyAttireGuides || [];
+  for (const trip of trips) {
+    const guide = guides.find(g => g.tripKey === trip.key);
+    const stale = await tripsyAttireGuideIsStale(trip, guide);
+    const btn = [...container.querySelectorAll('[data-tripsy-attire-menu-toggle]')].find(b => b.dataset.key === trip.key);
+    tripsySetAttireStaleBadge(btn, stale);
+  }
+}
 
 // The four *_time pseudo-fields compareTripsyItineraryPdf's schema uses for
 // time-only corrections (see that function's own comment for why -- never a
@@ -23503,7 +23553,7 @@ async function renderTripsyEventsListImpl() {
     ].join('');
     const attireButtonHtml = (!collapsed && (attireHasGuide || isOwner)) ? iconLabelButton(`
       <div style="position:relative;">
-        <button class="btn" data-tripsy-attire-menu-toggle data-key="${esc(trip.key)}" title="Attire" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:16px; display:flex; align-items:center; justify-content:center;">👔</button>
+        <button class="btn" data-tripsy-attire-menu-toggle data-key="${esc(trip.key)}" title="Attire" style="position:relative; width:28px; height:28px; border-radius:50%; padding:0; font-size:16px; display:flex; align-items:center; justify-content:center;">👔</button>
         <div data-tripsy-attire-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:180px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${attireMenuItems}
         </div>
@@ -24033,6 +24083,12 @@ async function renderTripsyEventsListImpl() {
   wireTripsyHeaderMenuToggle("[data-tripsy-itinerary-menu-toggle]", "data-tripsy-itinerary-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-trip-menu-toggle]", "data-tripsy-trip-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-attire-menu-toggle]", "data-tripsy-attire-menu");
+  // Flag each 👔 button with a ⚠️ when its trip's events have changed since the
+  // attire guide was generated (same fingerprint check the overlay uses). Async
+  // + fire-and-forget so it never blocks the render; it re-queries the live card
+  // node per trip, so a background re-render mid-pass just gets corrected by the
+  // next render's pass.
+  tripsyFlagStaleAttireButtons(container, trips);
 
   // Per-trip 🔍 Search: the toggle reveals that trip's find-in-page bar, which
   // highlights + steps through matches within its own timeline (tripsyCreateFindInPage).
