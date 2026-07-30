@@ -19163,9 +19163,12 @@ function getOrCreateTripsyAttireOverlay() {
     if (!tripsyAttireOverlayTripKey) return;
     runTripsyAttireGeneration(tripsyAttireOverlayTripKey, { isRefresh: true });
   });
-  overlay.querySelector('#tripsy-attire-outfits-btn').addEventListener('click', () => {
+  overlay.querySelector('#tripsy-attire-outfits-btn').addEventListener('click', e => {
     if (!tripsyAttireOverlayTripKey) return;
-    runTripsyOutfitComposition(tripsyAttireOverlayTripKey);
+    // Once outfits exist the button is "View Outfits" (opens the day-grouped list);
+    // otherwise it's "Compose Outfits" (owner). Mode is stamped by refreshTripsyOutfitsButton.
+    if (e.currentTarget.dataset.mode === 'view') showTripsyOutfitList(tripsyAttireOverlayTripKey);
+    else runTripsyOutfitComposition(tripsyAttireOverlayTripKey);
   });
   overlay.querySelector('#tripsy-attire-pack-btn').addEventListener('click', () => {
     if (!tripsyAttireOverlayTripKey) return;
@@ -19960,9 +19963,8 @@ async function showTripsyAttireOverlay(tripKey) {
   const saved = await Store.getTripsyAttireGuide(tripKey);
   refreshBtn.style.display = isOwner ? 'inline-block' : 'none';
   refreshBtn.textContent = saved ? 'Refresh' : 'Generate';
-  // Compose Outfits needs a saved guide (for the block schedule) + owner rights.
-  const outfitsBtn = overlay.querySelector('#tripsy-attire-outfits-btn');
-  if (outfitsBtn) outfitsBtn.style.display = (isOwner && saved) ? 'inline-block' : 'none';
+  // Outfits button: "View Outfits" once composed (anyone), else "✨ Compose Outfits" (owner + guide).
+  await refreshTripsyOutfitsButton(tripKey, !!saved);
   // Pack For Trip / Packing List moved here from the trip ⚙️ menu; owner-only, and
   // don't require a guide (they work off the wardrobe selection, guide just adds counts).
   const packBtn = overlay.querySelector('#tripsy-attire-pack-btn');
@@ -20005,8 +20007,7 @@ async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
     const { weatherTargetsByDay, tripStartDayKey } = trip ? await tripsyAttireLoadWeatherBar(trip, guide) : { weatherTargetsByDay: new Map(), tripStartDayKey: null };
     renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
     refreshBtn.textContent = 'Refresh';
-    const outfitsBtn = overlay.querySelector('#tripsy-attire-outfits-btn');
-    if (outfitsBtn && isOwner) outfitsBtn.style.display = 'inline-block';
+    await refreshTripsyOutfitsButton(tripKey, true);
     toast(isRefresh ? 'Attire guide refreshed.' : 'Attire guide generated.', 'success');
   } catch (e) {
     console.error('Attire generation failed:', e);
@@ -21010,7 +21011,6 @@ Rules:
 async function runTripsyOutfitComposition(tripKey) {
   const overlay = getOrCreateTripsyAttireOverlay();
   const btn = overlay.querySelector('#tripsy-attire-outfits-btn');
-  const prevLabel = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = 'Composing…'; }
   try {
     await composeTripsyOutfits(tripKey);
@@ -21020,13 +21020,77 @@ async function runTripsyOutfitComposition(tripKey) {
       const { weatherTargetsByDay, tripStartDayKey } = await tripsyAttireLoadWeatherBar(trip, guide);
       renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
     }
-    toast('Outfits composed — tap a dress-code box in the Daily Dress Guide to see each one.', 'success');
+    toast('Outfits composed — tap "View Outfits" (or a dress-code box) to see them.', 'success');
   } catch (e) {
     console.error('Outfit composition failed:', e);
     toast(`Could not compose outfits — ${e.message || 'unknown error'}.`, 'error');
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = prevLabel || '✨ Compose Outfits'; }
+    // Relabel from state: "View Outfits" on success, back to "✨ Compose Outfits" on failure.
+    if (btn) btn.disabled = false;
+    await refreshTripsyOutfitsButton(tripKey, true);
   }
+}
+// Sets the Attire toolbar outfits button: "View Outfits" (mode=view, anyone) once outfits
+// exist for the trip; else "✨ Compose Outfits" (mode=compose, owner + a saved guide); else hidden.
+async function refreshTripsyOutfitsButton(tripKey, hasGuide) {
+  const btn = getOrCreateTripsyAttireOverlay().querySelector('#tripsy-attire-outfits-btn');
+  if (!btn) return;
+  let has = false;
+  try { const o = await Store.getTripsyTripOutfits(tripKey); has = !!(o && (o.blocks || []).length); } catch (e) {}
+  if (has) { btn.style.display = 'inline-block'; btn.textContent = 'View Outfits'; btn.dataset.mode = 'view'; }
+  else if (isOwner && hasGuide) { btn.style.display = 'inline-block'; btn.textContent = '✨ Compose Outfits'; btn.dataset.mode = 'compose'; }
+  else { btn.style.display = 'none'; btn.dataset.mode = ''; }
+}
+// The day-grouped outfit list ("View Outfits"): each day lists its composed outfit(s);
+// tapping one opens showTripsyOutfitModal with that block's photos. Owner gets a Recompose.
+async function showTripsyOutfitList(tripKey) {
+  let ov = document.getElementById('tw-outfit-list-overlay');
+  if (!ov) {
+    ov = document.createElement('div'); ov.id = 'tw-outfit-list-overlay'; ov.className = 'tw-modal';
+    ov.style.zIndex = '2147482990'; // just under .tw-modal, so the outfit photo modal opens ON TOP of the list
+    document.body.appendChild(ov);
+    ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+  }
+  const outfits = await Store.getTripsyTripOutfits(tripKey);
+  const blocks = (outfits && outfits.blocks) || [];
+  const days = [];
+  for (const b of blocks) {
+    const last = days[days.length - 1];
+    if (last && last.dayKey === b.dayKey) last.blocks.push(b);
+    else days.push({ dayKey: b.dayKey, blocks: [b] });
+  }
+  const daysHtml = days.map(d => `
+    <div style="margin-bottom:14px;">
+      <div class="tw-group-title">${esc(tripsyDayHeaderLabel(d.dayKey))}</div>
+      ${d.blocks.map(b => {
+        const evId = (b.eventIds || [])[0] || '';
+        const n = (b.garmentIds || []).length;
+        return `<button type="button" data-outfit-ev="${esc(evId)}" style="display:flex; justify-content:space-between; align-items:center; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:4px 0; cursor:pointer; color:var(--text);">
+          <span style="min-width:0;">${tripsyAttireBadgeHtml(b.category)}${b.label ? ` <span style="color:var(--muted);">${esc(b.label)}</span>` : ''}</span>
+          <span style="color:var(--muted); flex-shrink:0;">${n} item${n === 1 ? '' : 's'} ›</span>
+        </button>`;
+      }).join('')}
+    </div>`).join('');
+  ov.innerHTML = `
+    <div class="tw-modal-paper tw-wide">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
+        <h2 style="margin:0; font-size:18px;">Outfits</h2>
+        <div style="display:flex; gap:8px;">
+          ${isOwner ? `<button class="btn" data-outfit-recompose>Recompose</button>` : ''}
+          <button class="btn" data-outfit-list-close>Close</button>
+        </div>
+      </div>
+      ${daysHtml || `<div class="empty-state">No outfits yet — compose them first.</div>`}
+    </div>`;
+  ov.style.display = 'flex';
+  ov.querySelector('[data-outfit-list-close]').onclick = () => { ov.style.display = 'none'; };
+  const recompose = ov.querySelector('[data-outfit-recompose]');
+  if (recompose) recompose.onclick = async () => { ov.style.display = 'none'; await runTripsyOutfitComposition(tripKey); showTripsyOutfitList(tripKey); };
+  ov.onclick = e => {
+    if (e.target === ov) { ov.style.display = 'none'; return; }
+    const row = e.target.closest('[data-outfit-ev]');
+    if (row && row.dataset.outfitEv) showTripsyOutfitModal(tripKey, row.dataset.outfitEv);
+  };
 }
 
 // Orchestrates one full Update run: reads the picked file, snapshots the
