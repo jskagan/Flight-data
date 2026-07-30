@@ -20432,6 +20432,19 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
     guide.counts = counts;
   }
   const laundryByDay = new Map((guide.laundryDays || []).map(l => [l.dayKey, l.reason]));
+  // Per-person garment hint under each dress-code lead-in: the pieces this person
+  // (His default / Hers) wears at that tier, from Claude's own personGuidance --
+  // names only, since the quantities there are trip totals, not per-block.
+  const person = tripsyDressGuidePerson;
+  const pg = (guide.personGuidance && guide.personGuidance[person]) || null;
+  const garmentHintFor = category => {
+    const entry = tripsyAttireGarmentEntry(pg, category);
+    const items = (entry && Array.isArray(entry.items)) ? entry.items.filter(it => it && it.name && !tripsyAttireIsExcludedPackingItem(it.name)) : [];
+    const reuse = (entry && entry.reuse_note) ? String(entry.reuse_note).trim() : '';
+    if (!items.length && !reuse) return '';
+    const names = items.map(it => esc(it.name)).join(', ');
+    return `<div style="margin:1px 0 7px; padding-left:2px; font-size:12.5px; color:var(--muted); line-height:1.5;">${names}${reuse ? `${names ? ' · ' : ''}<span style="opacity:0.85;">(${esc(reuse)})</span>` : ''}</div>`;
+  };
   const tripOutfits = (driveData.tripsyTripOutfits || []).find(o => o.tripKey === guide.tripKey) || null;
   const outfitEventIds = new Set();
   if (tripOutfits) (tripOutfits.blocks || []).forEach(b => { if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => outfitEventIds.add(id)); });
@@ -20453,8 +20466,12 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
         ? `<div class="tripsy-attire-dressguide-instruction tripsy-attire-dressguide-instruction--outfit" role="button" tabindex="0" data-tripsy-outfit-block="${esc(ev.id)}" title="Tap to see the outfit for this block">${leadInText}<span class="tripsy-attire-outfit-cue">👔 See outfit</span></div>`
         : `<div class="tripsy-attire-dressguide-instruction">${leadInText}</div>`);
       const timeRange = ev.startTime && ev.endTime ? `${ev.startTime} – ${ev.endTime}` : (ev.startTime || '');
+      // Show this person's garments for the tier right under the lead-in that
+      // announces it (start-of-day or a ⇄ change), not on every event mid-block.
+      const garmentHint = leadInText == null ? '' : garmentHintFor(disp);
       return `
         ${leadIn}
+        ${garmentHint}
         <div class="tripsy-attire-dressguide-event" data-tripsy-attire-event-row="${esc(ev.id)}">
           <div class="tripsy-attire-col-time">${esc(timeRange)}</div>
           <div class="tripsy-attire-dressguide-event-main">
@@ -20497,6 +20514,10 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
   });
 }
 
+// Which person's garments the Daily Dress Guide is showing (His default / Hers).
+// Module-level so it survives a Regenerate, which rebuilds the whole overlay via
+// showTripsyDailyDressGuide rather than the in-place rerender closure.
+let tripsyDressGuidePerson = 'him';
 // The Daily Dress Guide as its OWN page (own overlay, opened from the Attire toolbar).
 function getOrCreateTripsyDressGuideOverlay() {
   let overlay = document.getElementById('tripsy-attire-dressguide-overlay');
@@ -20507,6 +20528,8 @@ function getOrCreateTripsyDressGuideOverlay() {
     <div class="tripsy-attire-toolbar">
       <div class="tripsy-attire-toolbar-title" data-tripsy-dressguide-title></div>
       <div class="tripsy-attire-toolbar-actions">
+        <span id="tripsy-attire-dressguide-person"></span>
+        <button class="tripsy-update-btn" id="tripsy-attire-dressguide-regen-btn" style="display:none;">Regenerate</button>
         <button class="tripsy-update-btn" id="tripsy-attire-dressguide-close-btn">Close</button>
       </div>
     </div>
@@ -20528,6 +20551,37 @@ async function showTripsyDailyDressGuide(tripKey, scrollToEventId) {
   const { weatherTargetsByDay, tripStartDayKey } = trip ? await tripsyAttireLoadWeatherBar(trip, guide) : { weatherTargetsByDay: new Map(), tripStartDayKey: null };
   const renderOpts = { weatherTargetsByDay, tripStartDayKey };
   renderOpts.rerender = () => renderTripsyDressGuideInto(content, guide, renderOpts);
+  // His/Hers toggle (everyone) — flips which person's garments the guide shows;
+  // the shared schedule/change-markers stay. Re-render in place via rerender.
+  const personSlot = overlay.querySelector('#tripsy-attire-dressguide-person');
+  const renderPersonToggle = () => {
+    personSlot.innerHTML = tripsyPersonToggleHtml(tripsyDressGuidePerson);
+    wireTripsyPersonToggle(personSlot, p => {
+      if (p === tripsyDressGuidePerson) return;
+      tripsyDressGuidePerson = p;
+      renderPersonToggle();
+      renderOpts.rerender();
+    });
+  };
+  renderPersonToggle();
+  // Regenerate (owner only) recomputes the whole guide from scratch, then rebuilds
+  // this page (re-fetching the fresh guide) so the change markers / garments update.
+  const regenBtn = overlay.querySelector('#tripsy-attire-dressguide-regen-btn');
+  regenBtn.style.display = isOwner ? '' : 'none';
+  regenBtn.onclick = async () => {
+    if (regenBtn.dataset.busy) return;
+    regenBtn.dataset.busy = '1';
+    regenBtn.textContent = 'Regenerating…';
+    try {
+      await runTripsyAttireGeneration(tripKey, { isRefresh: true });
+      await showTripsyDailyDressGuide(tripKey); // rebuilds with the fresh guide + retained person
+    } finally {
+      // showTripsyDailyDressGuide rebinds a fresh button; this one is orphaned, but
+      // reset defensively in case regeneration threw before the rebuild.
+      regenBtn.textContent = 'Regenerate';
+      delete regenBtn.dataset.busy;
+    }
+  };
   renderTripsyDressGuideInto(content, guide, renderOpts);
   if (scrollToEventId) tripsyAttireScrollToEventRow(scrollToEventId);
 }
