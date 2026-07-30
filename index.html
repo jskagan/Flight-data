@@ -7641,6 +7641,34 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
   });
   return byTier;
 }
+// True when THIS person's Plan Packing List is fully satisfied for the trip --
+// every recommended need line (across all tiers) has been covered by selected
+// wardrobe garments + No-Picture additions, i.e. the Plan Packing List screen
+// would show all ✓. Synchronous driveData read, mirroring that screen's own
+// "remaining" math. Requires a saved guide with needs for the person; false when
+// there are none. Used to gate Compose/View Outfits (outfits are built from the
+// planned garments, so composing before the plan is done is premature).
+function tripsyPlanPackingIsComplete(guide, tripKey, person) {
+  if (!guide) return false;
+  const needLines = tripsyWardrobeNeedByTier(guide, person);
+  const garmentById = new Map((driveData.tripsyWardrobe || []).map(g => [g.id, g]));
+  const chosen = tripsyNormalizeTripSelection((driveData.tripsyTripWardrobe || {})[tripKey] || []);
+  const generics = (driveData.tripsyTripGenericGarments || {})[tripKey] || [];
+  let totalNeed = 0, remaining = 0;
+  for (const tier of [...TRIPSY_ATTIRE_CATEGORY_ORDER, TRIPSY_WARDROBE_GENERAL_TIER]) {
+    const lines = needLines[tier] || [];
+    if (!lines.length) continue;
+    const packedForTier = chosen.map(e => ({ g: garmentById.get(e.id), qty: e.qty }))
+      .filter(x => x.g && (x.g.person || 'him') === person && x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
+    const filled = tripsyWardrobeAssignFill(lines, packedForTier);
+    lines.forEach((ln, i) => {
+      const gen = generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
+      totalNeed += ln.need;
+      remaining += Math.max(0, ln.need - (filled[i] || 0) - gen);
+    });
+  }
+  return totalNeed > 0 && remaining === 0;
+}
 // How many of each packing line the packed garments fill, in one tier. Run
 // PER TIER (a garment tagged for several dress codes fills a line in EACH of
 // them), so multi-category garments decrement every category they belong to.
@@ -21058,23 +21086,39 @@ async function showTripsyOutfitList(tripKey, person = 'him') {
       }).join('')}
     </div>`).join('');
   const hasOutfits = blocks.length > 0;
+  const guide = await Store.getTripsyAttireGuide(tripKey);
+  const planComplete = tripsyPlanPackingIsComplete(guide, tripKey, person);
+  const personLabel = person === 'her' ? 'Hers' : 'His';
+  // Outfits are assembled from the planned garments, so block Compose/View until
+  // this person's Plan Packing List is complete. Already-composed outfits stay viewable.
+  const blocked = !hasOutfits && !planComplete;
   ov.innerHTML = `
     <div class="tw-modal-paper tw-wide">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap;">
         <h2 style="margin:0; font-size:18px;">Outfits</h2>
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
           <span data-outfit-person>${tripsyPersonToggleHtml(person)}</span>
-          ${isOwner ? `<button class="btn" data-outfit-recompose>${hasOutfits ? 'Recompose' : 'Compose'}</button>` : ''}
+          ${(isOwner && !blocked) ? `<button class="btn" data-outfit-recompose>${hasOutfits ? 'Recompose' : 'Compose'}</button>` : ''}
           <button class="btn" data-outfit-list-close>Close</button>
         </div>
       </div>
-      ${daysHtml || `<div class="empty-state">No ${person === 'her' ? 'Hers' : 'His'} outfits yet${isOwner ? ' — tap Compose to build them from this person\'s packed garments.' : '.'}</div>`}
+      ${blocked
+        ? (isOwner
+            ? `<div class="empty-state">Complete the ${personLabel} Plan Packing List first — then you can compose ${personLabel} outfits.</div>`
+            : `<div class="empty-state">No ${personLabel} outfits yet.</div>`)
+        : (daysHtml || `<div class="empty-state">No ${personLabel} outfits yet${isOwner ? ` — tap Compose to build them from ${person === 'her' ? 'her' : 'his'} packed garments.` : '.'}</div>`)}
     </div>`;
   ov.style.display = 'flex';
   ov.querySelector('[data-outfit-list-close]').onclick = () => { ov.style.display = 'none'; };
   wireTripsyPersonToggle(ov.querySelector('[data-outfit-person]'), p => { if (p !== person) showTripsyOutfitList(tripKey, p); });
   const recompose = ov.querySelector('[data-outfit-recompose]');
-  if (recompose) recompose.onclick = async () => { ov.style.display = 'none'; await runTripsyOutfitComposition(tripKey, person); showTripsyOutfitList(tripKey, person); };
+  if (recompose) recompose.onclick = async () => {
+    if (!planComplete) { alert(`Complete the ${personLabel} Plan Packing List before composing ${personLabel} outfits.`); return; }
+    ov.style.display = 'none'; await runTripsyOutfitComposition(tripKey, person); showTripsyOutfitList(tripKey, person);
+  };
+  // Dialog when the owner opens/toggles to a person whose plan isn't complete
+  // (nothing composed to view + composing is blocked) -- e.g. Hers before it's planned.
+  if (blocked && isOwner) alert(`You need to complete the ${personLabel} Plan Packing List before you can compose ${personLabel} outfits.`);
   ov.onclick = e => {
     if (e.target === ov) { ov.style.display = 'none'; return; }
     const row = e.target.closest('[data-outfit-ev]');
@@ -23429,8 +23473,14 @@ async function renderTripsyEventsListImpl() {
     // outfit list, where His/Hers is toggled and Compose/Recompose lives; Refresh/
     // Generate is owner-only. The whole menu is hidden when it would be empty (a
     // viewer with no guide).
-    const attireHasGuide = !!(driveData.tripsyAttireGuides || []).find(g => g.tripKey === trip.key);
+    const attireGuideObj = (driveData.tripsyAttireGuides || []).find(g => g.tripKey === trip.key) || null;
+    const attireHasGuide = !!attireGuideObj;
     const attireHasOutfits = !!(driveData.tripsyTripOutfits || []).find(o => o.tripKey === trip.key && (o.blocks || []).some(b => b.garmentIds && b.garmentIds.length));
+    // Compose Outfits only appears once at least one person's Plan Packing List is
+    // COMPLETE (outfits are assembled from the planned garments, so composing before
+    // the plan is done is premature). View Outfits still shows whenever outfits exist.
+    const attireOutfitsReady = isOwner && attireHasGuide && !attireHasOutfits
+      && (tripsyPlanPackingIsComplete(attireGuideObj, trip.key, 'him') || tripsyPlanPackingIsComplete(attireGuideObj, trip.key, 'her'));
     const attireMenuItems = [
       attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="summary" data-key="${esc(trip.key)}"`, '👗', 'Clothing Summary') : '',
       attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="dressguide" data-key="${esc(trip.key)}"`, '📅', 'Daily Dress Guide') : '',
@@ -23438,7 +23488,7 @@ async function renderTripsyEventsListImpl() {
       isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="packlist" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '📋', 'Packing Status') : '',
       attireHasOutfits
         ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-key="${esc(trip.key)}"`, '✨', 'View Outfits')
-        : (isOwner && attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-key="${esc(trip.key)}"`, '✨', 'Compose Outfits') : ''),
+        : (attireOutfitsReady ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-key="${esc(trip.key)}"`, '✨', 'Compose Outfits') : ''),
       isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="refresh" data-mode="${attireHasGuide ? 'refresh' : 'generate'}" data-key="${esc(trip.key)}"`, '🔄', attireHasGuide ? 'Refresh' : 'Generate') : '',
     ].join('');
     const attireButtonHtml = (!collapsed && (attireHasGuide || isOwner)) ? iconLabelButton(`
@@ -23757,7 +23807,13 @@ async function renderTripsyEventsListImpl() {
         case 'dressguide': showTripsyDailyDressGuide(key); break;
         case 'pack': tripsyWardrobePackForTrip(key, name); break;
         case 'packlist': tripsyWardrobePackingList(key, name); break;
-        case 'outfits': showTripsyOutfitList(key); break; // per-person list; Compose lives inside it
+        case 'outfits': { // per-person list; open on a person who can view/compose
+          const g = (driveData.tripsyAttireGuides || []).find(x => x.tripKey === key) || null;
+          const hasFor = p => !!(driveData.tripsyTripOutfits || []).find(o => o.tripKey === key && (o.person || 'him') === p && (o.blocks || []).some(b => b.garmentIds && b.garmentIds.length));
+          const okFor = p => hasFor(p) || tripsyPlanPackingIsComplete(g, key, p);
+          showTripsyOutfitList(key, okFor('him') ? 'him' : (okFor('her') ? 'her' : 'him'));
+          break;
+        }
         case 'refresh': runTripsyAttireGeneration(key, { isRefresh: btn.dataset.mode === 'refresh' }); break;
       }
     });
