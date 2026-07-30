@@ -1198,6 +1198,16 @@
     padding: 10px 14px; border: 1px solid var(--amber);
   }
   .tripsy-attire-packinglist-btn:hover { background: #f0b04e; }
+  /* Three per-person actions at the bottom of each Him/Her card -- open the Daily
+     Dress Guide / Plan Packing List / Packing Status for THAT person. Stacked,
+     equal weight; the card body (flex:1) still pushes them flush to the bottom so
+     the Him/Her groups line up. */
+  .tripsy-attire-card-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 18px; }
+  .tripsy-attire-card-actions button {
+    font-size: 13px; font-weight: 600; cursor: pointer; border-radius: 8px; text-align: center;
+    background: var(--panel-2); color: var(--text); padding: 9px 12px; border: 1px solid var(--line);
+  }
+  .tripsy-attire-card-actions button:hover { background: rgba(255,255,255,0.06); border-color: var(--amber); }
 
   /* Section headings shared by the 2 top-level parts of the main report
      (Packing Summary, Daily Dress Guide) -- Definitions moved back to
@@ -7876,7 +7886,7 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
 // from the grid and counts the need down (a garment counts toward every dress code it's
 // tagged for). "No Picture" additions persist separately (tripsyTripGenericGarments) and
 // count the need down too, but can't join AI outfit composition (no photo).
-async function tripsyWardrobePackForTrip(tripKey, tripName) {
+async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him') {
   const ov = getOrCreateWardrobeSelectOverlay();
   const bodyEl = ov.querySelector('#tw-select-body');
   const countEl = ov.querySelector('#tw-select-count');
@@ -7897,8 +7907,9 @@ async function tripsyWardrobePackForTrip(tripKey, tripName) {
   let generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-person: His (default) and Hers each draw from that person's packing-list
-  // need lines (guide.packingList[person]) and only that person's garments.
-  let person = 'him';
+  // need lines (guide.packingList[person]) and only that person's garments. The
+  // opener (e.g. a Clothing Summary card) can preselect His/Hers via initialPerson.
+  let person = initialPerson === 'her' ? 'her' : 'him';
   let needLines = tripsyWardrobeNeedByTier(guide, person);
   // Dress codes with recommended garments, most → least formal. The page is need-driven,
   // so a tier with no packing-list lines (or no guide at all) simply doesn't appear.
@@ -8060,7 +8071,7 @@ function getOrCreateWardrobePackingListOverlay() {
 
 // "Packing List" — every selected piece (photo + name + tier badges + how many
 // packing) plus, per dress code, the specific garment types still needed.
-async function tripsyWardrobePackingList(tripKey, tripName) {
+async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him') {
   const ov = getOrCreateWardrobePackingListOverlay();
   const bodyEl = ov.querySelector('#tw-packlist-body');
   ov.querySelector('#tw-packlist-title').textContent = `Packing Status${tripName ? ` — ${tripName}` : ''}`;
@@ -8074,8 +8085,9 @@ async function tripsyWardrobePackingList(tripKey, tripName) {
   let generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-person Packing Status: His (default) / Hers each show only that person's
-  // chosen garments + generics, scored against that person's need lines.
-  let person = 'him';
+  // chosen garments + generics, scored against that person's need lines. The opener
+  // (e.g. a Clothing Summary card) can preselect His/Hers via initialPerson.
+  let person = initialPerson === 'her' ? 'her' : 'him';
   const isPerson = g => (g.person || 'him') === person;
   let needLines = tripsyWardrobeNeedByTier(guide, person);
   const genericFilledFor = (tier, ln) => generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
@@ -19854,75 +19866,6 @@ async function tripsyAttireGoToEvent(tripKey, attireEventId) {
     await showTripsyDailyDressGuide(tripKey, attireEventId);
   });
 }
-// ---- Detailed Packing List (Him/Her) --------------------------------
-// A real itemized garment list nested under each Packing Summary card --
-// separate from that card's aggregate outfit counts/essentials, seeded
-// once from generateTripsyAttireCategories's packing_list (see
-// generateTripsyAttireGuide) and fully owner-editable afterward: checked
-// off, renamed/requantified, deleted, added, linked to specific events.
-// A Refresh never touches an existing packingList once it exists (see
-// generateTripsyAttireGuide's own comment) -- edits here are sticky.
-//
-// Two overlays, one nested inside the other: the packing list itself
-// (same weight as the existing detail/definitions modals, opened
-// directly from the main Attire overlay) and a smaller, higher-stacked
-// generic popup reused for BOTH the event-link picker and the
-// linked-events popover below, since neither is ever open at the same
-// time as the other -- same "one generic modal, several drill-downs"
-// precedent already established by getOrCreateTripsyAttireDetailOverlay.
-function getOrCreateTripsyAttirePackingListOverlay() {
-  let overlay = document.getElementById('tripsy-attire-packinglist-overlay');
-  if (overlay) return overlay;
-  overlay = document.createElement('div');
-  overlay.id = 'tripsy-attire-packinglist-overlay';
-  overlay.innerHTML = `
-    <div class="tripsy-attire-packinglist-paper">
-      <div class="tripsy-attire-packinglist-head">
-        <h2 data-tripsy-attire-packinglist-title></h2>
-        <button class="tripsy-update-btn" id="tripsy-attire-packinglist-close-btn">Close</button>
-      </div>
-      <div id="tripsy-attire-packinglist-content"></div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  overlay.querySelector('#tripsy-attire-packinglist-close-btn').addEventListener('click', () => {
-    overlay.style.display = 'none';
-  });
-  overlay.addEventListener('click', e => {
-    if (e.target === overlay) overlay.style.display = 'none';
-  });
-  return overlay;
-}
-function getOrCreateTripsyAttirePackingPopupOverlay() {
-  let overlay = document.getElementById('tripsy-attire-packing-popup-overlay');
-  if (overlay) return overlay;
-  overlay = document.createElement('div');
-  overlay.id = 'tripsy-attire-packing-popup-overlay';
-  overlay.innerHTML = `
-    <div class="tripsy-attire-packing-popup-paper">
-      <div class="tripsy-attire-packing-popup-head">
-        <h2 data-tripsy-attire-packing-popup-title></h2>
-        <button class="tripsy-update-btn" id="tripsy-attire-packing-popup-close-btn">Close</button>
-      </div>
-      <div id="tripsy-attire-packing-popup-content"></div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  overlay.querySelector('#tripsy-attire-packing-popup-close-btn').addEventListener('click', () => {
-    overlay.style.display = 'none';
-  });
-  overlay.addEventListener('click', e => {
-    if (e.target === overlay) overlay.style.display = 'none';
-  });
-  return overlay;
-}
-function showTripsyAttirePackingListOverlay(guide, person) {
-  const overlay = getOrCreateTripsyAttirePackingListOverlay();
-  overlay.querySelector('[data-tripsy-attire-packinglist-title]').textContent =
-    `${person === 'her' ? 'Her' : 'Him'} — Packing List`;
-  renderTripsyAttirePackingListContent(guide, person);
-  overlay.style.display = 'flex';
-}
 // Packing-list garment groups, in display order. Claude assigns one per item at
 // generation time (see the packing_list schema/prompt); the owner can change it
 // from an item's Edit box.
@@ -19964,248 +19907,6 @@ function tripsyAttirePackingGroupOf(item) {
   if (/\b(shirts?|t-?shirts?|tees?|blouses?|polos?|tops?|turtlenecks?)\b/.test(n)) return 'tops';
   if (/\b(belts?|scarves|scarf|jewel(le)?ry|watch(es)?|hats?|caps?|sunglasses|bags?|purses?|clutch(es)?|cuff\s*links?|cufflinks?|pocket\s+squares?|gloves?|wraps?|shawls?)\b/.test(n)) return 'accessories';
   return 'accessories';
-}
-function tripsyAttirePackingItemRowHtml(item) {
-  const linkedCount = (item.eventIds || []).length;
-  return `
-    <div class="tripsy-attire-packing-row">
-      <div class="tripsy-attire-packing-row-main">
-        <input type="checkbox" data-tripsy-attire-packing-toggle data-item-id="${esc(item.id)}" ${item.checked ? 'checked' : ''} ${isOwner ? '' : 'disabled'}>
-        <button type="button" class="tripsy-attire-packing-name${item.checked ? ' tripsy-attire-packing-name-checked' : ''}" data-tripsy-attire-packing-name data-item-id="${esc(item.id)}">${esc(item.name)}${linkedCount ? ` <span class="tripsy-attire-packing-link-count">${linkedCount} event${linkedCount === 1 ? '' : 's'}</span>` : ''}</button>
-        <span class="tripsy-attire-packing-qty">${esc(item.quantity)}</span>
-      </div>
-      ${isOwner ? `
-        <div class="tripsy-attire-packing-row-actions">
-          <button type="button" class="tripsy-attire-packing-mini-btn" data-tripsy-attire-packing-edit-toggle data-item-id="${esc(item.id)}">Edit</button>
-          <button type="button" class="tripsy-attire-packing-mini-btn" data-tripsy-attire-packing-delete data-item-id="${esc(item.id)}">Delete</button>
-        </div>
-      ` : ''}
-    </div>
-    ${isOwner ? `
-      <div class="tripsy-attire-packing-inline-box" data-tripsy-attire-packing-edit-box data-item-id="${esc(item.id)}" style="display:none;">
-        <input type="text" data-tripsy-attire-packing-edit-name value="${esc(item.name)}" placeholder="Item name">
-        <input type="text" data-tripsy-attire-packing-edit-qty value="${esc(item.quantity)}" placeholder="Quantity">
-        <select data-tripsy-attire-packing-edit-group>
-          ${TRIPSY_ATTIRE_PACKING_GROUPS.map(g => `<option value="${esc(g)}"${g === tripsyAttirePackingGroupOf(item) ? ' selected' : ''}>${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[g])}</option>`).join('')}
-        </select>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <button type="button" class="btn primary" data-tripsy-attire-packing-edit-save data-item-id="${esc(item.id)}">Save</button>
-          <button type="button" class="btn" data-tripsy-attire-packing-edit-cancel data-item-id="${esc(item.id)}">Cancel</button>
-          <button type="button" class="btn" data-tripsy-attire-packing-edit-link data-item-id="${esc(item.id)}">Link to Events…</button>
-        </div>
-      </div>
-    ` : ''}
-  `;
-}
-function renderTripsyAttirePackingListContent(guide, person) {
-  const overlay = getOrCreateTripsyAttirePackingListOverlay();
-  const content = overlay.querySelector('#tripsy-attire-packinglist-content');
-  if (!guide.packingList) guide.packingList = { him: [], her: [] };
-  if (!guide.packingList[person]) guide.packingList[person] = [];
-  const items = guide.packingList[person];
-  // Grouped by garment type, in TRIPSY_ATTIRE_PACKING_GROUPS order, with each
-  // item keeping its original position within its group. Empty groups are
-  // skipped entirely rather than rendering a bare header.
-  const byGroup = new Map(TRIPSY_ATTIRE_PACKING_GROUPS.map(g => [g, []]));
-  items.forEach(item => { if (item && tripsyAttireIsExcludedPackingItem(item.name)) return; byGroup.get(tripsyAttirePackingGroupOf(item)).push(item); });
-  const rowsHtml = items.length
-    ? TRIPSY_ATTIRE_PACKING_GROUPS.map(g => {
-        const groupItems = byGroup.get(g);
-        if (!groupItems.length) return '';
-        return `
-          <div class="tripsy-attire-packing-group">
-            <div class="tripsy-attire-packing-group-title">${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[g])}</div>
-            ${groupItems.map(tripsyAttirePackingItemRowHtml).join('')}
-          </div>
-        `;
-      }).join('')
-    : `<p style="color:var(--muted); font-size:13px;">No items yet.</p>`;
-  content.innerHTML = `
-    ${isOwner ? `
-      <div style="margin-bottom:14px;">
-        <button type="button" class="tripsy-update-btn" data-tripsy-attire-packing-add-toggle>+ Add Item</button>
-      </div>
-      <div class="tripsy-attire-packing-inline-box" data-tripsy-attire-packing-add-box style="display:none;">
-        <input type="text" data-tripsy-attire-packing-add-name placeholder="Item name">
-        <input type="text" data-tripsy-attire-packing-add-qty placeholder="Quantity">
-        <select data-tripsy-attire-packing-add-group>
-          ${TRIPSY_ATTIRE_PACKING_GROUPS.map(g => `<option value="${esc(g)}">${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[g])}</option>`).join('')}
-        </select>
-        <div style="display:flex; gap:8px;">
-          <button type="button" class="btn primary" data-tripsy-attire-packing-add-save>Save</button>
-          <button type="button" class="btn" data-tripsy-attire-packing-add-cancel>Cancel</button>
-        </div>
-      </div>
-    ` : ''}
-    <div class="tripsy-attire-packing-list">${rowsHtml}</div>
-  `;
-
-  content.querySelectorAll('[data-tripsy-attire-packing-toggle]').forEach(cb => {
-    cb.addEventListener('change', async () => {
-      const item = items.find(i => i.id === cb.dataset.itemId);
-      if (!item) return;
-      item.checked = cb.checked;
-      await Store.saveTripsyAttireGuide(guide);
-      renderTripsyAttirePackingListContent(guide, person);
-    });
-  });
-  content.querySelectorAll('[data-tripsy-attire-packing-name]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      showTripsyAttirePackingItemEvents(guide, person, btn.dataset.itemId);
-    });
-  });
-
-  if (!isOwner) return;
-
-  const addToggleBtn = content.querySelector('[data-tripsy-attire-packing-add-toggle]');
-  const addBox = content.querySelector('[data-tripsy-attire-packing-add-box]');
-  addToggleBtn.addEventListener('click', () => { addBox.style.display = 'block'; });
-  content.querySelector('[data-tripsy-attire-packing-add-cancel]').addEventListener('click', () => {
-    addBox.style.display = 'none';
-  });
-  content.querySelector('[data-tripsy-attire-packing-add-save]').addEventListener('click', async () => {
-    const name = content.querySelector('[data-tripsy-attire-packing-add-name]').value.trim();
-    const quantity = content.querySelector('[data-tripsy-attire-packing-add-qty]').value.trim();
-    if (!name) { toast('Enter an item name.', 'error'); return; }
-    const group = content.querySelector('[data-tripsy-attire-packing-add-group]').value;
-    const newItem = { id: crypto.randomUUID(), name, quantity: quantity || '1', group, checked: false, eventIds: [] };
-    items.push(newItem);
-    await Store.saveTripsyAttireGuide(guide);
-    renderTripsyAttirePackingListContent(guide, person);
-    if (confirm(`Link "${name}" to specific events?`)) {
-      showTripsyAttireEventLinkPicker(guide, person, newItem.id);
-    }
-  });
-
-  content.querySelectorAll('[data-tripsy-attire-packing-edit-toggle]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const box = content.querySelector(`[data-tripsy-attire-packing-edit-box][data-item-id="${CSS.escape(btn.dataset.itemId)}"]`);
-      if (box) box.style.display = box.style.display === 'none' ? 'block' : 'none';
-    });
-  });
-  content.querySelectorAll('[data-tripsy-attire-packing-edit-cancel]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const box = content.querySelector(`[data-tripsy-attire-packing-edit-box][data-item-id="${CSS.escape(btn.dataset.itemId)}"]`);
-      if (box) box.style.display = 'none';
-    });
-  });
-  content.querySelectorAll('[data-tripsy-attire-packing-edit-save]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const itemId = btn.dataset.itemId;
-      const box = content.querySelector(`[data-tripsy-attire-packing-edit-box][data-item-id="${CSS.escape(itemId)}"]`);
-      const name = box.querySelector('[data-tripsy-attire-packing-edit-name]').value.trim();
-      const quantity = box.querySelector('[data-tripsy-attire-packing-edit-qty]').value.trim();
-      if (!name) { toast('Enter an item name.', 'error'); return; }
-      const item = items.find(i => i.id === itemId);
-      if (!item) return;
-      item.name = name;
-      item.quantity = quantity || item.quantity;
-      const groupSel = box.querySelector('[data-tripsy-attire-packing-edit-group]');
-      if (groupSel && groupSel.value) item.group = groupSel.value;
-      await Store.saveTripsyAttireGuide(guide);
-      renderTripsyAttirePackingListContent(guide, person);
-    });
-  });
-  content.querySelectorAll('[data-tripsy-attire-packing-edit-link]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      showTripsyAttireEventLinkPicker(guide, person, btn.dataset.itemId);
-    });
-  });
-  content.querySelectorAll('[data-tripsy-attire-packing-delete]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const item = items.find(i => i.id === btn.dataset.itemId);
-      if (!item) return;
-      if (!confirm(`Remove "${item.name}" from the packing list?`)) return;
-      guide.packingList[person] = items.filter(i => i.id !== item.id);
-      await Store.saveTripsyAttireGuide(guide);
-      renderTripsyAttirePackingListContent(guide, person);
-    });
-  });
-}
-// Checkbox picker over every event on the trip (guide.days, same event
-// ids the rest of the guide already uses), grouped by day -- same visual
-// pattern as renderTripsyNarrativeSelectionScreen's day/event checklist,
-// reused here to let the owner link one packing-list item to the
-// specific event(s) it's needed for. Pre-checks whatever's already in
-// item.eventIds; Save overwrites it wholesale with the new selection.
-function showTripsyAttireEventLinkPicker(guide, person, itemId) {
-  const item = (guide.packingList[person] || []).find(i => i.id === itemId);
-  if (!item) return;
-  const overlay = getOrCreateTripsyAttirePackingPopupOverlay();
-  overlay.querySelector('[data-tripsy-attire-packing-popup-title]').textContent = `Link "${item.name}" to events`;
-  const content = overlay.querySelector('#tripsy-attire-packing-popup-content');
-  const dayBlocksHtml = (guide.days || []).map(day => {
-    const rows = (day.events || []).map(ev => `
-      <label style="display:flex; align-items:flex-start; gap:8px; padding:4px 0; font-size:13px; cursor:pointer;">
-        <input type="checkbox" data-tripsy-attire-eventlink-checkbox data-event-id="${esc(ev.id)}" ${item.eventIds.includes(ev.id) ? 'checked' : ''} style="margin-top:3px;">
-        <span>${ev.startTime ? `<span style="font-family:var(--mono); color:var(--amber); margin-right:6px;">${esc(ev.startTime)}</span>` : ''}${esc(ev.name || '')}</span>
-      </label>
-    `).join('');
-    return `
-      <div style="margin-bottom:16px;">
-        <div style="font-family:var(--mono); font-weight:700; font-size:13px; color:var(--amber); padding:6px 0; border-bottom:1px solid var(--line); margin-bottom:6px;">
-          ${esc(tripsyDayHeaderLabel(day.dayKey))}
-        </div>
-        ${rows || `<div style="font-size:12px; color:var(--muted); font-style:italic; padding:4px 0;">No events</div>`}
-      </div>
-    `;
-  }).join('');
-  content.innerHTML = `
-    <div style="display:flex; gap:10px; margin-bottom:16px;">
-      <button type="button" class="btn" data-tripsy-attire-eventlink-all>Check All</button>
-      <button type="button" class="btn" data-tripsy-attire-eventlink-none>Uncheck All</button>
-    </div>
-    ${dayBlocksHtml}
-    <div style="display:flex; gap:8px; margin-top:10px;">
-      <button type="button" class="btn primary" data-tripsy-attire-eventlink-save>Save</button>
-      <button type="button" class="btn" data-tripsy-attire-eventlink-cancel>Cancel</button>
-    </div>
-  `;
-  overlay.style.display = 'flex';
-  content.querySelector('[data-tripsy-attire-eventlink-all]').addEventListener('click', () => {
-    content.querySelectorAll('[data-tripsy-attire-eventlink-checkbox]').forEach(cb => { cb.checked = true; });
-  });
-  content.querySelector('[data-tripsy-attire-eventlink-none]').addEventListener('click', () => {
-    content.querySelectorAll('[data-tripsy-attire-eventlink-checkbox]').forEach(cb => { cb.checked = false; });
-  });
-  content.querySelector('[data-tripsy-attire-eventlink-cancel]').addEventListener('click', () => {
-    overlay.style.display = 'none';
-  });
-  content.querySelector('[data-tripsy-attire-eventlink-save]').addEventListener('click', async () => {
-    item.eventIds = [...content.querySelectorAll('[data-tripsy-attire-eventlink-checkbox]:checked')].map(cb => cb.dataset.eventId);
-    await Store.saveTripsyAttireGuide(guide);
-    overlay.style.display = 'none';
-    renderTripsyAttirePackingListContent(guide, person);
-  });
-}
-// Read-only: which specific events (date + time + name, resolved against
-// guide.days) a packing-list item is linked to, each clickable to jump to
-// that event on My Trips (tripsyAttireGoToEvent) -- hides BOTH the popup
-// and the packing-list overlay first, same reasoning as
-// tripsyAttireGoToEvent already hiding the main Attire overlay before
-// navigating, so nothing is left stacked on top of My Trips underneath.
-function showTripsyAttirePackingItemEvents(guide, person, itemId) {
-  const item = ((guide.packingList && guide.packingList[person]) || []).find(i => i.id === itemId);
-  if (!item) return;
-  const overlay = getOrCreateTripsyAttirePackingPopupOverlay();
-  overlay.querySelector('[data-tripsy-attire-packing-popup-title]').textContent = `${item.name} — Worn At`;
-  const content = overlay.querySelector('#tripsy-attire-packing-popup-content');
-  const eventsById = new Map();
-  (guide.days || []).forEach(day => (day.events || []).forEach(ev => eventsById.set(ev.id, { ...ev, dayKey: day.dayKey })));
-  const linked = (item.eventIds || []).map(id => eventsById.get(id)).filter(Boolean);
-  content.innerHTML = linked.length ? linked.map(ev => `
-    <button type="button" class="tripsy-attire-event-title-link" data-tripsy-attire-packing-goto-event data-trip-key="${esc(guide.tripKey)}" data-event-id="${esc(ev.id)}" style="display:block; width:100%; padding:8px 0; border-top:1px solid var(--line);">
-      <span style="font-family:var(--mono); color:var(--muted); font-size:11px; margin-right:8px;">${esc(tripsyDayHeaderLabel(ev.dayKey))}${ev.startTime ? ` · ${esc(ev.startTime)}` : ''}</span>${esc(ev.name || '')}
-    </button>
-  `).join('') : `<p style="color:var(--muted); font-size:13px;">Not linked to any specific event.</p>`;
-  overlay.style.display = 'flex';
-  content.querySelectorAll('[data-tripsy-attire-packing-goto-event]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      overlay.style.display = 'none';
-      getOrCreateTripsyAttirePackingListOverlay().style.display = 'none';
-      tripsyAttireGoToEvent(btn.dataset.tripKey, btn.dataset.eventId);
-    });
-  });
 }
 // Opens the overlay for a trip and renders whatever's saved -- or an empty
 // state (owner: an inline Generate button; viewer: plain text, since only
@@ -20399,7 +20100,11 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
           ${footwearHtml}
           ${essentialsHtml}
         </div>
-        <button type="button" class="tripsy-attire-packinglist-btn" data-tripsy-attire-packinglist-btn data-trip-key="${esc(guide.tripKey)}" data-person="${esc(personKey)}">View Detailed List</button>
+        <div class="tripsy-attire-card-actions">
+          <button type="button" data-tripsy-attire-open="dressguide" data-trip-key="${esc(guide.tripKey)}" data-person="${esc(personKey)}">Daily Dress Guide</button>
+          <button type="button" data-tripsy-attire-open="pack" data-trip-key="${esc(guide.tripKey)}" data-person="${esc(personKey)}">Plan Packing List</button>
+          <button type="button" data-tripsy-attire-open="packlist" data-trip-key="${esc(guide.tripKey)}" data-person="${esc(personKey)}">Packing Status</button>
+        </div>
       </div>
     `;
   };
@@ -20432,9 +20137,18 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
   });
   // (Daily Dress Guide handlers -- outfit boxes, override badges, goto-event -- moved
   // to renderTripsyDressGuideInto with the guide itself.)
-  content.querySelectorAll('[data-tripsy-attire-packinglist-btn]').forEach(btn => {
+  // The three per-person card buttons open the Daily Dress Guide / Plan Packing
+  // List / Packing Status for the SAME person (His or Hers) whose card was tapped.
+  content.querySelectorAll('[data-tripsy-attire-open]').forEach(btn => {
     btn.addEventListener('click', () => {
-      showTripsyAttirePackingListOverlay(guide, btn.dataset.person);
+      const action = btn.dataset.tripsyAttireOpen;
+      const key = btn.dataset.tripKey;
+      const person = btn.dataset.person === 'her' ? 'her' : 'him';
+      const trip = (tripsyDecryptedTrips || []).find(t => t.key === key);
+      const name = trip ? trip.name : '';
+      if (action === 'dressguide') { tripsyDressGuidePerson = person; showTripsyDailyDressGuide(key); }
+      else if (action === 'pack') tripsyWardrobePackForTrip(key, name, person);
+      else if (action === 'packlist') tripsyWardrobePackingList(key, name, person);
     });
   });
 }
