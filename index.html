@@ -19170,56 +19170,20 @@ function getOrCreateTripsyAttireOverlay() {
     <div class="tripsy-attire-toolbar">
       <div class="tripsy-attire-toolbar-title" data-tripsy-attire-title></div>
       <div class="tripsy-attire-toolbar-actions">
-        <div id="tripsy-attire-menu-wrap" style="position:relative;">
-          <button class="tripsy-update-btn" id="tripsy-attire-menu-btn">Attire ▾</button>
-          <div id="tripsy-attire-menu" style="display:none; position:absolute; right:0; top:calc(100% + 4px); background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:30; min-width:190px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
-            <button class="btn" data-attire-nav="summary" style="display:none; width:100%; text-align:left; margin-bottom:4px;">👗 Clothing Summary</button>
-            <button class="btn" data-attire-nav="dressguide" style="display:none; width:100%; text-align:left; margin-bottom:4px;">📅 Daily Dress Guide</button>
-            <button class="btn" data-attire-nav="pack" style="display:none; width:100%; text-align:left; margin-bottom:4px;">🧳 Pack For Trip</button>
-            <button class="btn" data-attire-nav="packlist" style="display:none; width:100%; text-align:left; margin-bottom:4px;">📋 Packing List</button>
-            <button class="btn" data-attire-nav="outfits" id="tripsy-attire-outfits-item" style="display:none; width:100%; text-align:left; margin-bottom:4px;">✨ Compose Outfits</button>
-            <button class="btn" data-attire-nav="refresh" id="tripsy-attire-refresh-item" style="display:none; width:100%; text-align:left;">Refresh</button>
-          </div>
-        </div>
         <button class="tripsy-update-btn" id="tripsy-attire-close-btn">Close</button>
       </div>
     </div>
     <div class="tripsy-attire-paper" id="tripsy-attire-content"></div>
   `;
   document.body.appendChild(overlay);
-  const attireMenu = overlay.querySelector('#tripsy-attire-menu');
+  // The attire ACTIONS (Clothing Summary / DDG / Pack / Packing List / Outfits /
+  // Refresh) now live on each trip card's 👔 menu on My Trips; this overlay is just
+  // the Clothing Summary content (+ its own Definitions button) and a Close.
   overlay.querySelector('#tripsy-attire-close-btn').addEventListener('click', () => {
     overlay.style.display = 'none';
   });
   overlay.addEventListener('click', e => {
     if (e.target === overlay) overlay.style.display = 'none';
-    // Close the Menu dropdown on any click outside it (or its toggle).
-    if (attireMenu && attireMenu.style.display !== 'none' && !e.target.closest('#tripsy-attire-menu') && !e.target.closest('#tripsy-attire-menu-btn')) attireMenu.style.display = 'none';
-  });
-  overlay.querySelector('#tripsy-attire-menu-btn').addEventListener('click', e => {
-    e.stopPropagation();
-    attireMenu.style.display = attireMenu.style.display === 'none' ? 'block' : 'none';
-  });
-  // The one dropdown: Clothing Summary / Daily Dress Guide / Pack For Trip / Packing List /
-  // (Compose | View) Outfits. The outfits item flips label+mode via refreshTripsyOutfitsButton.
-  attireMenu.addEventListener('click', e => {
-    const item = e.target.closest('[data-attire-nav]');
-    if (!item) return;
-    attireMenu.style.display = 'none';
-    const key = tripsyAttireOverlayTripKey;
-    if (!key) return;
-    const trip = (tripsyDecryptedTrips || []).find(t => t.key === key);
-    switch (item.dataset.attireNav) {
-      case 'summary': showTripsyAttireOverlay(key); break; // re-show the Clothing Summary
-      case 'dressguide': showTripsyDailyDressGuide(key); break;
-      case 'pack': tripsyWardrobePackForTrip(key, trip && trip.name); break;
-      case 'packlist': tripsyWardrobePackingList(key, trip && trip.name); break;
-      case 'outfits':
-        if (item.dataset.mode === 'view') showTripsyOutfitList(key);
-        else runTripsyOutfitComposition(key);
-        break;
-      case 'refresh': runTripsyAttireGeneration(key, { isRefresh: item.textContent.trim() === 'Refresh' }); break;
-    }
   });
   return overlay;
 }
@@ -20007,20 +19971,9 @@ async function showTripsyAttireOverlay(tripKey) {
   overlay.querySelector('[data-tripsy-attire-title]').textContent = `Attire — ${trip.name || ''}`;
   overlay.style.display = 'flex';
   const content = overlay.querySelector('#tripsy-attire-content');
-  const refreshBtn = overlay.querySelector('#tripsy-attire-refresh-item');
   const saved = await Store.getTripsyAttireGuide(tripKey);
-  refreshBtn.style.display = isOwner ? 'block' : 'none';
-  refreshBtn.textContent = saved ? 'Refresh' : 'Generate';
-  // Outfits button: "View Outfits" once composed (anyone), else "✨ Compose Outfits" (owner + guide).
-  await refreshTripsyOutfitsButton(tripKey, !!saved);
-  // The ☰ Menu dropdown items: Clothing Summary + Daily Dress Guide need a saved
-  // guide; Pack For Trip + Packing List are owner-only (they work off the wardrobe
-  // selection, so they don't need a guide).
-  const setAttireMenuItem = (nav, show) => { const b = overlay.querySelector(`[data-attire-nav="${nav}"]`); if (b) b.style.display = show ? 'block' : 'none'; };
-  setAttireMenuItem('summary', !!saved);
-  setAttireMenuItem('dressguide', !!saved);
-  setAttireMenuItem('pack', isOwner);
-  setAttireMenuItem('packlist', isOwner);
+  // (Generate/Refresh + all the other attire actions live on the trip card's 👔 menu
+  // now; this overlay just shows the Clothing Summary content.)
   if (saved) {
     let stale = false;
     try {
@@ -20045,33 +19998,38 @@ async function showTripsyAttireOverlay(tripKey) {
   }
 }
 // Runs (or re-runs) generation and re-renders the overlay content in place.
+// Triggered from a trip card's 👔 menu (or the overlay's empty-state Generate button).
+// Overlay-optional: a progress toast covers the ~1-2 min wait when the panel isn't open;
+// if it IS open its content shows a loading/result state too. On finish, re-render My
+// Trips so the card's 👔 menu reflects the new state (Generate→Refresh, etc.).
 async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
   const overlay = getOrCreateTripsyAttireOverlay();
+  const overlayOpen = overlay.style.display !== 'none';
   const content = overlay.querySelector('#tripsy-attire-content');
-  const refreshBtn = overlay.querySelector('#tripsy-attire-refresh-item');
-  content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Generating attire guide — this can take a minute or two for a longer trip…</div>`;
-  refreshBtn.disabled = true;
+  if (overlayOpen) content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Generating attire guide — this can take a minute or two for a longer trip…</div>`;
+  toast(isRefresh ? 'Refreshing the attire guide — this can take a minute…' : 'Generating the attire guide — this can take a minute…');
   try {
     const guide = await generateTripsyAttireGuide(tripKey);
     const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
-    const { weatherTargetsByDay, tripStartDayKey } = trip ? await tripsyAttireLoadWeatherBar(trip, guide) : { weatherTargetsByDay: new Map(), tripStartDayKey: null };
-    renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
-    refreshBtn.textContent = 'Refresh';
-    await refreshTripsyOutfitsButton(tripKey, true);
-    // A guide now exists -> reveal the Clothing Summary + Daily Dress Guide menu items.
-    ['summary', 'dressguide'].forEach(nav => { const b = overlay.querySelector(`[data-attire-nav="${nav}"]`); if (b) b.style.display = 'block'; });
+    if (overlayOpen && trip) {
+      const { weatherTargetsByDay, tripStartDayKey } = await tripsyAttireLoadWeatherBar(trip, guide);
+      renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
+    }
     toast(isRefresh ? 'Attire guide refreshed.' : 'Attire guide generated.', 'success');
   } catch (e) {
     console.error('Attire generation failed:', e);
-    content.innerHTML = `
-      <div style="padding:60px 20px; text-align:center; color:var(--red);">
-        Could not generate the attire guide — ${esc(e.message || 'unknown error')}.
-        ${isOwner ? '<div style="margin-top:12px;"><button class="btn" data-tripsy-attire-retry>Retry</button></div>' : ''}
-      </div>`;
-    const retryBtn = content.querySelector('[data-tripsy-attire-retry]');
-    if (retryBtn) retryBtn.addEventListener('click', () => runTripsyAttireGeneration(tripKey, { isRefresh }));
+    if (overlayOpen) {
+      content.innerHTML = `
+        <div style="padding:60px 20px; text-align:center; color:var(--red);">
+          Could not generate the attire guide — ${esc(e.message || 'unknown error')}.
+          ${isOwner ? '<div style="margin-top:12px;"><button class="btn" data-tripsy-attire-retry>Retry</button></div>' : ''}
+        </div>`;
+      const retryBtn = content.querySelector('[data-tripsy-attire-retry]');
+      if (retryBtn) retryBtn.addEventListener('click', () => runTripsyAttireGeneration(tripKey, { isRefresh }));
+    }
+    toast(`Could not generate the attire guide — ${e.message || 'unknown error'}.`, 'error');
   } finally {
-    refreshBtn.disabled = false;
+    if (currentView === 'tripsytrips') renderTripsyEventsList();
   }
 }
 // Pure render of a saved guide into the overlay's content pane -- day-by-day
@@ -20113,8 +20071,6 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
   }
   const overlay = getOrCreateTripsyAttireOverlay();
   const content = overlay.querySelector('#tripsy-attire-content');
-  const refreshBtn = overlay.querySelector('#tripsy-attire-refresh-item');
-  if (refreshBtn) refreshBtn.textContent = 'Refresh';
 
   const generatedLabel = (() => {
     try { return new Date(guide.generatedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
@@ -21082,39 +21038,25 @@ Rules:
 // the Daily Dress Guide's dress-code boxes become tappable. Toasts on success/failure;
 // the button shows its own busy state (this call can take a minute on a big trip).
 async function runTripsyOutfitComposition(tripKey) {
-  const overlay = getOrCreateTripsyAttireOverlay();
-  const btn = overlay.querySelector('#tripsy-attire-outfits-item');
-  if (btn) { btn.disabled = true; btn.textContent = 'Composing…'; }
-  // The item lives in a (now-closed) dropdown, so surface a toast for progress.
+  // Triggered from a trip card's 👔 menu; toast covers the wait, and My Trips is
+  // re-rendered afterward so the card's outfits item flips Compose -> View.
   toast('Composing outfits — this can take a minute…');
   try {
     await composeTripsyOutfits(tripKey);
+    const overlay = getOrCreateTripsyAttireOverlay();
     const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
     const guide = await Store.getTripsyAttireGuide(tripKey);
-    if (trip && guide) {
+    if (overlay.style.display !== 'none' && trip && guide) {
       const { weatherTargetsByDay, tripStartDayKey } = await tripsyAttireLoadWeatherBar(trip, guide);
       renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
     }
-    toast('Outfits composed — tap "View Outfits" (or a dress-code box) to see them.', 'success');
+    toast('Outfits composed — tap "View Outfits" on the trip to see them.', 'success');
   } catch (e) {
     console.error('Outfit composition failed:', e);
     toast(`Could not compose outfits — ${e.message || 'unknown error'}.`, 'error');
   } finally {
-    // Relabel from state: "View Outfits" on success, back to "✨ Compose Outfits" on failure.
-    if (btn) btn.disabled = false;
-    await refreshTripsyOutfitsButton(tripKey, true);
+    if (currentView === 'tripsytrips') renderTripsyEventsList();
   }
-}
-// Sets the Attire menu's outfits item: "View Outfits" (mode=view, anyone) once outfits
-// exist for the trip; else "✨ Compose Outfits" (mode=compose, owner + a saved guide); else hidden.
-async function refreshTripsyOutfitsButton(tripKey, hasGuide) {
-  const btn = getOrCreateTripsyAttireOverlay().querySelector('#tripsy-attire-outfits-item');
-  if (!btn) return;
-  let has = false;
-  try { const o = await Store.getTripsyTripOutfits(tripKey); has = !!(o && (o.blocks || []).length); } catch (e) {}
-  if (has) { btn.style.display = 'block'; btn.textContent = 'View Outfits'; btn.dataset.mode = 'view'; }
-  else if (isOwner && hasGuide) { btn.style.display = 'block'; btn.textContent = '✨ Compose Outfits'; btn.dataset.mode = 'compose'; }
-  else { btn.style.display = 'none'; btn.dataset.mode = ''; }
 }
 // The day-grouped outfit list ("View Outfits"): each day lists its composed outfit(s);
 // tapping one opens showTripsyOutfitModal with that block's photos. Owner gets a Recompose.
@@ -22879,6 +22821,7 @@ const TRIPSY_TRIP_PANEL_SELECTORS = [
   '[data-tripsy-itinerary-menu]',
   '[data-tripsy-generate-panel]',
   '[data-tripsy-trip-menu]',
+  '[data-tripsy-attire-menu]',
   '[data-tripsy-sort-menu]',
 ];
 // The buttons that open one of the panels above -- a click on one of these
@@ -22895,6 +22838,7 @@ const TRIPSY_TRIP_PANEL_TRIGGER_SELECTORS = [
   '[data-tripsy-itinerary-menu-toggle]',
   '[data-tripsy-generate-panel-toggle]',
   '[data-tripsy-trip-menu-toggle]',
+  '[data-tripsy-attire-menu-toggle]',
   '[data-tripsy-add-doc-menu-item]',
   '[data-tripsy-sort-toggle]',
 ];
@@ -22906,7 +22850,7 @@ function closeAllTripsyTripPanels() {
   // render would recreate anyway, so only panels that get their innerHTML
   // freshly rendered on open (add-item menu, edit-trip panel, attach
   // panel) need clearing here.
-  const freshlyRenderedEachTime = new Set(['[data-tripsy-attachments-menu]', '[data-tripsy-document-menu]', '[data-tripsy-itinerary-menu]', '[data-tripsy-generate-panel]', '[data-tripsy-trip-menu]', '[data-tripsy-sort-menu]']);
+  const freshlyRenderedEachTime = new Set(['[data-tripsy-attachments-menu]', '[data-tripsy-document-menu]', '[data-tripsy-itinerary-menu]', '[data-tripsy-generate-panel]', '[data-tripsy-trip-menu]', '[data-tripsy-attire-menu]', '[data-tripsy-sort-menu]']);
   TRIPSY_TRIP_PANEL_SELECTORS.forEach(sel => {
     card.querySelectorAll(sel).forEach(el => {
       el.style.display = "none";
@@ -23504,15 +23448,32 @@ async function renderTripsyEventsListImpl() {
         <div data-tripsy-generate-panel="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:280px; max-width:380px; max-height:70vh; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.4);"></div>
       </div>
     `, 'Itinerary') : '';
-    // 👔 Attire -- opens the generated outfit/packing guide overlay
-    // (Store.getTripsyAttireGuide / showTripsyAttireOverlay). Available to
-    // every viewer (a read-only render of whatever's saved); only the owner
-    // sees the Generate/Refresh control inside the overlay itself, since
-    // generating one needs the Anthropic key. No dropdown, unlike Itinerary
-    // -- always just opens the overlay. Sits right of Itinerary, left of
-    // Search.
-    const attireButtonHtml = !collapsed ? iconLabelButton(`
-      <button class="btn" data-tripsy-attire-toggle data-key="${esc(trip.key)}" title="Attire guide" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:16px; display:flex; align-items:center; justify-content:center;">👔</button>
+    // 👔 Attire -- a dropdown of all the attire actions (moved here from a menu
+    // inside the overlay). Item labels/visibility are state-driven, read
+    // SYNCHRONOUSLY from driveData at render: Clothing Summary + Daily Dress Guide
+    // need a saved guide (any viewer); Pack For Trip / Packing List are owner-only;
+    // the outfits item is View Outfits once composed (any viewer) else Compose
+    // Outfits (owner + guide); Refresh/Generate is owner-only. The whole menu is
+    // hidden when it would be empty (a viewer with no guide).
+    const attireHasGuide = !!(driveData.tripsyAttireGuides || []).find(g => g.tripKey === trip.key);
+    const attireHasOutfits = !!(driveData.tripsyTripOutfits || []).find(o => o.tripKey === trip.key && (o.blocks || []).some(b => b.garmentIds && b.garmentIds.length));
+    const attireMenuItems = [
+      attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="summary" data-key="${esc(trip.key)}"`, '👗', 'Clothing Summary') : '',
+      attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="dressguide" data-key="${esc(trip.key)}"`, '📅', 'Daily Dress Guide') : '',
+      isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="pack" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🧳', 'Pack For Trip') : '',
+      isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="packlist" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '📋', 'Packing List') : '',
+      attireHasOutfits
+        ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-mode="view" data-key="${esc(trip.key)}"`, '✨', 'View Outfits')
+        : (isOwner && attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-mode="compose" data-key="${esc(trip.key)}"`, '✨', 'Compose Outfits') : ''),
+      isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="refresh" data-mode="${attireHasGuide ? 'refresh' : 'generate'}" data-key="${esc(trip.key)}"`, '🔄', attireHasGuide ? 'Refresh' : 'Generate') : '',
+    ].join('');
+    const attireButtonHtml = (!collapsed && (attireHasGuide || isOwner)) ? iconLabelButton(`
+      <div style="position:relative;">
+        <button class="btn" data-tripsy-attire-menu-toggle data-key="${esc(trip.key)}" title="Attire" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:16px; display:flex; align-items:center; justify-content:center;">👔</button>
+        <div data-tripsy-attire-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:180px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+          ${attireMenuItems}
+        </div>
+      </div>
     `, 'Attire') : '';
     // 🔍 Search this trip -- toggles the find-in-page bar (searchBarHtml below,
     // placed just above the timeline) that highlights + steps through matches
@@ -23812,11 +23773,19 @@ async function renderTripsyEventsListImpl() {
       input.click();
     });
   });
-  container.querySelectorAll("[data-tripsy-attire-toggle]").forEach(btn => {
-    btn.addEventListener("click", async e => {
+  container.querySelectorAll("[data-tripsy-attire-nav]").forEach(btn => {
+    btn.addEventListener("click", e => {
       e.stopPropagation();
       closeAllTripsyTripPanels();
-      await showTripsyAttireOverlay(btn.dataset.key);
+      const key = btn.dataset.key, name = btn.dataset.name;
+      switch (btn.dataset.attireNav) {
+        case 'summary': showTripsyAttireOverlay(key); break;
+        case 'dressguide': showTripsyDailyDressGuide(key); break;
+        case 'pack': tripsyWardrobePackForTrip(key, name); break;
+        case 'packlist': tripsyWardrobePackingList(key, name); break;
+        case 'outfits': if (btn.dataset.mode === 'view') showTripsyOutfitList(key); else runTripsyOutfitComposition(key); break;
+        case 'refresh': runTripsyAttireGeneration(key, { isRefresh: btn.dataset.mode === 'refresh' }); break;
+      }
     });
   });
 
@@ -24028,6 +23997,7 @@ async function renderTripsyEventsListImpl() {
   wireTripsyHeaderMenuToggle("[data-tripsy-document-menu-toggle]", "data-tripsy-document-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-itinerary-menu-toggle]", "data-tripsy-itinerary-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-trip-menu-toggle]", "data-tripsy-trip-menu");
+  wireTripsyHeaderMenuToggle("[data-tripsy-attire-menu-toggle]", "data-tripsy-attire-menu");
 
   // Per-trip 🔍 Search: the toggle reveals that trip's find-in-page bar, which
   // highlights + steps through matches within its own timeline (tripsyCreateFindInPage).
