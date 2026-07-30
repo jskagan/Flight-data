@@ -407,7 +407,7 @@ that catches drift between them.
   the Update page itself (Accept/Add/Delete, and Modify Existing's jump into the real edit panel) are
   stamped `source: 'tripsy_update_page'` on the pending change they queue specifically so this check
   can tell those apart from an unrelated edit to the same event.
-- **Attire is a generated, saved packing guide, two PARALLEL Claude calls per (re)generation**: a "👔 Attire"
+- **Attire is a generated, saved packing guide — events categorized FIRST, then per-person guidance sized off the finalized time-block counts**: a "👔 Attire"
   button on each trip card (`index.html:19741` area, between Itinerary and Search) opens
   `showTripsyAttireOverlay` (`index.html:16879`), which renders whatever's already saved
   (`driveData.tripsyAttireGuides`, `Store.getTripsyAttireGuide`/`saveTripsyAttireGuide`/
@@ -416,8 +416,9 @@ that catches drift between them.
   dress-code tiers (Athletic / Casual / Smart Casual / Semi-formal / Cocktail / Formal / Black Tie,
   `TRIPSY_ATTIRE_CATEGORY_COLOR`/`_LABEL`/`_ORDER`) by `generateTripsyAttireCategories`
   (`index.html:14312`, same `fetchAnthropicApiKeyFromDrive` + streamed-`json_schema` pattern as
-  `compareTripsyItineraryPdf`, `model: 'claude-sonnet-5'` for both calls) — which fires **two
-  concurrent Claude calls via `Promise.all`** (shared plumbing: `tripsyAttireClaudeCall`), each
+  `compareTripsyItineraryPdf`, `model: 'claude-sonnet-5'` for both calls) — which runs the events categorization FIRST (on a fresh generate; reused verbatim on a Refresh), then
+  fires the per-person **him + her guidance calls concurrently via `Promise.all`** off the finalized
+  per-tier counts (shared plumbing: `tripsyAttireClaudeCall`), each
   passing an EXPLICIT `thinking`/`effort` (events: `{type:'disabled'}` + `low`; guidance:
   `{type:'adaptive'}` + `medium`). **Setting these explicitly is the single biggest latency lever
   here, and the default is a trap**: `claude-sonnet-5` runs *adaptive thinking by default* when
@@ -436,8 +437,9 @@ that catches drift between them.
   fixed schema, so deep chain-of-thought buys little for the EVENTS half — it's pure per-event
   classification against a 7-value enum, so thinking is off there (measured: 108s → 18.7s, with
   time-to-first-token collapsing 79,461ms → 2,607ms). The GUIDANCE half is the live tradeoff, and
-  **the only dial that moves total wall-clock** — the two run in parallel, so the total is whichever
-  is slower, and guidance always is. Measured on a 67-event trip:
+  **the only dial that moves total wall-clock** — the two guidance halves (him/her) run in parallel so
+  their contribution is whichever is slower; on a fresh generate the events call now runs BEFORE them
+  and adds to the total (a Refresh skips it), but guidance always dominates. Measured on a 67-event trip:
   | guidance setting | guidance time | total | packing-list output |
   |---|---|---|---|
   | *(no `thinking` param — the sonnet-5 default of adaptive+`high`)* | ~290–324s | ~5.2 min | 16.7–17.6K chars |
@@ -452,13 +454,14 @@ that catches drift between them.
   per-event array (category / `alternate_category` / `continues_previous_event` — the per-event
   `note` field was retired in this split, it was stored but never rendered anywhere and cost about
   half the events stream), and the other emits `person_guidance` for two travelers ("him"/"her",
-  both assumed to attend every event). The guidance call does NOT wait on the events call; instead
-  it's handed a **pre-computed, authoritative TIME-BLOCKS list** as input
-  (`tripsyAttireComputeTimeBlocks`, plain JS run before both calls: consecutive same-day events ≤3h
-  apart, unknown times treated as continuous — the timing half of
-  `tripsyAttireOutfitChangeNeeded`, category-free because the attire tiers don't exist yet when the
-  two calls fire concurrently). It privately judges each event's tier and takes each block's tier as
-  its DRESSIEST event, then counts every quantity per BLOCK. This is what keeps judgment (how many
+  both assumed to attend every event). The guidance call is handed a **finalized, tier-tagged
+  TIME-BLOCKS list + per-tier occasion counts** as input: block TIMING comes from
+  `tripsyAttireComputeTimeBlocks` (plain JS: consecutive same-day events ≤3h apart, unknown times
+  treated as continuous — the timing half of `tripsyAttireOutfitChangeNeeded`), and block TIERS come
+  from the events categorization, which now runs BEFORE guidance on a fresh generate and is reused on
+  a Refresh (`tripsyAttireTieredTimeBlocks` + authoritative `tierCounts`, threaded via the
+  `eventsOnly`/`skipEvents` options of `generateTripsyAttireCategories`). So the guidance call does
+  NOT re-judge tiers — it takes each block's tier as given and counts every quantity per BLOCK. This is what keeps judgment (how many
   ties N formal blocks actually warrant is still the model's call) while removing the guesswork about
   what the blocks ARE — previously it re-derived grouping per event and drifted, e.g. quoting "5-6
   ties" across 11 tie-linked events that mechanically form just 4 blocks. Per event,
@@ -689,10 +692,10 @@ that catches drift between them.
   **Each `packing_list` item
   also carries its own `category`** (the single dress-code tier it's packed for, `''` only for
   genuinely tier-agnostic items) specifically so its `event_ids` can be validated rather than trusted
-  outright: the events call and the guidance call run in parallel and never see each other's output,
-  so their PRIVATE per-event tier judgments can genuinely diverge for a borderline event (e.g. the
-  guidance call privately reading a reception+concert as Formal while the events call calls it
-  Semi-formal) — left unchecked, that produced a real bug where a "Ties (formal)" item ended up
+  outright: the guidance call is now fed the events call's FINALIZED tiers (it no longer runs in parallel
+  re-judging them), so this divergence is largely gone for freshly generated guides. The validation
+  below is kept as a safety net for older guides or any residual mismatch — without it, a borderline
+  event the guidance call mis-linked produced a real bug where a "Ties (formal)" item ended up
   linked to an event the app displays everywhere else as Semi-formal. `generateTripsyAttireGuide`
   fixes this in JS: `days` already carries each event's AUTHORITATIVE `displayCategory` (block-
   dressiest tier, stamped by `computeTripsyAttireBlocks`) by the time the packing list is built, so
