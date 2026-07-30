@@ -1741,8 +1741,10 @@ async function uploadBinaryFileToDrive(file) {
 // blob PATCHes in full on every save and now also has to be downloadable
 // whole by tooling that reads it directly, so keeping raw bytes out of it
 // matters for more than just its own size.
-async function uploadBlobToDrive(blob, fileName, mimeType) {
-  const folderId = await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
+async function uploadBlobToDrive(blob, fileName, mimeType, parentFolderId) {
+  // parentFolderId lets callers target a subfolder (place photos go in "Photos");
+  // default is the flat "Travel Reservation Tracking" folder as before.
+  const folderId = parentFolderId || await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
   const buf = await blob.arrayBuffer();
   // Base64-encode in chunks to avoid a call-stack overflow from
   // String.fromCharCode(...bigArray) on large files.
@@ -1766,6 +1768,80 @@ async function uploadBlobToDrive(blob, fileName, mimeType) {
   });
   const json = await res.json();
   return json.id;
+}
+
+// Find (or create) a folder named `folderName` that lives INSIDE `parentId`, unlike
+// findOrCreateDriveFolder which works at the Drive root. Used for the place-photo
+// "Photos" subfolder under "Travel Reservation Tracking".
+async function findOrCreateSubfolder(folderName, parentId) {
+  const query = encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='${folderName}' and '${parentId}' in parents and trashed=false`);
+  const searchRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`);
+  const searchJson = await searchRes.json();
+  if (searchJson.files && searchJson.files.length) return searchJson.files[0].id;
+  const createRes = await driveApiFetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }),
+  });
+  const createJson = await createRes.json();
+  return createJson.id;
+}
+
+const TRIPSY_PHOTOS_SUBFOLDER_NAME = 'Photos';
+let tripsyPhotosFolderIdCache = null;
+// Memoized id of the "Photos" subfolder (inside "Travel Reservation Tracking")
+// where all tripsy place/transportation photos are stored.
+async function getTripsyPhotosFolderId() {
+  if (tripsyPhotosFolderIdCache) return tripsyPhotosFolderIdCache;
+  const parent = await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
+  tripsyPhotosFolderIdCache = await findOrCreateSubfolder(TRIPSY_PHOTOS_SUBFOLDER_NAME, parent);
+  return tripsyPhotosFolderIdCache;
+}
+
+// Moves a Drive file into `addParentId`, off `removeParentId` (a files.update
+// metadata PATCH -- the app's only file-move). The file id is unchanged, so every
+// driveFileId reference in driveData keeps working.
+async function moveDriveFileToFolder(fileId, addParentId, removeParentId) {
+  const qs = `addParents=${addParentId}${removeParentId ? `&removeParents=${removeParentId}` : ''}&fields=id,parents`;
+  await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?${qs}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+}
+
+// Every tripsy place/transportation photo goes through here so it lands in the
+// "Photos" subfolder with the canonical `tripsy-place-photo-*` name.
+async function uploadTripsyPlacePhotoToDrive(blob, mimeType = 'image/jpeg') {
+  return uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, mimeType, await getTripsyPhotosFolderId());
+}
+
+// One-time (owner) migration: move every existing `tripsy-place-photo-*` file from
+// the flat "Travel Reservation Tracking" folder into the "Photos" subfolder. Lists
+// the folder (so it also catches orphans not in tripsyPlacePhotoCache), moves each
+// match, and only sets the done-flag if nothing failed (a partial run retries next
+// load; already-moved files leave the parent, so a re-list never double-moves them).
+async function migrateTripsyPlacePhotosToSubfolder() {
+  if (driveData.tripsyPhotosFolderMigrated) return;
+  const parent = await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
+  const photos = await getTripsyPhotosFolderId();
+  let pageToken = '', moved = 0, failed = 0, scanned = 0;
+  do {
+    const q = encodeURIComponent(`'${parent}' in parents and trashed=false`);
+    const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name)&pageSize=1000${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`);
+    const json = await res.json();
+    for (const f of (json.files || [])) {
+      scanned++;
+      if (!/^tripsy-place-photo-/.test(f.name || '')) continue;
+      try { await moveDriveFileToFolder(f.id, photos, parent); moved++; }
+      catch (e) { failed++; console.error('[photos migration] move failed', f.id, e); }
+    }
+    pageToken = json.nextPageToken || '';
+  } while (pageToken);
+  console.log(`[photos migration] scanned ${scanned}, moved ${moved}, failed ${failed}`);
+  if (!failed) {
+    await persistTripsyNarrativeCacheWithRetry(() => { driveData.tripsyPhotosFolderMigrated = true; });
+  }
 }
 
 // Hard-deletes a Drive file by id (the real DELETE endpoint, not a
@@ -4166,6 +4242,10 @@ async function runBackgroundSyncs() {
   }
 
   await syncTripsyRelays();
+
+  // One-time: tidy existing place/transportation photos into the "Photos" subfolder.
+  try { await migrateTripsyPlacePhotosToSubfolder(); }
+  catch (e) { console.error('Place-photo folder migration failed (will retry next load):', e); }
 }
 
 function todayLocalDateString() {
@@ -13834,7 +13914,7 @@ async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
     const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
     if (!blob) return null;
     const contentHash = await tripsyHashBlob(blob);
-    const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+    const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
     Store.cacheTripsyPlacePhotoLocal(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [photoName] });
     tripsyPlacePhotoCacheDirty = true;
     return URL.createObjectURL(blob);
@@ -13963,7 +14043,7 @@ async function fetchTripsyTransportationPhoto(company, category) {
     const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
     if (!blob) return null;
     const contentHash = await tripsyHashBlob(blob);
-    const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+    const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
     Store.cacheTripsyPlacePhotoLocal(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [photoName] });
     tripsyPlacePhotoCacheDirty = true;
     return URL.createObjectURL(blob);
@@ -13992,7 +14072,7 @@ async function tripsyTryAnotherTransportationPhoto(company, category) {
     const blob = await tripsyFetchPlacePhotoBlob(apiKey, nextPhotoName);
     if (!blob) return null;
     const contentHash = await tripsyHashBlob(blob);
-    const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+    const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
     await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName: nextPhotoName, contentHash, triedPhotoNames: [...tried, nextPhotoName] });
     return URL.createObjectURL(blob);
   } catch (e) {
@@ -14042,7 +14122,7 @@ async function tripsyManualSearchTransportationPhoto(company, category, query) {
     const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
     if (!blob) return null;
     const contentHash = await tripsyHashBlob(blob);
-    const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+    const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
     await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [...tried, photoName] });
     return URL.createObjectURL(blob);
   } catch (e) {
@@ -14079,7 +14159,7 @@ async function tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHin
       if (!blob) continue;
       const contentHash = await tripsyHashBlob(blob);
       if (usedPhotoHashes.has(contentHash)) continue;
-      const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+      const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
       return { photoDataUrl: URL.createObjectURL(blob), photoName, driveFileId, contentHash };
     }
     return null;
@@ -14250,7 +14330,7 @@ async function tripsyTryAnotherPlacePhoto(name, address, eventTitle, locationHin
     const blob = await tripsyFetchPlacePhotoBlob(apiKey, nextPhotoName);
     if (!blob) return null;
     const contentHash = await tripsyHashBlob(blob);
-    const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+    const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
     await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName: nextPhotoName, contentHash, triedPhotoNames: [...tried, nextPhotoName] });
     return URL.createObjectURL(blob);
   } catch (e) {
@@ -14293,7 +14373,7 @@ async function tripsyManualSearchPlacePhoto(name, address, eventTitle, locationH
     const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
     if (!blob) return null;
     const contentHash = await tripsyHashBlob(blob);
-    const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/jpeg');
+    const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
     await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [...tried, photoName] });
     return URL.createObjectURL(blob);
   } catch (e) {
@@ -21572,7 +21652,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
           swapCardPhoto(card, name, URL.createObjectURL(blob)); // show it now
           const cacheKey = cardCacheKey();
           const contentHash = await tripsyHashBlob(blob);
-          const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, blob.type || 'image/png');
+          const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/png');
           const existing = await Store.getTripsyPlacePhoto(cacheKey);
           const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
             driveFileId, photoName: `user-pasted-${Date.now()}`, contentHash,
@@ -21651,7 +21731,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
           const picked = (thumbs || []).find(t => t.photoName === photoName);
           if (!picked) throw new Error('Picked thumbnail no longer available');
           const contentHash = await tripsyHashBlob(picked.blob);
-          const driveFileId = await uploadBlobToDrive(picked.blob, `tripsy-place-photo-${Date.now()}`, picked.blob.type || 'image/jpeg');
+          const driveFileId = await uploadTripsyPlacePhotoToDrive(picked.blob, picked.blob.type || 'image/jpeg');
           const existing = await Store.getTripsyPlacePhoto(cacheKey);
           const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
             driveFileId, photoName, contentHash,
