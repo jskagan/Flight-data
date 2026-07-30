@@ -16155,7 +16155,7 @@ async function generateTripsyAttireCategories(effectiveTrip, currentEventsForPro
   // authoritative time-blocks each tagged with its final tier; tierCounts = the
   // per-tier occasion counts; skipEvents = don't re-categorize, only regenerate
   // the packing guidance from those finalized counts.
-  const { tieredBlocks = null, tierCounts = null, skipEvents = false } = opts;
+  const { tieredBlocks = null, tierCounts = null, skipEvents = false, eventsOnly = false } = opts;
   const authoritative = !!tieredBlocks;
   const apiKey = await fetchAnthropicApiKeyFromDrive();
   const categoryEnum = ['athletic', 'casual', 'smart_casual', 'semi_formal', 'cocktail', 'formal', 'black_tie'];
@@ -16334,6 +16334,17 @@ ${eventsJson}`;
   // them -- no wasted events call and less reasoning, so this path is faster than
   // the two-call generate below while producing counts that match the owner's
   // adjustments.
+  // Events-only mode: categorize events and return (NO guidance). The first-
+  // generation path uses this so the per-tier time-block counts can be finalized
+  // BEFORE the guidance call, then handed to it authoritatively (skipEvents) --
+  // the same coordinated flow a Refresh uses, so garment quantities always match
+  // the event schedule rather than the guidance call's own private tier guess.
+  if (eventsOnly) {
+    const evStart = performance.now();
+    const eventsResult = await tripsyAttireClaudeCall(apiKey, eventsSchema, eventsPrompt, 'per-event categories', { thinking: false, effort: 'low' });
+    console.log(`[attire timing] events only: ${Math.round(performance.now() - evStart)}ms`);
+    return { events: (eventsResult && eventsResult.events) || [], person_guidance: { him: null, her: null }, laundry_days: [] };
+  }
   if (skipEvents) {
     const gStart = performance.now();
     // Him + her in PARALLEL (runGuidance) -- half the output each, so faster
@@ -21121,11 +21132,16 @@ async function generateTripsyAttireGuide(tripKey) {
     const guidance = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { tieredBlocks, tierCounts, skipEvents: true });
     result = { events: [], person_guidance: guidance.person_guidance, laundry_days: guidance.laundry_days || [] };
   } else {
-    // First generate, or the trip's events actually changed: re-categorize from
-    // scratch (parallel with the guidance call, as before), but still PRESERVE
-    // any manual override the owner had set on an event that still exists.
-    result = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay);
-    const categoryById = new Map(result.events.map(e => [e.id, e]));
+    // First generate, or the trip's events actually changed: categorize events
+    // FIRST (events-only call), apply the fresh categories -- still PRESERVING
+    // any manual override the owner had set on an event that still exists -- then
+    // hand the FINALIZED per-tier time-block counts to the guidance call, exactly
+    // like the Refresh branch above. This keeps the garment list ALWAYS sized off
+    // the event schedule's time-block counts, never the guidance call's own tier
+    // guess (which, when run in parallel, could diverge on borderline events and
+    // leave a tier's count with no matching garments).
+    const eventsResult = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { eventsOnly: true });
+    const categoryById = new Map((eventsResult.events || []).map(e => [e.id, e]));
     for (const day of days) {
       day.events = day.events.map(ev => {
         const match = categoryById.get(ev.id);
@@ -21150,6 +21166,14 @@ async function generateTripsyAttireGuide(tripKey) {
         };
       });
     }
+    // Finalized per-tier time-block counts (incl. overrides) drive the guidance
+    // call authoritatively -- same as the eventsUnchanged branch above.
+    const authCounts = computeTripsyAttireBlocks(days).counts;
+    const tierCounts = {};
+    TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(cat => { const n = authCounts[TRIPSY_ATTIRE_CAMEL_KEY[cat]] || 0; if (n) tierCounts[cat] = n; });
+    const tieredBlocks = tripsyAttireTieredTimeBlocks(days);
+    const guidance = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { tieredBlocks, tierCounts, skipEvents: true });
+    result = { events: eventsResult.events || [], person_guidance: guidance.person_guidance, laundry_days: guidance.laundry_days || [] };
   }
 
   const { blocks, counts } = computeTripsyAttireBlocks(days);
