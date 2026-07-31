@@ -7304,6 +7304,10 @@ let tripsyWardrobePerson = 'him';
 // Wardrobe page "Filter by type" selection -- '' = all types, else a filter-bucket
 // key from tripsyWardrobeFilterBucket (e.g. 'suit:formal', 'trousers'). Session-only.
 let tripsyWardrobeTypeFilter = '';
+// Wardrobe page "Filter by attire category" selection -- '' = all dress codes, else a
+// tier key from TRIPSY_ATTIRE_CATEGORY_ORDER (e.g. 'casual'). Combines with the type
+// filter (a garment must match BOTH active filters). Session-only.
+let tripsyWardrobeTierFilter = '';
 // A His/Hers segmented toggle, reused across every per-person Attire surface.
 // `active` is 'him'|'her'; the picked button carries data-tw-person. Wire with
 // wireTripsyPersonToggle (or a bespoke handler) after inserting into the DOM.
@@ -7481,8 +7485,19 @@ async function renderUtilitiesWardrobe() {
   // Two separate libraries -- His (default) and Hers. A garment with no person
   // field reads as His, so today's wardrobe stays under His untouched.
   const garments = allGarments.filter(g => (g.person || 'him') === person);
-  // Type-filter options = the distinct filter buckets actually present in THIS
-  // library (His/Hers), ordered. Drop a stale selection that this library lacks.
+  // Two independent, COMBINABLE filters, each built from what's actually present in
+  // THIS library (His/Hers) and each dropping a stale selection this library lacks:
+  //   (1) attire category = the dress-code tiers the garments are tagged for;
+  //   (2) type = the garment-type buckets (tripsyWardrobeFilterBucket).
+  // A garment shows only if it matches EVERY active filter.
+  const presentTiers = new Set();
+  garments.forEach(g => (g.tiers || []).forEach(t => presentTiers.add(t)));
+  if (tripsyWardrobeTierFilter && !presentTiers.has(tripsyWardrobeTierFilter)) tripsyWardrobeTierFilter = '';
+  const tierOptions = TRIPSY_ATTIRE_CATEGORY_ORDER.filter(t => presentTiers.has(t));
+  const tierFilterHtml = tierOptions.length > 1 ? `<select class="btn" id="tw-tier-filter" title="Filter by attire category" aria-label="Filter by attire category">
+        <option value="">All dress codes</option>
+        ${tierOptions.map(t => `<option value="${esc(t)}"${t === tripsyWardrobeTierFilter ? ' selected' : ''}>${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[t] || t)}</option>`).join('')}
+      </select>` : '';
   const presentBuckets = new Map();
   garments.forEach(g => { const b = tripsyWardrobeFilterBucket(g); if (!presentBuckets.has(b.key)) presentBuckets.set(b.key, b.label); });
   if (tripsyWardrobeTypeFilter && !presentBuckets.has(tripsyWardrobeTypeFilter)) tripsyWardrobeTypeFilter = '';
@@ -7492,14 +7507,16 @@ async function renderUtilitiesWardrobe() {
         <option value="">All types</option>
         ${filterOptions.map(([key, label]) => `<option value="${esc(key)}"${key === tripsyWardrobeTypeFilter ? ' selected' : ''}>${esc(label)}</option>`).join('')}
       </select>` : '';
-  const shownGarments = tripsyWardrobeTypeFilter ? garments.filter(g => tripsyWardrobeFilterBucket(g).key === tripsyWardrobeTypeFilter) : garments;
+  const matchesFilters = g => (!tripsyWardrobeTierFilter || (g.tiers || []).includes(tripsyWardrobeTierFilter)) && (!tripsyWardrobeTypeFilter || tripsyWardrobeFilterBucket(g).key === tripsyWardrobeTypeFilter);
+  const shownGarments = garments.filter(matchesFilters);
   main.innerHTML = `
     <div class="page-title" style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
       <span>Wardrobe</span>
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
         <span id="tw-person-toggle">${tripsyPersonToggleHtml(person)}</span>
+        ${tierFilterHtml}
         ${filterHtml}
-        ${garments.length ? `<button class="btn" id="tw-bulk-btn">Edit all</button>` : ''}
+        ${garments.length ? `<button class="btn" id="tw-bulk-btn">Edit</button>` : ''}
         <button class="btn" id="tw-import-btn">Import from Drive folder</button>
         <button class="btn primary" id="tw-add-btn">+ Add garment</button>
         <button class="btn" id="tw-close-btn">Close</button>
@@ -7509,13 +7526,12 @@ async function renderUtilitiesWardrobe() {
     <div id="tw-library">${tripsyWardrobeGroupedHtml(shownGarments)}</div>`;
   wireTripsyPersonToggle(document.getElementById('tw-person-toggle'), p => { if (p !== tripsyWardrobePerson) { tripsyWardrobePerson = p; renderUtilitiesWardrobe(); } });
   const libEl = document.getElementById('tw-library');
+  // Re-render just the library grid when either filter changes (both filters apply).
+  const renderLibrary = () => { libEl.innerHTML = tripsyWardrobeGroupedHtml(garments.filter(matchesFilters)); tripsyWardrobeLoadPhotos(libEl); };
+  const tierFilterEl = document.getElementById('tw-tier-filter');
+  if (tierFilterEl) tierFilterEl.addEventListener('change', () => { tripsyWardrobeTierFilter = tierFilterEl.value; renderLibrary(); });
   const filterEl = document.getElementById('tw-type-filter');
-  if (filterEl) filterEl.addEventListener('change', () => {
-    tripsyWardrobeTypeFilter = filterEl.value;
-    const shown = tripsyWardrobeTypeFilter ? garments.filter(g => tripsyWardrobeFilterBucket(g).key === tripsyWardrobeTypeFilter) : garments;
-    libEl.innerHTML = tripsyWardrobeGroupedHtml(shown);
-    tripsyWardrobeLoadPhotos(libEl);
-  });
+  if (filterEl) filterEl.addEventListener('change', () => { tripsyWardrobeTypeFilter = filterEl.value; renderLibrary(); });
   tripsyWardrobeLoadPhotos(libEl);
   document.getElementById('tw-close-btn').addEventListener('click', () => navigate('tripsytrips'));
   document.getElementById('tw-add-btn').addEventListener('click', () => showWardrobeGarmentForm(null, renderUtilitiesWardrobe));
