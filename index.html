@@ -7600,9 +7600,12 @@ function tripsyWardrobePackedCardHtml(g, qty) {
 // A per-trip selection entry is {id, qty}; older data was a bare id string.
 function tripsyNormalizeTripSelection(arr) {
   return (arr || []).map(e => {
-    if (typeof e === 'string') return { id: e, qty: 1, packed: 0 };
+    if (typeof e === 'string') return { id: e, category: '', qty: 1, packed: 0 };
     const qty = Math.max(1, e.qty || 1);
-    return { id: e.id, qty, packed: Math.max(0, Math.min(qty, e.packed || 0)) };
+    // `category` is the dress-code tier this allocation is for. Legacy entries (from
+    // before per-category selection) have '' and are treated as unrecognized by the
+    // per-category screens (the owner re-picks). See tripsyWardrobePackForTrip.
+    return { id: e.id, category: e.category || '', qty, packed: Math.max(0, Math.min(qty, e.packed || 0)) };
   }).filter(e => e.id);
 }
 // Per dress-code tier, the packing-list garment LINES (name + quantity). Dress-code-
@@ -7639,13 +7642,18 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
       lines.push({ name: 'Shoes', typeKey: 'shoes', group: 'footwear', need: 1 });
     }
   });
-  // Deterministic: a cocktail sport coat/blazer can always be swapped for a casual
-  // suit (a suit = jacket + trousers). Surface that on the line's own label -- the fill
-  // logic (tripsyWardrobeAssignFill) then counts a selected suit toward BOTH this
-  // blazer line and the cocktail trousers line. typeKey stays 'blazer' (display-only).
-  (byTier['cocktail'] || []).forEach(ln => {
-    if (ln.typeKey === 'blazer' && !/casual suit/i.test(ln.name || '')) ln.name = `${ln.name} or casual suit`;
-  });
+  // Cocktail: a sport coat/blazer can be swapped for an informal SUIT (jacket +
+  // trousers). When the guide has a blazer line, relabel it "... or informal suit"
+  // and DROP any standalone suit line (e.g. a prompt-generated "casual/informal suit"
+  // alternative) -- a cocktail suit is an ALTERNATIVE, counted by the fill rule toward
+  // the blazer + trousers lines, NOT a separate need. Without dropping it the selected
+  // suit would fill that line instead of blazer+trousers. (A tier whose real need is a
+  // suit -- e.g. Formal -- keeps its suit line and is untouched.)
+  const cocktailLines = byTier['cocktail'];
+  if (cocktailLines && cocktailLines.some(ln => ln.typeKey === 'blazer')) {
+    byTier['cocktail'] = cocktailLines.filter(ln => ln.typeKey !== 'suit');
+    byTier['cocktail'].forEach(ln => { if (ln.typeKey === 'blazer' && !/informal suit/i.test(ln.name || '')) ln.name = `${ln.name} or informal suit`; });
+  }
   return byTier;
 }
 // True when THIS person's Plan Packing List is satisfied across every DRESS-CODE
@@ -7665,7 +7673,7 @@ function tripsyPlanPackingIsComplete(guide, tripKey, person) {
   for (const tier of TRIPSY_ATTIRE_CATEGORY_ORDER) { // dress codes only -- General excluded
     const lines = needLines[tier] || [];
     if (!lines.length) continue;
-    const packedForTier = chosen.map(e => ({ g: garmentById.get(e.id), qty: e.qty }))
+    const packedForTier = chosen.filter(e => e.category === tier).map(e => ({ g: garmentById.get(e.id), qty: e.qty }))
       .filter(x => x.g && (x.g.person || 'him') === person && x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
     const filled = tripsyWardrobeAssignFill(lines, packedForTier);
     lines.forEach((ln, i) => {
@@ -7853,9 +7861,10 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
   const bucketKey = current ? tripsyGarmentTypeBucket(current).key : null;
   const typeLabel = current ? tripsyGarmentTypeBucket(current).label : 'garment';
   const wornElsewhere = new Set((block.garmentIds || []).filter(id => id !== currentGarmentId));
-  // Only offer this person's packed garments as swap candidates.
-  const candidates = tripsyNormalizeTripSelection(selectedRaw)
-    .map(e => byId.get(e.id))
+  // Only offer this person's selected garments as swap candidates (deduped by id --
+  // a garment allocated to several categories is one garment here).
+  const candidates = [...new Set(tripsyNormalizeTripSelection(selectedRaw).map(e => e.id))]
+    .map(id => byId.get(id))
     .filter(g => g && (g.person || 'him') === person && g.id !== currentGarmentId && !wornElsewhere.has(g.id) && (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey));
   return new Promise(resolve => {
     let ov = document.getElementById('tw-swap-overlay');
@@ -7907,11 +7916,22 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   const [garments, selectedRaw, genericRaw, guide] = await Promise.all([
     Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey),
   ]);
-  const chosen = new Map(tripsyNormalizeTripSelection(selectedRaw).map(e => [e.id, e.qty]));
-  // Preserve each entry's packed count (set on the Packing List screen) across edits
-  // here -- persist rewrites the whole array, so without this a re-pick would silently
-  // zero the owner's packing progress.
-  const packedById = new Map(tripsyNormalizeTripSelection(selectedRaw).map(e => [e.id, e.packed]));
+  // Per-CATEGORY selection: a garment is picked FOR a specific dress-code tier, and its
+  // owned quantity is spread across the tiers it's allocated to. Keyed by "id::tier".
+  // Legacy (category-less) picks are ignored -- the owner re-picks under this model.
+  const sel = new Map();          // "id::tier" -> qty allocated to that tier
+  const packedByKey = new Map();  // "id::tier" -> packed (preserved across edits here)
+  for (const e of tripsyNormalizeTripSelection(selectedRaw)) {
+    if (!e.category) continue;
+    const k = `${e.id}::${e.category}`;
+    sel.set(k, e.qty);
+    packedByKey.set(k, e.packed);
+  }
+  const selKey = (id, cat) => `${id}::${cat}`;
+  const parseSelKey = k => { const i = k.indexOf('::'); return { id: k.slice(0, i), category: k.slice(i + 2) }; };
+  // Copies of a garment allocated to OTHER tiers -- available in `cat` = owned qty minus this.
+  const allocElsewhere = (id, cat) => { let s = 0; for (const [k, q] of sel) { const p = parseSelKey(k); if (p.id === id && p.category !== cat) s += q; } return s; };
+  const availableFor = (g, cat) => (g.quantity || 1) - allocElsewhere(g.id, cat);
   let generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-person: His (default) and Hers each draw from that person's packing-list
@@ -7931,7 +7951,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   const isPerson = g => (g.person || 'him') === person;
 
   let view = { mode: 'list' }; // or { mode: 'detail', tier, lineIndex }
-  const persistChosen = () => Store.setTripWardrobe(tripKey, [...chosen].map(([id, qty]) => ({ id, qty, packed: Math.min(qty, packedById.get(id) || 0) })));
+  const persistChosen = () => Store.setTripWardrobe(tripKey, [...sel].map(([k, qty]) => { const { id, category } = parseSelKey(k); return { id, category, qty, packed: Math.min(qty, packedByKey.get(k) || 0) }; }));
   const persistGenerics = () => Store.setTripGenericGarments(tripKey, generics);
 
   // A need line's type bucket, matching tripsyGarmentTypeBucket(g).key for a garment.
@@ -7940,11 +7960,13 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   // Per-line remaining in a tier = need − real-garment fill − no-picture fill.
   const remainingLinesFor = tier => {
     const lines = needLines[tier] || [];
-    const packedForTier = [...chosen].map(([id, qty]) => ({ g: garmentById.get(id), qty })).filter(x => x.g && isPerson(x.g) && x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
+    // Only garments SELECTED FOR this tier fill its lines (per-category selection).
+    const packedForTier = [...sel].map(([k, qty]) => { const { id, category } = parseSelKey(k); return { g: garmentById.get(id), qty, category }; })
+      .filter(x => x.g && x.category === tier && isPerson(x.g) && x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
     const filled = tripsyWardrobeAssignFill(lines, packedForTier);
     return lines.map((ln, i) => ({ ...ln, remaining: Math.max(0, ln.need - (filled[i] || 0) - genericFilledFor(tier, ln)) }));
   };
-  const totalPacked = () => [...chosen].filter(([id]) => { const g = garmentById.get(id); return g && isPerson(g); }).reduce((a, [, qty]) => a + qty, 0) + generics.filter(x => (x.person || 'him') === person).reduce((a, x) => a + x.qty, 0);
+  const totalPacked = () => [...sel].filter(([k]) => { const g = garmentById.get(parseSelKey(k).id); return g && isPerson(g); }).reduce((a, [, qty]) => a + qty, 0) + generics.filter(x => (x.person || 'him') === person).reduce((a, x) => a + x.qty, 0);
 
   const renderList = () => {
     backBtn.style.display = 'none';
@@ -7979,8 +8001,9 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     // Show ALL matching garments (selected ones stay, checkbox checked) so a pick
     // can be toggled off, not just added.
     // The cocktail sport-coat/blazer line also offers casual SUITS (see the
-    // "or casual suit" relabel + suit fill rule): a suit counts as jacket + trousers.
-    const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (g.tiers || []).includes(tier) && (tripsyGarmentTypeBucket(g).key === bucket || (tier === 'cocktail' && bucket === 'blazer' && tripsyGarmentTypeBucket(g).key === 'suit')));
+    // "or informal suit" relabel + suit fill rule): a suit counts as jacket + trousers.
+    // Hide a garment whose owned copies are all allocated to OTHER tiers (availableFor <= 0).
+    const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (g.tiers || []).includes(tier) && (tripsyGarmentTypeBucket(g).key === bucket || (tier === 'cocktail' && bucket === 'blazer' && tripsyGarmentTypeBucket(g).key === 'suit')) && availableFor(g, tier) > 0);
     countEl.innerHTML = `<div style="font-weight:700; font-size:14px;">${esc(tripsyWardrobeTierLabel(tier))} › ${esc(ln.name)}</div><div style="margin-top:2px; color:${ln.remaining ? 'var(--amber)' : 'var(--home-green)'};">${ln.remaining ? `${ln.remaining} needed` : '✓ all set'}</div>`;
     const genQty = genericFilledFor(tier, ln);
     const noPicCard = `<div class="tw-card tw-card-select" data-tw-nopic="1" style="cursor:pointer;">
@@ -7988,7 +8011,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       <div class="tw-info"><div class="tw-name">${esc(tripsyWardrobeTierLabel(tier))} ${esc(ln.name)}</div><div class="tw-meta">Other${genQty ? ` · <span style="color:var(--amber); font-weight:700;">×${genQty} added</span>` : ''}</div></div>
       <div class="tw-actions"><button class="btn">Add</button>${genQty ? `<button class="btn" data-tw-nopic-remove="1">Remove</button>` : ''}</div>
     </div>`;
-    bodyEl.innerHTML = `<div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, selected: chosen.has(g.id) })).join('')}${noPicCard}</div>`;
+    bodyEl.innerHTML = `<div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, selected: sel.has(selKey(g.id, tier)) })).join('')}${noPicCard}</div>`;
     tripsyWardrobeLoadPhotos(bodyEl);
   };
 
@@ -8037,8 +8060,15 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     if (!card) return;
     const g = garmentById.get(card.getAttribute('data-tw-id'));
     if (!g) return;
-    if (chosen.has(g.id)) { chosen.delete(g.id); } // toggle off a selected garment
-    else { let qty = 1; if ((g.quantity || 1) > 1) { const n = await tripsyWardrobeChooseQty(g.quantity, g.name, 'pack'); if (!n) return; qty = n; } chosen.set(g.id, qty); }
+    const key = selKey(g.id, view.tier);
+    if (sel.has(key)) { sel.delete(key); packedByKey.delete(key); } // deselect for THIS tier
+    else {
+      const avail = availableFor(g, view.tier); // owned qty minus copies used in other tiers
+      if (avail <= 0) return;
+      let qty = 1;
+      if (avail > 1) { const n = await tripsyWardrobeChooseQty(avail, g.name, 'pack'); if (!n) return; qty = n; }
+      sel.set(key, qty);
+    }
     persistChosen();
     render(); maybeCongratulate(); // stay on the garment page; the user leaves via Back or an outside click
   };
@@ -8097,7 +8127,10 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   ov.style.display = 'flex';
 
   const [garments, selectedRaw, genericRaw, guide] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey)]);
-  const chosen = new Map(tripsyNormalizeTripSelection(selectedRaw).map(e => [e.id, { qty: e.qty, packed: e.packed }]));
+  // Per-CATEGORY store entries kept intact (for persist + the per-tier "needs" math),
+  // but shown COMBINED per garment (sum qty + packed across the tiers it's allocated
+  // to). Legacy category-less picks are ignored, matching the Plan Packing List.
+  const selEntries = tripsyNormalizeTripSelection(selectedRaw).filter(e => e.category);
   let generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-person Packing Status: His (default) / Hers each show only that person's
@@ -8107,10 +8140,12 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   const isPerson = g => (g.person || 'him') === person;
   let needLines = tripsyWardrobeNeedByTier(guide, person);
   const genericFilledFor = (tier, ln) => generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
-  const persist = () => Store.setTripWardrobe(tripKey, [...chosen].map(([id, v]) => ({ id, qty: v.qty, packed: v.packed })));
+  const aggregate = () => { const m = new Map(); for (const e of selEntries) { const cur = m.get(e.id) || { qty: 0, packed: 0 }; cur.qty += e.qty; cur.packed += Math.min(e.packed, e.qty); m.set(e.id, cur); } return m; };
+  let chosen = aggregate(); // id -> { qty, packed } combined across categories
+  // Distribute n packed copies of a garment across its per-category entries (qty untouched).
+  const setGarmentPacked = (id, n) => { let rem = Math.max(0, n); for (const e of selEntries.filter(x => x.id === id)) { const take = Math.max(0, Math.min(e.qty, rem)); e.packed = take; rem -= take; } chosen = aggregate(); };
+  const persist = () => Store.setTripWardrobe(tripKey, selEntries.map(e => ({ id: e.id, category: e.category, qty: e.qty, packed: Math.min(e.qty, e.packed) })));
   const persistGenerics = () => Store.setTripGenericGarments(tripKey, generics);
-  const entryOf = (kind, key) => kind === 'generic' ? generics[key] : chosen.get(key);
-  const persistKind = kind => { if (kind === 'generic') persistGenerics(); else persist(); };
 
   let packView = 'grid'; // 'grid' (pictures) or 'list' (checklist)
   const listToggleBtn = ov.querySelector('#tw-packlist-listtoggle');
@@ -8120,25 +8155,23 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   // Mark packed from a picture card: qty 1 packs it outright; qty >1 asks how many
   // (1..qty) via the quantity picker. Fully-packed items drop out of the grid.
   const markPacked = async (kind, key) => {
-    const entry = entryOf(kind, key);
-    if (!entry) return;
-    if (entry.qty === 1) { entry.packed = 1; }
-    else {
-      const name = kind === 'generic' ? entry.name : ((garmentById.get(key) || {}).name || 'garment');
-      const n = await tripsyWardrobeChooseQty(entry.qty, name, 'pack');
-      if (!n) return;
-      entry.packed = Math.max(0, Math.min(entry.qty, n));
+    if (kind === 'generic') {
+      const entry = generics[key]; if (!entry) return;
+      if (entry.qty === 1) entry.packed = 1;
+      else { const n = await tripsyWardrobeChooseQty(entry.qty, entry.name, 'pack'); if (!n) return; entry.packed = Math.max(0, Math.min(entry.qty, n)); }
+      persistGenerics(); render(); return;
     }
-    persistKind(kind);
-    render();
+    const agg = chosen.get(key); if (!agg) return; // combined garment; distribute across categories
+    if (agg.qty === 1) setGarmentPacked(key, 1);
+    else { const n = await tripsyWardrobeChooseQty(agg.qty, (garmentById.get(key) || {}).name || 'garment', 'pack'); if (!n) return; setGarmentPacked(key, n); }
+    persist(); render();
   };
   // List-view checkbox: all-packed <-> none (partial states come from the picker above).
   const toggleFull = (kind, key) => {
-    const entry = entryOf(kind, key);
-    if (!entry) return;
-    entry.packed = entry.packed >= entry.qty ? 0 : entry.qty;
-    persistKind(kind);
-    render();
+    if (kind === 'generic') { const entry = generics[key]; if (!entry) return; entry.packed = entry.packed >= entry.qty ? 0 : entry.qty; persistGenerics(); render(); return; }
+    const agg = chosen.get(key); if (!agg) return;
+    setGarmentPacked(key, agg.packed >= agg.qty ? 0 : agg.qty);
+    persist(); render();
   };
 
   const render = () => {
@@ -8190,7 +8223,8 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const stillHtml = [...TRIPSY_ATTIRE_CATEGORY_ORDER.slice().reverse(), TRIPSY_WARDROBE_GENERAL_TIER].map(tier => {
       const lines = needLines[tier] || [];
       if (!lines.length) return '';
-      const packedForTier = chosenEntries.filter(x => x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
+      const packedForTier = selEntries.filter(e => e.category === tier).map(e => ({ g: garmentById.get(e.id), qty: e.qty }))
+        .filter(x => x.g && isPerson(x.g) && x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
       const filled = tripsyWardrobeAssignFill(lines, packedForTier);
       const parts = lines.map((ln, i) => { const r = Math.max(0, ln.need - (filled[i] || 0) - genericFilledFor(tier, ln)); return `<span style="color:${r ? 'var(--amber)' : 'var(--home-green)'};">${esc(ln.name)} ${r || '✓'}</span>`; }).join('<span style="color:var(--muted); margin:0 5px;">·</span>');
       return `<div style="padding:7px 0; border-top:1px solid var(--line);"><div style="font-weight:700; font-size:12.5px;">${esc(tripsyWardrobeTierLabel(tier))}</div><div style="font-size:12.5px; margin-top:2px;">${parts}</div></div>`;
@@ -16311,7 +16345,7 @@ person_guidance is for ONE person only: ${personLabel}, attending every event ab
 - garments: an ARRAY with ONE ENTRY PER TIER that actually has occasions on this trip (set that entry's category to the tier; omit tiers with no occasions entirely -- do not emit empty entries). Each entry lists the ACTUAL GARMENTS TO PACK for that tier, itemized -- NOT a count of outfits, and NOT a description of how things get restyled. Each element of that entry's items[] is one garment line: name (e.g. "suits", "dress shirts", "ties", "cocktail dresses", "tops", "trousers") and quantity (e.g. "2", "5", "3-4"). Say only what is NEEDED. Example entry for a tier with 6 time-blocks: {"category":"formal","reuse_note":"","items":[{"name":"suits","quantity":"2"},{"name":"dress shirts","quantity":"6"},{"name":"ties","quantity":"3"}]} -- note ties is roughly HALF the dress-shirt/block count, per the re-wear rule below, not equal to it. Never write prose like "restyled with different accessories" in a garment name.
 - Anchor garments are counted LOW and re-worn across time-blocks in the tier (see the packing_list rules below for the exact reuse logic -- a suit/dress repeats across blocks; a DRESS specifically is re-worn up to 6 TIMES before washing, restyled each time with different accessories to read as a new outfit, so it's quantified at roughly a SIXTH of that tier's occasion count, rounded up, at least 1; a dress shirt is worn once then washed, so it's quantified one per formal time-block but, being washable, is sized to a single ~10-day laundry cycle on longer trips (a mid-trip wash lets shirts be re-worn), not one per block across the whole trip; a tie is re-worn twice so at FORMAL/BLACK TIE (a tie every block) it's quantified at roughly HALF the block count, and at COCKTAIL (a tie worn to only half the occasions) at roughly a QUARTER of the block count; jewelry/scarves for her restyle repeats the same way ties do).
 - At the COCKTAIL tier specifically, ASSUME a tie is worn to only HALF (50%) of the cocktail occasions -- an open collar reads fine at cocktail, unlike Formal/Black Tie where a tie is worn EVERY time. So the number of cocktail tie-WEARINGS is half that tier's time-block count, which then feeds the tie re-wear rule below -- cocktail ties therefore come to roughly a QUARTER of the cocktail time-block count, rounded up, at least 1 whenever cocktail occasions exist. Still list ties for the tier; the UI labels that line "Optional" on its own.
-- MEN'S COCKTAIL (him): do NOT pack a second dark suit for cocktail. If a Formal/Black-Tie tier exists, its dark suit is REUSED (restyled with a different shirt/tie) to cover the cocktail occasions it can -- call that out in cocktail's reuse_note, and NEVER list a 2nd "dark suit" under cocktail. For any ADDITIONAL cocktail variety, prefer a SPORT COAT / blazer + dress trousers over another suit (a blazer with dress trousers reads cocktail and is far more versatile). Dress trousers are a reusable anchor (re-worn ~10x, so 1-2 pairs cover the whole tier), and AT LEAST ONE of those pairs should DOUBLE as a smart-casual bottom -- count it ONCE, shared across cocktail and smart-casual (note the share in reuse_note), not separately in each tier. WHENEVER you list a sport coat/blazer under his cocktail, you MUST ALSO add a separate cocktail item offering a CASUAL SUIT as an either/or ALTERNATIVE to that blazer -- name it clearly as an alternative (e.g. "Casual suit (alternative to the blazer)"), quantity "1", group dress_wear, category cocktail. This casual suit is a softer, less-formal suit DISTINCT from the reused dark formal suit above (so it is NOT the forbidden "second dark suit"); the traveler packs EITHER the blazer + dress trousers OR the casual suit, their choice. Net: a man's cocktail ADDITIONS beyond the reused formal suit are typically a sport coat + 1-2 dress trousers, WITH a casual suit always offered alongside as the alternative to the blazer -- but never a whole extra DARK suit.
+- MEN'S COCKTAIL (him): do NOT pack a second dark suit for cocktail. If a Formal/Black-Tie tier exists, its dark suit is REUSED (restyled with a different shirt/tie) to cover the cocktail occasions it can -- call that out in cocktail's reuse_note, and NEVER list a 2nd "dark suit" under cocktail. For any ADDITIONAL cocktail variety, prefer a SPORT COAT / blazer + dress trousers over another suit (a blazer with dress trousers reads cocktail and is far more versatile). Dress trousers are a reusable anchor (re-worn ~10x, so 1-2 pairs cover the whole tier), and AT LEAST ONE of those pairs should DOUBLE as a smart-casual bottom -- count it ONCE, shared across cocktail and smart-casual (note the share in reuse_note), not separately in each tier. (Do NOT emit a separate "informal/casual suit" cocktail item -- the app deterministically relabels the cocktail blazer line "... or informal suit" and counts a selected suit toward the blazer + trousers lines itself.) Net: a man's cocktail ADDITIONS beyond the reused formal suit are typically just a sport coat + 1-2 dress trousers, never a whole extra dark suit.
 - reuse_note: when a tier needs NO additional copy of an anchor garment because a DRESSIER tier's one already covers it, do NOT list that garment in items[] -- instead put a short parenthetical-style note here naming what to reuse, e.g. "use one Formal suit" or "use the Black Tie tuxedo shirt", and list only the genuinely ADDITIONAL garments for this tier in items[]. When nothing is being reused from another tier, set reuse_note to an empty string ''.
 - For the 3 "mix and match" tiers (athletic, smart_casual, casual), items[] must give the number of TOPS and BOTTOMS needed, sized with these EXACT re-wear rules rather than a vague "once-a-week rotation": TOPS (t-shirts, casual shirts, blouses, polos) get ONE wearing each before they need a wash -- quantity should cover the wearings in ONE ~10-day laundry cycle (see LAUNDRY below), not the whole trip and not fewer. BOTTOMS (trousers, chinos, jeans, shorts) can each be re-worn up to 10 TIMES before a wash -- quantity = wearings in one ~10-day cycle divided by 10 (rounded up), at least 1: typically just 1-2 pairs TOTAL for the whole trip, far below the tops count (e.g. [{"name":"tops","quantity":"7"},{"name":"trousers/chinos","quantity":"1"}]). Also: smart-casual chinos DOUBLE as casual trousers -- do NOT list a separate casual-tier trouser (note it as covered by the smart-casual chinos via reuse_note) UNLESS the trip genuinely needs casual trousers or jeans (a real casual occasion), in which case add a minimum of 1 dedicated casual pair/jeans -- plus any other distinct garment for that tier.
 - Typical real-world difference between the two: men more often reuse one suit/tux across several occasions in the same tier via a different tie/shirt; women more often want a bit more variety per tier. Reflect that when it's a natural fit, but don't force a difference that doesn't make sense for this specific trip.
@@ -16813,7 +16847,7 @@ function tripsyAttireGarmentIsOptional(category, garmentName) {
 // the alternative on existing guides without a regenerate.
 function tripsyAttireDisplayGarmentName(category, name) {
   const n = String(name || '');
-  if (category === 'cocktail' && tripsyGarmentTypeKey(n) === 'blazer' && !/casual suit/i.test(n)) return `${n} or casual suit`;
+  if (category === 'cocktail' && tripsyGarmentTypeKey(n) === 'blazer' && !/informal suit/i.test(n)) return `${n} or informal suit`;
   return n;
 }
 // Items the owner never wants shown on any packing list or summary. Filtered
@@ -19695,9 +19729,16 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
   ]);
   // The user may have closed/reopened onto another category while this loaded.
   if (!document.body.contains(packEl)) return;
-  const chosen = new Map(tripsyNormalizeTripSelection(selectedRaw).map(e => [e.id, e.qty]));
-  // Preserve packed counts across edits here (see the same guard in tripsyWardrobePackForTrip).
-  const packedById = new Map(tripsyNormalizeTripSelection(selectedRaw).map(e => [e.id, e.packed]));
+  // Per-CATEGORY selection keyed by "id::tier" (see tripsyWardrobePackForTrip). This
+  // embedded picker only edits the drill-down's own `category`, but availability still
+  // accounts for copies allocated to OTHER tiers.
+  const sel = new Map();
+  const packedByKey = new Map();
+  for (const e of tripsyNormalizeTripSelection(selectedRaw)) { if (!e.category) continue; const k = `${e.id}::${e.category}`; sel.set(k, e.qty); packedByKey.set(k, e.packed); }
+  const selKey = (id, cat) => `${id}::${cat}`;
+  const parseSelKey = k => { const i = k.indexOf('::'); return { id: k.slice(0, i), category: k.slice(i + 2) }; };
+  const allocElsewhere = (id, cat) => { let s = 0; for (const [k, q] of sel) { const p = parseSelKey(k); if (p.id === id && p.category !== cat) s += q; } return s; };
+  const availableFor = (g, cat) => (g.quantity || 1) - allocElsewhere(g.id, cat);
   let generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Person-scoped (His default / Hers): this person's need lines for the tier and
@@ -19705,7 +19746,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
   // reopening; events above are shared by both people, so only the pack re-renders.
   const isPerson = g => (g.person || 'him') === person;
   let lines = tripsyWardrobeNeedByTier(guide, person)[category] || [];
-  const persistChosen = () => Store.setTripWardrobe(guide.tripKey, [...chosen].map(([id, qty]) => ({ id, qty, packed: Math.min(qty, packedById.get(id) || 0) })));
+  const persistChosen = () => Store.setTripWardrobe(guide.tripKey, [...sel].map(([k, qty]) => { const { id, category: c } = parseSelKey(k); return { id, category: c, qty, packed: Math.min(qty, packedByKey.get(k) || 0) }; }));
   const persistGenerics = () => Store.setTripGenericGarments(guide.tripKey, generics);
   const genericFilledFor = ln => generics.filter(x => (x.person || 'him') === person && x.category === category && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
   const lineBucketKey = ln => ln.typeKey || `group:${ln.group}`;
@@ -19719,13 +19760,13 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
       renderPack();
     });
     if (!lines.length) { packEl.innerHTML = headerHtml + `<div style="color:var(--muted); font-size:13px;">No specific garments recommended for this dress code${person === 'her' ? ' (Hers)' : ''}.</div>`; wirePersonToggle(); return; }
-    const packedForTier = [...chosen].map(([id, qty]) => ({ g: garmentById.get(id), qty })).filter(x => x.g && isPerson(x.g) && x.g.group !== 'essentials' && (x.g.tiers || []).includes(category));
+    const packedForTier = [...sel].map(([k, qty]) => { const { id, category: c } = parseSelKey(k); return { g: garmentById.get(id), qty, c }; }).filter(x => x.g && x.c === category && isPerson(x.g) && x.g.group !== 'essentials' && (x.g.tiers || []).includes(category));
     const filled = tripsyWardrobeAssignFill(lines, packedForTier);
     const sections = lines.map((ln, i) => {
       const remaining = Math.max(0, ln.need - (filled[i] || 0) - genericFilledFor(ln));
       const bucket = lineBucketKey(ln);
       // All matching garments (selected stay, checkbox checked) so a pick can be toggled off.
-      const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (g.tiers || []).includes(category) && (tripsyGarmentTypeBucket(g).key === bucket || (category === 'cocktail' && bucket === 'blazer' && tripsyGarmentTypeBucket(g).key === 'suit')));
+      const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (g.tiers || []).includes(category) && (tripsyGarmentTypeBucket(g).key === bucket || (category === 'cocktail' && bucket === 'blazer' && tripsyGarmentTypeBucket(g).key === 'suit')) && availableFor(g, category) > 0);
       const noPic = `<div class="tw-card tw-card-select" data-tw-nopic="1" data-line-name="${esc(ln.name)}" data-type-key="${esc(ln.typeKey || '')}" style="cursor:pointer;">
         <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(ln.typeKey, ln.group, ln.name)}</div>
         <div class="tw-info"><div class="tw-name">${esc(ln.name)}</div><div class="tw-meta">Other</div></div>
@@ -19736,7 +19777,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
           <span style="font-weight:700; font-size:13.5px;">${esc(ln.name)}</span>
           <span style="font-weight:700; flex-shrink:0; color:${remaining ? 'var(--amber)' : 'var(--home-green)'};">${remaining ? `${remaining} needed` : '✓ all set'}</span>
         </div>
-        <div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, selected: chosen.has(g.id) })).join('')}${noPic}</div>
+        <div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, selected: sel.has(selKey(g.id, category)) })).join('')}${noPic}</div>
       </div>`;
     }).join('');
     packEl.innerHTML = headerHtml + sections;
@@ -19761,8 +19802,15 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
     if (!card) return;
     const g = garmentById.get(card.getAttribute('data-tw-id'));
     if (!g) return;
-    if (chosen.has(g.id)) { chosen.delete(g.id); } // toggle off a selected garment
-    else { let qty = 1; if ((g.quantity || 1) > 1) { const nn = await tripsyWardrobeChooseQty(g.quantity, g.name, 'pack'); if (!nn) return; qty = nn; } chosen.set(g.id, qty); }
+    const key = selKey(g.id, category);
+    if (sel.has(key)) { sel.delete(key); packedByKey.delete(key); } // deselect for THIS tier
+    else {
+      const av = availableFor(g, category);
+      if (av <= 0) return;
+      let qty = 1;
+      if (av > 1) { const nn = await tripsyWardrobeChooseQty(av, g.name, 'pack'); if (!nn) return; qty = nn; }
+      sel.set(key, qty);
+    }
     persistChosen();
     renderPack();
   };
@@ -20080,7 +20128,10 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
       // existed still has the old single `outfits` string, so fall back to
       // rendering that as one line rather than showing an empty tier.
       const g = tripsyAttireGarmentEntry(pg, category);
-      const items = (g && Array.isArray(g.items)) ? g.items.filter(it => it && it.name && !tripsyAttireIsExcludedPackingItem(it.name)) : [];
+      let items = (g && Array.isArray(g.items)) ? g.items.filter(it => it && it.name && !tripsyAttireIsExcludedPackingItem(it.name)) : [];
+      // Cocktail: the blazer line already reads "... or informal suit", so drop any
+      // separate suit item (e.g. a prompt-generated alternative) to avoid a duplicate.
+      if (category === 'cocktail' && items.some(it => tripsyGarmentTypeKey(it.name) === 'blazer')) items = items.filter(it => tripsyGarmentTypeKey(it.name) !== 'suit');
       const reuseNote = (g && g.reuse_note) ? String(g.reuse_note).trim() : '';
       const legacyOutfits = (!g && pg.outfits) ? pg.outfits[category] : '';
       const detailHtml = (reuseNote || items.length)
@@ -21015,9 +21066,12 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
   const selection = tripsyNormalizeTripSelection(selectedRaw);
   if (!selection.length) throw new Error('Plan your packing list first — no garments are selected for this trip.');
   const garmentById = new Map(garments.map(g => [g.id, g]));
-  // Only THIS person's selected garments feed the composition (the prompt is
-  // already written for one traveler); the other person composes separately.
-  const chosen = selection.map(sel => (garmentById.get(sel.id) ? { g: garmentById.get(sel.id), qty: sel.qty } : null))
+  // Only THIS person's selected garments feed the composition (the prompt is already
+  // written for one traveler). Dedup across categories: a garment allocated to several
+  // tiers is ONE garment for outfit composition (sum its qty across categories).
+  const qtyById = new Map();
+  for (const s of selection) qtyById.set(s.id, (qtyById.get(s.id) || 0) + s.qty);
+  const chosen = [...qtyById].map(([id, qty]) => (garmentById.get(id) ? { g: garmentById.get(id), qty } : null))
     .filter(x => x && (x.g.person || 'him') === person);
   if (!chosen.length) throw new Error(`No ${person === 'her' ? 'Hers' : 'His'} garments are selected for this trip — plan the packing list first.`);
   const blocks = tripsyEnumerateAttireBlocks(guide);
