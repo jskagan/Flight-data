@@ -26625,6 +26625,34 @@ let _tvResizeHandler = null;
 // category, shows the Daily Dress Guide's change-into cues + the laundry banner.
 // Session-scoped so it survives day navigation / re-renders but resets each open.
 let tvAttireMode = false;
+// Which person's composed outfits attire mode shows on an event tap (His/Hers).
+// PERSISTENT per-device preference (localStorage = longest-lived client storage),
+// chosen the first time attire mode is turned on and changeable via a 2s press-and-
+// hold on the 👔 button. null until the user has ever chosen.
+function tripsyGetTvOutfitPerson() { try { const v = localStorage.getItem('tripsyTvOutfitPerson'); return v === 'her' ? 'her' : (v === 'him' ? 'him' : null); } catch (e) { return null; } }
+function tripsySetTvOutfitPerson(p) { try { localStorage.setItem('tripsyTvOutfitPerson', p === 'her' ? 'her' : 'him'); } catch (e) {} }
+// His/Hers picker dialog (reuses the shared confirm overlay node). Resolves
+// 'him'|'her'; dismissing (tap-outside) keeps the current choice. Highlights it.
+function tripsyChooseOutfitPersonDialog(current) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-confirm-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-confirm-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100';
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:420px; text-align:center;">
+        <h2 style="margin:0 0 8px; font-size:19px;">Whose outfits?</h2>
+        <div style="font-size:14.5px; line-height:1.55; margin-bottom:20px; color:var(--text);">Would you like to see His or Hers outfits in attire mode?</div>
+        <div style="display:flex; gap:10px; justify-content:center;">
+          <button class="btn${current === 'him' ? ' primary' : ''}" data-person-pick="him">His</button>
+          <button class="btn${current === 'her' ? ' primary' : ''}" data-person-pick="her">Hers</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; resolve(v); };
+    ov.querySelectorAll('[data-person-pick]').forEach(b => { b.onclick = () => done(b.dataset.personPick); });
+    ov.onclick = e => { if (e.target === ov) done(current || 'him'); };
+  });
+}
 
 // Haptic pulse when the Travel View selected date changes. Uses the Vibration
 // API only (Android/Chrome). iOS Safari has no web haptic API and no reliable
@@ -26934,13 +26962,18 @@ async function renderTravelView(chosenTripKey) {
     }
   } catch (e) { console.error('Travel View: attire guide load failed', e); }
 
-  // Composed outfits (if any): tapping an event whose block has an outfit opens it
-  // (Jon's ask), keyed by the same event ids the attire map uses.
-  // Travel View has no His/Hers UI; it surfaces His outfits (the historical set).
-  const tvOutfitEventIds = new Set();
+  // Composed outfits (if any): in ATTIRE MODE, tapping an event whose time-block has
+  // a composed outfit opens that outfit (event detail stays reachable from the modal).
+  // Travel View has no His/Hers UI, so load BOTH and map each event to whoever has an
+  // outfit for it (His wins if both are composed) -- whichever person the owner made.
+  const tvOutfitEventsByPerson = { him: new Set(), her: new Set() };
   try {
-    const to = await Store.getTripsyTripOutfits(trip.key, 'him');
-    if (to && Array.isArray(to.blocks)) to.blocks.forEach(b => { if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => tvOutfitEventIds.add(id)); });
+    for (const p of ['him', 'her']) {
+      const to = await Store.getTripsyTripOutfits(trip.key, p);
+      if (to && Array.isArray(to.blocks)) to.blocks.forEach(b => {
+        if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => tvOutfitEventsByPerson[p].add(id));
+      });
+    }
   } catch (e) { console.error('Travel View: outfits load failed', e); }
 
   // ---- Day strip (horizontal) ----
@@ -27152,10 +27185,11 @@ async function renderTravelView(chosenTripKey) {
     if (!row) return;
     const evId = row.dataset.tvEv;
     const ev = eventById.get(evId);
-    // If this event's time-block has a composed outfit, show it (event detail stays
-    // reachable via the modal's "View event details" button).
-    if (tvOutfitEventIds.has(evId)) {
-      showTripsyOutfitModal(trip.key, evId, 'him', { onDetails: ev ? () => showTripsyTravelEventDetail(ev) : null });
+    // In attire mode, if this event's time-block has a composed outfit, show it
+    // (event detail stays reachable via the modal's "View event details" button).
+    const tvPerson = tripsyGetTvOutfitPerson() || 'him';
+    if (tvAttireMode && tvOutfitEventsByPerson[tvPerson].has(evId)) {
+      showTripsyOutfitModal(trip.key, evId, tvPerson, { onDetails: ev ? () => showTripsyTravelEventDetail(ev) : null });
       return;
     }
     if (ev) showTripsyTravelEventDetail(ev);
@@ -27175,7 +27209,30 @@ async function renderTravelView(chosenTripKey) {
       attireBtn.classList.toggle('tv-active', on);
       updateSpine();
     };
-    attireBtn.addEventListener('click', () => { tvAttireMode = !tvAttireMode; applyAttireMode(tvAttireMode); });
+    // A normal tap toggles attire mode (and, the FIRST time it's turned on with no
+    // saved His/Hers choice and outfits exist, asks once). A 2s PRESS-AND-HOLD on
+    // the 👔 button re-opens the picker to change which person's outfits it shows.
+    let holdTimer = null, longPressed = false;
+    const startHold = () => {
+      longPressed = false;
+      holdTimer = setTimeout(async () => {
+        longPressed = true; holdTimer = null;
+        const p = await tripsyChooseOutfitPersonDialog(tripsyGetTvOutfitPerson() || 'him');
+        tripsySetTvOutfitPerson(p);
+      }, 2000);
+    };
+    const cancelHold = () => { if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; } };
+    attireBtn.addEventListener('mousedown', startHold);
+    attireBtn.addEventListener('touchstart', startHold, { passive: true });
+    ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach(evName => attireBtn.addEventListener(evName, cancelHold));
+    attireBtn.addEventListener('click', async () => {
+      if (longPressed) { longPressed = false; return; } // this click was the long-press
+      tvAttireMode = !tvAttireMode;
+      applyAttireMode(tvAttireMode);
+      if (tvAttireMode && !tripsyGetTvOutfitPerson() && (tvOutfitEventsByPerson.him.size || tvOutfitEventsByPerson.her.size)) {
+        tripsySetTvOutfitPerson(await tripsyChooseOutfitPersonDialog('him'));
+      }
+    });
     if (tvAttireMode) applyAttireMode(true); // persist across re-renders this session
   }
 
