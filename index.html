@@ -7706,6 +7706,45 @@ function tripsyWardrobeChooseQty(max, garmentName, verb = 'pack') {
     };
   });
 }
+// A styled Yes/No dialog resolving to a boolean. Clicking outside or No -> false.
+// Sits above the other tw-modals (outfit list etc.) via a very high z-index.
+function tripsyConfirmDialog(message, { title = '', yes = 'Yes', no = 'No' } = {}) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-confirm-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-confirm-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100';
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:420px; text-align:center;">
+        ${title ? `<h2 style="margin:0 0 8px; font-size:19px;">${esc(title)}</h2>` : ''}
+        <div style="font-size:14.5px; line-height:1.55; margin-bottom:20px; color:var(--text);">${esc(message)}</div>
+        <div style="display:flex; gap:10px; justify-content:center;">
+          <button class="btn primary" data-confirm-yes>${esc(yes)}</button>
+          <button class="btn" data-confirm-no>${esc(no)}</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; resolve(v); };
+    ov.querySelector('[data-confirm-yes]').onclick = () => done(true);
+    ov.querySelector('[data-confirm-no]').onclick = () => done(false);
+    ov.onclick = e => { if (e.target === ov) done(false); };
+  });
+}
+// Celebration when a person's Plan Packing List is completed: offer to compose
+// outfits, then (after composing) offer to view them in that person's Daily Dress
+// Guide. Owner-only path (composition needs the owner's API key).
+async function tripsyPackingCompleteDialog(tripKey, person) {
+  const wantOutfits = await tripsyConfirmDialog(
+    'You have finished your packing list! Would you like me to create outfits for you?',
+    { title: 'Congratulations! 🎉' });
+  if (!wantOutfits) return;
+  await runTripsyOutfitComposition(tripKey, person);
+  const wantSee = await tripsyConfirmDialog('Would you like to see the outfits?');
+  if (!wantSee) return;
+  const sel = document.getElementById('tw-select-overlay');
+  if (sel) sel.style.display = 'none'; // close the Plan Packing List behind the guide
+  tripsyDressGuidePerson = person;
+  showTripsyDailyDressGuide(tripKey);
+}
 
 // Shows the composed outfit for the time-block an event belongs to (photos + names,
 // the stylist's coordination note, and any gaps). Shared by the Daily Dress Guide's
@@ -7933,6 +7972,14 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   };
 
   const render = () => { if (view.mode === 'detail') renderDetail(); else renderList(); };
+  // Fire the "packing list complete" celebration exactly on the incomplete->complete
+  // transition for the CURRENT person (not on open, not on every pick). Owner only.
+  let planWasComplete = tripsyPlanPackingIsComplete(guide, tripKey, person);
+  const maybeCongratulate = () => {
+    const nowComplete = tripsyPlanPackingIsComplete(guide, tripKey, person);
+    if (isOwner && nowComplete && !planWasComplete) tripsyPackingCompleteDialog(tripKey, person);
+    planWasComplete = nowComplete;
+  };
 
   backBtn.onclick = () => { view = { mode: 'list' }; render(); };
   bodyEl.onclick = async e => {
@@ -7950,7 +7997,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     if (nopicRemove) {
       const ln = (needLines[view.tier] || [])[view.lineIndex];
       if (ln) { generics = generics.filter(x => !(x.category === view.tier && x.name === ln.name && (x.person || 'him') === person)); persistGenerics(); }
-      render(); // stay on the garment page; the user leaves via Back or an outside click
+      render(); maybeCongratulate(); // stay on the garment page; the user leaves via Back or an outside click
       return;
     }
     const nopic = e.target.closest('[data-tw-nopic]');
@@ -7962,7 +8009,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       const existing = generics.find(x => x.category === view.tier && x.name === ln.name && (x.person || 'him') === person);
       if (existing) existing.qty += n; else generics.push({ category: view.tier, typeKey: ln.typeKey || '', name: ln.name, qty: n, packed: 0, person });
       persistGenerics();
-      render(); // stay on the garment page; the user leaves via Back or an outside click
+      render(); maybeCongratulate(); // stay on the garment page; the user leaves via Back or an outside click
       return;
     }
     const card = e.target.closest('.tw-card-select');
@@ -7972,7 +8019,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     if (chosen.has(g.id)) { chosen.delete(g.id); } // toggle off a selected garment
     else { let qty = 1; if ((g.quantity || 1) > 1) { const n = await tripsyWardrobeChooseQty(g.quantity, g.name, 'pack'); if (!n) return; qty = n; } chosen.set(g.id, qty); }
     persistChosen();
-    render(); // stay on the garment page; the user leaves via Back or an outside click
+    render(); maybeCongratulate(); // stay on the garment page; the user leaves via Back or an outside click
   };
   // His/Hers toggle in the header: switch person → recompute this person's need
   // lines + tiers from the same already-loaded data, reset to the list view.
@@ -7988,6 +8035,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       view = { mode: 'list' };
       renderPersonToggle();
       render();
+      planWasComplete = tripsyPlanPackingIsComplete(guide, tripKey, person); // re-baseline for the new person
     });
   };
   renderPersonToggle();
