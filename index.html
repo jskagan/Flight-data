@@ -8272,6 +8272,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   const isPerson = g => (g.person || 'him') === person;
   let needLines = tripsyWardrobeNeedByTier(guide, person);
   const genericFilledFor = (tier, ln) => generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
+  const genericPackedFor = (tier, ln) => generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + Math.min(x.packed, x.qty), 0);
   const aggregate = () => { const m = new Map(); for (const e of selEntries) { const cur = m.get(e.id) || { qty: 0, packed: 0 }; cur.qty += e.qty; cur.packed += Math.min(e.packed, e.qty); m.set(e.id, cur); } return m; };
   let chosen = aggregate(); // id -> { qty, packed } combined across categories
   // Distribute n packed copies of a garment across its per-category entries (qty untouched).
@@ -8289,8 +8290,9 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
 
   let statusView = { mode: 'list' }; // or { mode: 'detail', tier, lineIndex }
   const TIER_ROWS = [...TRIPSY_ATTIRE_CATEGORY_ORDER.slice().reverse(), TRIPSY_WARDROBE_GENERAL_TIER];
-  // Selected wardrobe pieces for a tier as {g, qty} -- same filter the fill math uses.
-  const selectedForTier = tier => selEntries.filter(e => e.category === tier).map(e => ({ g: garmentById.get(e.id), qty: e.qty }))
+  // Selected wardrobe pieces for a tier as {g, qty, packed} -- same filter the fill
+  // math uses; `packed` (this tier's entry) rides along so the Packed column can sum it.
+  const selectedForTier = tier => selEntries.filter(e => e.category === tier).map(e => ({ g: garmentById.get(e.id), qty: e.qty, packed: Math.min(e.packed, e.qty) }))
     .filter(x => x.g && isPerson(x.g) && x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
   // Generics selected for a tier+line, carrying their ORIGINAL array index (for packed toggling).
   const genericsForLine = (tier, ln) => generics.map((x, i) => ({ x, i })).filter(({ x }) => (x.person || 'him') === person && x.category === tier && x.name === ln.name);
@@ -8310,22 +8312,34 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
       ? `<div style="font-size:12px; color:var(--muted); margin-bottom:14px;"><span style="color:${packedTotal >= reqTotal ? 'var(--home-green)' : 'var(--amber)'}; font-weight:700;">${packedTotal}/${reqTotal} packed</span></div>`
       : '';
 
+    // Two right-hand columns, aligned across every section: Selected (how many of
+    // this garment type are picked in the pack plan) and Packed (how many of those
+    // have been marked packed on the detail pages). Padding 13px = the rows' 12px
+    // padding + 1px border, so the labels sit exactly over the numbers.
+    const colHeader = `<div style="display:flex; align-items:center; gap:10px; padding:2px 13px 5px; font-size:10.5px; letter-spacing:0.04em; text-transform:uppercase; color:var(--muted);">
+        <span style="flex:1; min-width:0;"></span>
+        <span style="width:64px; text-align:right;">Selected</span>
+        <span style="width:52px; text-align:right;">Packed</span>
+      </div>`;
     const sections = TIER_ROWS.map(tier => {
       const lines = needLines[tier] || [];
       if (!lines.length) return '';
-      const { fill } = tripsyWardrobeAssignGarments(lines, selectedForTier(tier));
+      const { fill, byLine } = tripsyWardrobeAssignGarments(lines, selectedForTier(tier));
       const rows = lines.map((ln, i) => {
         const selected = (fill[i] || 0) + genericFilledFor(tier, ln);
-        const met = selected >= ln.need;
-        return `<button type="button" data-tw-status-line="${esc(tier)}::${i}" style="display:flex; justify-content:space-between; align-items:center; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:5px 0; cursor:pointer; color:var(--text); font-size:14px;">
-            <span>${esc(tripsyStripCategoryParen(ln.name))}</span>
-            <span style="font-weight:700; flex-shrink:0; color:${met ? 'var(--home-green)' : 'var(--amber)'};">${met ? '✓' : `${selected}/${ln.need}`}</span>
+        const packed = (byLine[i] || []).reduce((a, it) => a + Math.min(it.packed || 0, it.qty), 0) + genericPackedFor(tier, ln);
+        const selColor = selected >= ln.need ? 'var(--home-green)' : 'var(--amber)';
+        const packedColor = (selected > 0 && packed >= selected) ? 'var(--home-green)' : 'var(--muted)';
+        return `<button type="button" data-tw-status-line="${esc(tier)}::${i}" style="display:flex; align-items:center; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:5px 0; cursor:pointer; color:var(--text); font-size:14px;">
+            <span style="flex:1; min-width:0;">${esc(tripsyStripCategoryParen(ln.name))}</span>
+            <span style="width:64px; text-align:right; font-weight:700; color:${selColor};">${selected}</span>
+            <span style="width:52px; text-align:right; font-weight:700; color:${packedColor};">${packed}</span>
           </button>`;
       }).join('');
       return `<div style="margin-bottom:18px;"><div class="tw-group-title" style="margin-bottom:6px;">${esc(tripsyWardrobeTierLabel(tier))}</div>${rows}</div>`;
     }).join('');
 
-    bodyEl.innerHTML = summary + (sections || `<div class="empty-state" style="margin-top:12px;">No attire guide yet — generate one from the trip's 👔 menu.</div>`);
+    bodyEl.innerHTML = summary + (sections ? colHeader + sections : `<div class="empty-state" style="margin-top:12px;">No attire guide yet — generate one from the trip's 👔 menu.</div>`);
   };
 
   const renderDetail = () => {
