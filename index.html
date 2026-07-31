@@ -7639,6 +7639,13 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
       lines.push({ name: 'Shoes', typeKey: 'shoes', group: 'footwear', need: 1 });
     }
   });
+  // Deterministic: a cocktail sport coat/blazer can always be swapped for a casual
+  // suit (a suit = jacket + trousers). Surface that on the line's own label -- the fill
+  // logic (tripsyWardrobeAssignFill) then counts a selected suit toward BOTH this
+  // blazer line and the cocktail trousers line. typeKey stays 'blazer' (display-only).
+  (byTier['cocktail'] || []).forEach(ln => {
+    if (ln.typeKey === 'blazer' && !/casual suit/i.test(ln.name || '')) ln.name = `${ln.name} or casual suit`;
+  });
   return byTier;
 }
 // True when THIS person's Plan Packing List is satisfied across every DRESS-CODE
@@ -7679,6 +7686,18 @@ function tripsyWardrobeAssignFill(lines, packed) {
   const fill = lines.map(() => 0);
   for (const { g, qty } of packed) {
     const gType = tripsyGarmentTypeKey(g.name);
+    // A SUIT is a jacket + trousers. If the tier has its own "suit" line (e.g. Formal)
+    // it fills that directly; otherwise (e.g. Cocktail, which asks for a sport coat/
+    // blazer + dress trousers) one suit counts toward BOTH the blazer line and the
+    // trousers line, since a suit covers both.
+    if (gType === 'suit' && !lines.some(ln => ln.typeKey === 'suit')) {
+      const bi = lines.findIndex(ln => ln.typeKey === 'blazer');
+      const ti = lines.findIndex(ln => ln.typeKey === 'trousers');
+      if (bi >= 0) fill[bi] += qty;
+      if (ti >= 0) fill[ti] += qty;
+      if (bi < 0 && ti < 0) { const gi = lines.findIndex(ln => !ln.typeKey && ln.group === 'dress_wear'); if (gi >= 0) fill[gi] += qty; }
+      continue;
+    }
     const gGroup = g.group || tripsyAttirePackingGroupOf(g);
     let idx = gType ? lines.findIndex(ln => ln.typeKey === gType) : -1;
     if (idx < 0) idx = lines.findIndex(ln => !ln.typeKey && ln.group === gGroup);
@@ -7959,7 +7978,9 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const bucket = lineBucketKey(ln);
     // Show ALL matching garments (selected ones stay, checkbox checked) so a pick
     // can be toggled off, not just added.
-    const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (g.tiers || []).includes(tier) && tripsyGarmentTypeBucket(g).key === bucket);
+    // The cocktail sport-coat/blazer line also offers casual SUITS (see the
+    // "or casual suit" relabel + suit fill rule): a suit counts as jacket + trousers.
+    const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (g.tiers || []).includes(tier) && (tripsyGarmentTypeBucket(g).key === bucket || (tier === 'cocktail' && bucket === 'blazer' && tripsyGarmentTypeBucket(g).key === 'suit')));
     countEl.innerHTML = `<div style="font-weight:700; font-size:14px;">${esc(tripsyWardrobeTierLabel(tier))} › ${esc(ln.name)}</div><div style="margin-top:2px; color:${ln.remaining ? 'var(--amber)' : 'var(--home-green)'};">${ln.remaining ? `${ln.remaining} needed` : '✓ all set'}</div>`;
     const genQty = genericFilledFor(tier, ln);
     const noPicCard = `<div class="tw-card tw-card-select" data-tw-nopic="1" style="cursor:pointer;">
@@ -19696,7 +19717,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
       const remaining = Math.max(0, ln.need - (filled[i] || 0) - genericFilledFor(ln));
       const bucket = lineBucketKey(ln);
       // All matching garments (selected stay, checkbox checked) so a pick can be toggled off.
-      const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (g.tiers || []).includes(category) && tripsyGarmentTypeBucket(g).key === bucket);
+      const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (g.tiers || []).includes(category) && (tripsyGarmentTypeBucket(g).key === bucket || (category === 'cocktail' && bucket === 'blazer' && tripsyGarmentTypeBucket(g).key === 'suit')));
       const noPic = `<div class="tw-card tw-card-select" data-tw-nopic="1" data-line-name="${esc(ln.name)}" data-type-key="${esc(ln.typeKey || '')}" style="cursor:pointer;">
         <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(ln.typeKey, ln.group, ln.name)}</div>
         <div class="tw-info"><div class="tw-name">${esc(ln.name)}</div><div class="tw-meta">Other</div></div>
