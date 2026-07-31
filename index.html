@@ -3294,18 +3294,21 @@ const Store = {
   // OPTIONAL dress-code need lines the owner has explicitly marked "Done" (skipped) on
   // the Plan Packing List -- keyed "person::tier::lineName". A done optional line counts
   // as satisfied (0 remaining) for the completeness / celebration checks.
-  async getTripAttireDone(tripKey) {
-    return [...((driveData.tripsyTripAttireDone || {})[tripKey] || [])];
+  // Per-line SKIP counts (see tripsyNormalizeAttireSkips). The driveData key is still
+  // `tripsyTripAttireDone` so existing data keeps working -- its value used to be a flat
+  // array of "this optional line is done" keys, which normalises to a full-line skip.
+  async getTripAttireSkips(tripKey) {
+    return tripsyNormalizeAttireSkips((driveData.tripsyTripAttireDone || {})[tripKey]);
   },
-  async setTripAttireDone(tripKey, keys) {
+  async setTripAttireSkips(tripKey, skips) {
     try {
-      const apply = () => { if (!driveData.tripsyTripAttireDone) driveData.tripsyTripAttireDone = {}; driveData.tripsyTripAttireDone[tripKey] = [...keys]; };
+      const apply = () => { if (!driveData.tripsyTripAttireDone) driveData.tripsyTripAttireDone = {}; driveData.tripsyTripAttireDone[tripKey] = { ...skips }; };
       apply();
       for (let attempt = 0; ; attempt++) {
         try { await persistDriveData({ silentConflict: true }); return true; }
         catch (e) { if (e && e.conflict && attempt < 2) { apply(); continue; } throw e; }
       }
-    } catch (e) { console.error('Store.setTripAttireDone failed:', e); return false; }
+    } catch (e) { console.error('Store.setTripAttireSkips failed:', e); return false; }
   },
   // "No Picture" packing additions per trip -- garments the owner is bringing but
   // hasn't photographed, so they can't be real wardrobe entries. Each is tied to
@@ -7715,6 +7718,31 @@ function tripsyWardrobeTierLabel(tier) {
 function tripsyStripCategoryParen(name) {
   return String(name || '').replace(/\s*\((athletic|casual|smart[\s-]?casual|semi[\s-]?formal|cocktail|formal|black[\s-]?tie)\)\s*$/i, '').trim();
 }
+// Per-line SKIP counts: how many of a need line's suggested items the owner has decided
+// NOT to pack, keyed "person::tier::lineName". A skip reduces that line's need rather
+// than marking the whole line satisfied, so "5 dress shirts" can become "3 needed".
+// LEGACY SHAPE: this used to be a flat ARRAY of keys meaning "this optional line is
+// done" (the old Done-when-unmet button, which only existed on cocktail tie lines).
+// Those normalise to -1, read back by tripsyAttireSkippedFor as "skip whatever this
+// line still needs" -- i.e. exactly what Done used to mean. -1 is never written fresh.
+function tripsyNormalizeAttireSkips(raw) {
+  const out = {};
+  if (Array.isArray(raw)) { for (const k of raw) if (k) out[String(k)] = -1; return out; }
+  if (raw && typeof raw === 'object') {
+    for (const [k, v] of Object.entries(raw)) {
+      const n = Math.floor(Number(v));
+      if (k && Number.isFinite(n) && n !== 0) out[k] = n < 0 ? -1 : n;
+    }
+  }
+  return out;
+}
+const tripsyAttireSkipKey = (person, tier, lineName) => `${person}::${tier}::${lineName}`;
+// Never more than the line actually needs, so a stale skip can't drive a need negative.
+function tripsyAttireSkippedFor(skips, person, tier, ln) {
+  const n = (skips || {})[tripsyAttireSkipKey(person, tier, ln.name)];
+  if (n == null) return 0;
+  return n < 0 ? (ln.need || 0) : Math.min(n, ln.need || 0);
+}
 function tripsyWardrobeNeedByTier(guide, person = 'him') {
   const byTier = {};
   TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(tier => { byTier[tier] = []; });
@@ -7785,8 +7813,8 @@ function tripsyPlanPackingIsComplete(guide, tripKey, person) {
   const garmentById = new Map((driveData.tripsyWardrobe || []).map(g => [g.id, g]));
   const chosen = tripsyWardrobeResolveSelectionLines(tripsyNormalizeTripSelection((driveData.tripsyTripWardrobe || {})[tripKey] || []), guide, garmentById);
   const generics = (driveData.tripsyTripGenericGarments || {})[tripKey] || [];
-  // OPTIONAL lines the owner marked "Done" (skipped) count as satisfied.
-  const doneSet = new Set((driveData.tripsyTripAttireDone || {})[tripKey] || []);
+  // Items the owner chose to skip reduce that line's need.
+  const skips = tripsyNormalizeAttireSkips((driveData.tripsyTripAttireDone || {})[tripKey]);
   let totalNeed = 0, remaining = 0;
   for (const tier of TRIPSY_ATTIRE_CATEGORY_ORDER) { // dress codes only -- General excluded
     const lines = needLines[tier] || [];
@@ -7796,8 +7824,7 @@ function tripsyPlanPackingIsComplete(guide, tripKey, person) {
     const filled = tripsyWardrobeAssignFill(lines, packedForTier);
     lines.forEach((ln, i) => {
       const gen = generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
-      let rem = Math.max(0, ln.need - (filled[i] || 0) - gen);
-      if (rem > 0 && tripsyAttireGarmentIsOptional(tier, ln.name) && doneSet.has(`${person}::${tier}::${ln.name}`)) rem = 0;
+      const rem = Math.max(0, ln.need - tripsyAttireSkippedFor(skips, person, tier, ln) - (filled[i] || 0) - gen);
       totalNeed += ln.need;
       remaining += rem;
     });
@@ -7921,7 +7948,7 @@ function tripsyWardrobeChooseQty(max, garmentName, verb = 'pack', needed = null)
     ov.innerHTML = `
       <div class="tw-modal-paper" style="max-width:380px; text-align:center;">
         <h2 style="margin:0 0 6px; font-size:17px;">How many to ${esc(verb)}?</h2>
-        <div style="font-size:13px; color:var(--muted); margin-bottom:14px;">${esc(garmentName || '')} — ${max} ${verb === 'unpack' ? 'packed' : 'available'}${neededTxt}</div>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:14px;">${esc(garmentName || '')} — ${max} ${verb === 'unpack' ? 'packed' : (verb === 'skip' ? 'still needed' : 'available')}${neededTxt}</div>
         <div style="display:flex; flex-wrap:wrap; gap:8px; justify-content:center;">${Array.from({ length: max }, (_, i) => `<button class="btn" data-qty="${i + 1}" style="min-width:44px;">${i + 1}</button>`).join('')}</div>
         <div style="margin-top:14px;"><button class="btn" data-qty="0">Cancel</button></div>
       </div>`;
@@ -8143,13 +8170,13 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   ov.onclick = e => { if (e.target === ov) { ov.style.display = 'none'; if (onClose) onClose(); } };
   ov.style.display = 'flex';
 
-  const [garments, selectedRaw, genericRaw, guide, doneRaw] = await Promise.all([
-    Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey), Store.getTripAttireDone(tripKey),
+  const [garments, selectedRaw, genericRaw, guide, skipsRaw] = await Promise.all([
+    Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey), Store.getTripAttireSkips(tripKey),
   ]);
-  // OPTIONAL need lines the owner marked "Done" (skipped) -- treated as satisfied.
-  const doneSet = new Set(doneRaw);
-  const doneKey = (tier, ln) => `${person}::${tier}::${ln.name}`;
-  const persistDone = () => Store.setTripAttireDone(tripKey, [...doneSet]);
+  // Items the owner chose to SKIP, reducing that line's need (see the Skip card below).
+  let skips = { ...skipsRaw };
+  const skippedFor = (tier, ln) => tripsyAttireSkippedFor(skips, person, tier, ln);
+  const persistSkips = () => Store.setTripAttireSkips(tripKey, skips);
   let generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-LINE selection: a garment is picked FOR one specific need line within one
@@ -8206,9 +8233,10 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       .filter(x => x.g && x.category === tier && isPerson(x.g) && x.g.group !== 'essentials' && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (x.g.tiers || []).includes(tier)));
     const filled = tripsyWardrobeAssignFill(lines, packedForTier);
     return lines.map((ln, i) => {
-      let remaining = Math.max(0, ln.need - (filled[i] || 0) - genericFilledFor(tier, ln));
-      if (remaining > 0 && tripsyAttireGarmentIsOptional(tier, ln.name) && doneSet.has(doneKey(tier, ln))) remaining = 0;
-      return { ...ln, remaining };
+      // Skipped items come off the need before anything else is counted against it.
+      const skipped = skippedFor(tier, ln);
+      const remaining = Math.max(0, ln.need - skipped - (filled[i] || 0) - genericFilledFor(tier, ln));
+      return { ...ln, remaining, skipped };
     });
   };
   const totalPacked = () => [...sel].filter(([k]) => { const g = garmentById.get(parseSelKey(k).id); return g && isPerson(g); }).reduce((a, [, qty]) => a + qty, 0) + generics.filter(x => (x.person || 'him') === person).reduce((a, x) => a + x.qty, 0);
@@ -8254,22 +8282,30 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     // tags, never "general", so don't require a tier match there -- the type/group match
     // (tripsyWardrobeGarmentFillsLine) still constrains what's offered.
     const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (g.tiers || []).includes(tier)) && tripsyWardrobeGarmentFillsLine(g, ln, lines) && availableFor(g, tier, ln.name) > 0);
-    // Once the line's need is met, a green "Done" returns to the Plan Packing List.
-    // An OPTIONAL line (e.g. a cocktail tie) also gets "Done" even when unmet -- tapping it
-    // marks the line satisfied so it no longer blocks completion.
+    // "Done" appears only once the line's need is actually MET -- it just returns to the
+    // Plan Packing List. Trimming an unmet line is the Skip card's job below, not Done's.
     const met = ln.remaining <= 0;
-    const isOptional = tripsyAttireGarmentIsOptional(tier, ln.name);
-    const showDone = met || isOptional;
-    const status = met ? '✓ all set' : (isOptional ? `${ln.remaining} needed · optional` : `${ln.remaining} needed`);
-    countEl.innerHTML = `<div style="font-weight:700; font-size:14px;">${esc(tripsyWardrobeTierLabel(tier))} › ${esc(tripsyStripCategoryParen(ln.name))}</div><div style="margin-top:2px; color:${met ? 'var(--home-green)' : 'var(--amber)'};">${status}</div>${showDone ? `<button type="button" data-tw-line-done style="margin-top:8px; display:block; width:100%; background:var(--home-green); color:#04210F; border:none; border-radius:8px; padding:10px 18px; font-weight:700; font-size:13px; cursor:pointer;">Done</button>` : ''}`;
-    countEl.onclick = showDone ? (e => { if (e.target.closest('[data-tw-line-done]')) { if (!met && isOptional) { doneSet.add(doneKey(tier, ln)); persistDone(); } view = { mode: 'list' }; render(); maybeCongratulate(); } }) : null;
+    const skipped = ln.skipped || 0;
+    const status = met ? '✓ all set' : `${ln.remaining} needed`;
+    const skipNote = skipped ? ` · <span style="color:var(--muted);">${skipped} skipped</span>` : '';
+    countEl.innerHTML = `<div style="font-weight:700; font-size:14px;">${esc(tripsyWardrobeTierLabel(tier))} › ${esc(tripsyStripCategoryParen(ln.name))}</div><div style="margin-top:2px; color:${met ? 'var(--home-green)' : 'var(--amber)'};">${status}${skipNote}</div>${met ? `<button type="button" data-tw-line-done style="margin-top:8px; display:block; width:100%; background:var(--home-green); color:#04210F; border:none; border-radius:8px; padding:10px 18px; font-weight:700; font-size:13px; cursor:pointer;">Done</button>` : ''}`;
+    countEl.onclick = met ? (e => { if (e.target.closest('[data-tw-line-done]')) { view = { mode: 'list' }; render(); maybeCongratulate(); } }) : null;
     const genQty = genericFilledFor(tier, ln);
     const noPicCard = `<div class="tw-card tw-card-select" data-tw-nopic="1" style="cursor:pointer;">
       <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(ln.typeKey, ln.group, ln.name)}</div>
       <div class="tw-info"><div class="tw-name">${esc(tripsyWardrobeTierLabel(tier))} ${esc(tripsyStripCategoryParen(ln.name))}</div><div class="tw-meta">Other${genQty ? ` · <span style="color:var(--amber); font-weight:700;">×${genQty} added</span>` : ''}</div></div>
       <div class="tw-actions"><button class="btn">Add</button>${genQty ? `<button class="btn" data-tw-nopic-remove="1">Remove</button>` : ''}</div>
     </div>`;
-    bodyEl.innerHTML = `<div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, selected: sel.has(selKey(g.id, tier, ln.name)) })).join('')}${noPicCard}</div>`;
+    // Skip: "I'm not packing this many." Rendered as a card in the same grid as the
+    // garments so it reads as one more choice for the line, and shown only while the
+    // line still wants something (nothing to trim once it's met). Skipping reduces the
+    // line's NEED; Unskip puts the items back.
+    const skipCard = (!met || skipped) ? `<div class="tw-card tw-card-select" data-tw-skip="1" style="cursor:pointer;">
+      <div class="tw-photo tw-photo-glyph">⤫</div>
+      <div class="tw-info"><div class="tw-name">Skip</div><div class="tw-meta">${skipped ? `<span style="color:var(--amber); font-weight:700;">×${skipped} skipped</span>` : 'Not packing these'}</div></div>
+      <div class="tw-actions">${met ? '' : `<button class="btn">Skip</button>`}${skipped ? `<button class="btn" data-tw-skip-undo="1">Unskip</button>` : ''}</div>
+    </div>` : '';
+    bodyEl.innerHTML = `<div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, selected: sel.has(selKey(g.id, tier, ln.name)) })).join('')}${noPicCard}${skipCard}</div>`;
     tripsyWardrobeLoadPhotos(bodyEl);
   };
 
@@ -8295,6 +8331,30 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     // Detail view: "No Picture" remove (once at least one has been added),
     // add, or assign a pictured garment. Remove is checked first since its
     // button sits inside the [data-tw-nopic] card.
+    // Skip / Unskip. Checked before the generic card handlers below for the same reason
+    // they order themselves that way: Unskip's button sits inside the [data-tw-skip] card.
+    const skipUndo = e.target.closest('[data-tw-skip-undo]');
+    if (skipUndo) {
+      const ln = (remainingLinesFor(view.tier) || [])[view.lineIndex];
+      if (ln) { delete skips[tripsyAttireSkipKey(person, view.tier, ln.name)]; persistSkips(); }
+      render(); maybeCongratulate();
+      return;
+    }
+    const skipCardEl = e.target.closest('[data-tw-skip]');
+    if (skipCardEl) {
+      const ln = (remainingLinesFor(view.tier) || [])[view.lineIndex];
+      if (!ln || ln.remaining <= 0) return;
+      // More than one still wanted -> ask HOW MANY to skip; exactly one -> just skip it.
+      let n = 1;
+      if (ln.remaining > 1) { const chosen = await tripsyWardrobeChooseQty(ln.remaining, tripsyStripCategoryParen(ln.name), 'skip'); if (!chosen) return; n = chosen; }
+      const key = tripsyAttireSkipKey(person, view.tier, ln.name);
+      // Resolve a legacy -1 ("whole line") to a real number before adding to it.
+      const current = tripsyAttireSkippedFor(skips, person, view.tier, ln);
+      skips[key] = Math.min(ln.need, current + n);
+      persistSkips();
+      render(); maybeCongratulate();
+      return;
+    }
     const nopicRemove = e.target.closest('[data-tw-nopic-remove]');
     if (nopicRemove) {
       const ln = (needLines[view.tier] || [])[view.lineIndex];
@@ -8387,7 +8447,12 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   bodyEl.innerHTML = `<div style="padding:24px 0; color:var(--muted);">Loading…</div>`;
   ov.style.display = 'flex';
 
-  const [garments, selectedRaw, genericRaw, guide] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey)]);
+  const [garments, selectedRaw, genericRaw, guide, skips] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey), Store.getTripAttireSkips(tripKey)]);
+  // Items skipped on the Plan Packing List reduce the need HERE TOO. Without this the
+  // two pages disagreed outright -- the Plan showed a trimmed cocktail tie line as
+  // complete while this one still read 1/2.
+  // `person` flips with the His/Hers toggle, so resolve the key at render time.
+  const effectiveNeed = (tier, ln) => Math.max(0, ln.need - tripsyAttireSkippedFor(skips, person, tier, ln));
   // Per-CATEGORY store entries kept intact (for persist + the per-tier "needs" math),
   // but shown COMBINED per garment (sum qty + packed across the tiers it's allocated
   // to). Legacy category-less picks are ignored, matching the Plan Packing List.
@@ -8483,7 +8548,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
       const rows = lines.map((ln, i) => {
         const selected = (fill[i] || 0) + genericFilledFor(tier, ln);
         const packed = (byLine[i] || []).reduce((a, it) => a + Math.min(it.packed || 0, it.qty), 0) + genericPackedFor(tier, ln);
-        const selColor = selected >= ln.need ? 'var(--home-green)' : 'var(--amber)';
+        const selColor = selected >= effectiveNeed(tier, ln) ? 'var(--home-green)' : 'var(--amber)';
         const packedColor = (selected > 0 && packed >= selected) ? 'var(--home-green)' : 'var(--muted)';
         return `<button type="button" data-tw-status-line="${esc(tier)}::${i}" style="display:flex; align-items:center; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:5px 0; cursor:pointer; color:var(--text); font-size:14px;">
             <span style="flex:1; min-width:0;">${esc(tripsyStripCategoryParen(ln.name))}</span>
@@ -8506,7 +8571,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const garmentItems = byLine[lineIndex] || [];       // {g, qty}
     const genItems = genericsForLine(tier, ln);          // {x, i}
     const selected = garmentItems.reduce((a, it) => a + it.qty, 0) + genItems.reduce((a, { x }) => a + x.qty, 0);
-    const met = selected >= ln.need;
+    const met = selected >= effectiveNeed(tier, ln);
 
     const cardPackedBits = (packed, qty) => {
       const full = qty > 0 && packed >= qty;
