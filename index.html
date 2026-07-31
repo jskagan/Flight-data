@@ -7851,6 +7851,33 @@ function tripsyWardrobeChooseQty(max, garmentName, verb = 'pack', needed = null)
     };
   });
 }
+// "How many packed?" chooser for a multi-copy garment (one photo standing for N
+// copies) -- a DROPDOWN of 0..total, pre-set to the current packed count. Resolves
+// to the chosen count, or null on cancel. Used by the Packing Status detail page.
+function tripsyWardrobeChoosePackedCount(garmentName, total, current = 0) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tw-packed-qty-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-packed-qty-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    const cur = Math.max(0, Math.min(total, current));
+    const opts = Array.from({ length: total + 1 }, (_, i) => `<option value="${i}"${i === cur ? ' selected' : ''}>${i}</option>`).join('');
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:360px; text-align:center;">
+        <h2 style="margin:0 0 6px; font-size:17px;">How many packed?</h2>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:14px;">${esc(garmentName || 'garment')} — ${total} selected</div>
+        <select id="tw-packed-qty-select" class="btn" style="font-size:15px; padding:8px 14px; min-width:90px; text-align:center;">${opts}</select>
+        <div style="margin-top:16px; display:flex; gap:10px; justify-content:center;">
+          <button class="btn" data-packed-cancel>Cancel</button>
+          <button class="btn primary" data-packed-ok>OK</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const close = val => { ov.style.display = 'none'; ov.onclick = null; resolve(val); };
+    ov.onclick = e => {
+      if (e.target.closest('[data-packed-ok]')) { const n = parseInt(ov.querySelector('#tw-packed-qty-select').value, 10); close(Number.isFinite(n) ? n : null); return; }
+      if (e.target.closest('[data-packed-cancel]') || e.target === ov) close(null);
+    };
+  });
+}
 // A styled Yes/No dialog resolving to a boolean. Clicking outside or No -> false.
 // Sits above the other tw-modals (outfit list etc.) via a very high z-index.
 function tripsyConfirmDialog(message, { title = '', yes = 'Yes', no = 'No' } = {}) {
@@ -8275,8 +8302,6 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   const genericPackedFor = (tier, ln) => generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + Math.min(x.packed, x.qty), 0);
   const aggregate = () => { const m = new Map(); for (const e of selEntries) { const cur = m.get(e.id) || { qty: 0, packed: 0 }; cur.qty += e.qty; cur.packed += Math.min(e.packed, e.qty); m.set(e.id, cur); } return m; };
   let chosen = aggregate(); // id -> { qty, packed } combined across categories
-  // Distribute n packed copies of a garment across its per-category entries (qty untouched).
-  const setGarmentPacked = (id, n) => { let rem = Math.max(0, n); for (const e of selEntries.filter(x => x.id === id)) { const take = Math.max(0, Math.min(e.qty, rem)); e.packed = take; rem -= take; } chosen = aggregate(); };
   const persist = () => Store.setTripWardrobe(tripKey, selEntries.map(e => ({ id: e.id, category: e.category, qty: e.qty, packed: Math.min(e.qty, e.packed) })));
   const persistGenerics = () => Store.setTripGenericGarments(tripKey, generics);
 
@@ -8296,11 +8321,29 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     .filter(x => x.g && isPerson(x.g) && x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
   // Generics selected for a tier+line, carrying their ORIGINAL array index (for packed toggling).
   const genericsForLine = (tier, ln) => generics.map((x, i) => ({ x, i })).filter(({ x }) => (x.person || 'him') === person && x.category === tier && x.name === ln.name);
-  // Mark a whole garment / generic packed <-> unpacked from the detail view.
-  const toggleGarmentPacked = id => { const agg = chosen.get(id); if (!agg) return; setGarmentPacked(id, agg.packed >= agg.qty ? 0 : agg.qty); persist(); render(); };
-  const toggleGenericPacked = idx => { const entry = generics[idx]; if (!entry) return; entry.packed = entry.packed >= entry.qty ? 0 : entry.qty; persistGenerics(); render(); };
+  // Mark packed from the detail view. A single copy (qty 1) just toggles packed<->
+  // unpacked; a garment/generic whose ONE photo stands for MORE than one copy opens a
+  // "how many packed?" dropdown (0..total, preset to the current count). Packed is
+  // stored on THIS tier's entry, matching the per-tier Selected/Packed columns.
+  const setEntryPacked = (id, tier, n) => { const e = selEntries.find(x => x.id === id && x.category === tier); if (!e) return; e.packed = Math.max(0, Math.min(e.qty, n)); chosen = aggregate(); persist(); render(); };
+  const markGarmentPacked = async id => {
+    const tier = statusView.tier;
+    const e = selEntries.find(x => x.id === id && x.category === tier);
+    if (!e) return;
+    if (e.qty <= 1) { setEntryPacked(id, tier, e.packed >= 1 ? 0 : 1); return; }
+    const n = await tripsyWardrobeChoosePackedCount((garmentById.get(id) || {}).name || 'garment', e.qty, e.packed);
+    if (n != null) setEntryPacked(id, tier, n);
+  };
+  const markGenericPacked = async idx => {
+    const entry = generics[idx]; if (!entry) return;
+    if (entry.qty <= 1) { entry.packed = entry.packed >= 1 ? 0 : 1; persistGenerics(); render(); return; }
+    const n = await tripsyWardrobeChoosePackedCount(entry.name, entry.qty, entry.packed);
+    if (n == null) return;
+    entry.packed = Math.max(0, Math.min(entry.qty, n)); persistGenerics(); render();
+  };
 
   const packedBadge = `<div style="position:absolute; top:6px; right:6px; background:var(--home-green); color:#04210F; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:13px;">✓</div>`;
+  const partialBadge = n => `<div style="position:absolute; top:6px; right:6px; background:var(--amber); color:#04210F; border-radius:11px; min-width:22px; height:22px; padding:0 6px; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:12px;">${n}</div>`;
 
   const renderList = () => {
     // Overall physical-packing progress across every selected piece for this person.
@@ -8353,21 +8396,28 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const selected = garmentItems.reduce((a, it) => a + it.qty, 0) + genItems.reduce((a, { x }) => a + x.qty, 0);
     const met = selected >= ln.need;
 
-    const garmentCards = garmentItems.map(({ g, qty }) => {
-      const agg = chosen.get(g.id) || { qty, packed: 0 };
-      const packed = agg.qty > 0 && agg.packed >= agg.qty;
+    const cardPackedBits = (packed, qty) => {
+      const full = qty > 0 && packed >= qty;
+      const partial = packed > 0 && packed < qty;
+      const meta = full ? '✓ packed' : (partial ? `${packed}/${qty} packed` : 'tap to mark packed');
+      const color = full ? 'var(--home-green)' : (partial ? 'var(--amber)' : 'var(--muted)');
+      const badge = full ? packedBadge : (partial ? partialBadge(packed) : '');
+      return { meta, color, badge };
+    };
+    const garmentCards = garmentItems.map(({ g, qty, packed }) => {
+      const b = cardPackedBits(packed, qty);
       return `<div class="tw-card" data-tw-detail-garment="${esc(g.id)}" style="cursor:pointer; position:relative;">
           <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}"${g.driveFileId ? ` data-tw-photo="${esc(g.driveFileId)}"` : ''}>${g.driveFileId ? '' : tripsyGarmentGlyph(tripsyGarmentTypeKey(g.name), g.group, g.name)}</div>
-          <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div><div class="tw-meta" style="color:${packed ? 'var(--home-green)' : 'var(--muted)'};">${packed ? '✓ packed' : 'tap to mark packed'}</div></div>
-          ${packed ? packedBadge : ''}
+          <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div></div>
+          ${b.badge}
         </div>`;
     }).join('');
     const genCards = genItems.map(({ x, i }) => {
-      const packed = x.qty > 0 && x.packed >= x.qty;
+      const b = cardPackedBits(Math.min(x.packed, x.qty), x.qty);
       return `<div class="tw-card" data-tw-detail-generic="${i}" style="cursor:pointer; position:relative;">
           <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(x.typeKey, '', x.name)}</div>
-          <div class="tw-info"><div class="tw-name">${esc(x.name)}${x.qty > 1 ? ` <span style="color:var(--muted);">×${x.qty}</span>` : ''}</div><div class="tw-meta" style="color:${packed ? 'var(--home-green)' : 'var(--muted)'};">${packed ? '✓ packed' : 'tap to mark packed'}</div></div>
-          ${packed ? packedBadge : ''}
+          <div class="tw-info"><div class="tw-name">${esc(x.name)}${x.qty > 1 ? ` <span style="color:var(--muted);">×${x.qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div></div>
+          ${b.badge}
         </div>`;
     }).join('');
     const cards = (garmentCards + genCards) || `<div class="empty-state" style="margin-top:12px;">No garments selected for this yet — use "Plan Packing List" to pick some.</div>`;
@@ -8384,14 +8434,14 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
 
   const render = () => { statusView.mode === 'detail' ? renderDetail() : renderList(); };
 
-  bodyEl.onclick = e => {
+  bodyEl.onclick = async e => {
     const lineBtn = e.target.closest('[data-tw-status-line]');
     if (lineBtn) { const [tier, i] = lineBtn.getAttribute('data-tw-status-line').split('::'); statusView = { mode: 'detail', tier, lineIndex: parseInt(i, 10) }; render(); return; }
     if (e.target.closest('[data-tw-status-back]')) { statusView = { mode: 'list' }; render(); return; }
     const gEl = e.target.closest('[data-tw-detail-garment]');
-    if (gEl) { toggleGarmentPacked(gEl.getAttribute('data-tw-detail-garment')); return; }
+    if (gEl) { await markGarmentPacked(gEl.getAttribute('data-tw-detail-garment')); return; }
     const genEl = e.target.closest('[data-tw-detail-generic]');
-    if (genEl) { toggleGenericPacked(parseInt(genEl.getAttribute('data-tw-detail-generic'), 10)); }
+    if (genEl) { await markGenericPacked(parseInt(genEl.getAttribute('data-tw-detail-generic'), 10)); }
   };
   // From a garment-type DETAIL view, "leaving" the screen -- clicking the backdrop
   // (away from the card) OR the header Done button -- steps back to the Packing
