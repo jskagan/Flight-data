@@ -7821,7 +7821,7 @@ function tripsyPlanPackingIsComplete(guide, tripKey, person) {
     const lines = needLines[tier] || [];
     if (!lines.length) continue;
     const packedForTier = chosen.filter(e => e.category === tier).map(e => ({ g: garmentById.get(e.id), qty: e.qty, line: e.line }))
-      .filter(x => x.g && (x.g.person || 'him') === person && x.g.group !== 'essentials' && (x.g.tiers || []).includes(tier));
+      .filter(x => x.g && (x.g.person || 'him') === person && (x.g.tiers || []).includes(tier));
     const filled = tripsyWardrobeAssignFill(lines, packedForTier);
     lines.forEach((ln, i) => {
       const gen = generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
@@ -7907,7 +7907,7 @@ function tripsyWardrobeResolveSelectionLines(entries, guide, garmentById) {
       // Same eligibility filter the per-tier fill math uses, so the assignment matches.
       const items = out.filter(e => !e.line && e.category === tier)
         .map(e => ({ e, g: garmentById.get(e.id) }))
-        .filter(x => x.g && (x.g.person || 'him') === person && x.g.group !== 'essentials'
+        .filter(x => x.g && (x.g.person || 'him') === person
           && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (x.g.tiers || []).includes(tier)))
         .map(x => ({ g: x.g, qty: x.e.qty, ref: x.e }));
       if (!items.length) continue;
@@ -8120,7 +8120,9 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
   // a garment allocated to several categories is one garment here).
   const candidates = [...new Set(tripsyNormalizeTripSelection(selectedRaw).map(e => e.id))]
     .map(id => byId.get(id))
-    .filter(g => g && (g.person || 'him') === person && g.id !== currentGarmentId && !wornElsewhere.has(g.id) && (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey));
+    // Underwear/socks are packable (and so selectable) but are never part of a composed
+    // OUTFIT, so they're excluded here and in tripsyComposeTripOutfits' own `chosen`.
+    .filter(g => g && (g.person || 'him') === person && g.group !== 'essentials' && g.id !== currentGarmentId && !wornElsewhere.has(g.id) && (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey));
   return new Promise(resolve => {
     let ov = document.getElementById('tw-swap-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tw-swap-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -8231,7 +8233,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     // Only garments SELECTED FOR this tier fill its lines, each against the specific
     // line it was picked for (assignGarments honours `line`).
     const packedForTier = [...sel].map(([k, qty]) => { const { id, category, line } = parseSelKey(k); return { g: garmentById.get(id), qty, category, line }; })
-      .filter(x => x.g && x.category === tier && isPerson(x.g) && x.g.group !== 'essentials' && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (x.g.tiers || []).includes(tier)));
+      .filter(x => x.g && x.category === tier && isPerson(x.g) && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (x.g.tiers || []).includes(tier)));
     const filled = tripsyWardrobeAssignFill(lines, packedForTier);
     return lines.map((ln, i) => {
       // Skipped items come off the need before anything else is counted against it.
@@ -8282,7 +8284,11 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     // General is tier-agnostic (swimwear, a rain layer…): garments carry only dress-code
     // tags, never "general", so don't require a tier match there -- the type/group match
     // (tripsyWardrobeGarmentFillsLine) still constrains what's offered.
-    const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (g.tiers || []).includes(tier)) && tripsyWardrobeGarmentFillsLine(g, ln, lines) && availableFor(g, tier, ln.name) > 0);
+    // Essentials (underwear/socks/undershirts) ARE offered: their need lines all sit in
+    // General, and tripsyWardrobeGarmentFillsLine still gates by group, so an essentials
+    // garment can only ever fill an essentials line. They're excluded from outfit
+    // composition instead, where they genuinely don't belong.
+    const avail = garments.filter(g => isPerson(g) && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (g.tiers || []).includes(tier)) && tripsyWardrobeGarmentFillsLine(g, ln, lines) && availableFor(g, tier, ln.name) > 0);
     // "Done" appears only once the line's need is actually MET -- it just returns to the
     // Plan Packing List. Trimming an unmet line is the Skip card's job below, not Done's.
     const met = ln.remaining <= 0;
@@ -8496,7 +8502,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   // Selected wardrobe pieces for a tier as {g, qty, packed} -- same filter the fill
   // math uses; `packed` (this tier's entry) rides along so the Packed column can sum it.
   const selectedForTier = tier => selEntries.filter(e => e.category === tier).map(e => ({ g: garmentById.get(e.id), qty: e.qty, packed: Math.min(e.packed, e.qty), line: e.line }))
-    .filter(x => x.g && isPerson(x.g) && x.g.group !== 'essentials' && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (x.g.tiers || []).includes(tier)));
+    .filter(x => x.g && isPerson(x.g) && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (x.g.tiers || []).includes(tier)));
   // Generics selected for a tier+line, carrying their ORIGINAL array index (for packed toggling).
   const genericsForLine = (tier, ln) => generics.map((x, i) => ({ x, i })).filter(({ x }) => (x.person || 'him') === person && x.category === tier && x.name === ln.name);
   // Mark packed from the detail view. A single copy (qty 1) just toggles packed<->
@@ -20203,12 +20209,12 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
       renderPack();
     });
     if (!lines.length) { packEl.innerHTML = headerHtml + `<div style="color:var(--muted); font-size:13px;">No specific garments recommended for this dress code${person === 'her' ? ' (Hers)' : ''}.</div>`; wirePersonToggle(); return; }
-    const packedForTier = [...sel].map(([k, qty]) => { const { id, category: c, line } = parseSelKey(k); return { g: garmentById.get(id), qty, c, line }; }).filter(x => x.g && x.c === category && isPerson(x.g) && x.g.group !== 'essentials' && (x.g.tiers || []).includes(category));
+    const packedForTier = [...sel].map(([k, qty]) => { const { id, category: c, line } = parseSelKey(k); return { g: garmentById.get(id), qty, c, line }; }).filter(x => x.g && x.c === category && isPerson(x.g) && (x.g.tiers || []).includes(category));
     const filled = tripsyWardrobeAssignFill(lines, packedForTier);
     const sections = lines.map((ln, i) => {
       const remaining = Math.max(0, ln.need - (filled[i] || 0) - genericFilledFor(ln));
       // All garments that would fill this line (selected stay, checkbox checked) so a pick can be toggled off.
-      const avail = garments.filter(g => isPerson(g) && g.group !== 'essentials' && (category === TRIPSY_WARDROBE_GENERAL_TIER || (g.tiers || []).includes(category)) && tripsyWardrobeGarmentFillsLine(g, ln, lines) && availableFor(g, category, ln.name) > 0);
+      const avail = garments.filter(g => isPerson(g) && (category === TRIPSY_WARDROBE_GENERAL_TIER || (g.tiers || []).includes(category)) && tripsyWardrobeGarmentFillsLine(g, ln, lines) && availableFor(g, category, ln.name) > 0);
       const noPic = `<div class="tw-card tw-card-select" data-tw-nopic="1" data-line-name="${esc(ln.name)}" data-type-key="${esc(ln.typeKey || '')}" style="cursor:pointer;">
         <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(ln.typeKey, ln.group, ln.name)}</div>
         <div class="tw-info"><div class="tw-name">${esc(tripsyStripCategoryParen(ln.name))}</div><div class="tw-meta">Other</div></div>
@@ -21528,8 +21534,11 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
   // tiers is ONE garment for outfit composition (sum its qty across categories).
   const qtyById = new Map();
   for (const s of selection) qtyById.set(s.id, (qtyById.get(s.id) || 0) + s.qty);
+  // Essentials (underwear/socks/undershirts) are packable and therefore selectable, but
+  // they are not part of an OUTFIT -- keep them out of the composition prompt entirely
+  // rather than paying to upload their photos and risk them appearing in a look.
   const chosen = [...qtyById].map(([id, qty]) => (garmentById.get(id) ? { g: garmentById.get(id), qty } : null))
-    .filter(x => x && (x.g.person || 'him') === person);
+    .filter(x => x && (x.g.person || 'him') === person && x.g.group !== 'essentials');
   if (!chosen.length) throw new Error(`No ${person === 'her' ? 'Hers' : 'His'} garments are selected for this trip — plan the packing list first.`);
   const blocks = tripsyEnumerateAttireBlocks(guide);
   if (!blocks.length) throw new Error('This trip has no events to compose outfits for.');
