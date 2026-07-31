@@ -7301,6 +7301,9 @@ function tripsyResizeImageBlob(blob, maxDim = 1200, quality = 0.82) {
 // persisted (a view-only user has no Drive write access), and it also seeds the
 // default library for a newly-added garment / import batch.
 let tripsyWardrobePerson = 'him';
+// Wardrobe page "Filter by type" selection -- '' = all types, else a filter-bucket
+// key from tripsyWardrobeFilterBucket (e.g. 'suit:formal', 'trousers'). Session-only.
+let tripsyWardrobeTypeFilter = '';
 // A His/Hers segmented toggle, reused across every per-person Attire surface.
 // `active` is 'him'|'her'; the picked button carries data-tw-person. Wire with
 // wireTripsyPersonToggle (or a bespoke handler) after inserting into the DOM.
@@ -7478,11 +7481,24 @@ async function renderUtilitiesWardrobe() {
   // Two separate libraries -- His (default) and Hers. A garment with no person
   // field reads as His, so today's wardrobe stays under His untouched.
   const garments = allGarments.filter(g => (g.person || 'him') === person);
+  // Type-filter options = the distinct filter buckets actually present in THIS
+  // library (His/Hers), ordered. Drop a stale selection that this library lacks.
+  const presentBuckets = new Map();
+  garments.forEach(g => { const b = tripsyWardrobeFilterBucket(g); if (!presentBuckets.has(b.key)) presentBuckets.set(b.key, b.label); });
+  if (tripsyWardrobeTypeFilter && !presentBuckets.has(tripsyWardrobeTypeFilter)) tripsyWardrobeTypeFilter = '';
+  const orderIdx = key => { const i = TRIPSY_WARDROBE_FILTER_ORDER.indexOf(key); return i < 0 ? 1000 : i; };
+  const filterOptions = [...presentBuckets.entries()].sort((a, b) => orderIdx(a[0]) - orderIdx(b[0]) || String(a[1]).localeCompare(String(b[1])));
+  const filterHtml = filterOptions.length > 1 ? `<select class="btn" id="tw-type-filter" title="Filter by type" aria-label="Filter by type">
+        <option value="">All types</option>
+        ${filterOptions.map(([key, label]) => `<option value="${esc(key)}"${key === tripsyWardrobeTypeFilter ? ' selected' : ''}>${esc(label)}</option>`).join('')}
+      </select>` : '';
+  const shownGarments = tripsyWardrobeTypeFilter ? garments.filter(g => tripsyWardrobeFilterBucket(g).key === tripsyWardrobeTypeFilter) : garments;
   main.innerHTML = `
     <div class="page-title" style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
       <span>Wardrobe</span>
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
         <span id="tw-person-toggle">${tripsyPersonToggleHtml(person)}</span>
+        ${filterHtml}
         ${garments.length ? `<button class="btn" id="tw-bulk-btn">Edit all</button>` : ''}
         <button class="btn" id="tw-import-btn">Import from Drive folder</button>
         <button class="btn primary" id="tw-add-btn">+ Add garment</button>
@@ -7490,9 +7506,16 @@ async function renderUtilitiesWardrobe() {
       </div>
     </div>
     <div class="page-sub">Your full wardrobe, photographed once. Add each garment with its type, the dress codes it works for, and its color. On a trip's 👔 Attire panel you can then pick which pieces to bring. Use the His/Hers toggle to switch libraries.</div>
-    <div id="tw-library">${tripsyWardrobeGroupedHtml(garments)}</div>`;
+    <div id="tw-library">${tripsyWardrobeGroupedHtml(shownGarments)}</div>`;
   wireTripsyPersonToggle(document.getElementById('tw-person-toggle'), p => { if (p !== tripsyWardrobePerson) { tripsyWardrobePerson = p; renderUtilitiesWardrobe(); } });
   const libEl = document.getElementById('tw-library');
+  const filterEl = document.getElementById('tw-type-filter');
+  if (filterEl) filterEl.addEventListener('change', () => {
+    tripsyWardrobeTypeFilter = filterEl.value;
+    const shown = tripsyWardrobeTypeFilter ? garments.filter(g => tripsyWardrobeFilterBucket(g).key === tripsyWardrobeTypeFilter) : garments;
+    libEl.innerHTML = tripsyWardrobeGroupedHtml(shown);
+    tripsyWardrobeLoadPhotos(libEl);
+  });
   tripsyWardrobeLoadPhotos(libEl);
   document.getElementById('tw-close-btn').addEventListener('click', () => navigate('tripsytrips'));
   document.getElementById('tw-add-btn').addEventListener('click', () => showWardrobeGarmentForm(null, renderUtilitiesWardrobe));
@@ -7579,6 +7602,21 @@ function tripsyGarmentTypeBucket(g) {
   const grp = g.group || 'accessories';
   return { key: `group:${grp}`, label: TRIPSY_ATTIRE_PACKING_GROUP_LABEL[grp] || 'Other' };
 }
+// Wardrobe page "Filter by type" bucket -- same as tripsyGarmentTypeBucket, but a
+// SUIT is split into Formal vs Informal by the dress codes it works for (a suit
+// tagged formal/black-tie is a formal suit; anything else -- cocktail/smart-casual
+// -- is an informal suit), since the owner asked to filter those separately.
+function tripsyWardrobeFilterBucket(g) {
+  const b = tripsyGarmentTypeBucket(g);
+  if (b.key === 'suit') {
+    const tiers = g.tiers || [];
+    const formal = tiers.includes('formal') || tiers.includes('black_tie');
+    return formal ? { key: 'suit:formal', label: 'Formal Suits' } : { key: 'suit:informal', label: 'Informal Suits' };
+  }
+  return b;
+}
+// Display order for the type-filter dropdown (group:* buckets append after, by label).
+const TRIPSY_WARDROBE_FILTER_ORDER = ['tuxedo', 'suit:formal', 'suit:informal', 'blazer', 'jacket', 'sweater', 'dress-shirt', 'shirt', 'polo', 'tee', 'dress', 'trousers', 'jeans', 'shorts', 'skirt', 'tie', 'shoes', 'belt'];
 // A representative emoji for a garment TYPE, shown in the photoless "No Picture"
 // packing slots instead of the words "No Picture". Falls back to the packing
 // group, then a generic shirt.
