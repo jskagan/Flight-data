@@ -1135,8 +1135,18 @@
      `finally`. */
   .tripsy-attire-stale-badge--generating { animation: tripsy-attire-badge-blink 1s steps(1, end) infinite; }
   @keyframes tripsy-attire-badge-blink { 50% { opacity: 0; } }
+  /* Red ▲ overlaid on the My Trips 🧭 button when events changed since that trip's
+     itinerary was generated. The same signal the ▲ beside "Edit" INSIDE that menu
+     already gives, hoisted onto the glyph so it doesn't need the menu opened to be
+     seen; both are driven by the one tripsyItineraryChangedEvents call. Blinks while a
+     regeneration is actually running, sharing the attire badge's keyframes. */
+  .tripsy-itin-glyph-badge {
+    position: absolute; top: -4px; right: -4px; font-size: 11px; line-height: 1;
+    color: #e02424; pointer-events: none; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.5));
+  }
+  .tripsy-itin-glyph-badge--generating { animation: tripsy-attire-badge-blink 1s steps(1, end) infinite; }
   @media (prefers-reduced-motion: reduce) {
-    .tripsy-attire-stale-badge--generating { animation: none; }
+    .tripsy-attire-stale-badge--generating, .tripsy-itin-glyph-badge--generating { animation: none; }
   }
   .tripsy-attire-generated-line { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
   .tripsy-attire-day-section { margin-bottom: 24px; }
@@ -16461,6 +16471,10 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
     const status = overlay.querySelector('[data-icd-status]');
     contBtn.disabled = true;
     status.textContent = 'Generating…';
+    // Blink the 🧭 glyph's red ▲ for the duration, so the wait is visible on My Trips
+    // behind this dialog. Cleared in the `finally` below, so a failure can't strand it.
+    tripsyItineraryGeneratingKeys.add(trip.key);
+    tripsyRefreshItineraryGeneratingBadges();
     try {
       const checkedDayKeys = [...new Set([...overlay.querySelectorAll('[data-tripsy-itin-change]:checked')].map(cb => cb.dataset.dayKey))];
       if (checkedDayKeys.length) {
@@ -16480,6 +16494,13 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       console.error('Itinerary changes generation failed:', e);
       status.textContent = 'Could not generate — see console for details.';
       contBtn.disabled = false;
+    } finally {
+      // The baseline was just reset, so there are no changed events left and the glyph's
+      // steady state is "none" -- the sweep clears the blink outright. On the failure
+      // path the baseline is untouched, and the next My Trips render restores the steady
+      // red ▲ from tripsyItineraryChangedEvents.
+      tripsyItineraryGeneratingKeys.delete(trip.key);
+      tripsyRefreshItineraryGeneratingBadges();
     }
   });
   document.body.appendChild(overlay);
@@ -17648,6 +17669,39 @@ function tripsyRefreshAttireGeneratingBadges() {
     const generating = tripsyAttireGeneratingKeys.has(btn.dataset.key);
     if (generating) tripsySetAttireStaleBadge(btn, 'generating');
     else if (btn.querySelector('.tripsy-attire-stale-badge--generating')) tripsySetAttireStaleBadge(btn, '');
+  });
+}
+// The same pair, for the 🧭 itinerary button. Separate from the attire badge rather than
+// generalised: the states differ (changed-events vs stale-guide), the mark differs (red ▲
+// vs ⚠️), and the two are computed by different passes.
+const tripsyItineraryGeneratingKeys = new Set();
+// `state` is 'generating' (blinking -- a regeneration is running), 'changed' (steady --
+// events were added/modified since the itinerary was generated), or '' for none.
+// Generating outranks changed, exactly as it does for attire.
+function tripsySetItineraryGlyphBadge(btn, state) {
+  if (!btn) return;
+  let badge = btn.querySelector('.tripsy-itin-glyph-badge');
+  if (!state) { if (badge) badge.remove(); return; }
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.textContent = '▲';
+    btn.appendChild(badge);
+  }
+  const generating = state === 'generating';
+  badge.className = `tripsy-itin-glyph-badge${generating ? ' tripsy-itin-glyph-badge--generating' : ''}`;
+  badge.title = generating
+    ? 'Regenerating this trip’s itinerary…'
+    : 'Events changed since this itinerary was generated — open Itinerary → Edit.';
+  badge.setAttribute('aria-label', generating ? 'Itinerary is being regenerated' : 'Itinerary is out of date');
+}
+// Applies the blink immediately, without waiting for a My Trips re-render. A trip that
+// just finished is cleared outright here (unlike the attire sweep, which defers to its
+// stale pass): a completed regeneration resets the baseline, so there are no changed
+// events left and the badge's next steady state is "none" either way.
+function tripsyRefreshItineraryGeneratingBadges() {
+  document.querySelectorAll('[data-tripsy-itinerary-menu-toggle]').forEach(btn => {
+    if (tripsyItineraryGeneratingKeys.has(btn.dataset.key)) tripsySetItineraryGlyphBadge(btn, 'generating');
+    else if (btn.querySelector('.tripsy-itin-glyph-badge--generating')) tripsySetItineraryGlyphBadge(btn, '');
   });
 }
 // Fire-and-forget pass over the rendered trip cards: for each trip whose saved
@@ -24382,7 +24436,7 @@ async function renderTripsyEventsListImpl() {
     // synchronous Preview/Print/PDF handlers.
     const itineraryButtonHtml = !collapsed ? iconLabelButton(`
       <div style="position:relative;">
-        <button class="btn" data-tripsy-itinerary-menu-toggle data-key="${esc(trip.key)}" title="Itinerary" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🧭</button>
+        <button class="btn" data-tripsy-itinerary-menu-toggle data-key="${esc(trip.key)}" title="Itinerary" style="position:relative; width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">🧭</button>
         <div data-tripsy-itinerary-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${(() => {
             // Create/Delete are the two states of one owner-only button:
@@ -25026,6 +25080,11 @@ async function renderTripsyEventsListImpl() {
         try {
           const changed = await tripsyItineraryChangedEvents(trip, cache);
           warnEl.style.display = changed.length ? 'inline-flex' : 'none';
+          // Same verdict, mirrored onto the 🧭 glyph so it's visible with the menu shut.
+          // A regeneration in flight wins, so a re-render landing mid-run can't replace
+          // the blink with the steady ▲ or drop it.
+          const glyphBtn = [...container.querySelectorAll('[data-tripsy-itinerary-menu-toggle]')].find(b => b.dataset.key === trip.key);
+          tripsySetItineraryGlyphBadge(glyphBtn, tripsyItineraryGeneratingKeys.has(trip.key) ? 'generating' : (changed.length ? 'changed' : ''));
         } catch (e) { /* leave hidden */ }
       }
     })();
