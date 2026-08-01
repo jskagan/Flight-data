@@ -8045,6 +8045,16 @@ function tripsyWardrobeLineIsNeverPhotographed(ln) {
   if (!ln) return false;
   return ln.group === 'essentials' || TRIPSY_WARDROBE_NEVER_PHOTOGRAPHED_TYPES.includes(ln.typeKey);
 }
+// Garments that are PACKED but are never part of a composed outfit: underwear, socks
+// (casual and dress) and undershirts. Group 'essentials' catches the General ones;
+// dress socks are group 'dress_wear', so they need the type test. Applied when
+// composing, when offering a swap, AND when RENDERING an outfit -- outfits composed
+// before this still carry dress socks in their saved garmentIds, so filtering only at
+// composition time would leave them showing on existing outfit pages.
+function tripsyWardrobeGarmentExcludedFromOutfits(g) {
+  if (!g) return true;
+  return g.group === 'essentials' || TRIPSY_WARDROBE_NEVER_PHOTOGRAPHED_TYPES.includes(tripsyGarmentTypeKey(g.name));
+}
 function tripsyWardrobeLosesAccessoryLine(g, ln, lines) {
   if (ln.group !== 'accessories' || tripsyWardrobeNameMatchesLine(g, ln)) return false;
   return (lines || []).some(l => l !== ln && !l.typeKey && l.group === 'accessories' && tripsyWardrobeNameMatchesLine(g, l));
@@ -8161,7 +8171,9 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
   }
   const garments = await Store.listWardrobe();
   const byId = new Map(garments.map(g => [g.id, g]));
-  const cards = (block.garmentIds || []).map(id => byId.get(id)).filter(Boolean);
+  // Filtered, not just mapped: an outfit composed before essentials/dress socks were
+  // excluded still lists them in its saved garmentIds.
+  const cards = (block.garmentIds || []).map(id => byId.get(id)).filter(g => g && !tripsyWardrobeGarmentExcludedFromOutfits(g));
   const label = TRIPSY_ATTIRE_CATEGORY_LABEL[block.category] || block.category || '';
   // "May be out of date" if the guide's events or the packing selection changed since compose.
   let stale = false;
@@ -8232,7 +8244,7 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
     .map(id => byId.get(id))
     // Underwear/socks are packable (and so selectable) but are never part of a composed
     // OUTFIT, so they're excluded here and in tripsyComposeTripOutfits' own `chosen`.
-    .filter(g => g && (g.person || 'him') === person && g.group !== 'essentials' && g.id !== currentGarmentId && !wornElsewhere.has(g.id) && (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey));
+    .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g) && g.id !== currentGarmentId && !wornElsewhere.has(g.id) && (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey));
   return new Promise(resolve => {
     let ov = document.getElementById('tw-swap-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tw-swap-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -8440,8 +8452,14 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   };
 
   const render = () => { if (view.mode === 'detail') renderDetail(); else renderList(); };
-  // Fire the "packing list complete" celebration exactly on the incomplete->complete
-  // transition for the CURRENT person (not on open, not on every pick). Owner only.
+  // Fire the "packing list complete -- create outfits?" prompt exactly on the
+  // incomplete->complete transition for the CURRENT person (not on open). Owner only.
+  // Called ONLY from the Done button on a garment page, deliberately: picking the last
+  // garment used to trigger it mid-flow, interrupting before the owner had confirmed
+  // they were finished with that line. Now it waits until Done is pressed on the line
+  // that completes the plan. Every other mutation (pick, skip, unskip, No-Picture
+  // add/remove) just re-renders, leaving planWasComplete stale-but-false, which is
+  // exactly what lets the transition still be detected when Done is finally pressed.
   let planWasComplete = tripsyPlanPackingIsComplete(guide, tripKey, person);
   const maybeCongratulate = () => {
     const nowComplete = tripsyPlanPackingIsComplete(guide, tripKey, person);
@@ -8473,7 +8491,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     if (skipUndo) {
       const ln = (remainingLinesFor(view.tier) || [])[view.lineIndex];
       if (ln) { delete skips[tripsyAttireSkipKey(person, view.tier, ln.name)]; persistSkips(); }
-      render(); maybeCongratulate();
+      render();
       return;
     }
     const skipCardEl = e.target.closest('[data-tw-skip]');
@@ -8488,14 +8506,14 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       const current = tripsyAttireSkippedFor(skips, person, view.tier, ln);
       skips[key] = Math.min(ln.need, current + n);
       persistSkips();
-      render(); maybeCongratulate();
+      render();
       return;
     }
     const nopicRemove = e.target.closest('[data-tw-nopic-remove]');
     if (nopicRemove) {
       const ln = (needLines[view.tier] || [])[view.lineIndex];
       if (ln) { generics = generics.filter(x => !(x.category === view.tier && x.name === ln.name && (x.person || 'him') === person)); persistGenerics(); }
-      render(); maybeCongratulate(); // stay on the garment page; the user leaves via Back or an outside click
+      render(); // stay on the garment page; the user leaves via Back or an outside click
       return;
     }
     const nopic = e.target.closest('[data-tw-nopic]');
@@ -8507,7 +8525,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       const existing = generics.find(x => x.category === view.tier && x.name === ln.name && (x.person || 'him') === person);
       if (existing) existing.qty += n; else generics.push({ category: view.tier, typeKey: ln.typeKey || '', name: ln.name, qty: n, packed: 0, person });
       persistGenerics();
-      render(); maybeCongratulate(); // stay on the garment page; the user leaves via Back or an outside click
+      render(); // stay on the garment page; the user leaves via Back or an outside click
       return;
     }
     const card = e.target.closest('.tw-card-select');
@@ -8526,7 +8544,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       sel.set(key, qty);
     }
     persistChosen();
-    render(); maybeCongratulate(); // stay on the garment page; the user leaves via Back or an outside click
+    render(); // stay on the garment page; the user leaves via Back or an outside click
   };
   // His/Hers toggle in the header: switch person → recompute this person's need
   // lines + tiers from the same already-loaded data, reset to the list view.
@@ -21691,7 +21709,7 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
   // they are not part of an OUTFIT -- keep them out of the composition prompt entirely
   // rather than paying to upload their photos and risk them appearing in a look.
   const chosen = [...qtyById].map(([id, qty]) => (garmentById.get(id) ? { g: garmentById.get(id), qty } : null))
-    .filter(x => x && (x.g.person || 'him') === person && x.g.group !== 'essentials');
+    .filter(x => x && (x.g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(x.g));
   if (!chosen.length) throw new Error(`No ${person === 'her' ? 'Hers' : 'His'} garments are selected for this trip — plan the packing list first.`);
   const blocks = tripsyEnumerateAttireBlocks(guide);
   if (!blocks.length) throw new Error('This trip has no events to compose outfits for.');
@@ -21835,10 +21853,9 @@ async function showTripsyOutfitList(tripKey, person = 'him') {
       <div class="tw-group-title">${esc(tripsyDayHeaderLabel(d.dayKey))}</div>
       ${d.blocks.map(b => {
         const evId = (b.eventIds || [])[0] || '';
-        const n = (b.garmentIds || []).length;
         return `<button type="button" data-outfit-ev="${esc(evId)}" style="display:flex; justify-content:space-between; align-items:center; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:4px 0; cursor:pointer; color:var(--text);">
           <span style="min-width:0;">${tripsyAttireBadgeHtml(b.category)}${b.label ? ` <span style="color:var(--muted);">${esc(b.label)}</span>` : ''}</span>
-          <span style="color:var(--muted); flex-shrink:0;">${n} item${n === 1 ? '' : 's'} ›</span>
+          <span style="color:var(--muted); flex-shrink:0;">›</span>
         </button>`;
       }).join('')}
     </div>`).join('');
