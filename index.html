@@ -7906,6 +7906,11 @@ function tripsyWardrobeAssignGarments(lines, packed) {
     }
     const gGroup = g.group || tripsyAttirePackingGroupOf(g);
     let idx = gType ? lines.findIndex(ln => ln.typeKey === gType) : -1;
+    // Among untyped lines, an ACCESSORIES line the garment's own name names wins over
+    // the first same-group line -- the assignment half of tripsyWardrobeLosesAccessoryLine,
+    // kept in step with it so a scarf both SHOWS under and COUNTS toward the scarf line
+    // rather than whichever untyped accessories line happens to come first.
+    if (idx < 0 && gGroup === 'accessories') idx = lines.findIndex(ln => !ln.typeKey && ln.group === 'accessories' && tripsyWardrobeNameMatchesLine(g, ln));
     if (idx < 0) idx = lines.findIndex(ln => !ln.typeKey && ln.group === gGroup);
     if (idx >= 0) { fill[idx] += qty; byLine[idx].push(item); }
   }
@@ -7974,7 +7979,60 @@ function tripsyWardrobeGarmentFillsLine(g, ln, lines) {
   if (ln.typeKey) return gType === ln.typeKey;
   const gGroup = g.group || tripsyAttirePackingGroupOf(g);
   if (gGroup !== ln.group) return false;
-  return !(gType && lines.some(l => l.typeKey === gType));
+  if (gType && lines.some(l => l.typeKey === gType)) return false;
+  return !tripsyWardrobeLosesAccessoryLine(g, ln, lines);
+}
+// Words that carry no identity in a need-line name, so they can't create a false
+// match: structural filler, and the dress-code/occasion adjectives that prefix half
+// these lines ("evening clutch", "statement scarf"). Checked AFTER singularizing,
+// so 'sets'/'pairs' are covered by 'set'/'pair'.
+const TRIPSY_GARMENT_NAME_STOPWORDS = new Set([
+  'for', 'and', 'the', 'with', 'set', 'pair', 'piece', 'item', 'other', 'misc',
+  'restyling', 'optional', 'evening', 'formal', 'casual', 'smart', 'cocktail',
+  'athletic', 'general', 'statement',
+]);
+// Crude singularization -- it only has to be CONSISTENT between a line name and a
+// garment name, not linguistically right, since the two are compared to each other:
+// "sunglasses" collapsing to "sunglasse" on both sides matches fine. The -ves rule
+// is the one real irregular worth handling ("scarves" -> "scarf").
+function tripsyGarmentNameSingular(word) {
+  if (word.endsWith('ves')) return `${word.slice(0, -3)}f`;
+  if (word.endsWith('s') && !word.endsWith('ss')) return word.slice(0, -1);
+  return word;
+}
+function tripsyGarmentNameTokens(name) {
+  const out = new Set();
+  // Parenthetical asides ("(for restyling)", "(cocktail)") are never identity.
+  for (const raw of String(name || '').toLowerCase().replace(/\([^)]*\)/g, ' ').split(/[^a-z]+/)) {
+    const w = tripsyGarmentNameSingular(raw);
+    if (w.length < 3 || TRIPSY_GARMENT_NAME_STOPWORDS.has(w)) continue;
+    out.add(w);
+  }
+  return out;
+}
+// Does this garment's NAME identify it as belonging to this need line? Word-level
+// overlap only, e.g. "Navy Cashmere Scarf" -> the "scarf" line.
+function tripsyWardrobeNameMatchesLine(g, ln) {
+  const lineTokens = tripsyGarmentNameTokens(ln && ln.name);
+  if (!lineTokens.size) return false;
+  const nameTokens = tripsyGarmentNameTokens(g && g.name);
+  for (const t of lineTokens) if (nameTokens.has(t)) return true;
+  return false;
+}
+// True when g should NOT be offered for untyped ACCESSORIES line `ln` because a
+// DIFFERENT untyped accessories line in the same tier is the one its name actually
+// names. Untyped lines otherwise match on group alone, so General's "sunglasses" and
+// "scarf" -- both untyped accessories -- each offered every accessory the other did.
+// Deliberately accessories-ONLY: that group is a grab-bag of non-interchangeable
+// things (cufflinks, a clutch, a pocket square), whereas the untyped lines in
+// tops/pants/footwear are the mix-and-match tiers' collapsed "any garment of this
+// group" pools (see tripsyWardrobeNeedByTier), where substitution is the whole point
+// and narrowing by name would wrongly stop a t-shirt filling a "tops" line.
+// A garment whose name matches NO accessories line here is left alone -- it stays
+// offered on all of them, exactly as before.
+function tripsyWardrobeLosesAccessoryLine(g, ln, lines) {
+  if (ln.group !== 'accessories' || tripsyWardrobeNameMatchesLine(g, ln)) return false;
+  return (lines || []).some(l => l !== ln && !l.typeKey && l.group === 'accessories' && tripsyWardrobeNameMatchesLine(g, l));
 }
 // Quantity chooser (1..max) for pack/unpack. Resolves the number, or null on cancel.
 function tripsyWardrobeChooseQty(max, garmentName, verb = 'pack', needed = null) {
