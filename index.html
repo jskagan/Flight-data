@@ -25010,23 +25010,42 @@ async function renderTripsyEventsListImpl() {
   // by the Document, Itinerary, and Trip dropdowns below, each with its own
   // trigger/menu attribute pair so they don't collide despite all three
   // sharing the same trip.key.
-  const wireTripsyHeaderMenuToggle = (toggleSelector, menuAttr) => {
+  // `beforeOpen(btn, tripKey)` is an optional async gate run just before the menu would
+  // open: returning false means the hook handled the click itself and the menu stays
+  // shut. Used by the attire button to explain its ⚠️ first.
+  const wireTripsyHeaderMenuToggle = (toggleSelector, menuAttr, beforeOpen = null) => {
     container.querySelectorAll(toggleSelector).forEach(btn => {
-      btn.addEventListener("click", e => {
+      btn.addEventListener("click", async e => {
         e.stopPropagation();
         const tripKey = btn.dataset.key;
         const menu = container.querySelector(`[${menuAttr}="${tripKey}"]`);
         if (!menu) return;
         const wasOpen = menu.style.display !== "none";
         closeAllTripsyTripPanels();
-        if (!wasOpen) positionTripsyFixedMenu(btn, menu);
+        if (wasOpen) return;
+        if (beforeOpen && !(await beforeOpen(btn, tripKey))) return;
+        positionTripsyFixedMenu(btn, menu);
       });
     });
   };
   wireTripsyHeaderMenuToggle("[data-tripsy-document-menu-toggle]", "data-tripsy-document-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-itinerary-menu-toggle]", "data-tripsy-itinerary-menu");
   wireTripsyHeaderMenuToggle("[data-tripsy-trip-menu-toggle]", "data-tripsy-trip-menu");
-  wireTripsyHeaderMenuToggle("[data-tripsy-attire-menu-toggle]", "data-tripsy-attire-menu");
+  // Tapping a 👔 button that's carrying the ⚠️ explains it before opening the menu, the
+  // way the itinerary "Edit" button routes through its own changes dialog rather than
+  // leaving a bare marker the owner has to interpret. Only the STEADY badge: a blinking
+  // one means a refresh is already running, and there's nothing to act on. Owner-only,
+  // since Refresh is; a viewer just gets the menu.
+  wireTripsyHeaderMenuToggle("[data-tripsy-attire-menu-toggle]", "data-tripsy-attire-menu", async (btn, tripKey) => {
+    const badge = btn.querySelector('.tripsy-attire-stale-badge');
+    if (!isOwner || !badge || badge.className.includes('--generating')) return true;
+    const refresh = await tripsyConfirmDialog(
+      'This trip’s events have changed since its attire guide was built, so the dress codes, packing counts and daily guide may no longer match the itinerary. Refreshing rebuilds the guide from the current events and clears the ⚠️ — but it regenerates the whole guide, so any dress codes you set by hand are discarded.',
+      { title: '⚠️ Attire guide is out of date', yes: 'Refresh now', no: 'Not now' });
+    if (!refresh) return true; // let the menu open as usual
+    runTripsyAttireGeneration(tripKey, { isRefresh: true });
+    return false;
+  });
   // Flag each 👔 button with a ⚠️ when its trip's events have changed since the
   // attire guide was generated (same fingerprint check the overlay uses). Async
   // + fire-and-forget so it never blocks the render; it re-queries the live card
