@@ -1127,6 +1127,17 @@
     position: absolute; top: -4px; right: -4px; font-size: 11px; line-height: 1;
     pointer-events: none; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.5));
   }
+  /* The SAME badge, blinking, while that trip's guide is being generated or refreshed
+     (tripsyAttireGeneratingKeys). Deliberately the same ⚠️ in the same spot as the
+     stale badge rather than a second indicator: it means "working" instead of "out of
+     date", and the blink is what distinguishes them. Clears itself when generation
+     ends, so it can never be left behind by a failed run -- the caller removes it in a
+     `finally`. */
+  .tripsy-attire-stale-badge--generating { animation: tripsy-attire-badge-blink 1s steps(1, end) infinite; }
+  @keyframes tripsy-attire-badge-blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .tripsy-attire-stale-badge--generating { animation: none; }
+  }
   .tripsy-attire-generated-line { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
   .tripsy-attire-day-section { margin-bottom: 24px; }
   .tripsy-attire-day-section:last-child { margin-bottom: 0; }
@@ -17602,20 +17613,42 @@ async function tripsyAttireGuideIsStale(trip, guide) {
     return false;
   }
 }
-// Adds/removes the ⚠️ "out of date" badge on one My Trips 👔 button.
-function tripsySetAttireStaleBadge(btn, stale) {
+// Trip keys whose attire guide is being generated/refreshed RIGHT NOW. Module-level and
+// never persisted -- like tripsyInFlightWrites, there's no way to represent "a run is in
+// progress" in the data model, and a run can't outlive the page.
+const tripsyAttireGeneratingKeys = new Set();
+// Adds/removes the ⚠️ badge on one My Trips 👔 button. `state` is 'generating' (blinking
+// -- a run is under way), 'stale' (steady -- the itinerary moved since the guide was
+// built), or '' for none. Generating outranks stale: while a run is in flight, whether
+// the OLD guide is out of date is not the useful thing to say.
+function tripsySetAttireStaleBadge(btn, state) {
   if (!btn) return;
+  const want = state === true ? 'stale' : (state || '');
   let badge = btn.querySelector('.tripsy-attire-stale-badge');
-  if (stale && !badge) {
+  if (!want) { if (badge) badge.remove(); return; }
+  if (!badge) {
     badge = document.createElement('span');
-    badge.className = 'tripsy-attire-stale-badge';
     badge.textContent = '⚠️';
-    badge.title = 'Itinerary changed since the attire guide was generated — open Attire and Refresh.';
-    badge.setAttribute('aria-label', 'Attire may be out of date');
     btn.appendChild(badge);
-  } else if (!stale && badge) {
-    badge.remove();
   }
+  const generating = want === 'generating';
+  badge.className = `tripsy-attire-stale-badge${generating ? ' tripsy-attire-stale-badge--generating' : ''}`;
+  badge.title = generating
+    ? 'Building this trip’s attire guide…'
+    : 'Itinerary changed since the attire guide was generated — open Attire and Refresh.';
+  badge.setAttribute('aria-label', generating ? 'Attire guide is being generated' : 'Attire may be out of date');
+}
+// Applies the blinking badge to the 👔 buttons of every trip currently generating, without
+// waiting for a My Trips re-render -- so it appears the moment a run starts and goes the
+// moment it ends. A trip whose run just finished is left alone here rather than cleared
+// outright: tripsyFlagStaleAttireButtons re-runs on the render that follows and decides
+// between stale and nothing.
+function tripsyRefreshAttireGeneratingBadges() {
+  document.querySelectorAll('[data-tripsy-attire-menu-toggle]').forEach(btn => {
+    const generating = tripsyAttireGeneratingKeys.has(btn.dataset.key);
+    if (generating) tripsySetAttireStaleBadge(btn, 'generating');
+    else if (btn.querySelector('.tripsy-attire-stale-badge--generating')) tripsySetAttireStaleBadge(btn, '');
+  });
 }
 // Fire-and-forget pass over the rendered trip cards: for each trip whose saved
 // attire guide is now out of date, flag its 👔 button with a ⚠️. Re-queries the
@@ -17627,7 +17660,9 @@ async function tripsyFlagStaleAttireButtons(container, trips) {
     const guide = guides.find(g => g.tripKey === trip.key);
     const stale = await tripsyAttireGuideIsStale(trip, guide);
     const btn = [...container.querySelectorAll('[data-tripsy-attire-menu-toggle]')].find(b => b.dataset.key === trip.key);
-    tripsySetAttireStaleBadge(btn, stale);
+    // A run in flight wins: a re-render landing mid-generation must not replace the
+    // blinking badge with the steady stale one (or drop it entirely).
+    tripsySetAttireStaleBadge(btn, tripsyAttireGeneratingKeys.has(trip.key) ? 'generating' : (stale ? 'stale' : ''));
   }
 }
 
@@ -20774,6 +20809,11 @@ async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
   const summaryLiveForTrip = () => overlay.style.display !== 'none' && tripsyAttireOverlayTripKey === tripKey;
   if (summaryLiveForTrip()) content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Generating attire guide — this can take a minute or two for a longer trip…</div>`;
   toast(isRefresh ? 'Refreshing the attire guide — this can take a minute…' : 'Generating the attire guide — this can take a minute…');
+  // Blinking ⚠️ on this trip's 👔 button for as long as the run lasts, so the wait is
+  // visible from My Trips with the panel closed. Cleared in the `finally` below, so a
+  // failure or an early return can't strand it.
+  tripsyAttireGeneratingKeys.add(tripKey);
+  tripsyRefreshAttireGeneratingBadges();
   try {
     const guide = await generateTripsyAttireGuide(tripKey);
     const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
@@ -20795,7 +20835,12 @@ async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
     }
     toast(`Could not generate the attire guide — ${e.message || 'unknown error'}.`, 'error');
   } finally {
+    tripsyAttireGeneratingKeys.delete(tripKey);
+    // Re-render first (it rebuilds the buttons and re-runs the stale pass, which now
+    // sees an empty generating set), then sweep in case My Trips isn't the current view
+    // or that render is asynchronous -- the blink must not outlive the run either way.
     if (currentView === 'tripsytrips') renderTripsyEventsList();
+    tripsyRefreshAttireGeneratingBadges();
   }
 }
 // Pure render of a saved guide into the overlay's content pane -- day-by-day
