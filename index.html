@@ -7848,19 +7848,19 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
   // than in the guide's own counts means it applies to an already-generated guide with
   // no regenerate (which would discard manual overrides and packing-list edits); the
   // saved guide text still quotes its original numbers.
-  const flightTier = tripsyWardrobeFirstFlightBlockTier(guide);
-  if (flightTier) {
-    const tierLines = byTier[flightTier] || [];
-    const general = byTier[TRIPSY_WARDROBE_GENERAL_TIER] || [];
-    const decFirst = (lines, pred) => { const ln = (lines || []).find(pred); if (ln) { ln.need = Math.max(0, ln.need - 1); return true; } return false; };
-    // One full outfit: a top, a bottom, a pair of shoes -- at the block's own tier.
-    // Outerwear is deliberately NOT deducted: a coat is carried and re-worn regardless.
-    for (const grp of ['tops', 'pants', 'footwear']) decFirst(tierLines, ln => ln.group === grp);
-    // Plus the essentials worn with it. Socks come from the block's own tier when it has
-    // its own sock line (a formal departure would wear dress socks), else from General.
-    decFirst(general, ln => ln.typeKey === 'underwear');
-    const isSock = ln => ln.typeKey === 'socks' || ln.typeKey === 'dress-socks';
-    if (!decFirst(tierLines, isSock)) decFirst(general, isSock);
+  // One top / bottom / shoes at the block's own tier, plus the underwear and socks worn
+  // with them. Outerwear is deliberately NOT deducted: a coat is carried and re-worn
+  // regardless. Ordering matters, so the flight tier is offered to the claimer before
+  // General -- otherwise a General sock line could take the claim a tier line wanted.
+  const flightClaimer = tripsyWardrobeFlightWornClaimer(guide);
+  if (flightClaimer) {
+    const order = [flightClaimer.tier, TRIPSY_WARDROBE_GENERAL_TIER,
+      ...Object.keys(byTier).filter(k => k !== flightClaimer.tier && k !== TRIPSY_WARDROBE_GENERAL_TIER)];
+    for (const tier of order) {
+      for (const ln of (byTier[tier] || [])) {
+        if (flightClaimer.claim(ln.name, tier, ln.group)) ln.need = Math.max(0, ln.need - 1);
+      }
+    }
     // A line fully covered by what's worn drops out rather than lingering at 0 -- every
     // other line here is guaranteed need >= 1, so this only removes what was just zeroed.
     for (const k of Object.keys(byTier)) byTier[k] = byTier[k].filter(ln => ln.need > 0);
@@ -7876,6 +7876,49 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
 // stamps every event in a block with the block's dressiest tier, so the first event
 // already carries it. Leading days with no events are skipped; the first day that HAS
 // an event decides, and if that event isn't a flight the trip doesn't qualify.
+// THE single rule behind "worn on the departing flight, so not packed", shared by the
+// need lines, the Packing Summary and the Detailed Packing List so the three can't
+// disagree. Returns null when the trip doesn't start with a flight.
+// `claim(name, itemTier, group)` returns true the FIRST time it sees an item filling
+// each deducted role, so a role is only ever deducted once per list: one top, one
+// bottom and one pair of shoes AT THE FLIGHT BLOCK'S TIER, plus one underwear and one
+// socks. Those two are claimed only from that same tier or from the tier-agnostic
+// General bucket -- never from another dress code, or a casual departure would wrongly
+// eat the Formal tier's single pair of dress socks.
+// Stateful by design (one claimer per list); build a fresh one per surface.
+function tripsyWardrobeFlightWornClaimer(guide) {
+  const tier = tripsyWardrobeFirstFlightBlockTier(guide);
+  if (!tier) return null;
+  const taken = new Set();
+  const take = role => { if (taken.has(role)) return false; taken.add(role); return true; };
+  return {
+    tier,
+    claim(name, itemTier, group) {
+      const isGeneral = !itemTier || itemTier === TRIPSY_WARDROBE_GENERAL_TIER;
+      const typeKey = tripsyGarmentTypeKey(name);
+      if (isGeneral || itemTier === tier) {
+        if (typeKey === 'underwear') return take('underwear');
+        if (typeKey === 'socks' || typeKey === 'dress-socks') return take('socks');
+      }
+      if (itemTier !== tier) return false;
+      const grp = group || tripsyAttirePackingGroupOf({ name });
+      return ['tops', 'pants', 'footwear'].includes(grp) ? take(grp) : false;
+    },
+  };
+}
+// One off a quantity that may be a plain count ("4" -> "3") or a range ("8-9" -> "7-8").
+// `zero` is true when nothing is left, so the caller can drop the line entirely.
+function tripsyAttireQuantityMinusOne(quantity) {
+  const text = String(quantity == null ? '' : quantity);
+  if (!/\d/.test(text)) return { text, zero: false };
+  let zero = true;
+  const out = text.replace(/\d+/g, m => {
+    const n = Math.max(0, parseInt(m, 10) - 1);
+    if (n > 0) zero = false;
+    return String(n);
+  });
+  return { text: out, zero };
+}
 function tripsyWardrobeFirstFlightBlockTier(guide) {
   for (const day of ((guide && guide.days) || [])) {
     const events = (day && day.events) || [];
@@ -20810,6 +20853,13 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
   // (it's the same trip) but can get different outfit suggestions.
   const personCardHtml = (personKey, label) => {
     const pg = (guide.personGuidance && guide.personGuidance[personKey]) || { garments: {}, essentials: [] };
+    // Worn on the departing flight, so not packed -- the same deduction the packing
+    // screens apply, shown here too rather than leaving the Summary quoting numbers
+    // that include an outfit you're wearing. One claimer for this whole card, so a role
+    // is deducted once across all its tiers. Rows are rendered most-formal-first, but
+    // the claimer only ever takes tier roles from the flight block's OWN tier, so the
+    // order can't misdirect a deduction.
+    const flightClaimer = tripsyWardrobeFlightWornClaimer(guide);
     const rows = TRIPSY_ATTIRE_CATEGORY_ORDER.slice().reverse().map(category => {
       const camel = TRIPSY_ATTIRE_CAMEL_KEY[category];
       const blockCount = (guide.counts && guide.counts[camel]) || 0;
@@ -20824,6 +20874,14 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
       // Cocktail: the blazer line already reads "... or informal suit", so drop any
       // separate suit item (e.g. a prompt-generated alternative) to avoid a duplicate.
       if (category === 'cocktail' && items.some(it => tripsyGarmentTypeKey(it.name) === 'blazer')) items = items.filter(it => tripsyGarmentTypeKey(it.name) !== 'suit');
+      // Take the flight outfit off, dropping any line it fully covers.
+      if (flightClaimer) {
+        items = items.map(it => {
+          if (!flightClaimer.claim(it.name, category)) return it;
+          const q = tripsyAttireQuantityMinusOne(it.quantity);
+          return q.zero ? null : { ...it, quantity: q.text };
+        }).filter(Boolean);
+      }
       const reuseNote = (g && g.reuse_note) ? String(g.reuse_note).trim() : '';
       const legacyOutfits = (!g && pg.outfits) ? pg.outfits[category] : '';
       const detailHtml = (reuseNote || items.length)
@@ -20851,8 +20909,18 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
     // rather than the per-tier garments[] (which Claude keeps to clothing),
     // so shoes appear in the summary too. Works for existing guides, no
     // Refresh needed; item names ("formal shoes", "loafers") carry the tier.
+    // Same flightClaimer instance the tier rows above used, deliberately: the rows have
+    // already taken the top and bottom for the flight tier, leaving the footwear role
+    // for the pair listed here (Claude keeps shoes out of garments[], so this is the
+    // only place a shoe can be deducted).
     const footwearList = ((guide.packingList && guide.packingList[personKey]) || [])
-      .filter(it => it && it.name && tripsyAttirePackingGroupOf(it) === 'footwear' && !tripsyAttireIsExcludedPackingItem(it.name));
+      .filter(it => it && it.name && tripsyAttirePackingGroupOf(it) === 'footwear' && !tripsyAttireIsExcludedPackingItem(it.name))
+      .map(it => {
+        if (!flightClaimer || !flightClaimer.claim(it.name, it.category, 'footwear')) return it;
+        const q = tripsyAttireQuantityMinusOne(it.quantity);
+        return q.zero ? null : { ...it, quantity: q.text };
+      })
+      .filter(Boolean);
     const footwearHtml = footwearList.length ? `
       <div class="tripsy-attire-essentials">
         <div class="tripsy-attire-essentials-title">Footwear</div>
