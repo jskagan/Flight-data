@@ -7841,7 +7841,50 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
     byTier['cocktail'] = cocktailLines.filter(ln => ln.typeKey !== 'suit');
     byTier['cocktail'].forEach(ln => { if (ln.typeKey === 'blazer' && !/informal suit/i.test(ln.name || '')) ln.name = `${ln.name} or informal suit`; });
   }
+  // WORN, NOT PACKED. When the trip STARTS with a flight, the outfit for that first
+  // time block is on your body when you leave, so it never goes in the bag -- deduct it
+  // from every packing analysis. Applied last, on the FINAL lines, so it sees the
+  // footwear guarantee and the cocktail blazer/suit rewrite above. Doing it here rather
+  // than in the guide's own counts means it applies to an already-generated guide with
+  // no regenerate (which would discard manual overrides and packing-list edits); the
+  // saved guide text still quotes its original numbers.
+  const flightTier = tripsyWardrobeFirstFlightBlockTier(guide);
+  if (flightTier) {
+    const tierLines = byTier[flightTier] || [];
+    const general = byTier[TRIPSY_WARDROBE_GENERAL_TIER] || [];
+    const decFirst = (lines, pred) => { const ln = (lines || []).find(pred); if (ln) { ln.need = Math.max(0, ln.need - 1); return true; } return false; };
+    // One full outfit: a top, a bottom, a pair of shoes -- at the block's own tier.
+    // Outerwear is deliberately NOT deducted: a coat is carried and re-worn regardless.
+    for (const grp of ['tops', 'pants', 'footwear']) decFirst(tierLines, ln => ln.group === grp);
+    // Plus the essentials worn with it. Socks come from the block's own tier when it has
+    // its own sock line (a formal departure would wear dress socks), else from General.
+    decFirst(general, ln => ln.typeKey === 'underwear');
+    const isSock = ln => ln.typeKey === 'socks' || ln.typeKey === 'dress-socks';
+    if (!decFirst(tierLines, isSock)) decFirst(general, isSock);
+    // A line fully covered by what's worn drops out rather than lingering at 0 -- every
+    // other line here is guaranteed need >= 1, so this only removes what was just zeroed.
+    for (const k of Object.keys(byTier)) byTier[k] = byTier[k].filter(ln => ln.need > 0);
+  }
   return byTier;
+}
+// The attire tier of the first time block when the trip STARTS with a flight, else ''.
+// The guide's own event objects carry no Tripsy category, only `resource` -- so a flight
+// is identified as a transportation event whose title begins "Flight", which is exactly
+// what the snapshot builder's transportation-title rule produces ("Flight from LAX to
+// LHR • …", against "Car from …" / "Train from …" for everything else).
+// The block's tier is the first event's displayCategory: computeTripsyAttireBlocks
+// stamps every event in a block with the block's dressiest tier, so the first event
+// already carries it. Leading days with no events are skipped; the first day that HAS
+// an event decides, and if that event isn't a flight the trip doesn't qualify.
+function tripsyWardrobeFirstFlightBlockTier(guide) {
+  for (const day of ((guide && guide.days) || [])) {
+    const events = (day && day.events) || [];
+    if (!events.length) continue;
+    const first = events[0];
+    const isFlight = first && first.resource === 'transportation' && /^\s*flight\b/i.test(String(first.name || ''));
+    return isFlight ? (first.displayCategory || first.category || '') : '';
+  }
+  return '';
 }
 // True when THIS person's Plan Packing List is satisfied across every DRESS-CODE
 // tier -- each recommended need line covered by selected wardrobe garments +
