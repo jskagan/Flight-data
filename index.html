@@ -8297,6 +8297,9 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   // Closing (backdrop click) hides the overlay and, when an opener asked to be
   // notified (e.g. Packing Status' "Packing Plan" button), calls onClose so it can
   // reopen itself with the freshly-updated selections.
+  // This early handler covers the "Loading…" window before the data arrives; it is
+  // REPLACED below by one that also fires the packing-complete prompt, once
+  // maybeCongratulate exists. Nothing can have been completed yet at this point.
   ov.onclick = e => { if (e.target === ov) { ov.style.display = 'none'; if (onClose) onClose(); } };
   ov.style.display = 'flex';
 
@@ -8454,12 +8457,13 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   const render = () => { if (view.mode === 'detail') renderDetail(); else renderList(); };
   // Fire the "packing list complete -- create outfits?" prompt exactly on the
   // incomplete->complete transition for the CURRENT person (not on open). Owner only.
-  // Called ONLY from the Done button on a garment page, deliberately: picking the last
-  // garment used to trigger it mid-flow, interrupting before the owner had confirmed
-  // they were finished with that line. Now it waits until Done is pressed on the line
-  // that completes the plan. Every other mutation (pick, skip, unskip, No-Picture
-  // add/remove) just re-renders, leaving planWasComplete stale-but-false, which is
-  // exactly what lets the transition still be detected when Done is finally pressed.
+  // Called from the Done button on a garment page AND from closePage, deliberately not
+  // from every mutation: picking the last garment used to trigger it mid-flow,
+  // interrupting before the owner had confirmed they were finished with that line. So
+  // picks, skips, unskips and No-Picture add/remove just re-render, leaving
+  // planWasComplete stale-but-false -- which is exactly what lets the incomplete ->
+  // complete transition still be detected at whichever of Done or close comes first.
+  // Whichever fires first sets planWasComplete, so the other can't prompt twice.
   let planWasComplete = tripsyPlanPackingIsComplete(guide, tripKey, person);
   const maybeCongratulate = () => {
     const nowComplete = tripsyPlanPackingIsComplete(guide, tripKey, person);
@@ -8467,12 +8471,23 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     planWasComplete = nowComplete;
   };
 
-  // Detail -> back to the list of need lines; list -> close the page, notifying an
-  // opener that asked to be told (the same path the backdrop click takes).
-  closeBtn.onclick = () => {
-    if (view.mode === 'detail') { view = { mode: 'list' }; render(); return; }
+  // The one way this page closes, shared by the Close button and the backdrop so the
+  // two can't drift: hide, hand back to the opener, then fire the packing-complete
+  // prompt if this session is what completed the plan. Firing on close as well as on
+  // Done means finishing the last line and simply leaving still offers outfits.
+  // maybeCongratulate is a no-op unless the plan went incomplete -> complete here, so
+  // closing a plan that was already complete (or still isn't) prompts nothing.
+  const closePage = () => {
     ov.style.display = 'none';
     if (onClose) onClose();
+    maybeCongratulate();
+  };
+  // Replaces the early loading-window handler above, now that maybeCongratulate exists.
+  ov.onclick = e => { if (e.target === ov) closePage(); };
+  // Detail -> back to the list of need lines; list -> close the page.
+  closeBtn.onclick = () => {
+    if (view.mode === 'detail') { view = { mode: 'list' }; render(); return; }
+    closePage();
   };
   bodyEl.onclick = async e => {
     if (view.mode === 'list') {
