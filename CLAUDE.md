@@ -658,86 +658,89 @@ that catches drift between them.
   mechanism, not a separate one. `.tripsy-attire-dressguide-event` is `flex-wrap: wrap` specifically
   so this wider two-badge pair can drop to its own line rather than overflowing at narrower widths,
   the same way the single-badge case already fit.
-- **Detailed Packing List, one per person, nested under the Packing Summary cards**: each Him/Her
-  card's aggregate outfit counts (above) are complemented by a real itemized garment list — a
-  prominent amber/orange "View Detailed List" button (`.tripsy-attire-packinglist-btn`, the one CTA
-  each card wants to draw the eye to, deliberately styled apart from the plain outline buttons
-  elsewhere in Attire) opens `showTripsyAttirePackingListOverlay`, an overlay listing
-  `guide.packingList.{him,her}[]` (`{id, name, quantity, group, category, checked, eventIds}`). The button always
-  sits flush at the bottom of its card (`.tripsy-attire-person-card` is a flex column;
-  `.tripsy-attire-person-card-body` wraps the rows+essentials above it with `flex:1` so IT absorbs
-  the card's leftover height) — since the grid row already stretches both cards to equal height,
-  this keeps the Him and Her buttons aligned on the same horizontal line regardless of how long
-  either person's essentials list is. Seeded once from a
-  new `packing_list` field on `generateTripsyAttireCategories`'s `person_guidance` schema
-  (part of the guidance half of that function's two parallel calls, no extra round trip beyond
-  them) — the prompt asks for the same anchor-garment-plus-restyled-accessories logic worked out by
-  hand this session, now pinned to EXACT re-wear multipliers per garment type (given explicitly by
-  the owner after the model's own looser "once-a-week rotation" phrasing produced inconsistent
-  counts) rather than left to the model's own judgment call: suits/dresses counted low and reused
-  across time-blocks; **tops/shirts (dress shirts, casual tops, blouses) and underwear/socks get
-  exactly ONE wearing each** before a wash, so quantity matches the block/day count 1:1 within one
-  laundry cycle; **ties get TWO wearings each**, so quantity is roughly HALF the formal/cocktail-tier
-  time-block count (rounded up, minimum 1) — for her, jewelry/scarves/wraps restyle the same repeat
-  dresses the same way ties restyle a repeat suit; **casual/smart-casual BOTTOMS (trousers, jeans,
-  shorts) get up to SIX wearings each**, a much lower count than tops need for the same span. Each
-  item also carries an `event_ids` link where it reasonably maps to specific occasions.
-  **All garment/outfit counting is done per TIME-BLOCK, not per event** — "occasion" means one
-  time-block (events with no time to change between them, worn as one outfit, e.g. a pre-concert
-  reception → concert → post-concert reception evening = ONE wearing), so a continuous evening counts
-  as one anchor wearing / one fresh shirt, not one per sub-event. The blocks are **given to the call
-  as input** rather than re-derived by it (see `tripsyAttireComputeTimeBlocks` under the
-  two-parallel-calls bullet above), and the prompt states outright that a garment worn once per
-  occasion must never be quantified above its tier's BLOCK count times its own re-wear multiplier.
-  **Each `packing_list` item
-  also carries its own `category`** (the single dress-code tier it's packed for, `''` only for
-  genuinely tier-agnostic items) specifically so its `event_ids` can be validated rather than trusted
-  outright: the guidance call is now fed the events call's FINALIZED tiers (it no longer runs in parallel
-  re-judging them), so this divergence is largely gone for freshly generated guides. The validation
-  below is kept as a safety net for older guides or any residual mismatch — without it, a borderline
-  event the guidance call mis-linked produced a real bug where a "Ties (formal)" item ended up
-  linked to an event the app displays everywhere else as Semi-formal. `generateTripsyAttireGuide`
-  fixes this in JS: `days` already carries each event's AUTHORITATIVE `displayCategory` (block-
-  dressiest tier, stamped by `computeTripsyAttireBlocks`) by the time the packing list is built, so
-  every item's `event_ids` is filtered down to only the ids that actually belong to that item's own
-  `category` under `displayCategory` — a mismatched link is dropped rather than kept. **A Refresh re-generates the ENTIRE plan, `packingList` included** —
-  `generateTripsyAttireGuide` always seeds the packing list fresh from Claude's new output, the same
-  way it already re-derives every event's category from scratch, so a Refresh intentionally discards
-  hand-edited packing-list items (checked-off state, renames, custom quantities, manual adds) exactly
-  as it already discards manual category overrides. "Refresh" means regenerate, not update-in-place;
-  there is no carry-over of the prior `packingList`. (This reversed the earlier "packing edits are
-  sticky across Refresh" behavior, at the owner's request — the two kinds of manual edit, category
-  overrides and packing-list edits, now behave the same way on Refresh.) **Items are grouped by
-  garment type** into Dress Wear / Tops / Pants / Essentials / Footwear / Accessories
-  (`TRIPSY_ATTIRE_PACKING_GROUPS`, rendered in that order, empty groups skipped). Claude sets each
-  item's `group` via a schema enum, and `tripsyAttirePackingGroupOf` resolves it — preferring the
-  stored value but INFERRING one from the item name when it's missing or unrecognized, so a list
-  saved before groups existed still sections correctly instead of collapsing into one bucket. Two
-  splits in that taxonomy are deliberate and order-dependent in the inference regexes: *dress* socks
-  are Dress Wear while plain/casual socks are Essentials, and plain/dress trousers are Dress Wear
-  while *casual* trousers and jeans are Pants. The owner can reassign an item's group from a select
-  in its Edit box, and picks one when adding an item. Every mutation
-  (check/uncheck, rename, requantify, regroup, delete, add) is owner-gated exactly like
-  the rest of Attire (viewers see the same list read-only — checkboxes disabled, no Add/Edit/Delete
-  — never fully hidden, since seeing what's packed needs no write access) and persists straight to
-  `driveData` via the same `Store.saveTripsyAttireGuide`, since checked-state is real shared trip
-  data, not a personal display preference (unlike `isTripsyTripCollapsed`/`tripsyUpdateShowMatches`,
-  which are deliberately `localStorage`/session-only specifically because a non-owner viewer has no
-  Drive write access to persist anything into the shared file at all). An item with linked events
-  shows that tally next to its name as an explicit "N events" (NOT a bare "(N)" — that read as a
-  quantity and genuinely confused the owner, who saw "Ties (11)" and asked why 11 ties were being
-  packed when the quantity was "5-6" and the 11 was the linked-event count). Clicking an item's name opens
-  a small popup listing exactly which event(s) it's linked to (date/time/name, resolved against
-  `guide.days`), each clickable to jump to that event on My Trips via the same
-  `tripsyAttireGoToEvent` the Daily Dress Guide's own event titles already use — hiding the popup
-  and the packing-list overlay first so nothing is left stacked on top of My Trips underneath.
-  Adding a new item prompts "Link to specific events?"; accepting opens a checkbox picker over every
-  event on the trip (grouped by day, `guide.days`), pre-checked from the item's current `eventIds` —
-  the same picker an existing item's own "Link to Events…" button reopens to change its links later.
-  Both the event-link picker and the linked-events popup share one generic small overlay
-  (`getOrCreateTripsyAttirePackingPopupOverlay`) since neither is ever open at the same time as the
-  other — the same "one generic modal, several drill-downs" precedent
-  `getOrCreateTripsyAttireDetailOverlay` already established for the category drill-down.
+- **`guide.packingList` is data now, not its own screen**: each item is
+  `{id, name, quantity, group, category, checked, eventIds}`, seeded at generate time from
+  `person_guidance.packing_list`. There used to be a standalone "View Detailed List" overlay
+  (`showTripsyAttirePackingListOverlay`, `.tripsy-attire-packinglist-btn`, plus a shared popup for
+  event links) — **all of that is gone**; the wardrobe packing screens below replaced it. The list is
+  still generated and still read, in exactly two places: `tripsyWardrobeNeedByTier` turns it into the
+  per-tier **need lines** that drive every packing screen, and the Packing Summary's **Footwear**
+  block renders its `group: 'footwear'` items (Claude keeps shoes out of `garments[]`, so without
+  that they'd never appear in the summary at all). `checked`/`eventIds` are vestigial — nothing reads
+  them today.
+
+### Packing: the Wardrobe, the two screens, and how a need is satisfied
+
+A persistent garment library lives at **Utilities → Wardrobe** (`driveData.tripsyWardrobe`, records
+`{id, name, group, tiers[], color, quantity, person, driveFileId, …}`). Per trip, two overlays sit on
+top of it and **both read their need lines from the one function, `tripsyWardrobeNeedByTier`** — so
+they agree by construction rather than by two implementations staying in step:
+
+| Screen | Function | What it's for |
+|---|---|---|
+| Plan Packing List | `tripsyWardrobePackForTrip` | pick which garments cover each need line |
+| Packing Status | `tripsyWardrobePackingList` | mark what's physically packed; Selected/Packed per line |
+
+Each has a header button opening the other, passing an `onClose` callback so closing the second
+reopens the first with fresh numbers. Both use one **contextual Close**: on a garment detail screen
+it returns to the list of need lines, on the list it closes the page. Keep that single-button shape —
+a separate always-close button lands beside it on the detail screen wearing the same label.
+
+- **Allocation is per LINE, not per tier.** A pick is keyed `id::tier::line` (the line's NAME, not
+  its index — indices shift whenever the guide is regenerated, which is also why skip keys use
+  names), persisted in `driveData.tripsyTripWardrobe`. `availableFor` subtracts copies allocated to
+  any *other* line, so one owned pair can't silently satisfy two lines. Entries saved before this
+  are migrated on load by `tripsyWardrobeResolveSelectionLines`, which stamps the line the OLD
+  algorithm would have chosen — without a line an entry counts against availability while being
+  impossible to deselect. That function also re-homes swim picks (see below).
+  `tripsyWardrobeAssignGarments` honours an explicit `item.line`, falling back to its own matching
+  when absent, which is what lets all five call sites share it. A suit in a tier with no suit line
+  still fills both the blazer and trousers lines from one entry.
+- **Skips reduce a line's need**; they don't mark it satisfied. `driveData.tripsyTripAttireDone` is a
+  map `key -> count` (`tripsyNormalizeAttireSkips` / `tripsyAttireSkippedFor`); the key name is
+  historical — it used to be a flat ARRAY of "this optional line is Done" keys, which normalise to
+  `-1`, read back as "skip whatever this line still needs". `-1` is never written fresh, and skips
+  are clamped to the need so a stale one can't drive it negative. In the UI a **Skip** card sits in
+  the garment grid on any unmet line (with **Unskip**); when more than one item is outstanding it
+  asks how many. **Done** now appears only once a line's need is MET, and merely returns to the list.
+- **The "you finished — create outfits?" prompt** (`tripsyPackingCompleteDialog`, via
+  `maybeCongratulate`) fires on the incomplete→complete transition, from the **Done** button or from
+  `closePage`, *not* from every pick — picking the last garment used to interrupt mid-flow. Ordinary
+  mutations just re-render, leaving `planWasComplete` stale-but-false, which is exactly what lets the
+  transition still be detected later; whichever of Done/close comes first records it, so it can't
+  prompt twice.
+- **Essentials are packable; they're excluded from OUTFITS instead.** Underwear/socks/undershirt
+  lines live in the tier-agnostic **General** pseudo-tier and are filled by real wardrobe garments
+  like anything else. What they're kept out of is outfit composition —
+  `tripsyWardrobeGarmentExcludedFromOutfits`, applied when composing, in the swap picker, **and when
+  rendering** an outfit (a look composed earlier still lists them in its saved `garmentIds`, so
+  filtering only at compose time leaves them on screen).
+- **Never-photographed lines** (`tripsyWardrobeLineIsNeverPhotographed`: group `essentials`, or type
+  socks/dress-socks/underwear/undershirt) suppress the "No Picture" card, which otherwise drew a
+  second, near-identical glyph card beside the real garment — same emoji, same shape, told apart only
+  by its label. Still shown where generics already exist, so those stay removable.
+- **Garment types are matched by name**, `tripsyGarmentTypeKey`, and **order in that function is
+  load-bearing**: swim before `suit` (a "bathing suit" is not tailoring), dress-socks before socks,
+  socks before the trailing dress/gown rule ("dress socks" was typing as a gown), undershirt before
+  the generic shirt rule ("t-shirts" was typing as `shirt`). Plurals must be explicit — a whole-word
+  test silently mistyped `loafers`, `sneakers`, `tuxedos`, `dresses`, `swimwear`. `dress-shirt` vs
+  `shirt` is the precedent for every specific/generic split. **`tripsyAttirePackingGroupOf` has the
+  same ordering traps and must agree with it** (it read "bathing suit" as `dress_wear` for the same
+  reason). When changing either, re-type every name in the live data against the previous
+  implementation and diff — that catches what reasoning about the regex does not.
+- **A trip that STARTS with a flight wears its first outfit rather than packing it.** The outfit for
+  that first time block is on your body when you leave, so it's deducted from every packing analysis:
+  one top, one bottom and one pair of shoes at the block's own tier, plus the underwear and socks
+  worn with them (outerwear deliberately excluded — a coat is carried and re-worn regardless). One
+  shared `tripsyWardrobeFlightWornClaimer` hands out each role once and is used by all three
+  surfaces — the need lines, the Packing Summary rows and its Footwear block — so they can't drift;
+  `tripsyAttireQuantityMinusOne` handles ranges ("8-9" → "7-8") and a line reduced to nothing drops
+  out. Applied at READ time, not in the guide's own counts, so it works on an already-generated guide
+  (a Refresh would discard manual overrides and packing-list edits). A flight is identified as a
+  transportation event whose title begins "Flight" — the guide's saved events carry no Tripsy
+  category, only `resource`, and that title shape is what `tools/build_tripsy_snapshot.py`'s
+  transportation-title rule produces ("Flight from LAX to LHR • …" against "Car from …"/"Train from
+  …").
 - **A partial-itinerary PDF only compares the days it actually covers**: `compareTripsyItineraryPdf`
   determines the PDF's own date range from its day headings (`pdf_date_range`, part of the schema) —
   which can be narrower than the trip's real date range, e.g. a supplement covering just the middle
