@@ -7833,9 +7833,16 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
   // garments) so shoes are always a selectable garment type on Pack For Trip /
   // Packing List -- even when the guide's packing list didn't itemize shoes for
   // that tier. Skipped where the guide already provides its own footwear line.
+  // Also skipped when an UNTAGGED footwear line sits in General -- that is one pair
+  // covering every dress code (Claude sometimes emits "black dress shoes" with no dress
+  // code, as it did on 2026-08-02 having tagged the same item Formal the run before).
+  // Without this, Formal and Cocktail each got a generic "Shoes" line ON TOP of the
+  // General one, so the same single pair was demanded three times -- and under per-line
+  // allocation one pair cannot satisfy three lines, leaving two permanently unmet.
+  const generalHasFootwear = (byTier[TRIPSY_WARDROBE_GENERAL_TIER] || []).some(l => l.group === 'footwear');
   TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(tier => {
     const lines = byTier[tier];
-    if (lines.length && !lines.some(l => l.group === 'footwear')) {
+    if (lines.length && !generalHasFootwear && !lines.some(l => l.group === 'footwear')) {
       lines.push({ name: 'Shoes', typeKey: 'shoes', group: 'footwear', need: 1 });
     }
   });
@@ -7912,6 +7919,13 @@ function tripsyWardrobeFlightWornClaimer(guide) {
   if (!tier) return null;
   const taken = new Set();
   const take = role => { if (taken.has(role)) return false; taken.add(role); return true; };
+  // Which sock the flight outfit actually wears: a dress-code departure wears dress
+  // socks, a casual/athletic/smart-casual one wears ordinary socks. Without pinning it,
+  // the claim went to whichever sock line came first -- General lists "dress socks"
+  // before "casual socks", so a CASUAL flight was deducting a pair of DRESS socks.
+  // Only the matching type is ever claimed: if the guide has no such line, no sock is
+  // deducted at all, which is the safe direction to be wrong in.
+  const sockType = TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(tier) ? 'dress-socks' : 'socks';
   return {
     tier,
     claim(name, itemTier, group) {
@@ -7919,7 +7933,7 @@ function tripsyWardrobeFlightWornClaimer(guide) {
       const typeKey = tripsyGarmentTypeKey(name);
       if (isGeneral || itemTier === tier) {
         if (typeKey === 'underwear') return take('underwear');
-        if (typeKey === 'socks' || typeKey === 'dress-socks') return take('socks');
+        if (typeKey === sockType) return take('socks');
       }
       if (itemTier !== tier) return false;
       const grp = group || tripsyAttirePackingGroupOf({ name });
@@ -8053,6 +8067,22 @@ function tripsyWardrobeResolveSelectionLines(entries, guide, garmentById) {
       e.line = '';
     }
   }
+  // A REFRESH REWORDS THE NEED LINES. Claude writes the line names fresh every
+  // generation ("casual t-shirts" one run, "casual tops" the next), so a pick stored
+  // against the old wording matches nothing afterwards -- 32 of 40 picks on the first
+  // real refresh. Two things then go wrong: the copies stay counted as allocated, so the
+  // garment looks unavailable for the NEW line (six pairs of dress socks held by two
+  // lines that no longer existed, leaving the replacement line unfillable), and the fill
+  // math quietly falls back to guessing a line instead of honouring the pick.
+  // So: a line name that no longer exists in its tier is cleared here, and the
+  // assignment pass below re-homes that entry onto whichever current line the garment
+  // actually fills. Identity falls back to WHAT THE LINE IS when the wording is gone.
+  for (const e of out) {
+    if (!e.line || !e.category) continue;
+    const g = garmentById.get(e.id);
+    const lines = (needByPerson[(g && g.person) || 'him'][e.category]) || [];
+    if (!lines.some(ln => ln.name === e.line)) e.line = '';
+  }
   for (const person of ['him', 'her']) {
     const needLines = needByPerson[person];
     for (const tier of tiers) {
@@ -8071,7 +8101,36 @@ function tripsyWardrobeResolveSelectionLines(entries, guide, garmentById) {
       byLine.forEach((arr, i) => arr.forEach(it => { if (it.ref && !it.ref.line) it.ref.line = lines[i].name; }));
     }
   }
-  return out;
+  // Second chance in GENERAL before giving up. A refresh can move an item out of the
+  // dress codes entirely -- this trip's "black dress shoes" was tagged Formal one run
+  // and untagged (so General) the next -- which would otherwise discard the owner's
+  // formal-shoe and cocktail-loafer picks even though the very same line still exists,
+  // just relocated. Only General is tried, never a sibling dress code: General is the
+  // tier-agnostic bucket, so landing there is never a claim about formality, whereas
+  // re-homing a Formal pick into Smart Casual would be inventing an intent.
+  const generalLines = { him: needByPerson.him[TRIPSY_WARDROBE_GENERAL_TIER] || [], her: needByPerson.her[TRIPSY_WARDROBE_GENERAL_TIER] || [] };
+  for (const person of ['him', 'her']) {
+    const lines = generalLines[person];
+    if (!lines.length) continue;
+    const items = out.filter(e => !e.line && e.category && e.category !== TRIPSY_WARDROBE_GENERAL_TIER)
+      .map(e => ({ e, g: garmentById.get(e.id) }))
+      .filter(x => x.g && (x.g.person || 'him') === person)
+      .map(x => ({ g: x.g, qty: x.e.qty, ref: x.e }));
+    if (!items.length) continue;
+    const { byLine } = tripsyWardrobeAssignGarments(lines, items);
+    byLine.forEach((arr, i) => arr.forEach(it => {
+      if (it.ref && !it.ref.line) { it.ref.category = TRIPSY_WARDROBE_GENERAL_TIER; it.ref.line = lines[i].name; }
+    }));
+  }
+  // Anything STILL without a line couldn't be placed: nothing in its category is a line
+  // this garment fills any more. The dress socks are the case that showed it -- the new
+  // guide moved them out of Cocktail and Formal entirely, so neither tier had anywhere
+  // to put them. Left alone such an entry is pure blockage: it fills nothing yet still
+  // counts against the garment's availability, which is exactly what left the
+  // replacement line offering nothing but Skip. Dropping frees the copies, and the pick
+  // was already pointing at nothing. Entries with no category at all are legacy
+  // (pre-per-category) and are left untouched -- the screens already ignore them.
+  return out.filter(e => !e.category || e.line);
 }
 function tripsyWardrobeAssignFill(lines, packed) { return tripsyWardrobeAssignGarments(lines, packed).fill; }
 // Whether garment g would fill packing LINE ln within its tier's `lines` -- the
