@@ -7337,6 +7337,7 @@ function tripsyWardrobeCardHtml(g, opts = {}) {
         <div class="tw-meta"><span>${esc(groupLabel)}</span>${g.color ? `<span class="tw-color">· ${esc(g.color)}</span>` : ''}${(g.quantity || 1) > 1 ? `<span style="color:var(--muted);">· ×${g.quantity} available</span>` : ''}</div>
         ${tierBadges ? `<div class="tw-tiers">${tierBadges}</div>` : ''}
       </div>
+      ${opts.wearDays ? `<div class="tw-actions"><button class="btn" data-tw-wear-days="${esc(g.id)}">Wear Days</button></div>` : ''}
       ${opts.selectMode
         ? `<label class="tw-check"><input type="checkbox" data-tw-select="${esc(g.id)}" ${opts.selected ? 'checked' : ''}></label>`
         : `<div class="tw-actions"><button class="btn" data-tw-edit="${esc(g.id)}">Edit</button><button class="btn" data-tw-del="${esc(g.id)}">Delete</button></div>`}
@@ -8507,6 +8508,81 @@ async function tripsyPackingCompleteDialog(tripKey, person) {
 // tappable dress-code boxes and Travel View's event taps; the block is found by
 // eventIds membership on the saved outfit. `opts.onDetails`, when given, adds a footer
 // button (Travel View passes it so the event-detail panel stays reachable).
+// Where a garment is actually WORN, from the composed outfits: every time-block whose
+// garmentIds include it, grouped by day, with each block's events named. The composition
+// is the only thing that knows which of five dress shirts goes to which evening -- the
+// packing plan only knows the garment fills a LINE -- so this reads outfits, not picks,
+// and says so plainly when none have been composed.
+async function tripsyWardrobeWearDays(tripKey, garmentId, person) {
+  const [outfits, guide] = await Promise.all([
+    Store.getTripsyTripOutfits(tripKey, person),
+    Store.getTripsyAttireGuide(tripKey),
+  ]);
+  const blocks = ((outfits && outfits.blocks) || []).filter(b => (b.garmentIds || []).includes(garmentId));
+  // Event id -> its name/time, from the guide's own day list.
+  const evById = new Map();
+  for (const day of ((guide && guide.days) || [])) {
+    for (const ev of (day.events || [])) evById.set(ev.id, { ...ev, dayKey: day.dayKey });
+  }
+  const days = [];
+  for (const b of blocks) {
+    const events = (b.eventIds || []).map(id => evById.get(id) || { id, name: b.label || 'Event' });
+    const dayKey = b.dayKey || (events[0] && events[0].dayKey) || '';
+    const last = days[days.length - 1];
+    if (last && last.dayKey === dayKey) last.events.push(...events);
+    else days.push({ dayKey, events: [...events] });
+  }
+  return { days, hasOutfits: !!(outfits && (outfits.blocks || []).length) };
+}
+// The "Wear Days" screen: one amber day header per date, that day's events beneath it,
+// each tappable to open the full outfit for it (showTripsyOutfitModal -- the same view
+// the Outfits list uses). Its own overlay rather than the shared small one, since the
+// outfit modal opens ON TOP of it and the two must not fight over the same node.
+async function showTripsyWearDaysOverlay(tripKey, garment, person) {
+  let ov = document.getElementById('tw-weardays-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'tw-weardays-overlay';
+    ov.className = 'tw-modal';
+    ov.style.zIndex = '2147482980'; // under .tw-modal, so the outfit modal lands on top
+    document.body.appendChild(ov);
+    ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+  }
+  const render = body => {
+    ov.innerHTML = `
+      <div class="tw-modal-paper tw-wide">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:4px;">
+          <h2 style="margin:0; font-size:18px;">Wear Days</h2>
+          <button class="btn" data-tw-weardays-close>Close</button>
+        </div>
+        <div style="color:var(--muted); font-size:12.5px; margin-bottom:14px;">${esc(garment.name || 'Garment')}</div>
+        ${body}
+      </div>`;
+    ov.style.display = 'flex';
+    ov.querySelector('[data-tw-weardays-close]').onclick = () => { ov.style.display = 'none'; };
+  };
+  render(`<div style="padding:24px 0; color:var(--muted);">Loading…</div>`);
+  const { days, hasOutfits } = await tripsyWardrobeWearDays(tripKey, garment.id, person);
+  if (!days.length) {
+    render(`<div class="empty-state" style="margin-top:8px;">${hasOutfits
+      ? 'This piece isn’t part of any composed outfit yet.'
+      : 'No outfits have been composed for this trip yet — compose them from the trip’s 👔 Outfits screen, and the days this is worn will show here.'}</div>`);
+    return;
+  }
+  render(days.map(d => `
+    <div style="margin-bottom:14px;">
+      <div class="tw-group-title">${esc(tripsyDayHeaderLabel(d.dayKey))}</div>
+      ${d.events.map(ev => `<button type="button" data-tw-weardays-event="${esc(ev.id)}" style="display:flex; align-items:center; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:4px 0; cursor:pointer; color:var(--text); font-size:14px;">
+          <span style="flex:1; min-width:0;">${esc(ev.name || 'Event')}</span>
+          <span style="color:var(--muted); flex-shrink:0; font-size:12px;">${esc(ev.startTime || '')} ›</span>
+        </button>`).join('')}
+    </div>`).join(''));
+  ov.onclick = e => {
+    if (e.target === ov) { ov.style.display = 'none'; return; }
+    const row = e.target.closest('[data-tw-weardays-event]');
+    if (row) showTripsyOutfitModal(tripKey, row.getAttribute('data-tw-weardays-event'), person);
+  };
+}
 async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}) {
   let ov = document.getElementById('tw-outfit-overlay');
   if (!ov) {
@@ -8853,7 +8929,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       <div class="tw-info"><div class="tw-name">Skip</div><div class="tw-meta">${skipped ? `<span style="color:var(--amber); font-weight:700;">×${skipped} skipped</span>` : 'Not packing these'}</div></div>
       <div class="tw-actions">${met ? '' : `<button class="btn">Skip</button>`}${skipped ? `<button class="btn" data-tw-skip-undo="1">Unskip</button>` : ''}</div>
     </div>` : '';
-    bodyEl.innerHTML = `<div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, selected: sel.has(selKey(g.id, tier, ln.name)) })).join('')}${noPicCard}${skipCard}</div>`;
+    bodyEl.innerHTML = `<div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, wearDays: true, selected: sel.has(selKey(g.id, tier, ln.name)) })).join('')}${noPicCard}${skipCard}</div>`;
     tripsyWardrobeLoadPhotos(bodyEl);
   };
 
@@ -8944,6 +9020,14 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       if (existing) existing.qty += n; else generics.push({ category: view.tier, typeKey: ln.typeKey || '', name: ln.name, qty: n, packed: 0, person });
       persistGenerics();
       render(); // stay on the garment page; the user leaves via Back or an outside click
+      return;
+    }
+    // Checked before the card-select handler below, since this button sits INSIDE the
+    // card and a tap on it must not also toggle the selection.
+    const wearBtn = e.target.closest('[data-tw-wear-days]');
+    if (wearBtn) {
+      const wg = garmentById.get(wearBtn.getAttribute('data-tw-wear-days'));
+      if (wg) showTripsyWearDaysOverlay(tripKey, wg, person);
       return;
     }
     const card = e.target.closest('.tw-card-select');
@@ -9225,6 +9309,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
       return `<div class="tw-card" data-tw-detail-garment="${esc(g.id)}" style="cursor:pointer; position:relative;">
           <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}"${g.driveFileId ? ` data-tw-photo="${esc(g.driveFileId)}"` : ''}>${g.driveFileId ? '' : tripsyGarmentGlyph(tripsyGarmentTypeKey(g.name), g.group, g.name)}</div>
           <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div></div>
+          <div class="tw-actions"><button class="btn" data-tw-wear-days="${esc(g.id)}">Wear Days</button></div>
           ${b.badge}
         </div>`;
     }).join('');
@@ -9257,6 +9342,14 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const lineBtn = e.target.closest('[data-tw-status-line]');
     if (lineBtn) { const [tier, i] = lineBtn.getAttribute('data-tw-status-line').split('::'); statusView = { mode: 'detail', tier, lineIndex: parseInt(i, 10) }; render(); return; }
     if (e.target.closest('[data-tw-status-back]')) { statusView = { mode: 'list' }; render(); return; }
+    // Before the card handler: the button sits INSIDE the card, whose own tap marks the
+    // garment packed -- without this, opening Wear Days would also toggle packed state.
+    const wearBtn = e.target.closest('[data-tw-wear-days]');
+    if (wearBtn) {
+      const wg = garmentById.get(wearBtn.getAttribute('data-tw-wear-days'));
+      if (wg) showTripsyWearDaysOverlay(tripKey, wg, person);
+      return;
+    }
     const gEl = e.target.closest('[data-tw-detail-garment]');
     if (gEl) { await markGarmentPacked(gEl.getAttribute('data-tw-detail-garment')); return; }
     const genEl = e.target.closest('[data-tw-detail-generic]');
