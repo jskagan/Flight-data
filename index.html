@@ -8802,11 +8802,19 @@ function getOrCreateWardrobePackingListOverlay() {
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;">
         <h2 id="tw-packlist-title" style="margin:0; font-size:18px;">Packing Status</h2>
         <div style="display:flex; gap:8px; flex-shrink:0; align-items:center;">
-          <span id="tw-packlist-person"></span>
+          <button class="btn" id="tw-packlist-unpacked">Unpacked Items Only</button>
           <button class="btn" id="tw-packlist-listtoggle">List</button>
           <button class="btn" id="tw-packlist-plan">Packing Plan</button>
           <button class="btn" id="tw-packlist-done">Close</button>
         </div>
+      </div>
+      <!-- His/Hers and the packed tally share one row under the header, both flush to
+           the card's left edge. The person slot lives in this STATIC markup rather than
+           inside the re-rendered body, so it stays wired once instead of needing a
+           re-bind after every render. -->
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:14px;">
+        <span id="tw-packlist-person"></span>
+        <span id="tw-packlist-summary"></span>
       </div>
       <div id="tw-packlist-body"></div>
     </div>`;
@@ -8859,6 +8867,13 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   if (listToggleBtn) { listToggleBtn.style.display = 'none'; listToggleBtn.onclick = null; }
 
   let statusView = { mode: 'list' }; // or { mode: 'detail', tier, lineIndex }
+  // "Unpacked Items Only": show just the lines with something still to pack, i.e.
+  // Selected > Packed. A line nothing has been picked for (0/0) is NOT outstanding
+  // packing -- it's outstanding PLANNING, which is the Plan Packing List's job -- so it
+  // hides too. Session-only and never persisted, like every other display preference
+  // here (see isTripsyTripCollapsed / tripsyUpdateShowMatches): a view-only user has no
+  // Drive write access to store one.
+  let unpackedOnly = false;
   const TIER_ROWS = [...TRIPSY_ATTIRE_CATEGORY_ORDER.slice().reverse(), TRIPSY_WARDROBE_GENERAL_TIER];
   // Selected wardrobe pieces for a tier as {g, qty, packed} -- same filter the fill
   // math uses; `packed` (this tier's entry) rides along so the Packed column can sum it.
@@ -8906,9 +8921,14 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const genSel = generics.filter(x => (x.person || 'him') === person);
     const reqTotal = chosenSel.reduce((a, x) => a + x.qty, 0) + genSel.reduce((a, x) => a + x.qty, 0);
     const packedTotal = chosenSel.reduce((a, x) => a + Math.min(x.packed, x.qty), 0) + genSel.reduce((a, x) => a + Math.min(x.packed, x.qty), 0);
-    const summary = reqTotal
-      ? `<div style="font-size:12px; color:var(--muted); margin-bottom:14px;"><span style="color:${packedTotal >= reqTotal ? 'var(--home-green)' : 'var(--amber)'}; font-weight:700;">${packedTotal}/${reqTotal} packed</span></div>`
-      : '';
+    // Written into its own slot beside the His/Hers toggle, not into the body, so the
+    // two sit on one row under the header and the toggle survives a re-render.
+    const summaryEl = ov.querySelector('#tw-packlist-summary');
+    if (summaryEl) {
+      summaryEl.innerHTML = reqTotal
+        ? `<span style="font-size:12px; color:${packedTotal >= reqTotal ? 'var(--home-green)' : 'var(--amber)'}; font-weight:700;">${packedTotal}/${reqTotal} packed</span>`
+        : '';
+    }
 
     // Three right-hand columns, aligned across every section: Needed (the attire
     // guide's required count for this garment type, minus anything skipped -- the SAME
@@ -8933,6 +8953,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
         const need = effectiveNeed(tier, ln);
         const selected = (fill[i] || 0) + genericFilledFor(tier, ln);
         const packed = (byLine[i] || []).reduce((a, it) => a + Math.min(it.packed || 0, it.qty), 0) + genericPackedFor(tier, ln);
+        if (unpackedOnly && !(selected > packed)) return '';
         const selColor = selected >= need ? 'var(--home-green)' : 'var(--amber)';
         const packedColor = (selected > 0 && packed >= selected) ? 'var(--home-green)' : 'var(--muted)';
         return `<button type="button" data-tw-status-line="${esc(tier)}::${i}" style="display:flex; align-items:center; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:5px 0; cursor:pointer; color:var(--text); font-size:14px;">
@@ -8942,10 +8963,16 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
             <span style="width:52px; text-align:right; font-weight:700; color:${packedColor};">${packed}</span>
           </button>`;
       }).join('');
+      if (!rows) return ''; // every line in this tier is fully packed -- drop the heading too
       return `<div style="margin-bottom:18px;"><div class="tw-group-title" style="margin-bottom:6px;">${esc(tripsyWardrobeTierLabel(tier))}</div>${rows}</div>`;
     }).join('');
 
-    bodyEl.innerHTML = summary + (sections ? colHeader + sections : `<div class="empty-state" style="margin-top:12px;">No attire guide yet — generate one from the trip's 👔 menu.</div>`);
+    // With the filter on, "no sections" means nothing is outstanding -- NOT that there's
+    // no guide, which is what the default empty state would have wrongly claimed.
+    const emptyHtml = unpackedOnly
+      ? `<div class="empty-state" style="margin-top:12px;">Everything selected for ${person === 'her' ? 'Hers' : 'His'} is packed. Turn off “Unpacked Items Only” to see the full list.</div>`
+      : `<div class="empty-state" style="margin-top:12px;">No attire guide yet — generate one from the trip's 👔 menu.</div>`;
+    bodyEl.innerHTML = (sections ? colHeader + sections : emptyHtml);
   };
 
   const renderDetail = () => {
@@ -9028,6 +9055,13 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   if (doneBtn) doneBtn.onclick = leaveOrClose;
   // "Packing Plan" -> open the Plan Packing List; when it's closed, reopen THIS
   // Packing Status page (fresh, so it reflects any selection changes) for the same person.
+  // "Unpacked Items Only" -- a plain view filter, so it only ever re-renders. Reflected
+  // in the button itself (primary when on) since with it active the page can look empty
+  // or oddly short, and nothing else on screen would say why.
+  const unpackedBtn = ov.querySelector('#tw-packlist-unpacked');
+  const syncUnpackedBtn = () => { if (unpackedBtn) unpackedBtn.className = unpackedOnly ? 'btn primary' : 'btn'; };
+  if (unpackedBtn) unpackedBtn.onclick = () => { unpackedOnly = !unpackedOnly; syncUnpackedBtn(); statusView = { mode: 'list' }; render(); };
+  syncUnpackedBtn();
   const planBtn = ov.querySelector('#tw-packlist-plan');
   if (planBtn) planBtn.onclick = () => { ov.style.display = 'none'; tripsyWardrobePackForTrip(tripKey, tripName, person, () => tripsyWardrobePackingList(tripKey, tripName, person)); };
   const personSlot = ov.querySelector('#tw-packlist-person');
