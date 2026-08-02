@@ -8477,7 +8477,7 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
 // from the grid and counts the need down (a garment counts toward every dress code it's
 // tagged for). "No Picture" additions persist separately (tripsyTripGenericGarments) and
 // count the need down too, but can't join AI outfit composition (no photo).
-async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him', onClose = null) {
+async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him', onClose = null, initialLine = null) {
   const ov = getOrCreateWardrobeSelectOverlay();
   const bodyEl = ov.querySelector('#tw-select-body');
   const countEl = ov.querySelector('#tw-select-count');
@@ -8548,6 +8548,14 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   const isPerson = g => (g.person || 'him') === person;
 
   let view = { mode: 'list' }; // or { mode: 'detail', tier, lineIndex }
+  // Opened FROM the matching garment page on Packing Status -> land on that same line
+  // rather than the list, so the two pages are two views of one thing instead of a
+  // round trip through a menu. Addressed by line NAME, not index: a regenerated guide
+  // renumbers the lines, and names are what every other cross-reference here uses.
+  if (initialLine && initialLine.tier) {
+    const idx = (needLines[initialLine.tier] || []).findIndex(ln => ln.name === initialLine.lineName);
+    if (idx >= 0) view = { mode: 'detail', tier: initialLine.tier, lineIndex: idx };
+  }
   const persistChosen = () => Store.setTripWardrobe(tripKey, [...sel].map(([k, qty]) => { const { id, category, line } = parseSelKey(k); return { id, category, line, qty, packed: Math.min(qty, packedByKey.get(k) || 0) }; }));
   const persistGenerics = () => Store.setTripGenericGarments(tripKey, generics);
 
@@ -8841,7 +8849,7 @@ function getOrCreateWardrobePackingListOverlay() {
 
 // "Packing List" — every selected piece (photo + name + tier badges + how many
 // packing) plus, per dress code, the specific garment types still needed.
-async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him', onClose = null) {
+async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him', onClose = null, initialLine = null) {
   const ov = getOrCreateWardrobePackingListOverlay();
   const bodyEl = ov.querySelector('#tw-packlist-body');
   ov.querySelector('#tw-packlist-title').textContent = `Packing Status${tripName ? ` — ${tripName}` : ''}`;
@@ -8884,6 +8892,12 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   if (listToggleBtn) { listToggleBtn.style.display = 'none'; listToggleBtn.onclick = null; }
 
   let statusView = { mode: 'list' }; // or { mode: 'detail', tier, lineIndex }
+  // Same, for the return leg: closing the Plan page brings you back to the garment page
+  // you left, not to the top of the list.
+  if (initialLine && initialLine.tier) {
+    const idx = (needLines[initialLine.tier] || []).findIndex(ln => ln.name === initialLine.lineName);
+    if (idx >= 0) statusView = { mode: 'detail', tier: initialLine.tier, lineIndex: idx };
+  }
   // "Unpacked Items Only": show just the lines with something still to pack, i.e.
   // Selected > Packed. A line nothing has been picked for (0/0) is NOT outstanding
   // packing -- it's outstanding PLANNING, which is the Plan Packing List's job -- so it
@@ -9080,7 +9094,14 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   if (unpackedBtn) unpackedBtn.onclick = () => { unpackedOnly = !unpackedOnly; syncUnpackedBtn(); statusView = { mode: 'list' }; render(); };
   syncUnpackedBtn();
   const planBtn = ov.querySelector('#tw-packlist-plan');
-  if (planBtn) planBtn.onclick = () => { ov.style.display = 'none'; tripsyWardrobePackForTrip(tripKey, tripName, person, () => tripsyWardrobePackingList(tripKey, tripName, person)); };
+  if (planBtn) planBtn.onclick = () => {
+    // From a garment page, hand the SAME line to the Plan page (and take it back on the
+    // return leg). From the list, both stay on their lists as before.
+    const ln = statusView.mode === 'detail' ? (needLines[statusView.tier] || [])[statusView.lineIndex] : null;
+    const where = ln ? { tier: statusView.tier, lineName: ln.name } : null;
+    ov.style.display = 'none';
+    tripsyWardrobePackForTrip(tripKey, tripName, person, () => tripsyWardrobePackingList(tripKey, tripName, person, null, where), where);
+  };
   const personSlot = ov.querySelector('#tw-packlist-person');
   const renderPersonToggle = () => {
     if (!personSlot) return;
