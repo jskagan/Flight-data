@@ -8236,6 +8236,16 @@ function tripsyWardrobeLineIsNeverPhotographed(ln) {
 // composing, when offering a swap, AND when RENDERING an outfit -- outfits composed
 // before this still carry dress socks in their saved garmentIds, so filtering only at
 // composition time would leave them showing on existing outfit pages.
+// A wardrobe garment with NO PHOTO is a placeholder -- "I own some of these" -- not a
+// tracked item, so its `quantity` is bookkeeping rather than a real count of things you
+// could point at. Capping how many you can allocate by that number is meaningless
+// friction: the honest limit is however many the LINE asks for. (Underwear, socks and
+// undershirts are the whole point: nobody photographs them, and a line needing 4 must
+// let you pick 4 whatever the placeholder happens to say.) Photographed garments still
+// cap at what's genuinely available, since each copy is a real, allocatable thing.
+function tripsyWardrobeGarmentIsPlaceholder(g) {
+  return !!g && !g.driveFileId;
+}
 function tripsyWardrobeGarmentExcludedFromOutfits(g) {
   if (!g) return true;
   return g.group === 'essentials' || TRIPSY_WARDROBE_NEVER_PHOTOGRAPHED_TYPES.includes(tripsyGarmentTypeKey(g.name));
@@ -8604,7 +8614,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     // General, and tripsyWardrobeGarmentFillsLine still gates by group, so an essentials
     // garment can only ever fill an essentials line. They're excluded from outfit
     // composition instead, where they genuinely don't belong.
-    const avail = garments.filter(g => isPerson(g) && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (g.tiers || []).includes(tier)) && tripsyWardrobeGarmentFillsLine(g, ln, lines) && availableFor(g, tier, ln.name) > 0);
+    const avail = garments.filter(g => isPerson(g) && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (g.tiers || []).includes(tier)) && tripsyWardrobeGarmentFillsLine(g, ln, lines) && (tripsyWardrobeGarmentIsPlaceholder(g) || availableFor(g, tier, ln.name) > 0));
     // "Done" appears only once the line's need is actually MET -- it just returns to the
     // Plan Packing List. Trimming an unmet line is the Skip card's job below, not Done's.
     const met = ln.remaining <= 0;
@@ -8737,7 +8747,11 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const key = selKey(g.id, view.tier, lnHere.name);
     if (sel.has(key)) { sel.delete(key); packedByKey.delete(key); } // deselect for THIS line
     else {
-      const avail = availableFor(g, view.tier, lnHere.name); // owned qty minus copies used on other lines
+      // Photoless placeholder -> the cap is what the LINE needs; a real garment -> owned
+      // quantity minus copies already used on other lines.
+      const avail = tripsyWardrobeGarmentIsPlaceholder(g)
+        ? Math.max(1, lnHere.need || 1)
+        : availableFor(g, view.tier, lnHere.name);
       if (avail <= 0) return;
       let qty = 1;
       if (avail > 1) { const needed = (remainingLinesFor(view.tier)[view.lineIndex] || {}).remaining; const n = await tripsyWardrobeChooseQty(avail, g.name, 'pack', needed); if (!n) return; qty = n; }
@@ -20653,7 +20667,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
     const sections = lines.map((ln, i) => {
       const remaining = Math.max(0, ln.need - (filled[i] || 0) - genericFilledFor(ln));
       // All garments that would fill this line (selected stay, checkbox checked) so a pick can be toggled off.
-      const avail = garments.filter(g => isPerson(g) && (category === TRIPSY_WARDROBE_GENERAL_TIER || (g.tiers || []).includes(category)) && tripsyWardrobeGarmentFillsLine(g, ln, lines) && availableFor(g, category, ln.name) > 0);
+      const avail = garments.filter(g => isPerson(g) && (category === TRIPSY_WARDROBE_GENERAL_TIER || (g.tiers || []).includes(category)) && tripsyWardrobeGarmentFillsLine(g, ln, lines) && (tripsyWardrobeGarmentIsPlaceholder(g) || availableFor(g, category, ln.name) > 0));
       const noPic = `<div class="tw-card tw-card-select" data-tw-nopic="1" data-line-name="${esc(ln.name)}" data-type-key="${esc(ln.typeKey || '')}" style="cursor:pointer;">
         <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(ln.typeKey, ln.group, ln.name)}</div>
         <div class="tw-info"><div class="tw-name">${esc(tripsyStripCategoryParen(ln.name))}</div><div class="tw-meta">Other</div></div>
@@ -20697,7 +20711,10 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
     const key = selKey(g.id, category, lineName);
     if (sel.has(key)) { sel.delete(key); packedByKey.delete(key); } // deselect for THIS line
     else {
-      const av = availableFor(g, category, lineName);
+      const lnHere = (lines || []).find(l => l.name === lineName);
+      const av = tripsyWardrobeGarmentIsPlaceholder(g)
+        ? Math.max(1, (lnHere && lnHere.need) || 1)
+        : availableFor(g, category, lineName);
       if (av <= 0) return;
       let qty = 1;
       if (av > 1) { const nn = await tripsyWardrobeChooseQty(av, g.name, 'pack'); if (!nn) return; qty = nn; }
