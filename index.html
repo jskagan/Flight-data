@@ -1141,6 +1141,11 @@
      `finally`. */
   .tripsy-attire-stale-badge--generating { animation: tripsy-attire-badge-blink 1s steps(1, end) infinite; }
   @keyframes tripsy-attire-badge-blink { 50% { opacity: 0; } }
+  /* The composing spinner's hourglass -- a slow turn rather than a fast spin, so it
+     reads as "working" over a minute-long wait instead of looking frantic. */
+  .tw-composing-glyph { display: inline-block; animation: tripsy-hourglass-turn 1.6s ease-in-out infinite; }
+  @keyframes tripsy-hourglass-turn { 0%, 60% { transform: rotate(0deg); } 100% { transform: rotate(180deg); } }
+  @media (prefers-reduced-motion: reduce) { .tw-composing-glyph { animation: none; } }
   /* Red ▲ overlaid on the My Trips 🧭 button when events changed since that trip's
      itinerary was generated. The same signal the ▲ beside "Edit" INSIDE that menu
      already gives, hoisted onto the glyph so it doesn't need the menu opened to be
@@ -21523,6 +21528,49 @@ Rules:
 // Runs Compose Outfits from the Attire toolbar button, then re-renders the guide so
 // the Daily Dress Guide's dress-code boxes become tappable. Toasts on success/failure;
 // the button shows its own busy state (this call can take a minute on a big trip).
+// Do this person's saved outfits predate what they were composed from? True only when
+// outfits EXIST and their packing plan is complete -- i.e. the garment counts are right
+// and the only thing out of date is the composition itself. Two ways it goes stale: the
+// guide was regenerated (events/tiers moved), or the packing selection changed since.
+// Same pair of fingerprints showTripsyOutfitModal already uses for its own stale note.
+async function tripsyOutfitsNeedRecompose(tripKey, person = 'him') {
+  try {
+    const outfits = await Store.getTripsyTripOutfits(tripKey, person);
+    if (!outfits || !(outfits.blocks || []).length) return false;
+    const guide = await Store.getTripsyAttireGuide(tripKey);
+    if (!guide || !tripsyPlanPackingIsComplete(guide, tripKey, person)) return false;
+    const guideMoved = !!(guide.eventFingerprint && outfits.guideFingerprint
+      && guide.eventFingerprint.hash !== outfits.guideFingerprint.hash);
+    const sel = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey));
+    const selMoved = !!(outfits.selectionFingerprint
+      && tripsyOutfitSelectionFingerprint(sel).hash !== outfits.selectionFingerprint.hash);
+    return guideMoved || selMoved;
+  } catch (e) {
+    console.error('Outfit staleness check failed (non-fatal):', e);
+    return false;
+  }
+}
+// A spinning ⏳ for the length of an outfit composition. Its own tiny overlay above
+// everything else: composing takes a minute or more, and the toast alone scrolls away
+// long before it finishes, leaving nothing on screen to say the app is still working.
+function tripsyShowOutfitComposingSpinner(person) {
+  let ov = document.getElementById('tw-composing-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'tw-composing-overlay';
+    ov.className = 'tw-modal';
+    ov.style.zIndex = '2147483200';
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML = `
+    <div class="tw-modal-paper" style="max-width:360px; text-align:center;">
+      <div class="tw-composing-glyph" style="font-size:40px; line-height:1;">⏳</div>
+      <h2 style="margin:14px 0 6px; font-size:17px;">Regenerating outfits…</h2>
+      <div style="color:var(--muted); font-size:13px;">Composing ${person === 'her' ? 'Hers' : 'His'} outfits from the current plan. This can take a minute.</div>
+    </div>`;
+  ov.style.display = 'flex';
+  return () => { ov.style.display = 'none'; };
+}
 async function runTripsyOutfitComposition(tripKey, person = 'him') {
   // Triggered from the outfit list's per-person Compose/Recompose; toast covers the
   // wait, and My Trips is re-rendered afterward so the card's outfits item flips.
@@ -23912,7 +23960,7 @@ async function renderTripsyEventsListImpl() {
       isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="pack" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🧳', 'Plan Packing List') : '',
       isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="packlist" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '📋', 'Packing Status') : '',
       attireHasOutfits
-        ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-key="${esc(trip.key)}"`, '✨', 'View Outfits')
+        ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-key="${esc(trip.key)}"`, '✨', 'View Outfits', `<span data-tripsy-outfits-warning="${esc(trip.key)}" title="Your packing is complete, but these outfits were composed from an older plan" style="display:none; margin-left:auto; color:var(--amber); font-size:13px; line-height:1;">⚠️</span>`)
         : (attireOutfitsReady ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-key="${esc(trip.key)}"`, '✨', 'Compose Outfits') : ''),
       isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="refresh" data-mode="${attireHasGuide ? 'refresh' : 'generate'}" data-key="${esc(trip.key)}"`, '🔄', attireHasGuide ? 'Refresh' : 'Generate') : '',
     ].join('');
@@ -24236,7 +24284,23 @@ async function renderTripsyEventsListImpl() {
           const g = (driveData.tripsyAttireGuides || []).find(x => x.tripKey === key) || null;
           const hasFor = p => !!(driveData.tripsyTripOutfits || []).find(o => o.tripKey === key && (o.person || 'him') === p && (o.blocks || []).some(b => b.garmentIds && b.garmentIds.length));
           const okFor = p => hasFor(p) || tripsyPlanPackingIsComplete(g, key, p);
-          showTripsyOutfitList(key, okFor('him') ? 'him' : (okFor('her') ? 'her' : 'him'));
+          const who = okFor('him') ? 'him' : (okFor('her') ? 'her' : 'him');
+          // When the packing is complete but the saved outfits came from an earlier
+          // version of the trip, say so BEFORE showing them -- otherwise the list looks
+          // authoritative while quietly describing a trip that has moved on. Ignore just
+          // opens it; Regenerate recomposes behind a spinner, then opens it.
+          (async () => {
+            if (isOwner && await tripsyOutfitsNeedRecompose(key, who)) {
+              const regen = await tripsyConfirmDialog(
+                'Your garment counts are complete, but these outfits were composed from an earlier version of this trip — the itinerary or your packing picks have changed since. Regenerate them to be sure they match what you are actually taking.',
+                { title: '⚠️ Outfits may be out of date', yes: 'Regenerate', no: 'Ignore' });
+              if (regen) {
+                const hide = tripsyShowOutfitComposingSpinner(who);
+                try { await runTripsyOutfitComposition(key, who); } finally { hide(); }
+              }
+            }
+            showTripsyOutfitList(key, who);
+          })();
           break;
         }
         case 'refresh': tripsyRunAttireGenerationSafely(key, { isRefresh: btn.dataset.mode === 'refresh' }); break;
@@ -24521,6 +24585,18 @@ async function renderTripsyEventsListImpl() {
           // the blink with the steady ▲ or drop it.
           const glyphBtn = [...container.querySelectorAll('[data-tripsy-itinerary-menu-toggle]')].find(b => b.dataset.key === trip.key);
           tripsySetItineraryGlyphBadge(glyphBtn, tripsyItineraryGeneratingKeys.has(trip.key) ? 'generating' : (changed.length ? 'changed' : ''));
+        } catch (e) { /* leave hidden */ }
+      }
+    })();
+    // Same idea for the ✨ outfits item: flag it when the packing plan is complete but
+    // the saved outfits were composed from an older guide or an older selection.
+    (async () => {
+      for (const trip of (tripsyDecryptedTrips || [])) {
+        const el = container.querySelector(`[data-tripsy-outfits-warning="${CSS.escape(trip.key)}"]`);
+        if (!el) continue;
+        try {
+          const stale = (await tripsyOutfitsNeedRecompose(trip.key, 'him')) || (await tripsyOutfitsNeedRecompose(trip.key, 'her'));
+          el.style.display = stale ? 'inline-flex' : 'none';
         } catch (e) { /* leave hidden */ }
       }
     })();
