@@ -22470,6 +22470,13 @@ async function tripsyReadImageFromClipboard() {
   return null;
 }
 
+// Shows/hides the preview toolbar's action buttons (Print, Generate PDF) as one group.
+// They're only meaningful once a built itinerary is on the paper, so the loading state
+// and the two picker screens hide them. Toggling by class rather than by id keeps a
+// future third action from being missed at one of the call sites.
+function tripsySetPreviewActionsVisible(overlay, visible) {
+  overlay.querySelectorAll('.tripsy-preview-action').forEach(btn => { btn.style.display = visible ? '' : 'none'; });
+}
 async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPicker, scrollToId, onExit } = {}) {
   _tripsyPreviewExitCallback = onExit || null;
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
@@ -22483,7 +22490,8 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
       <div class="tripsy-preview-toolbar">
         <button class="btn" id="tripsy-preview-search-btn">🔍 Search</button>
         <button class="btn" id="tripsy-preview-close-btn">Close</button>
-        <button class="btn primary" id="tripsy-preview-print-btn">Print</button>
+        <button class="btn tripsy-preview-action" id="tripsy-preview-pdf-btn">📄 Generate PDF</button>
+        <button class="btn primary tripsy-preview-action" id="tripsy-preview-print-btn">Print</button>
       </div>
       <div class="tripsy-preview-searchbar" id="tripsy-preview-searchbar">
         <input type="search" id="tripsy-preview-search-input" placeholder="Search this itinerary…" autocomplete="off" spellcheck="false">
@@ -22507,6 +22515,31 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
     // outside the actual document.
     overlay.addEventListener('click', e => {
       if (e.target === overlay) { overlay.style.display = 'none'; const cb = _tripsyPreviewExitCallback; _tripsyPreviewExitCallback = null; if (cb) cb(); }
+    });
+    // Generate PDF, beside Print. Same builder the trip card's 🧭 menu uses, so the two
+    // produce an identical file; here it runs from the preview you're already looking at
+    // instead of making you close it and hunt through the menu. The overlay is a
+    // singleton wired once, so the trip key comes off overlay.dataset.tripKey, which
+    // previewTripsyItinerary already sets on every open for the narrative handlers.
+    // Deliberately does NOT close the preview -- the PDF downloads and you carry on
+    // reading.
+    overlay.querySelector('#tripsy-preview-pdf-btn').addEventListener('click', async e => {
+      const btn = e.currentTarget;
+      const tripKey = overlay.dataset.tripKey;
+      if (!tripKey || btn.disabled) return;
+      const label = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '⏳ Generating…';
+      toast('Generating PDF…', 'success');
+      try {
+        await buildTripsyItineraryPdf(tripKey);
+      } catch (err) {
+        console.error('buildTripsyItineraryPdf failed:', err);
+        toast('Could not build the PDF. Please try again.', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = label;
+      }
     });
     overlay.querySelector('#tripsy-preview-print-btn').addEventListener('click', async () => {
       const currentHtml = overlay.querySelector('#tripsy-preview-content').innerHTML;
@@ -23435,7 +23468,6 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
     }
   }
 
-  const printBtn = overlay.querySelector('#tripsy-preview-print-btn');
   const content = overlay.querySelector('#tripsy-preview-content');
   // Show the overlay (and a loading note) IMMEDIATELY rather than only after
   // buildTripsyPrintHtml resolves -- that build downloads every place photo
@@ -23445,7 +23477,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
   // note so the existing content doesn't flash away and back.
   const wasOpen = overlay.style.display === 'flex';
   if (!wasOpen) {
-    if (printBtn) printBtn.style.display = 'none';
+    tripsySetPreviewActionsVisible(overlay, false);
     content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Preparing your itinerary…</div>`;
     overlay.style.display = 'flex';
   }
@@ -23464,7 +23496,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, skipDraftPi
   }
   if (html == null) { if (!wasOpen) overlay.style.display = 'none'; return; }
   content.innerHTML = html;
-  if (printBtn) printBtn.style.display = '';
+  tripsySetPreviewActionsVisible(overlay, true);
   // The re-render wiped any find-in-page <mark>s; if the search bar is open,
   // rebuild the hits against the new content so the count/steps stay valid.
   if (overlay._tpRerunSearch) overlay._tpRerunSearch();
@@ -23536,8 +23568,7 @@ async function renderTripsyNarrativeSelectionScreen(overlay, tripKey, trip) {
   `;
 
   // Nothing to print yet on a selection screen.
-  const printBtn = overlay.querySelector('#tripsy-preview-print-btn');
-  if (printBtn) printBtn.style.display = 'none';
+  tripsySetPreviewActionsVisible(overlay, false);
   overlay.style.display = 'flex';
 
   content.querySelector('[data-tripsy-select-all-events]').addEventListener('click', () => {
@@ -23610,8 +23641,7 @@ function renderTripsyPdfDraftPicker(overlay, tripKey, trip, drafts) {
     </div>
   `;
 
-  const printBtn = overlay.querySelector('#tripsy-preview-print-btn');
-  if (printBtn) printBtn.style.display = 'none';
+  tripsySetPreviewActionsVisible(overlay, false);
   overlay.style.display = 'flex';
 
   content.querySelector('[data-tripsy-view-live-itinerary]').addEventListener('click', () => {
