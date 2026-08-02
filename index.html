@@ -7843,6 +7843,25 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
   // garments) so shoes are always a selectable garment type on Pack For Trip /
   // Packing List -- even when the guide's packing list didn't itemize shoes for
   // that tier. Skipped where the guide already provides its own footwear line.
+  // FOOTWEAR BELONGS TO A DRESS CODE, NOT TO GENERAL. Claude sometimes emits a single
+  // untagged shoe item ("Dress Shoes", no category), which buckets to General -- and
+  // General is deliberately tier-agnostic, so that line accepts ANY shoe, sneakers
+  // included. For shoes that is plainly wrong: a garment's tier tags exist precisely to
+  // say which dress codes it suits, and every dress-code tier's picker honours them.
+  // So an untagged footwear line is redistributed to the active dress-code tiers that
+  // have no shoe line of their own, named for the tier ("Formal shoes", "Cocktail
+  // shoes"), where the tag check applies normally. It also stops one pair being demanded
+  // by several lines at once, which per-line allocation cannot satisfy.
+  const generalFootwear = (byTier[TRIPSY_WARDROBE_GENERAL_TIER] || []).filter(ln => ln.group === 'footwear');
+  if (generalFootwear.length) {
+    const targets = TRIPSY_ATTIRE_CATEGORY_ORDER.filter(t => (byTier[t] || []).length && !(byTier[t] || []).some(l => l.group === 'footwear'));
+    if (targets.length) {
+      byTier[TRIPSY_WARDROBE_GENERAL_TIER] = byTier[TRIPSY_WARDROBE_GENERAL_TIER].filter(ln => ln.group !== 'footwear');
+      targets.forEach(t => byTier[t].push({
+        name: `${TRIPSY_ATTIRE_CATEGORY_LABEL[t] || t} shoes`, typeKey: 'shoes', group: 'footwear', need: 1,
+      }));
+    }
+  }
   // Also skipped when an UNTAGGED footwear line sits in General -- that is one pair
   // covering every dress code (Claude sometimes emits "black dress shoes" with no dress
   // code, as it did on 2026-08-02 having tagged the same item Formal the run before).
@@ -7856,6 +7875,18 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
       lines.push({ name: 'Shoes', typeKey: 'shoes', group: 'footwear', need: 1 });
     }
   });
+  // MINIMUM TWO DRESSY PAIRS. One pair across a trip with several formal/semi-formal/
+  // cocktail occasions isn't a real plan -- nothing to alternate with, and no spare if a
+  // pair gets soaked. Past two such occasions in total, the dress-code shoe lines must
+  // add up to at least two pairs. Usually that falls out for free, since each dressy
+  // tier now has its own line; when only ONE of them is active, its line carries both.
+  const TRIPSY_DRESSY_TIERS = ['semi_formal', 'cocktail', 'formal', 'black_tie'];
+  const dressyOccasions = TRIPSY_DRESSY_TIERS.reduce((a, t) => a + (((guide && guide.counts) || {})[TRIPSY_ATTIRE_CAMEL_KEY[t]] || 0), 0);
+  if (dressyOccasions > 2) {
+    const dressyShoeLines = TRIPSY_DRESSY_TIERS.flatMap(t => (byTier[t] || []).filter(l => l.group === 'footwear'));
+    const pairs = dressyShoeLines.reduce((a, l) => a + l.need, 0);
+    if (dressyShoeLines.length && pairs < 2) dressyShoeLines[0].need += 2 - pairs;
+  }
   // The 3 mix-and-match tiers (athletic, casual, smart_casual) are GROUP-level --
   // "tops"/"bottoms"/footwear, not specific garment types -- so a t-shirt, polo, and
   // casual shirt are interchangeable "tops" here. Collapse their lines to generic
@@ -8131,6 +8162,26 @@ function tripsyWardrobeResolveSelectionLines(entries, guide, garmentById) {
     byLine.forEach((arr, i) => arr.forEach(it => {
       if (it.ref && !it.ref.line) { it.ref.category = TRIPSY_WARDROBE_GENERAL_TIER; it.ref.line = lines[i].name; }
     }));
+  }
+  // Third chance, the mirror of the one above: a pick stranded in GENERAL retries the
+  // dress codes. Shoes are why -- an untagged shoe line in General is now redistributed
+  // into the dress-code tiers (see tripsyWardrobeNeedByTier), so picks made against the
+  // old General line have to follow it. Unlike a sibling-dress-code move, this invents
+  // nothing: it only considers tiers the GARMENT ITSELF is tagged for, which is the
+  // garment asserting it suits that dress code. Dressiest first, so a shoe tagged for
+  // both Formal and Cocktail lands on Formal rather than the first tier scanned.
+  for (const person of ['him', 'her']) {
+    for (const e of out) {
+      if (e.line || e.category !== TRIPSY_WARDROBE_GENERAL_TIER) continue;
+      const g = garmentById.get(e.id);
+      if (!g || (g.person || 'him') !== person) continue;
+      for (const tier of TRIPSY_ATTIRE_CATEGORY_ORDER.slice().reverse()) {
+        const lines = needByPerson[person][tier] || [];
+        if (!lines.length || !(g.tiers || []).includes(tier)) continue;
+        const hit = lines.find(ln => tripsyWardrobeGarmentFillsLine(g, ln, lines));
+        if (hit) { e.category = tier; e.line = hit.name; break; }
+      }
+    }
   }
   // Anything STILL without a line couldn't be placed: nothing in its category is a line
   // this garment fills any more. The dress socks are the case that showed it -- the new
