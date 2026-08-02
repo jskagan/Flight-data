@@ -7602,6 +7602,7 @@ function getOrCreateWardrobeSelectOverlay() {
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px;">
         <h2 id="tw-select-title" style="margin:0; font-size:18px;">Plan Packing List</h2>
         <div style="display:flex; gap:8px; flex-shrink:0; align-items:center;">
+          <button class="btn" id="tw-select-incomplete">Show Incomplete</button>
           <button class="btn" id="tw-select-status">Packing Status</button>
           <button class="btn" id="tw-select-toggle">Packed</button>
         </div>
@@ -8619,6 +8620,11 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   let tiers = computeTiers();
   const isPerson = g => (g.person || 'him') === person;
 
+  // "Show Incomplete": only the lines still short of their need (Selected < Needed --
+  // exactly the rows the Selected column paints RED). The Packing Status counterpart of
+  // this is "Unpacked Items Only"; both are session-only and never persisted, since a
+  // view-only user has no Drive write access to store a preference.
+  let incompleteOnly = false;
   let view = { mode: 'list' }; // or { mode: 'detail', tier, lineIndex }
   // Opened FROM the matching garment page on Packing Status -> land on that same line
   // rather than the list, so the two pages are two views of one thing instead of a
@@ -8676,6 +8682,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const sections = tiers.map(tier => {
       const rows = remainingLinesFor(tier).map((ln, i) => {
         const met = ln.remaining <= 0;
+        if (incompleteOnly && ln.selected >= ln.effectiveNeed) return '';
         return `<button type="button" class="tw-need-line" data-tier="${esc(tier)}" data-line="${i}" style="display:flex; align-items:center; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:4px 0; cursor:pointer; color:var(--text); font-size:14px;">
           <span style="flex:1; min-width:0;">${esc(tripsyStripCategoryParen(ln.name))}</span>
           <span style="width:52px; text-align:right; font-weight:700; color:var(--text);">${ln.effectiveNeed}</span>
@@ -8683,6 +8690,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
           <span style="width:52px; text-align:right; font-weight:700; color:var(--home-green);">${met ? '✓' : ''}</span>
         </button>`;
       }).join('');
+      if (!rows) return ''; // nothing outstanding in this tier -- drop its heading too
       return `<div style="margin-bottom:16px;"><div class="tw-group-title">${esc(tripsyWardrobeTierLabel(tier))}</div>${rows}</div>`;
     }).join('');
     // Trip-wide Selected/Needed, in the slot beside His/Hers -- the Packing Status
@@ -8698,7 +8706,11 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
         ? `<span style="font-size:12px; font-weight:700; color:${tripsyWardrobeSelectedColor(totSel, totNeed)};">${totSel}/${totNeed} selected</span>`
         : '';
     }
-    bodyEl.innerHTML = colHeader + sections;
+    // With the filter on, "no sections" means nothing is short -- NOT that the guide is
+    // empty, which is what the tiers-less empty state above would have implied.
+    bodyEl.innerHTML = sections
+      ? colHeader + sections
+      : `<div class="empty-state" style="margin-top:16px;">Every line has enough selected. Turn off “Show Incomplete” to see the full list.</div>`;
   };
 
   const renderDetail = () => {
@@ -8891,6 +8903,12 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   // The mirror of Packing Status' own "Packing Plan" button. This page's original
   // onClose is threaded through, so if it was itself opened from Packing Status,
   // closing it later still returns there rather than dead-ending.
+  // Plain view filter, so it only re-renders. Reflected in the button (primary when
+  // on) because with it active the page can look empty or oddly short.
+  const incompleteBtn = ov.querySelector('#tw-select-incomplete');
+  const syncIncompleteBtn = () => { if (incompleteBtn) incompleteBtn.className = incompleteOnly ? 'btn primary' : 'btn'; };
+  if (incompleteBtn) incompleteBtn.onclick = () => { incompleteOnly = !incompleteOnly; syncIncompleteBtn(); view = { mode: 'list' }; render(); };
+  syncIncompleteBtn();
   const statusBtn = ov.querySelector('#tw-select-status');
   if (statusBtn) statusBtn.onclick = () => {
     ov.style.display = 'none';
