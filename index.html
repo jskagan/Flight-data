@@ -7991,9 +7991,9 @@ function tripsyPlanPackingIsComplete(guide, tripKey, person) {
   const needLines = tripsyWardrobeNeedByTier(guide, person);
   const garmentById = new Map((driveData.tripsyWardrobe || []).map(g => [g.id, g]));
   const chosen = tripsyWardrobeResolveSelectionLines(tripsyNormalizeTripSelection((driveData.tripsyTripWardrobe || {})[tripKey] || []), guide, garmentById);
-  const generics = (driveData.tripsyTripGenericGarments || {})[tripKey] || [];
+  const generics = tripsyWardrobeResolveGenericLines((driveData.tripsyTripGenericGarments || {})[tripKey], guide);
   // Items the owner chose to skip reduce that line's need.
-  const skips = tripsyNormalizeAttireSkips((driveData.tripsyTripAttireDone || {})[tripKey]);
+  const skips = tripsyWardrobeResolveSkipLines(tripsyNormalizeAttireSkips((driveData.tripsyTripAttireDone || {})[tripKey]), guide);
   let totalNeed = 0, remaining = 0;
   for (const tier of TRIPSY_ATTIRE_CATEGORY_ORDER) { // dress codes only -- General excluded
     const lines = needLines[tier] || [];
@@ -8063,6 +8063,101 @@ function tripsyWardrobeAssignGarments(lines, packed) {
 // entry couldn't be matched by the selection key, so it would count against the
 // garment's availability while being impossible to deselect from any line.
 // Pure: returns a new array, never mutates the input.
+// Find the CURRENT line an old line name corresponds to. Selections are re-homed by
+// asking which line the GARMENT fills, but a skip or a "No Picture" addition has no
+// garment -- only the wording it was made against -- so it needs a name-based match, or
+// a refresh's rewording silently drops it (a skipped line quietly goes back to needing
+// its full count; a No-Picture addition stops counting toward anything).
+// In order: the exact name; then a UNIQUE line of the same garment type; then the best
+// word overlap, requiring at least one shared word. Null when nothing corresponds --
+// a line the regenerated guide genuinely no longer asks for.
+function tripsyWardrobeMatchLine(lines, oldName, typeKey) {
+  const ls = lines || [];
+  const exact = ls.find(l => l.name === oldName);
+  if (exact) return exact;
+  if (typeKey) {
+    const sameType = ls.filter(l => l.typeKey === typeKey);
+    if (sameType.length === 1) return sameType[0];
+  }
+  const want = tripsyGarmentNameTokens(oldName);
+  let best = null, bestScore = 0;
+  for (const l of ls) {
+    const toks = tripsyGarmentNameTokens(l.name);
+    let score = 0;
+    for (const t of want) if (toks.has(t)) score++;
+    if (score > bestScore) { best = l; bestScore = score; }
+  }
+  return bestScore > 0 ? best : null;
+}
+// Skips are keyed "person::tier::lineName" -- remap the line part onto the current guide.
+// A skip whose line is genuinely gone is dropped rather than kept as a dead key.
+function tripsyWardrobeResolveSkipLines(skips, guide) {
+  const out = {};
+  if (!skips) return out;
+  if (!guide) return { ...skips };
+  const needByPerson = {};
+  const parsed = [];
+  for (const [key, count] of Object.entries(skips)) {
+    const i = key.indexOf('::'); const j = i < 0 ? -1 : key.indexOf('::', i + 2);
+    if (i < 0 || j < 0) { out[key] = count; continue; } // not a key we understand: leave it
+    const person = key.slice(0, i), tier = key.slice(i + 2, j), name = key.slice(j + 2);
+    if (!needByPerson[person]) needByPerson[person] = tripsyWardrobeNeedByTier(guide, person);
+    const lines = needByPerson[person][tier] || [];
+    parsed.push({ person, tier, name, count, exact: lines.some(l => l.name === name), lines });
+  }
+  // EXACT matches are applied first, and a fuzzy match may only claim a line no exact
+  // match took. Several old keys can otherwise collapse onto one line -- this trip has
+  // three tie skips ("ties (cocktail, optional)", "ties (cocktail)" and the current
+  // "cocktail ties", the first two left over from earlier wordings) all pointing at the
+  // same line, and last-one-wins would silently swap in a stale count.
+  const claim = (p, t, n, c) => { const k = `${p}::${t}::${n}`; if (!(k in out)) out[k] = c; };
+  for (const e of parsed) if (e.exact) claim(e.person, e.tier, e.name, e.count);
+  // Fuzzy matches compete, so order them by HOW WELL they match, best first. On this
+  // trip all three tie skips point at one line; when a rewording means none matches
+  // exactly, "cocktail ties" shares two words with the new name while the stale
+  // "ties (cocktail)" shares one -- so the current one must claim it. First-come order
+  // would have handed the line to whichever stale key happened to be read first, along
+  // with its stale count.
+  const scored = [];
+  for (const e of parsed) {
+    if (e.exact) continue;
+    const hit = tripsyWardrobeMatchLine(e.lines, e.name, '');
+    if (!hit) continue;
+    const want = tripsyGarmentNameTokens(e.name);
+    const toks = tripsyGarmentNameTokens(hit.name);
+    let score = 0;
+    for (const t of want) if (toks.has(t)) score++;
+    // Token overlap alone often TIES here, because dress-code words are stopwords:
+    // "cocktail ties", "ties (cocktail)" and "ties (cocktail, optional)" all reduce to
+    // {tie}. So break the tie on whether one name literally contains the other --
+    // "cocktail ties (reworded)" contains "cocktail ties" but not "ties (cocktail)" --
+    // and finally on the longer, more specific name.
+    const a = String(e.name).toLowerCase(), b = String(hit.name).toLowerCase();
+    const contains = (b.includes(a) || a.includes(b)) ? 1 : 0;
+    scored.push({ e, hit, score, contains, len: a.length });
+  }
+  scored.sort((x, y) => (y.score - x.score) || (y.contains - x.contains) || (y.len - x.len));
+  for (const f of scored) claim(f.e.person, f.e.tier, f.hit.name, f.e.count);
+  return out;
+}
+// "No Picture" additions are matched to their line by category + NAME, so the same
+// rewording problem applies. Renames them onto the current line; one whose line is gone
+// keeps its old name and simply stops counting, as before -- it is the owner's own data,
+// so it is left in place rather than deleted.
+function tripsyWardrobeResolveGenericLines(generics, guide) {
+  const out = (generics || []).map(x => ({ ...x }));
+  if (!guide) return out;
+  const needByPerson = {};
+  for (const x of out) {
+    const person = x.person || 'him';
+    if (!needByPerson[person]) needByPerson[person] = tripsyWardrobeNeedByTier(guide, person);
+    const lines = needByPerson[person][x.category] || [];
+    if (lines.some(l => l.name === x.name)) continue;
+    const hit = tripsyWardrobeMatchLine(lines, x.name, x.typeKey || '');
+    if (hit) x.name = hit.name;
+  }
+  return out;
+}
 function tripsyWardrobeResolveSelectionLines(entries, guide, garmentById) {
   const out = (entries || []).map(e => ({ ...e }));
   if (!guide) return out;
@@ -8550,10 +8645,12 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey), Store.getTripAttireSkips(tripKey),
   ]);
   // Items the owner chose to SKIP, reducing that line's need (see the Skip card below).
-  let skips = { ...skipsRaw };
+  // Re-homed onto the current guide first, so a refresh's rewording doesn't silently
+  // drop a skip (its line would quietly go back to needing its full count).
+  let skips = tripsyWardrobeResolveSkipLines(skipsRaw, guide);
   const skippedFor = (tier, ln) => tripsyAttireSkippedFor(skips, person, tier, ln);
   const persistSkips = () => Store.setTripAttireSkips(tripKey, skips);
-  let generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
+  let generics = tripsyWardrobeResolveGenericLines(genericRaw, guide).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-LINE selection: a garment is picked FOR one specific need line within one
   // dress-code tier, and its owned quantity is spread across the lines it's allocated
@@ -8934,7 +9031,8 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   bodyEl.innerHTML = `<div style="padding:24px 0; color:var(--muted);">Loading…</div>`;
   ov.style.display = 'flex';
 
-  const [garments, selectedRaw, genericRaw, guide, skips] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey), Store.getTripAttireSkips(tripKey)]);
+  const [garments, selectedRaw, genericRaw, guide, skipsRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey), Store.getTripAttireSkips(tripKey)]);
+  const skips = tripsyWardrobeResolveSkipLines(skipsRaw, guide);
   // Items skipped on the Plan Packing List reduce the need HERE TOO. Without this the
   // two pages disagreed outright -- the Plan showed a trimmed cocktail tie line as
   // complete while this one still read 1/2.
@@ -8944,7 +9042,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   // but shown COMBINED per garment (sum qty + packed across the tiers it's allocated
   // to). Legacy category-less picks are ignored, matching the Plan Packing List.
   const selEntries = tripsyWardrobeResolveSelectionLines(tripsyNormalizeTripSelection(selectedRaw), guide, new Map(garments.map(g => [g.id, g]))).filter(e => e.category);
-  let generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
+  let generics = tripsyWardrobeResolveGenericLines(genericRaw, guide).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-person Packing Status: His (default) / Hers each show only that person's
   // chosen garments + generics, scored against that person's need lines. The opener
@@ -19788,7 +19886,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
   ]);
   // The user may have closed/reopened onto another category while this loaded.
   if (!document.body.contains(packEl)) return;
-  let generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
+  let generics = tripsyWardrobeResolveGenericLines(genericRaw, guide).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-LINE selection keyed by "id::tier::line" (see tripsyWardrobePackForTrip). This
   // embedded picker only edits the drill-down's own `category`, but availability still
