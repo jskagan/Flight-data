@@ -20842,7 +20842,7 @@ async function showTripsyAttireOverlay(tripKey) {
         <div style="margin-top:14px;"><button class="btn primary" data-tripsy-attire-generate-inline>Generate Attire Guide</button></div>
       </div>`;
     const inlineBtn = content.querySelector('[data-tripsy-attire-generate-inline]');
-    if (inlineBtn) inlineBtn.addEventListener('click', () => runTripsyAttireGeneration(tripKey, { isRefresh: false }));
+    if (inlineBtn) inlineBtn.addEventListener('click', () => tripsyRunAttireGenerationSafely(tripKey, { isRefresh: false }));
   } else {
     content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Not yet generated for this trip.</div>`;
   }
@@ -20852,23 +20852,42 @@ async function showTripsyAttireOverlay(tripKey) {
 // Overlay-optional: a progress toast covers the ~1-2 min wait when the panel isn't open;
 // if it IS open its content shows a loading/result state too. On finish, re-render My
 // Trips so the card's 👔 menu reflects the new state (Generate→Refresh, etc.).
+// Fire-and-forget entry point. runTripsyAttireGeneration reports its own failures, but
+// an un-awaited promise that rejects anyway (e.g. from its finally, or a re-render inside
+// it) would be an invisible unhandled rejection -- which is precisely how a failed Refresh
+// looked like a click that did nothing.
+function tripsyRunAttireGenerationSafely(tripKey, opts) {
+  runTripsyAttireGeneration(tripKey, opts).catch(e => {
+    console.error('Attire generation failed (unhandled):', e);
+    toast(`Could not generate the attire guide — ${(e && e.message) || 'unknown error'}.`, 'error');
+    tripsyAttireGeneratingKeys.delete(tripKey);
+    tripsyRefreshAttireGeneratingBadges();
+  });
+}
 async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
-  const overlay = getOrCreateTripsyAttireOverlay();
-  const content = overlay.querySelector('#tripsy-attire-content');
-  // Is the Clothing Summary overlay on screen for THIS trip right now? Checked
-  // both when we start (to show a loading state) AND again after generation --
-  // so a summary the owner opens DURING a background refresh (not just one that
-  // was already open when we started) still gets the fresh guide + timestamp in
-  // place, instead of keeping the stale one until it's closed and reopened.
-  const summaryLiveForTrip = () => overlay.style.display !== 'none' && tripsyAttireOverlayTripKey === tripKey;
-  if (summaryLiveForTrip()) content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Generating attire guide — this can take a minute or two for a longer trip…</div>`;
-  toast(isRefresh ? 'Refreshing the attire guide — this can take a minute…' : 'Generating the attire guide — this can take a minute…');
-  // Blinking ⚠️ on this trip's 👔 button for as long as the run lasts, so the wait is
-  // visible from My Trips with the panel closed. Cleared in the `finally` below, so a
-  // failure or an early return can't strand it.
+  // Mark in-progress FIRST, before anything that can throw. Everything below is inside
+  // the try, so there is no window where this function can reject without the ⚠️ having
+  // blinked and without the catch reporting why. It used to open with four unguarded
+  // statements; a failure in any of them rejected silently (the callers are
+  // fire-and-forget) and left the badge sitting steady, looking like the click did
+  // nothing at all.
   tripsyAttireGeneratingKeys.add(tripKey);
   tripsyRefreshAttireGeneratingBadges();
+  // Hoisted: the catch below renders its error into `content`, so it must outlive the try.
+  let overlay = null;
+  let content = null;
+  let summaryLiveForTrip = () => false;
   try {
+    overlay = getOrCreateTripsyAttireOverlay();
+    content = overlay.querySelector('#tripsy-attire-content');
+    // Is the Clothing Summary overlay on screen for THIS trip right now? Checked
+    // both when we start (to show a loading state) AND again after generation --
+    // so a summary the owner opens DURING a background refresh (not just one that
+    // was already open when we started) still gets the fresh guide + timestamp in
+    // place, instead of keeping the stale one until it's closed and reopened.
+    summaryLiveForTrip = () => !!content && overlay.style.display !== 'none' && tripsyAttireOverlayTripKey === tripKey;
+    if (summaryLiveForTrip()) content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Generating attire guide — this can take a minute or two for a longer trip…</div>`;
+    toast(isRefresh ? 'Refreshing the attire guide — this can take a minute…' : 'Generating the attire guide — this can take a minute…');
     const guide = await generateTripsyAttireGuide(tripKey);
     const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
     if (summaryLiveForTrip() && trip) {
@@ -20885,7 +20904,7 @@ async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
           ${isOwner ? '<div style="margin-top:12px;"><button class="btn" data-tripsy-attire-retry>Retry</button></div>' : ''}
         </div>`;
       const retryBtn = content.querySelector('[data-tripsy-attire-retry]');
-      if (retryBtn) retryBtn.addEventListener('click', () => runTripsyAttireGeneration(tripKey, { isRefresh }));
+      if (retryBtn) retryBtn.addEventListener('click', () => tripsyRunAttireGenerationSafely(tripKey, { isRefresh }));
     }
     toast(`Could not generate the attire guide — ${e.message || 'unknown error'}.`, 'error');
   } finally {
@@ -24843,7 +24862,7 @@ async function renderTripsyEventsListImpl() {
           showTripsyOutfitList(key, okFor('him') ? 'him' : (okFor('her') ? 'her' : 'him'));
           break;
         }
-        case 'refresh': runTripsyAttireGeneration(key, { isRefresh: btn.dataset.mode === 'refresh' }); break;
+        case 'refresh': tripsyRunAttireGenerationSafely(key, { isRefresh: btn.dataset.mode === 'refresh' }); break;
       }
     });
   });
@@ -25091,7 +25110,7 @@ async function renderTripsyEventsListImpl() {
       'This trip’s events have changed since its attire guide was built, so the dress codes, packing counts and daily guide may no longer match the itinerary. Refreshing rebuilds the guide from the current events and clears the ⚠️ — but it regenerates the whole guide, so any dress codes you set by hand are discarded.',
       { title: '⚠️ Attire guide is out of date', yes: 'Refresh now', no: 'Not now' });
     if (!refresh) return true; // let the menu open as usual
-    runTripsyAttireGeneration(tripKey, { isRefresh: true });
+    tripsyRunAttireGenerationSafely(tripKey, { isRefresh: true });
     return false;
   });
   // Flag each 👔 button with a ⚠️ when its trip's events have changed since the
