@@ -21624,13 +21624,31 @@ async function tripsyOutfitsNeedRecompose(tripKey, person = 'him') {
     const outfits = await Store.getTripsyTripOutfits(tripKey, person);
     if (!outfits || !(outfits.blocks || []).length) return false;
     const guide = await Store.getTripsyAttireGuide(tripKey);
-    if (!guide || !tripsyPlanPackingIsComplete(guide, tripKey, person)) return false;
+    if (!guide) return false;
+    // Deliberately NOT gated on the packing plan being complete. It was, and that
+    // switched the warning OFF exactly when it was most needed: editing dress codes can
+    // introduce a whole new tier (a semi-formal line appearing with nothing picked for
+    // it), which makes the plan incomplete AND the outfits stale at the same moment.
+    // An unfinished plan is a separate problem, said separately in the dialog.
     const guideMoved = !!(guide.eventFingerprint && outfits.guideFingerprint
       && guide.eventFingerprint.hash !== outfits.guideFingerprint.hash);
     const sel = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey));
     const selMoved = !!(outfits.selectionFingerprint
       && tripsyOutfitSelectionFingerprint(sel).hash !== outfits.selectionFingerprint.hash);
-    return guideMoved || selMoved;
+    // A manual dress-code override changes neither fingerprint -- the guide's own
+    // eventFingerprint is stamped at generation and the picks don't move -- yet it is
+    // exactly the kind of change that invalidates a composition. So compare each saved
+    // block's tier against what the guide says that event's tier is NOW.
+    const catByEvent = new Map();
+    for (const day of (guide.days || [])) {
+      for (const ev of (day.events || [])) catByEvent.set(ev.id, ev.displayCategory || ev.category);
+    }
+    const categoryMoved = (outfits.blocks || []).some(b => {
+      const first = (b.eventIds || [])[0];
+      const now = first != null ? catByEvent.get(first) : undefined;
+      return now !== undefined && b.category !== undefined && now !== b.category;
+    });
+    return guideMoved || selMoved || categoryMoved;
   } catch (e) {
     console.error('Outfit staleness check failed (non-fatal):', e);
     return false;
@@ -24377,8 +24395,10 @@ async function renderTripsyEventsListImpl() {
           // opens it; Regenerate recomposes behind a spinner, then opens it.
           (async () => {
             if (isOwner && await tripsyOutfitsNeedRecompose(key, who)) {
+              const planDone = tripsyPlanPackingIsComplete(
+                (driveData.tripsyAttireGuides || []).find(x => x.tripKey === key) || null, key, who);
               const regen = await tripsyConfirmDialog(
-                'Your garment counts are complete, but these outfits were composed from an earlier version of this trip — the itinerary or your packing picks have changed since. Regenerate them to be sure they match what you are actually taking.',
+                `These outfits were composed from an earlier version of this trip — the itinerary, your dress-code choices or your packing picks have changed since. Regenerate them to be sure they match what you are actually taking.${planDone ? '' : ' Note your packing list still has lines with nothing picked for them, so finish those first if you want the outfits to cover everything.'}`,
                 { title: '⚠️ Outfits may be out of date', yes: 'Regenerate', no: 'Ignore' });
               if (regen) {
                 const hide = tripsyShowOutfitComposingSpinner(who);
