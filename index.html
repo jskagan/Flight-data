@@ -3331,6 +3331,25 @@ const Store = {
   // the attire-guide need LINE it was added under {category, typeKey, name, qty};
   // they count DOWN the packing need alongside real garments but never join AI
   // outfit composition (no photo). Same conflict-resilient shape as setTripWardrobe.
+  // CUSTOM need lines the owner added by hand -- a garment the attire guide never asked
+  // for (a pair of shorts it didn't think of). Kept in their OWN store, not in the
+  // guide, which is the whole point: a Refresh rebuilds the guide from scratch and would
+  // otherwise discard them. Merged into the need lines at read time so they behave like
+  // any other line -- selectable, countable, skippable, shown on both packing screens.
+  // { id, person, category (tier or 'general'), name, group, need }
+  async getTripCustomLines(tripKey) {
+    return [...((driveData.tripsyTripCustomLines || {})[tripKey] || [])];
+  },
+  async setTripCustomLines(tripKey, entries) {
+    try {
+      const apply = () => { if (!driveData.tripsyTripCustomLines) driveData.tripsyTripCustomLines = {}; driveData.tripsyTripCustomLines[tripKey] = [...entries]; };
+      apply();
+      for (let attempt = 0; ; attempt++) {
+        try { await persistDriveData({ silentConflict: true }); return true; }
+        catch (e) { if (e && e.conflict && attempt < 2) { apply(); continue; } throw e; }
+      }
+    } catch (e) { console.error('Store.setTripCustomLines failed:', e); return false; }
+  },
   async getTripGenericGarments(tripKey) {
     return [...((driveData.tripsyTripGenericGarments || {})[tripKey] || [])];
   },
@@ -7581,6 +7600,7 @@ function getOrCreateWardrobeSelectOverlay() {
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px;">
         <h2 id="tw-select-title" style="margin:0; font-size:18px;">Plan Packing List</h2>
         <div style="display:flex; gap:8px; flex-shrink:0; align-items:center;">
+          <button class="btn" id="tw-select-addline">+ Add Line</button>
           <button class="btn" id="tw-select-incomplete">Show Incomplete</button>
           <button class="btn" id="tw-select-status">Packing Status</button>
           <button class="btn" id="tw-select-toggle">Packed</button>
@@ -7825,6 +7845,30 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
     const bucket = (typeKey !== 'swim' && group !== 'essentials' && it.category && byTier[it.category]) ? it.category : TRIPSY_WARDROBE_GENERAL_TIER;
     byTier[bucket].push({ name: it.name || 'garment', typeKey, group, need });
   }
+  // The owner's own added lines, merged before every rule below so they take part in all
+  // of them. Read straight from driveData (keyed off the guide's own tripKey) rather than
+  // threaded through every caller -- needByTier has a lot of callers and they should all
+  // see the same set. A name that collides with a guide line in the same tier is dropped:
+  // one name per tier is what selections, skips and the Status->Plan jump key on.
+  // Guarded read: this is otherwise a pure function of (guide, person), and reaching for
+  // a global makes it throw anywhere driveData isn't in scope. Absent store = no custom
+  // lines, which is the correct answer rather than an error.
+  const customStore = (typeof driveData !== 'undefined' && driveData && driveData.tripsyTripCustomLines) || {};
+  const customLines = (customStore[(guide && guide.tripKey) || ''] || [])
+    .filter(c => c && c.name && ((c.person || 'him') === person));
+  for (const c of customLines) {
+    const tier = byTier[c.category] ? c.category : TRIPSY_WARDROBE_GENERAL_TIER;
+    if (byTier[tier].some(ln => ln.name === c.name)) continue;
+    byTier[tier].push({
+      name: c.name,
+      typeKey: tripsyGarmentTypeKey(c.name),
+      group: c.group || tripsyAttirePackingGroupOf({ name: c.name }),
+      need: Math.max(1, Number(c.need) || 1),
+      custom: true,
+      customId: c.id,
+    });
+  }
+
   // Guarantee a footwear line on every ACTIVE dress-code tier (one that has any
   // garments) so shoes are always a selectable garment type on Pack For Trip /
   // Packing List -- even when the guide's packing list didn't itemize shoes for
@@ -7875,7 +7919,8 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
   // Status->Plan jump both rely on.
   TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(tier => {
     const shoeLines = (byTier[tier] || []).filter(ln => ln.group === 'footwear');
-    if (shoeLines.length === 1) shoeLines[0].name = `${TRIPSY_ATTIRE_CATEGORY_LABEL[tier] || tier} shoes`;
+    // Never rename a line the owner added and named themselves.
+    if (shoeLines.length === 1 && !shoeLines[0].custom) shoeLines[0].name = `${TRIPSY_ATTIRE_CATEGORY_LABEL[tier] || tier} shoes`;
   });
   // MINIMUM TWO DRESSY PAIRS. One pair across a trip with several formal/semi-formal/
   // cocktail occasions isn't a real plan -- nothing to alternate with, and no spare if a
@@ -8795,6 +8840,70 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
 // from the grid and counts the need down (a garment counts toward every dress code it's
 // tagged for). "No Picture" additions persist separately (tripsyTripGenericGarments) and
 // count the need down too, but can't join AI outfit composition (no photo).
+// Add-a-line form for the Plan Packing List. Resolves to the new line's name once saved,
+// or null if cancelled. Deliberately asks for the packing GROUP as well as the name: the
+// group is what a generic tier line matches on, so a "shorts" line the owner files under
+// Pants offers their shorts, while one filed under Tops would not.
+async function tripsyWardrobeAddLineDialog(tripKey, person, existingNames) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tw-addline-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-addline-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100';
+    const tiers = [...TRIPSY_ATTIRE_CATEGORY_ORDER].reverse();
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:420px;">
+        <h2 style="margin:0 0 4px; font-size:18px;">Add a packing line</h2>
+        <div style="color:var(--muted); font-size:12.5px; margin-bottom:16px;">Something the attire guide didn’t ask for. It stays across refreshes.</div>
+        <div class="tw-field"><label>What is it?</label><input type="text" id="tw-addline-name" placeholder="e.g. shorts" autocomplete="off"></div>
+        <div class="tw-field"><label>Dress code</label><select id="tw-addline-tier">
+          ${tiers.map(t => `<option value="${t}">${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[t] || t)}</option>`).join('')}
+          <option value="${TRIPSY_WARDROBE_GENERAL_TIER}">General (no dress code)</option>
+        </select></div>
+        <div class="tw-field"><label>Type</label><select id="tw-addline-group">
+          ${TRIPSY_ATTIRE_PACKING_GROUPS.map(g => `<option value="${g}">${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[g] || g)}</option>`).join('')}
+        </select></div>
+        <div class="tw-field"><label>How many to pack</label><select id="tw-addline-qty">${Array.from({ length: 20 }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join('')}</select></div>
+        <div id="tw-addline-err" style="color:var(--red); font-size:12.5px; min-height:16px; margin-bottom:8px;"></div>
+        <div style="display:flex; gap:10px; justify-content:flex-end;">
+          <button class="btn" id="tw-addline-cancel">Cancel</button>
+          <button class="btn primary" id="tw-addline-save">Add</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const close = v => { ov.style.display = 'none'; resolve(v); };
+    ov.querySelector('#tw-addline-cancel').onclick = () => close(null);
+    ov.onclick = e => { if (e.target === ov) close(null); };
+    // Default the Type to whatever the name implies, unless the owner has already picked
+    // one -- "shorts" should land in Pants without them having to think about it.
+    const nameEl = ov.querySelector('#tw-addline-name');
+    const groupEl = ov.querySelector('#tw-addline-group');
+    let groupTouched = false;
+    groupEl.onchange = () => { groupTouched = true; };
+    nameEl.oninput = () => { if (!groupTouched && nameEl.value.trim()) groupEl.value = tripsyAttirePackingGroupOf({ name: nameEl.value.trim() }); };
+    ov.querySelector('#tw-addline-save').onclick = async () => {
+      const name = nameEl.value.trim();
+      const tier = ov.querySelector('#tw-addline-tier').value;
+      const errEl = ov.querySelector('#tw-addline-err');
+      if (!name) { errEl.textContent = 'Give it a name.'; return; }
+      // One name per tier -- selections, skips and the Status->Plan jump all key on it.
+      if ((existingNames[tier] || []).some(n => n.toLowerCase() === name.toLowerCase())) {
+        errEl.textContent = 'That tier already has a line with this name.'; return;
+      }
+      const entry = {
+        id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
+        person, category: tier, name,
+        group: groupEl.value,
+        need: parseInt(ov.querySelector('#tw-addline-qty').value, 10) || 1,
+      };
+      const lines = await Store.getTripCustomLines(tripKey);
+      lines.push(entry);
+      const okSaved = await Store.setTripCustomLines(tripKey, lines);
+      if (!okSaved) { errEl.textContent = 'Could not save — please try again.'; return; }
+      close(name);
+    };
+    nameEl.focus();
+  });
+}
 async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him', onClose = null, initialLine = null) {
   const ov = getOrCreateWardrobeSelectOverlay();
   const bodyEl = ov.querySelector('#tw-select-body');
@@ -8997,7 +9106,25 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const status = met ? '✓ all set' : `${ln.remaining} needed`;
     const skipNote = skipped ? ` · <span style="color:var(--muted);">${skipped} skipped</span>` : '';
     countEl.innerHTML = `<div style="font-weight:700; font-size:14px;">${esc(tripsyWardrobeTierLabel(tier))} › ${esc(tripsyStripCategoryParen(ln.name))}</div><div style="margin-top:2px; color:${met ? 'var(--home-green)' : 'var(--amber)'};">${status}${skipNote}</div>${met ? `<button type="button" data-tw-line-done style="margin-top:8px; display:block; width:100%; background:var(--home-green); color:#04210F; border:none; border-radius:8px; padding:10px 18px; font-weight:700; font-size:13px; cursor:pointer;">Done</button>` : ''}`;
-    countEl.onclick = met ? (e => { if (e.target.closest('[data-tw-line-done]')) { view = { mode: 'list' }; render(); maybeCongratulate(); } }) : null;
+    // A line the owner added can be removed again, from the line itself -- the only place
+    // it is unambiguous WHICH line is meant. Guide lines have no such button: they come
+    // back on the next generation, so removing one would only look broken.
+    if (ln.custom) {
+      countEl.innerHTML += `<button type="button" data-tw-line-remove style="margin-top:8px; display:block; width:100%; background:transparent; color:var(--red); border:1px solid var(--red); border-radius:8px; padding:8px 18px; font-weight:600; font-size:12.5px; cursor:pointer;">Remove this line</button>`;
+    }
+    countEl.onclick = async e => {
+      if (e.target.closest('[data-tw-line-remove]')) {
+        const rest = (await Store.getTripCustomLines(tripKey)).filter(c => c.id !== ln.customId);
+        if (!(await Store.setTripCustomLines(tripKey, rest))) { toast('Could not remove the line.', 'error'); return; }
+        needLines = tripsyWardrobeNeedByTier(guide, person);
+        tiers = computeTiers();
+        view = { mode: 'list' };
+        render();
+        toast('Line removed.', 'success');
+        return;
+      }
+      if (met && e.target.closest('[data-tw-line-done]')) { view = { mode: 'list' }; render(); maybeCongratulate(); }
+    };
     const genQty = genericFilledFor(tier, ln);
     // The "No Picture" card is redundant on a NEVER-PHOTOGRAPHED line. Underwear,
     // undershirts and socks (casual AND dress) are tracked as real wardrobe garments
@@ -9168,6 +9295,21 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   // closing it later still returns there rather than dead-ending.
   // Plain view filter, so it only re-renders. Reflected in the button (primary when
   // on) because with it active the page can look empty or oddly short.
+  // "+ Add Line" -- a need line the guide never asked for. Stored outside the guide, so
+  // it survives a Refresh; needByTier merges it back in, which is why one save is enough
+  // to make it appear on both packing screens.
+  const addLineBtn = ov.querySelector('#tw-select-addline');
+  if (addLineBtn) addLineBtn.onclick = async () => {
+    const namesByTier = {};
+    for (const [t, ls] of Object.entries(needLines)) namesByTier[t] = (ls || []).map(l => l.name);
+    const added = await tripsyWardrobeAddLineDialog(tripKey, person, namesByTier);
+    if (!added) return;
+    needLines = tripsyWardrobeNeedByTier(guide, person);
+    tiers = computeTiers();
+    view = { mode: 'list' };
+    render();
+    toast(`Added “${added}” to your packing list.`, 'success');
+  };
   const incompleteBtn = ov.querySelector('#tw-select-incomplete');
   const syncIncompleteBtn = () => { if (incompleteBtn) incompleteBtn.className = incompleteOnly ? 'btn primary' : 'btn'; };
   if (incompleteBtn) incompleteBtn.onclick = () => { incompleteOnly = !incompleteOnly; syncIncompleteBtn(); view = { mode: 'list' }; render(); };
