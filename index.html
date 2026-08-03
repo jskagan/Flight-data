@@ -8569,6 +8569,67 @@ async function tripsyPackingCompleteDialog(tripKey, person) {
 // is the only thing that knows which of five dress shirts goes to which evening -- the
 // packing plan only knows the garment fills a LINE -- so this reads outfits, not picks,
 // and says so plainly when none have been composed.
+// Consecutive events sharing a dayKey collapse into one day group. The guide's
+// day list is already in order, so no re-sorting is needed (its formatted times
+// wouldn't sort chronologically as strings anyway).
+function tripsyWearDaysGroupByDay(evs) {
+  const days = [];
+  for (const ev of evs) {
+    const last = days[days.length - 1];
+    if (last && last.dayKey === ev.dayKey) last.events.push(ev);
+    else days.push({ dayKey: ev.dayKey, events: [ev] });
+  }
+  return days;
+}
+// The days a set of {category, line} ALLOCATIONS is worn on. Split out of
+// tripsyWardrobeWearDays so a "No Picture" generic can use the identical rules: it
+// has no wardrobe record and therefore no garment id, only the line it was added
+// to, so it can never take that function's outfit-based path -- but everything
+// from step 2 down is keyed by line, not by garment.
+function tripsyWardrobeWearDaysFromLines(guide, person, lines, nameHint) {
+  if (!guide || !lines || !lines.length) return { days: [], basis: 'none', outfitLinked: false };
+  const evById = new Map();
+  const allDays = [];
+  for (const day of (guide.days || [])) {
+    allDays.push(day);
+    for (const ev of (day.events || [])) evById.set(ev.id, { ...ev, dayKey: day.dayKey });
+  }
+  const items = (guide.packingList && guide.packingList[person]) || [];
+  const evs = [];
+  let basis = 'line';
+  for (const e of lines) {
+    // 2. The guide often links a packing item to the exact events it is for.
+    const item = items.find(it => it && it.name === e.line);
+    const linked = ((item && item.eventIds) || []).map(id => evById.get(id)).filter(Boolean);
+    if (linked.length) { evs.push(...linked); continue; }
+    // 3. No links: a dress-code tier means "whenever you're dressed at that level".
+    if (e.category !== TRIPSY_WARDROBE_GENERAL_TIER) {
+      basis = 'tier';
+      for (const day of allDays) {
+        for (const ev of (day.events || [])) {
+          if ((ev.displayCategory || ev.category) === e.category) evs.push({ ...ev, dayKey: day.dayKey });
+        }
+      }
+      continue;
+    }
+    // 4. General has no occasions of its own, so fall back on what the piece IS.
+    // Undershirts and dress socks go under dressy clothes; underwear and ordinary socks
+    // are worn every day of the trip. This mirrors how the guide sizes them.
+    const typeKey = tripsyGarmentTypeKey(nameHint || e.line || '');
+    const dressy = ['undershirt', 'dress-socks'].includes(typeKey);
+    basis = dressy ? 'dressy' : 'daily';
+    for (const day of allDays) {
+      for (const ev of (day.events || [])) {
+        const cat = ev.displayCategory || ev.category;
+        if (!dressy || TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(cat)) evs.push({ ...ev, dayKey: day.dayKey });
+      }
+    }
+  }
+  // De-duplicate: several allocations can point at overlapping events.
+  const seen = new Set();
+  const unique = evs.filter(ev => { const k = `${ev.dayKey}::${ev.id}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  return { days: tripsyWearDaysGroupByDay(unique), basis, outfitLinked: false };
+}
 async function tripsyWardrobeWearDays(tripKey, garmentId, person) {
   const [outfits, guide, selectedRaw, garments] = await Promise.all([
     Store.getTripsyTripOutfits(tripKey, person),
@@ -8583,15 +8644,7 @@ async function tripsyWardrobeWearDays(tripKey, garmentId, person) {
     allDays.push(day);
     for (const ev of (day.events || [])) evById.set(ev.id, { ...ev, dayKey: day.dayKey });
   }
-  const group = evs => {
-    const days = [];
-    for (const ev of evs) {
-      const last = days[days.length - 1];
-      if (last && last.dayKey === ev.dayKey) last.events.push(ev);
-      else days.push({ dayKey: ev.dayKey, events: [ev] });
-    }
-    return days;
-  };
+  const group = tripsyWearDaysGroupByDay;
   // 1. BEST: the composed outfits actually say which block this piece is worn in.
   const blocks = ((outfits && outfits.blocks) || []).filter(b => (b.garmentIds || []).includes(garmentId));
   if (blocks.length) {
@@ -8610,41 +8663,7 @@ async function tripsyWardrobeWearDays(tripKey, garmentId, person) {
   const sel = tripsyWardrobeResolveSelectionLines(tripsyNormalizeTripSelection(selectedRaw), guide, byId)
     .filter(e => e.id === garmentId && e.category);
   if (!sel.length || !guide) return { days: [], basis: 'none', outfitLinked: false };
-  const items = (guide.packingList && guide.packingList[person]) || [];
-  const evs = [];
-  let basis = 'line';
-  for (const e of sel) {
-    // 2. The guide often links a packing item to the exact events it is for.
-    const item = items.find(it => it && it.name === e.line);
-    const linked = ((item && item.eventIds) || []).map(id => evById.get(id)).filter(Boolean);
-    if (linked.length) { evs.push(...linked); continue; }
-    // 3. No links: a dress-code tier means "whenever you're dressed at that level".
-    if (e.category !== TRIPSY_WARDROBE_GENERAL_TIER) {
-      basis = 'tier';
-      for (const day of allDays) {
-        for (const ev of (day.events || [])) {
-          if ((ev.displayCategory || ev.category) === e.category) evs.push({ ...ev, dayKey: day.dayKey });
-        }
-      }
-      continue;
-    }
-    // 4. General has no occasions of its own, so fall back on what the piece IS.
-    // Undershirts and dress socks go under dressy clothes; underwear and ordinary socks
-    // are worn every day of the trip. This mirrors how the guide sizes them.
-    const typeKey = tripsyGarmentTypeKey((garment && garment.name) || e.line || '');
-    const dressy = ['undershirt', 'dress-socks'].includes(typeKey);
-    basis = dressy ? 'dressy' : 'daily';
-    for (const day of allDays) {
-      for (const ev of (day.events || [])) {
-        const cat = ev.displayCategory || ev.category;
-        if (!dressy || TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(cat)) evs.push({ ...ev, dayKey: day.dayKey });
-      }
-    }
-  }
-  // De-duplicate: several allocations can point at overlapping events.
-  const seen = new Set();
-  const unique = evs.filter(ev => { const k = `${ev.dayKey}::${ev.id}`; if (seen.has(k)) return false; seen.add(k); return true; });
-  return { days: group(unique), basis, outfitLinked: false };
+  return tripsyWardrobeWearDaysFromLines(guide, person, sel, (garment && garment.name) || '');
 }
 // The "Wear Days" screen: one amber day header per date, that day's events beneath it,
 // each tappable to open the full outfit for it (showTripsyOutfitModal -- the same view
@@ -8679,7 +8698,11 @@ async function showTripsyWearDaysOverlay(tripKey, garment, person) {
     ov.querySelector('[data-tw-weardays-close]').onclick = () => { ov.style.display = 'none'; };
   };
   render(`<div style="padding:24px 0; color:var(--muted);">Loading…</div>`);
-  const { days, basis } = await tripsyWardrobeWearDays(tripKey, garment.id, person);
+  // A "No Picture" generic has no wardrobe record, so it arrives as a pseudo-garment
+  // carrying the {category, line} allocations it stands for instead of an id.
+  const { days, basis } = garment.lines
+    ? tripsyWardrobeWearDaysFromLines(await Store.getTripsyAttireGuide(tripKey), person, garment.lines, garment.name)
+    : await tripsyWardrobeWearDays(tripKey, garment.id, person);
   if (!days.length) {
     render(`<div class="empty-state" style="margin-top:8px;">This piece isn’t picked for anything on this trip yet — select it on the Plan Packing List and its days will show here.</div>`);
     return;
@@ -9136,7 +9159,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const noPicCard = (tripsyWardrobeLineIsNeverPhotographed(ln) && !genQty) ? '' : `<div class="tw-card tw-card-select" data-tw-nopic="1" style="cursor:pointer;">
       <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(ln.typeKey, ln.group, ln.name)}</div>
       <div class="tw-info"><div class="tw-name">${esc(tripsyWardrobeTierLabel(tier))} ${esc(tripsyStripCategoryParen(ln.name))}</div><div class="tw-meta">Other${genQty ? ` · <span style="color:var(--amber); font-weight:700;">×${genQty} added</span>` : ''}</div></div>
-      <div class="tw-actions"><button class="btn">Add</button>${genQty ? `<button class="btn" data-tw-nopic-remove="1">Remove</button>` : ''}</div>
+      <div class="tw-actions"><button class="btn">Add</button>${genQty ? `<button class="btn" data-tw-nopic-remove="1">Remove</button><button class="btn" data-tw-nopic-wear-days="1">Wear Days</button>` : ''}</div>
     </div>`;
     // Skip: "I'm not packing this many." Rendered as a card in the same grid as the
     // garments so it reads as one more choice for the line, and shown only while the
@@ -9246,6 +9269,13 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     if (wearBtn) {
       const wg = garmentById.get(wearBtn.getAttribute('data-tw-wear-days'));
       if (wg) showTripsyWearDaysOverlay(tripKey, wg, person);
+      return;
+    }
+    // Same, for the "No Picture" additions on this line -- they have no wardrobe
+    // record, so they're described by the line they were added to.
+    if (e.target.closest('[data-tw-nopic-wear-days]')) {
+      const ln = (remainingLinesFor(view.tier) || [])[view.lineIndex];
+      if (ln) showTripsyWearDaysOverlay(tripKey, { name: ln.name, lines: [{ category: view.tier, line: ln.name }] }, person);
       return;
     }
     const card = e.target.closest('.tw-card-select');
@@ -9549,6 +9579,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const genCards = genItems.map(({ x, i }) => {
       const b = cardPackedBits(Math.min(x.packed, x.qty), x.qty);
       return `<div class="tw-card" data-tw-detail-generic="${i}" style="cursor:pointer; position:relative;">
+          <div class="tw-actions tw-actions-top"><button class="btn" data-tw-gen-wear-days="${i}">Wear Days</button></div>
           <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(x.typeKey, '', x.name)}</div>
           <div class="tw-info"><div class="tw-name">${esc(x.name)}${x.qty > 1 ? ` <span style="color:var(--muted);">×${x.qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div></div>
           ${b.badge}
@@ -9581,6 +9612,14 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     if (wearBtn) {
       const wg = garmentById.get(wearBtn.getAttribute('data-tw-wear-days'));
       if (wg) showTripsyWearDaysOverlay(tripKey, wg, person);
+      return;
+    }
+    // Same, for a "No Picture" generic -- it has no wardrobe id, so it is described
+    // by the line it was added to.
+    const genWearBtn = e.target.closest('[data-tw-gen-wear-days]');
+    if (genWearBtn) {
+      const x = generics[parseInt(genWearBtn.getAttribute('data-tw-gen-wear-days'), 10)];
+      if (x) showTripsyWearDaysOverlay(tripKey, { name: x.name, lines: [{ category: x.category, line: x.name }] }, person);
       return;
     }
     const gEl = e.target.closest('[data-tw-detail-garment]');
