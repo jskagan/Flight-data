@@ -7343,7 +7343,7 @@ function tripsyWardrobeCardHtml(g, opts = {}) {
       ${opts.wearDays ? `<div class="tw-actions tw-actions-top"><button class="btn" data-tw-wear-days="${esc(g.id)}">Wear Days</button></div>` : ''}
       <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : tripsyGarmentGlyph(tripsyGarmentTypeKey(g.name), g.group, g.name)}</div>
       <div class="tw-info">
-        <div class="tw-name">${esc(g.name || 'Untitled')}</div>
+        <div class="tw-name">${esc(g.name || 'Untitled')}${(opts.selected && (g.quantity || 1) > 1) ? ` <span style="color:var(--muted);">×${opts.selectedQty || 1}</span>` : ''}</div>
         <div class="tw-meta"><span>${esc(groupLabel)}</span>${g.color ? `<span class="tw-color">· ${esc(g.color)}</span>` : ''}${(g.quantity || 1) > 1 ? `<span style="color:var(--muted);">· ×${g.quantity} available</span>` : ''}</div>
         ${tierBadges ? `<div class="tw-tiers">${tierBadges}</div>` : ''}
       </div>
@@ -8523,25 +8523,81 @@ async function tripsyPackingCompleteDialog(tripKey, person) {
 // packing plan only knows the garment fills a LINE -- so this reads outfits, not picks,
 // and says so plainly when none have been composed.
 async function tripsyWardrobeWearDays(tripKey, garmentId, person) {
-  const [outfits, guide] = await Promise.all([
+  const [outfits, guide, selectedRaw, garments] = await Promise.all([
     Store.getTripsyTripOutfits(tripKey, person),
     Store.getTripsyAttireGuide(tripKey),
+    Store.getTripWardrobe(tripKey),
+    Store.listWardrobe(),
   ]);
-  const blocks = ((outfits && outfits.blocks) || []).filter(b => (b.garmentIds || []).includes(garmentId));
-  // Event id -> its name/time, from the guide's own day list.
+  // Event id -> name/time/day, from the guide's own day list.
   const evById = new Map();
+  const allDays = [];
   for (const day of ((guide && guide.days) || [])) {
+    allDays.push(day);
     for (const ev of (day.events || [])) evById.set(ev.id, { ...ev, dayKey: day.dayKey });
   }
-  const days = [];
-  for (const b of blocks) {
-    const events = (b.eventIds || []).map(id => evById.get(id) || { id, name: b.label || 'Event' });
-    const dayKey = b.dayKey || (events[0] && events[0].dayKey) || '';
-    const last = days[days.length - 1];
-    if (last && last.dayKey === dayKey) last.events.push(...events);
-    else days.push({ dayKey, events: [...events] });
+  const group = evs => {
+    const days = [];
+    for (const ev of evs) {
+      const last = days[days.length - 1];
+      if (last && last.dayKey === ev.dayKey) last.events.push(ev);
+      else days.push({ dayKey: ev.dayKey, events: [ev] });
+    }
+    return days;
+  };
+  // 1. BEST: the composed outfits actually say which block this piece is worn in.
+  const blocks = ((outfits && outfits.blocks) || []).filter(b => (b.garmentIds || []).includes(garmentId));
+  if (blocks.length) {
+    const evs = [];
+    for (const b of blocks) {
+      const found = (b.eventIds || []).map(id => evById.get(id) || { id, name: b.label || 'Event', dayKey: b.dayKey });
+      for (const ev of found) evs.push({ ...ev, dayKey: ev.dayKey || b.dayKey });
+    }
+    return { days: group(evs), basis: 'outfits', outfitLinked: true };
   }
-  return { days, hasOutfits: !!(outfits && (outfits.blocks || []).length) };
+  // Nothing composed for it -- which is ALWAYS the case for underwear, socks and
+  // undershirts, since essentials are deliberately kept out of outfit composition. Fall
+  // back to where the garment is ALLOCATED: the line it was picked for.
+  const byId = new Map((garments || []).map(g => [g.id, g]));
+  const garment = byId.get(garmentId);
+  const sel = tripsyWardrobeResolveSelectionLines(tripsyNormalizeTripSelection(selectedRaw), guide, byId)
+    .filter(e => e.id === garmentId && e.category);
+  if (!sel.length || !guide) return { days: [], basis: 'none', outfitLinked: false };
+  const items = (guide.packingList && guide.packingList[person]) || [];
+  const evs = [];
+  let basis = 'line';
+  for (const e of sel) {
+    // 2. The guide often links a packing item to the exact events it is for.
+    const item = items.find(it => it && it.name === e.line);
+    const linked = ((item && item.eventIds) || []).map(id => evById.get(id)).filter(Boolean);
+    if (linked.length) { evs.push(...linked); continue; }
+    // 3. No links: a dress-code tier means "whenever you're dressed at that level".
+    if (e.category !== TRIPSY_WARDROBE_GENERAL_TIER) {
+      basis = 'tier';
+      for (const day of allDays) {
+        for (const ev of (day.events || [])) {
+          if ((ev.displayCategory || ev.category) === e.category) evs.push({ ...ev, dayKey: day.dayKey });
+        }
+      }
+      continue;
+    }
+    // 4. General has no occasions of its own, so fall back on what the piece IS.
+    // Undershirts and dress socks go under dressy clothes; underwear and ordinary socks
+    // are worn every day of the trip. This mirrors how the guide sizes them.
+    const typeKey = tripsyGarmentTypeKey((garment && garment.name) || e.line || '');
+    const dressy = ['undershirt', 'dress-socks'].includes(typeKey);
+    basis = dressy ? 'dressy' : 'daily';
+    for (const day of allDays) {
+      for (const ev of (day.events || [])) {
+        const cat = ev.displayCategory || ev.category;
+        if (!dressy || TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(cat)) evs.push({ ...ev, dayKey: day.dayKey });
+      }
+    }
+  }
+  // De-duplicate: several allocations can point at overlapping events.
+  const seen = new Set();
+  const unique = evs.filter(ev => { const k = `${ev.dayKey}::${ev.id}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  return { days: group(unique), basis, outfitLinked: false };
 }
 // The "Wear Days" screen: one amber day header per date, that day's events beneath it,
 // each tappable to open the full outfit for it (showTripsyOutfitModal -- the same view
@@ -8576,14 +8632,22 @@ async function showTripsyWearDaysOverlay(tripKey, garment, person) {
     ov.querySelector('[data-tw-weardays-close]').onclick = () => { ov.style.display = 'none'; };
   };
   render(`<div style="padding:24px 0; color:var(--muted);">Loading…</div>`);
-  const { days, hasOutfits } = await tripsyWardrobeWearDays(tripKey, garment.id, person);
+  const { days, basis } = await tripsyWardrobeWearDays(tripKey, garment.id, person);
   if (!days.length) {
-    render(`<div class="empty-state" style="margin-top:8px;">${hasOutfits
-      ? 'This piece isn’t part of any composed outfit yet.'
-      : 'No outfits have been composed for this trip yet — compose them from the trip’s 👔 Outfits screen, and the days this is worn will show here.'}</div>`);
+    render(`<div class="empty-state" style="margin-top:8px;">This piece isn’t picked for anything on this trip yet — select it on the Plan Packing List and its days will show here.</div>`);
     return;
   }
-  render(days.map(d => `
+  // Say WHICH source the days came from. They range from exact (the composed outfit
+  // named this garment) to inferred (an essentials piece with no occasions of its own),
+  // and a list that doesn't distinguish them reads as more certain than it is.
+  const note = {
+    outfits: 'From your composed outfits — the exact blocks this piece is worn in.',
+    line: 'From the events the attire guide links to the line you picked this for.',
+    tier: 'Every occasion at this dress code — outfits haven’t been composed for it.',
+    dressy: 'Every dressy occasion — worn under formal, semi-formal and cocktail clothes.',
+    daily: 'Every day of the trip.',
+  }[basis] || '';
+  render((note ? `<div style="color:var(--muted); font-size:12px; margin:-6px 0 12px;">${esc(note)}</div>` : '') + days.map(d => `
     <div style="margin-bottom:14px;">
       <div class="tw-group-title">${esc(tripsyDayHeaderLabel(d.dayKey))}</div>
       ${d.events.map(ev => `<button type="button" data-tw-weardays-event="${esc(ev.id)}" style="display:flex; align-items:center; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:4px 0; cursor:pointer; color:var(--text); font-size:14px;">
@@ -8954,7 +9018,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       <div class="tw-info"><div class="tw-name">Skip</div><div class="tw-meta">${skipped ? `<span style="color:var(--amber); font-weight:700;">×${skipped} skipped</span>` : 'Not packing these'}</div></div>
       <div class="tw-actions">${met ? '' : `<button class="btn">Skip</button>`}${skipped ? `<button class="btn" data-tw-skip-undo="1">Unskip</button>` : ''}</div>
     </div>` : '';
-    bodyEl.innerHTML = `<div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, wearDays: true, selected: sel.has(selKey(g.id, tier, ln.name)) })).join('')}${noPicCard}${skipCard}</div>`;
+    bodyEl.innerHTML = `<div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, wearDays: true, selected: sel.has(selKey(g.id, tier, ln.name)), selectedQty: sel.get(selKey(g.id, tier, ln.name)) })).join('')}${noPicCard}${skipCard}</div>`;
     tripsyWardrobeLoadPhotos(bodyEl);
   };
 
@@ -20075,7 +20139,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
           <span style="font-weight:700; font-size:13.5px;">${esc(tripsyStripCategoryParen(ln.name))}</span>
           <span style="font-weight:700; flex-shrink:0; color:${remaining ? 'var(--amber)' : 'var(--home-green)'};">${remaining ? `${remaining} needed` : '✓ all set'}</span>
         </div>
-        <div class="tw-grid" data-tw-line="${esc(ln.name)}">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, selected: sel.has(selKey(g.id, category, ln.name)) })).join('')}${noPic}</div>
+        <div class="tw-grid" data-tw-line="${esc(ln.name)}">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, selected: sel.has(selKey(g.id, category, ln.name)), selectedQty: sel.get(selKey(g.id, category, ln.name)) })).join('')}${noPic}</div>
       </div>`;
     }).join('');
     packEl.innerHTML = headerHtml + sections;
