@@ -11711,14 +11711,18 @@ function tripsyFindLayoverPairs(events) {
 // departure row (panelKey dedup is by tripsyEventKey, not ev.id), and _splitHalf 'end'
 // puts it ahead of anything beginning that day, exactly as a split half would sort.
 function insertTripsyFlightArrivals(events) {
-  const out = [];
-  for (const ev of events) {
-    out.push(ev);
+// This runs AFTER insertTripsyLayovers, whose whole job is to force connecting
+// flights adjacent and DEFER anything that fell between them to after the second
+// leg. So the row is SPLICED into place -- re-sorting the array here would undo
+// that gluing and let a hotel check-in land between a layover and the next leg.
+  const out = events.slice();
+  for (let i = 0; i < out.length; i++) {
+    const ev = out[i];
     if (!tripsyIsFlightEvent(ev) || ev._layover) continue;
     const startDay = tripsyDayKey(ev.start);
     const endDay = tripsyDayKey(ev.end);
     if (!startDay || !endDay || startDay === endDay) continue;
-    out.push({
+    const arrival = {
       ...ev,
       id: `${ev.id}-arrival`,
       summary: `Arriving ${ev.summary}`,
@@ -11728,9 +11732,91 @@ function insertTripsyFlightArrivals(events) {
       tripsyExtra: null,
       _splitHalf: 'end',
       _flightArrival: true,
-    });
+    };
+    // First row at/after the landing moment. Both are literal local-time
+    // "YYYY-MM-DDTHH:MM:SS" strings (see parseTripLocalParts), so a plain string
+    // compare orders them by day then clock. ">=" not ">" so the row lands ABOVE
+    // a transfer booked for the same minute as the landing.
+    let idx = out.length;
+    for (let j = i + 1; j < out.length; j++) {
+      if (out[j].start && String(out[j].start) >= String(ev.end)) { idx = j; break; }
+    }
+    // A layover row is always immediately followed by the leg it was glued to --
+    // never land between the two.
+    while (idx > 0 && idx < out.length && out[idx - 1]._layover) idx++;
+    out.splice(idx, 0, arrival);
+    i++;
   }
-  return out.sort(tripsyTimelineSortComparator);
+  return out;
+}
+// A private transfer is usually described by the HOTEL, not its city -- "Four
+// Seasons Tented Camp", "Chiang Rai Airport (for Flight FD3210)" -- which
+// tripsyLodgingTransportOrder's city test can't see (that lodging's city is
+// "chiang rai"). So this also compares the lodging's own NAME against the
+// transport's endpoint description, either direction, since one is usually a
+// prefix of the other ("Four Seasons Tented Camp" vs "Four Seasons Tented Camp
+// Golden Triangle Thailand"). The 10-char floor keeps a generic fragment from
+// matching everything.
+function tripsyDescMatchesLodgingName(desc, lodging) {
+  if (!desc) return false;
+  const norm = str => String(str || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const name = norm((lodging.tripsyRaw && lodging.tripsyRaw.name) || lodging.summary);
+  const d = norm(desc);
+  if (name.length < 10 || d.length < 10) return false;
+  return d.includes(name) || name.includes(d);
+}
+// 'arriving' (transport ends AT the lodging), 'departing' (starts there), or
+// null when it's neither or both.
+//
+// The NAME test is tried first and on its own, because an airport transfer
+// normally matches the lodging's CITY at BOTH ends -- "Four Seasons Tented Camp"
+// to "Chiang Rai Airport" leaves the hotel but stays in Chiang Rai, so a
+// city-only test sees both endpoints match and gives up. The name tells the two
+// ends apart; city matching is the fallback for transfers described only by city.
+function tripsyTransferSideForLodging(transport, lodging) {
+  const raw = transport.tripsyRaw;
+  if (!raw || raw.resource !== 'transportation') return null;
+  const depName = tripsyDescMatchesLodgingName(raw.departureDescription, lodging);
+  const arrName = tripsyDescMatchesLodgingName(raw.arrivalDescription, lodging);
+  if (depName !== arrName) return arrName ? 'arriving' : 'departing';
+  const city = tripsyLodgingCityLower(lodging);
+  if (!city) return null;
+  const depCity = tripsyDescMatchesCity(raw.departureDescription, city);
+  const arrCity = tripsyDescMatchesCity(raw.arrivalDescription, city);
+  if (depCity === arrCity) return null;
+  return arrCity ? 'arriving' : 'departing';
+}
+// Moves a lodging row next to the transfer that serves it: a Check-in goes
+// directly BELOW the transport that arrives there, a Check-out directly ABOVE
+// the one that leaves. Deliberately a post-sort MOVE rather than another
+// comparator rule -- the sort stays purely chronological (and so always
+// transitive), and this can only relocate the one lodging row it matched.
+// Timeline-only, like insertTripsyFlightArrivals: the itinerary print, Travel
+// View and the attire guide keep their existing order.
+function placeTripsyLodgingNextToTransfers(events) {
+  let out = events.slice();
+  for (const lodge of events) {
+    if (!lodge.tripsyRaw || lodge.tripsyRaw.resource !== 'hosting') continue;
+    const day = tripsyDayKey(lodge.start);
+    if (!day) continue;
+    // The Check-out half ('end') pairs with the transport LEAVING; every other
+    // lodging row pairs with the one arriving.
+    const want = lodge._splitHalf === 'end' ? 'departing' : 'arriving';
+    const transport = out.find(e => e !== lodge && !e._layover && !e._flightArrival
+      && tripsyDayKey(e.start) === day
+      && tripsyTransferSideForLodging(e, lodge) === want);
+    if (!transport) continue;
+    out = out.filter(e => e !== lodge);
+    let idx = out.indexOf(transport);
+    if (idx < 0) continue;
+    if (want === 'arriving') {
+      idx += 1;
+      // Same layover glue insertTripsyFlightArrivals respects.
+      while (idx > 0 && idx < out.length && out[idx - 1]._layover) idx++;
+    }
+    out.splice(idx, 0, lodge);
+  }
+  return out;
 }
 function insertTripsyLayovers(events) {
   const pairs = tripsyFindLayoverPairs(events);
@@ -23904,7 +23990,8 @@ async function renderTripsyEventsListImpl() {
     // (same airport, <=20h apart) and forces them adjacent in the render
     // order -- see insertTripsyLayovers.
     // Layovers first (they read the unsplit flight list), then the arrival rows.
-    const sortedEvents = insertTripsyFlightArrivals(insertTripsyLayovers(chronologicalEvents));
+    const sortedEvents = placeTripsyLodgingNextToTransfers(
+      insertTripsyFlightArrivals(insertTripsyLayovers(chronologicalEvents)));
     // Every distinct event type present in this trip (always computed off
     // the FULL sortedEvents, not the filtered-down list below), so the Sort
     // menu's checklist doesn't shrink once a filter is already applied.
