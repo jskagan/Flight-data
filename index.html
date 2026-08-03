@@ -11527,6 +11527,14 @@ function tripsyIsFlightEvent(ev) {
 }
 function expandMultiDayTripsyEvents(events) {
   return events.flatMap(ev => {
+    // Flights are the one exemption: tripsyFindLayoverPairs pairs CONSECUTIVE
+    // flights in the sorted array this feeds, so splitting them would break
+    // layover detection. This expansion is also shared with the itinerary
+    // print, Travel View and the ATTIRE GUIDE (via buildTripsyPrintDayData),
+    // where an extra arrival event would move the guide's event fingerprint
+    // and occasion counts. The My Trips timeline gets its overnight-flight
+    // arrival row from insertTripsyFlightArrivals instead -- added there,
+    // after layover pairing, so only that one screen is affected.
     if (tripsyIsFlightEvent(ev)) return [ev];
     const startDay = tripsyDayKey(ev.start);
     const endDay = tripsyDayKey(ev.end);
@@ -11691,6 +11699,39 @@ function tripsyFindLayoverPairs(events) {
 // immediately after the later flight (preserving their own relative order),
 // rather than left wedged between the connection. Chains of 3+ connecting
 // flights are handled by continuing to follow idxA -> idxB links.
+// A flight that takes off one day and lands the next appears only on its DEPARTURE day:
+// expandMultiDayTripsyEvents splits every other multi-day event into halves but exempts
+// flights, and tripsyFindLayoverPairs depends on that exemption (it pairs CONSECUTIVE
+// flights in the sorted array, which splitting would break). So rather than change the
+// shared expansion -- which also feeds the itinerary print, Travel View and the attire
+// guide, where an extra event would move the guide's fingerprint and occasion counts --
+// the arrival row is added HERE, in the My Trips timeline only, and only after layover
+// pairing has run on the untouched flight list.
+// The row carries the same tripsyRaw, so tapping it opens the same event panel as the
+// departure row (panelKey dedup is by tripsyEventKey, not ev.id), and _splitHalf 'end'
+// puts it ahead of anything beginning that day, exactly as a split half would sort.
+function insertTripsyFlightArrivals(events) {
+  const out = [];
+  for (const ev of events) {
+    out.push(ev);
+    if (!tripsyIsFlightEvent(ev) || ev._layover) continue;
+    const startDay = tripsyDayKey(ev.start);
+    const endDay = tripsyDayKey(ev.end);
+    if (!startDay || !endDay || startDay === endDay) continue;
+    out.push({
+      ...ev,
+      id: `${ev.id}-arrival`,
+      summary: `Arriving ${ev.summary}`,
+      start: ev.end,
+      end: null,
+      notes: null,
+      tripsyExtra: null,
+      _splitHalf: 'end',
+      _flightArrival: true,
+    });
+  }
+  return out.sort(tripsyTimelineSortComparator);
+}
 function insertTripsyLayovers(events) {
   const pairs = tripsyFindLayoverPairs(events);
   if (!pairs.size) return events;
@@ -13992,7 +14033,9 @@ function tripsyTimelineDetailLines(ev) {
   // time, always as the LAST line -- only for an unsplit leg. Flights are
   // NEVER split (see expandMultiDayTripsyEvents), so this is always where
   // a flight's arrival info lives, date included whenever it lands on a
-  // different day. Non-flight transportation only reaches here unsplit
+  // different day. (The My Trips timeline additionally shows an "Arriving
+  // ..." marker row on the arrival day -- insertTripsyFlightArrivals -- but
+  // that row carries _splitHalf 'end' and so takes the branch above.) Non-flight transportation only reaches here unsplit
   // when it's a same-day leg, where the date can never differ -- a split
   // leg's arrival time is already its own "end" half's left-side time, so
   // showing it here too would be the exact duplicate the user asked to
@@ -23860,7 +23903,8 @@ async function renderTripsyEventsListImpl() {
     // Inserts a synthetic layover row between any two connecting flights
     // (same airport, <=20h apart) and forces them adjacent in the render
     // order -- see insertTripsyLayovers.
-    const sortedEvents = insertTripsyLayovers(chronologicalEvents);
+    // Layovers first (they read the unsplit flight list), then the arrival rows.
+    const sortedEvents = insertTripsyFlightArrivals(insertTripsyLayovers(chronologicalEvents));
     // Every distinct event type present in this trip (always computed off
     // the FULL sortedEvents, not the filtered-down list below), so the Sort
     // menu's checklist doesn't shrink once a filter is already applied.
