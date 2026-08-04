@@ -7,9 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Travel Tracker is a single self-contained HTML file (`index.html`, ~15,300 lines) — no build step,
 no package manager, no test suite. It's a private, invite-only web app for tracking one family's
 NetJets fractional-jet usage, The Private Suite ("PS", the LAX private terminal)
-reservations/billing, and a Tripsy-API-backed Trips view (labeled "My Trips" in the nav — flights,
-hotels, and other reservations), synced by a Claude Code scheduled task rather than an in-browser
-API call (see "Tripsy Trips" below).
+reservations/billing, and a Trips view (labeled "My Trips" in the nav — flights, hotels, and
+other reservations) whose data lives in its own private Drive file, `trips-data.json` (see "Tripsy
+Trips" below — the name survives from the Tripsy service the data was migrated off on 2026-08-04).
 
 Open the file directly in a browser (or serve the directory statically) to run it — there is
 nothing to install or compile. The file **must** be named `index.html`, not something more
@@ -33,20 +33,8 @@ language and getting the user's explicit go-ahead.** This applies every session,
 the user asks for it in the moment — don't treat silence or an unrelated request as consent to
 commit pending changes.
 
-**Exception: Tripsy Trips snapshot-only refreshes.** When following the "Refresh Tripsy Trips
-snapshot" procedure (see `TRIPSY_SNAPSHOT_GENERATED_AT`/`TRIPSY_ENCRYPTED` in `index.html`) and the
-resulting diff touches *only* those two constants — no other lines changed — commit and push
-without asking first. Still describe what was refreshed (trip/event counts, any pending changes
-applied) after the fact. If the diff touches anything else, the normal go-ahead rule applies.
-(There used to be two companion `tripsy-trips-refresh-retry`/`-retry-2` tasks that retried the
-pending-changes step when a browser session wasn't available; they were removed once that step
-became headless — the main task now applies pending changes on every run with no browser, so no
-retry is needed.)
-
-Every refresh summary must say whether the top-right Tripsy pending-changes badge is now green
-(i.e. whether `tripsyChangesReadyToClear` is true for `driveData.tripsyPendingChanges` given the
-just-refreshed `TRIPSY_SNAPSHOT_GENERATED_AT`) — not just what changed. If it's green, say so
-explicitly and remind the user they can clear it from the Tripsy Refresh page.
+(The old "Tripsy snapshot-only refresh" auto-push exception is retired with the Tripsy migration —
+there is no snapshot to refresh anymore; every push needs the normal go-ahead.)
 
 The user runs multiple sessions against this repo (different devices, sometimes in parallel), so
 `main` can move without this session knowing. **Every session should start with `git fetch origin`
@@ -67,7 +55,8 @@ driveData = {
   report: {...} | null,            // cached passenger-hours report
   reservations: [...],             // PS reservations, from Gmail
   psBalanceDeductions: [...],      // PS balance deductions, from Gmail
-  tripsyPendingChanges: [...],     // queued edit/delete/create changes awaiting push to Tripsy
+  tripsyPendingChanges: [...],     // VESTIGIAL (always empty since the Tripsy migration): trip
+                                    // changes now apply directly to trips-data.json
   tripsyAttachments: [...],        // metadata for docs attached to a trip/event (bytes live in
                                     // their own separate Drive file, not inlined here)
   tripsyGeneratedPdfs: [...],      // metadata for saved "Generate PDF" exports (same separate-
@@ -76,7 +65,7 @@ driveData = {
   tripsyParseProposals: [...],     // draft events extracted from a flagged attachment or a
                                     // forwarded confirmation email, awaiting owner review
   tripsyEmailIntake: [...],        // raw forwarded confirmation emails the app found in Gmail,
-                                    // awaiting parse by a tripsy-trips-refresh run (see below)
+                                    // awaiting the scheduled cloud parse run (see below)
   tripsyUpdatePages: [...],        // saved Itinerary -> Update comparisons (tour-operator PDF vs.
                                     // Tripsy), one per trip, kept until every row is resolved or a
                                     // referenced event is edited some other way (see below)
@@ -87,9 +76,9 @@ driveData = {
 }
 ```
 
-Note what's conspicuously absent: the Tripsy trip/event data itself. Unlike every other pipeline,
-that data never touches `driveData` — it's a separate encrypted blob embedded directly in
-`index.html` and refreshed by a scheduled task outside the browser entirely. See "Tripsy Trips"
+Note what's conspicuously absent: the trip/event data itself. It lives in its own Drive file,
+`trips-data.json`, read/written directly by the app (same folder, same sharing model) — kept
+separate so the large trips payload isn't rewritten on every unrelated save. See "Tripsy Trips"
 below.
 
 All reads/writes go through the `Store` object (`index.html:1285`), which mutates
@@ -154,109 +143,36 @@ actually refreshes.
 
 ### Tripsy Trips (labeled "My Trips" in the nav; render code `index.html:12301`/`14198` area)
 
-**⚠️ MIGRATION IN PROGRESS (started 2026-08-04): trip data is moving OFF Tripsy into a private
-Drive file, `trips-data.json` (same folder as `flight-log-data.json`; shape
-`{schemaVersion, updatedAt, trips:[...]}` where `trips` is exactly the old decrypted-snapshot
-array).** Steps 2 (reads) AND 3 (writes) are live: `ensureTripsyDecrypted()` loads
-`trips-data.json` from Drive first (`fetchTripsDataFromDrive`, falling back to the
-encrypted-snapshot/passphrase paths only if that fails), and **every trip edit/create/delete now
-applies DIRECTLY to `trips-data.json`** — `Store.queueTripsyChange` (name kept so its many call
-sites stay untouched) routes each change object through `applyTripsyChangeToTrips` (display fields
-re-derived via `tripsyRawToDisplay`; created events get `tripsyMintLocalId()` ids, numeric and far
-above Tripsy's ranges) and `persistTripsData()` (same optimistic-concurrency revision guard as
-`persistDriveData`). Changes are real the moment they save: no queue, no refresh push, and Tripsy
-itself is no longer updated (it's a frozen archive). The pending-changes queue, relays, and
-refresh-push machinery described below are now VESTIGIAL — the queue is permanently empty — and
-get removed in step 4, along with slimming the cloud routine to doc/email parsing only (its
-snapshot rebuild now refreshes data nobody reads). Historical (pre-2026) trips are not yet in the
-file (planned backfill).
+**Trip data lives in a private Drive file, `trips-data.json`** (same folder as
+`flight-log-data.json`; shape `{schemaVersion, updatedAt, trips:[...]}`), loaded by
+`ensureTripsyDecrypted()`/`fetchTripsDataFromDrive` and cached as `tripsyDecryptedTrips` (both
+names kept from the earlier era so their many readers stayed untouched). Access control is Drive
+sharing itself, exactly like `flight-log-data.json` — no passphrase, no encryption. **This data
+was migrated OFF Tripsy on 2026-08-04**: it was exported once via `tools/build_tripsy_snapshot.py`
+(kept in the repo — it documents the raw→display transform and will drive the planned backfill of
+pre-2026 historical trips, which are not in the file yet); Tripsy itself is now a **frozen
+archive** that the app neither reads nor writes. Before that, the data was an AES-encrypted
+point-in-time snapshot baked into this public file and republished by a thrice-daily "Tripsy Trips
+Refresh" cloud routine — that whole apparatus (encrypted blob, passphrase, pending-changes queue,
+push/applied relays, Tripsy Refresh utility page, refresh lifecycle) was removed in the migration's
+step 4; git history has it if ever needed.
 
-Tripsy's own API isn't reachable from a public browser (no public/CORS-friendly developer access),
-so there is no in-browser sync at all for this pipeline — unlike PS Reservations/Balance above.
-Instead, a Claude Code agent following the `tripsy-trips-refresh` runbook (see the Git workflow
-section above for its push-authorization scope) talks to a Tripsy MCP connector, builds a plain JSON snapshot
-of every trip/event in range, and embeds it **encrypted** directly in `index.html` as
-`TRIPSY_ENCRYPTED` (AES-256-GCM, key derived via PBKDF2 from a passphrase kept in a private Drive
-file, decrypted client-side via `decryptTripsyData()`, `index.html:6471`) — necessary because this
-repo is public and the trip data includes confirmation codes, phone numbers, and addresses.
-`TRIPSY_SNAPSHOT_GENERATED_AT` tracks when the embedded snapshot was last refreshed. The sync
-window is `TRIP_SYNC_DAYS_BACK`/`TRIP_SYNC_DAYS_FORWARD` (`index.html:2450`, currently 60 days
-back / 1095 forward, i.e. 3 years).
-
-**How a refresh actually gets triggered** — three routes, all running the same procedure:
-
-- **Scheduled (cloud routine).** A Claude Code cloud routine, "Tripsy Trips Refresh", runs at
-  **9:00am / 5:00pm / 11:00pm Pacific** (cron `0 0,6,16 * * *`, fixed in UTC — so an hour earlier
-  during PST). It executes in Anthropic's cloud, so it fires with every local device switched off.
-  Managed at `https://claude.ai/code/routines`. Its prompt carries the whole runbook **inline**,
-  because the cloud sandbox clones this repo from GitHub and `.claude/` is gitignored — so edits to
-  the local runbook do *not* propagate to it; update both if the procedure changes.
-- **On demand, desktop (preferred).** Double-click `~/Desktop/Refresh Tripsy Trips.command`. It runs
-  `claude -p` headlessly with a fixed `--allowedTools` list, so it never prompts. This is the path
-  `LOCAL_SETUP.md` documents: it reads `flight-log-data.json` and the passphrase, and writes the
-  relay files, through the **Google Drive for Desktop mount** as ordinary local files rather than
-  the Drive connector (whose `create_file` currently fails from cloud sessions).
-- **On demand, by hand.** Tell any local Claude Code session "run a Tripsy refresh"; it follows
-  `~/.claude/scheduled-tasks/tripsy-trips-refresh/SKILL.md`. That file is untracked and
-  machine-local — it is the runbook text, not a schedule by itself.
-
-  **⚠️ GUARDRAIL — before running a refresh, confirm the runbook is actually here.** If you are asked
-  to "run a Tripsy refresh", FIRST check that `~/.claude/scheduled-tasks/tripsy-trips-refresh/SKILL.md`
-  exists. If it does **not**, you are on an iPad/iPhone/`claude.ai/code`/other cloud-cloned session
-  (`.claude/` is gitignored, so a fresh clone of this repo never contains it). Do **NOT** try to
-  improvise a refresh from this CLAUDE.md — you'd be missing the actual procedure (passphrase location,
-  AES/PBKDF2 params, the pending-changes/email/doc-parse steps, the two-const diff gating) and would
-  likely push a broken snapshot or silently skip the push/parse steps. Instead **STOP and tell the
-  user**: *"This device doesn't have the refresh runbook, so I can't run it here. Use **Run now** on
-  the **Tripsy Trips Refresh** routine at claude.ai/code/routines — it has the runbook baked in and
-  does the whole thing (push queued changes, parse flagged docs/photos and forwarded emails, pull data,
-  republish)."* Only proceed with a hand-run refresh when that `SKILL.md` is present (i.e. you're on
-  the owner's Mac).
-
-  **A note on scheduling — don't be fooled by empty `crontab`/`launchd`.** There genuinely IS (was)
-  a second scheduler: the **Claude desktop app runs its own scheduled tasks**, registered in
-  `~/Library/Application Support/Claude/claude-code-sessions/<userId>/<workspaceId>/scheduled-tasks.json`,
-  which fires `SKILL.md` as a `<scheduled-task>` local run. This is **invisible to `crontab` and
-  `launchd`** — checking only those and concluding "nothing is scheduled" is wrong (that mistake was
-  made on 2026-07-20). A `tripsy-trips-refresh` entry there ran daily at **8:24am** (`cronExpression`
-  `24 8 * * *`) and duplicated the cloud routine; it was set `enabled:false` on 2026-07-21 to
-  consolidate on the cloud routine. If you need to know what's scheduled, read that `scheduled-tasks.json`
-  and the cloud `https://claude.ai/code/routines` — not the OS schedulers.
-
-**The transform itself is committed code, not runbook prose: `tools/build_tripsy_snapshot.py`.**
-Every refresh route above pulls the raw Tripsy records, assembles them into that script's input
-shape (`{"trips":[{"trip":{…}, "activities":[…], "hostings":[…], "transportations":[…]}]}`), and
-runs the script to produce the snapshot plaintext — then encrypts that. It is a pure function (raw
-JSON in, plaintext out; no passphrase, no network, no encryption), which is why it lives in this
-public repo. It exists because re-deriving the transform from prose each run kept drifting (event-id
-shape, `""`-vs-`null`, key order, the `→` arrow, the transportation-title rule) and hand-retyping
-raw records silently corrupted data (a curly apostrophe flattened, a U+200E mark dropped); reading
-raw JSON in code makes both impossible. **One caveat**: the app *also* recomputes display fields for
-pending (unsynced) events client-side in `tripsyRawToDisplay`/`tripsyTransportationFallbackSummary`
-(`index.html`) — the single-file/no-imports app can't share the Python module — so the
-transportation-`summary` rule (route-first title, shortened endpoints) exists in both places and
-must be kept in lockstep. A refresh's step-12 diff against the decrypted live snapshot is the test
-that catches drift between them.
-
-- **Pending changes, not live writes (headless push via a Drive relay)**: the browser can't call
-  Tripsy's API directly, so any edit/delete/create the owner makes on the Trips page (per-event
-  Edit/Delete icons, "Delete Trip", the per-trip Add-item menu, "create a new trip" on the review
-  page) is queued as a plain-data change in `driveData.tripsyPendingChanges`
-  (`Store.queueTripsyChange`/`cancelTripsyChange`/`listTripsyPendingChanges`, `index.html:1454`
-  area) rather than applied immediately. A `tripsy-trips-refresh` run (step 1a) applies each to the
-  real Tripsy API — **fully headless**: it reads the queue by reading `flight-log-data.json`
-  directly via its Drive connector, applies via the `tripsy_` connectors, and (since it can't write
-  that file) reports per-change results in a `tripsy-applied-changes.json` Drive relay file. The app
-  drains that relay on its next open (`drainTripsyAppliedChanges`/`Store.applyDrainedPushResults`,
-  `index.html:2515`/`1858` area): `applied` → removed from the queue, `unverified` →
-  `pushConfirmationFailed` (red), `failed` → left to retry. This is the same Drive-relay pattern as
-  the email pipeline, in reverse, and it's what lets a refresh push from an iPad Claude session with
-  no browser. **The badge flag is confirmation-based, not snapshot-timestamp-based**: a change shows
-  yellow ("waiting to push") as long as it's in the queue and not yet explicitly confirmed applied —
-  it only clears when a relay marks that exact change `applied` — so a push that fails stays yellow
-  instead of being falsely inferred "done" from the snapshot clock advancing. The "Tripsy Refresh"
-  utility page (`renderUtilitiesTripsyRefresh`, `index.html:5757`) explains the states and its
-  "Check Now" button drains the relays on demand.
+- **Direct writes — every edit is real the moment it saves**: any edit/delete/create the owner
+  makes on the Trips page (per-event Edit/Delete icons, "Delete Trip", the per-trip Add-item menu,
+  doc-parse imports, "create a new trip" on the review page) still funnels through the ONE entry
+  point `Store.queueTripsyChange` (name kept so its dozens of call sites stayed untouched), which
+  now applies the same plain-data change object directly to the trips array via
+  `applyTripsyChangeToTrips` — display fields re-derived with `tripsyRawToDisplay`, created events
+  minted local numeric ids by `tripsyMintLocalId()` (epoch-millis-scaled, far above Tripsy's old id
+  ranges), trips/events kept sorted, arrays REPLACED rather than mutated so a failed save rolls
+  back by restoring the prior reference — then writes the whole file back with `persistTripsData()`
+  (same optimistic-concurrency head-revision guard as `persistDriveData`: a conflicting write from
+  another device reloads the newer copy, re-applies this change onto it, and retries, bounded).
+  `importTripsyParseProposalEvent`/`acceptTripsyParseProposalCluster` split into two ordered writes
+  (trip data first, then proposal bookkeeping in `flight-log-data.json`, each with conflict retry).
+  `driveData.tripsyPendingChanges` still exists in the data model but is permanently empty; the
+  timeline's pending-overlay plumbing (`getEffectiveTripsyEvent`/`getEffectiveTripsyTrip`,
+  `pendingCreates`, `cancelTripsyChange`) is retained but inert-on-empty by construction.
 - **Attachments, and doc/email parsing — always human-reviewed, never automatic**: the owner can
   attach a file (boarding pass, confirmation, full itinerary) to a trip or event
   (`renderTripsyAttachPanel`, `index.html:7777`; metadata in `driveData.tripsyAttachments`, actual
@@ -273,13 +189,10 @@ that catches drift between them.
   whole flow works from an iPad (upload+flag → cloud parses 3×/day → review/import). **Supported
   formats: PDF, Word `.docx`, and images** (`image/jpeg`/`png`/`heic`/`webp`/`gif` — a photo or
   screenshot of a printed itinerary/confirmation, read natively by the Read tool's vision). This
-  parse logic is **triplicated and must be kept in lockstep** — the cloud routine's inline STEP 1c
-  (managed at `https://claude.ai/code/routines`, since the cloud sandbox can't read `.claude/`), the
-  local `~/.claude/scheduled-tasks/tripsy-trips-refresh/SKILL.md` step 1c (desktop/on-demand
-  refresh), and the on-demand `~/.claude/scheduled-tasks/tripsy-pdf-parse/RUN_NOW.md` fallback all
-  parse the same formats the same way. (Images were unsupported until 2026-07-24, and the local
-  `SKILL.md` was missing step 1c entirely — a desktop refresh silently skipped doc-parsing — both
-  fixed then; if you change what formats parse, update all three.)
+  parse logic lives in the cloud routine's inline prompt (managed at
+  `https://claude.ai/code/routines`, since the cloud sandbox can't read `.claude/`); if you change
+  what formats parse, update it there. The owner can also fire it on demand from the badge panel's
+  **Run Parse Now** button (via the Cloudflare Worker).
   Independently, there's an **email-intake pipeline** for confirmations the owner forwards to
   `kaganworldtravel@gmail.com`. The scan (`scanTripsyEmailIntake`) searches the owner's Gmail for
   that address in *either* direction — `(to:kaganworldtravel@gmail.com OR from:kaganworldtravel@gmail.com)`
@@ -290,8 +203,8 @@ that catches drift between them.
   browser is ever needed: the **app** (on any device, owner only, in
   `runTripsyEmailIntake`/`scanTripsyEmailIntake`, `index.html:2515` area) searches Gmail
   for those forwards and appends each one's plain-text body to `driveData.tripsyEmailIntake`; the
-  **`tripsy-trips-refresh` task** (step 1b, headless — it reads `flight-log-data.json` directly via
-  its Drive connector, which *can* see that file despite older task-doc claims) parses each into
+  **cloud parse routine** (headless — it reads `flight-log-data.json` directly via its Drive
+  connector) parses each into
   events and writes them to a separate `tripsy-email-proposals.json` Drive file; the **app** drains
   that file on its next open (`drainTripsyEmailProposals`), staging into the same proposal queue and
   deleting the relay file. Claude never touches the app's domain or `flight-log-data.json` writes.
@@ -301,9 +214,9 @@ that catches drift between them.
   fetches its bytes from Gmail, uploads them to their own Drive file, and stages each as a
   `scope:'email'`, `purpose:'parse'` entry in `driveData.tripsyAttachments` (deduped by
   `sourceEmailId`+`gmailAttachmentId`). This deliberately reuses the **document** pipeline rather than
-  the email one: the attachment is then read by the refresh's doc-parse **step 1c** (which handles
-  images), NOT step 1b — so an image-only confirmation (empty text body, all the detail in the photo)
-  no longer arrives with `bodyLen=0`, get marked `empty` by step 1b, and vanish. `scope:'email'` keeps
+  the email one: the attachment is then read by the routine's doc-parse step (which handles
+  images), NOT the email-body step — so an image-only confirmation (empty text body, all the detail
+  in the photo) doesn't arrive with `bodyLen=0` and get marked `empty`. `scope:'email'` keeps
   these off trip cards; they show on the Parsing Docs page as "from a forwarded email". Only *new*
   forwards benefit — an already-scanned email id isn't re-fetched.
   Both sources stage their finds into the exact same queue, `driveData.tripsyParseProposals`
@@ -319,57 +232,32 @@ that catches drift between them.
   — it stays yellow until the conflict is resolved (import-with-conflict, modify one side out of
   overlap, delete the existing event, or ignore the new one), then flips to the green circle (see the
   badge color rule below).
-- **The consolidated top-right status badge** (`tripsy-status-badge`, `index.html:875`;
-  `computeTripsyStatus`/`updateTripsyStatusBadge`/`renderTripsyStatusPanel`, `index.html:13795`
-  area) is a single indicator with three prioritized states, replacing what used to be two separate
-  badges (pending-changes + doc-parse). The color rule is consistent across every Tripsy signal:
-  **red 🛑** = a push genuinely failed/unverified; **yellow ⚠️** = a Claude step is needed (changes
-  waiting to push, docs flagged-but-unparsed, or emails saved-but-unparsed) *or* any trip card is
-  showing its yellow ⚠️ conflict flag (`tripsyParseConflictTripKeys`) — so the global badge mirrors
-  any individual trip flag that's yellow; yellow deliberately outranks green so the
-  owner clears it first; **green 🟢** = the owner's turn in the app (proposals to review).
-  One caveat on that mirroring: conflict detection needs the *decrypted* trips to date-match
-  proposals against, so it only works once `tripsyDecryptedTrips` is populated. `syncTripsyRelays`
-  attempts a silent `ensureTripsyDecrypted()` before its badge refresh (covering startup on any
-  device that unlocks without prompting), and `renderTripsyEventsList` refreshes the badge after
-  each render — but on a device that can't unlock silently (first visit, rotated passphrase) the
-  badge can briefly read green while a trip card would read yellow, until something decrypts.
-  There's no green "clear the pushed changes" state anymore — applied changes
-  are auto-removed from the queue when a relay confirms them, so a queued change is always either
-  yellow (unconfirmed) or red (unverified). Clicking opens a panel listing the specific reason(s)
-  for the current state, each linking to where it's handled. Per-trip flags are green once any
-  conflict is resolved (a matched proposal is post-parse by definition), but show yellow while a
-  potential conflict is still unresolved (see the per-trip badge note above). Owner-only.
-  `tripsyEmailsAwaitingParseCount()` reads `driveData.tripsyEmailIntake` (entries not yet
-  `parsedAt`) to drive the yellow "N forwarded emails waiting to be parsed" reason.
-  One yellow reason is transient rather than driven off `driveData`: `tripsyInFlightWrites`
-  (module-level, never persisted — there's no way to represent "a write is in progress" in the data
-  model, only "queued" or not once it finishes) tracks a Drive write actually in flight right now.
-  This (and the failed-write tracking below) lives inside `Store.queueTripsyChange` itself, generically
-  — every Tripsy change, from anywhere in the app, funnels through that one function, so wrapping it
-  there covers all of them at once rather than each caller instrumenting its own call: the badge goes
-  yellow the instant ANY change is queued (matters most for actions like the Update page's "Add Event"
-  that resolve their row optimistically, fading out before the write actually finishes — without this
-  the badge would give no sign the save hadn't landed yet), for exactly as long as that one
-  `persistDriveData()` round-trip takes. `tripsyBeginInFlightWrite`/`tripsyEndInFlightWrite` add/remove
-  an entry and immediately refresh the badge; this reason renders as plain (non-clickable) text in the
-  panel, since there's nowhere to navigate to for "still saving." A write that genuinely FAILS is a
-  separate, similarly transient/in-memory `tripsyFailedWrites` list, but unlike `tripsyInFlightWrites`
-  it does NOT auto-clear: it turns the badge red — outranking even a `pushConfirmationFailed` change,
-  and combining with one if both are present — and each entry renders its own "Write Failed" block (red
-  label, a human description built from `TRIPSY_PENDING_CHANGE_LABEL[change.type]` plus
-  `change.eventSummary`/`change.tripName`, and its own Dismiss button) that stays listed until the
-  owner explicitly dismisses it (`tripsyRecordFailedWrite`/`tripsyDismissFailedWrite`). A failed write
-  also rolls `driveData.tripsyPendingChanges`/`tripsyUpdatePages` back to exactly how they looked
-  before that call (snapshotted before any mutation, restored in the `catch`) — every mutation inside
-  `queueTripsyChange` REPLACES those arrays rather than mutating in place, and the change was already
-  pushed into them before the `persistDriveData()` call that actually failed, so without this rollback
-  a failed write still left the change sitting in memory looking successfully queued once the red
-  banner was dismissed.
-- **Categories**: flight / transportation / hotel / dining / concert / tour / other, derived from
-  Tripsy's own activity/transportation type slugs at refresh time (see `tripsy-trips-refresh`'s own
-  category-mapping step for the exact rules) — unlike the old TripIt integration this replaced,
-  there's no category that can *only* ever be set by a manual edit.
+- **The consolidated top-right status badge** (`tripsy-status-badge`;
+  `computeTripsyStatus`/`updateTripsyStatusBadge`/`renderTripsyStatusPanel`) is a single indicator
+  with three prioritized states: **red 🛑** = a Drive write genuinely failed (in-memory
+  `tripsyFailedWrites`, recorded by `tripsyRecordFailedWrite` inside `queueTripsyChange`'s catch —
+  each entry renders its own "Write Failed" block with a Dismiss button and stays until the owner
+  dismisses it; an auth-expired failure gets a clearer "Session Expired → reload & sign in"
+  treatment); **yellow ⚠️** = a Claude parse step is needed (docs flagged-but-unparsed via
+  `parseStatus:'pending'`, or forwarded emails saved-but-unparsed via
+  `tripsyEmailsAwaitingParseCount()`), *or* any trip card is showing its yellow ⚠️ conflict flag
+  (`tripsyParseConflictTripKeys` — the global badge mirrors any individual trip flag), *or* —
+  transient, never persisted — a Drive write is in flight right now (`tripsyInFlightWrites`,
+  wrapped generically around `queueTripsyChange` by
+  `tripsyBeginInFlightWrite`/`tripsyEndInFlightWrite`, rendered as plain non-clickable text);
+  **green 🟢** = the owner's turn in the app (proposals to review). Yellow outranks green so the
+  owner clears the parse step first. Clicking opens a panel listing each specific reason, linking to
+  where it's handled, plus (non-green states) a **Run Parse Now** button that fires the cloud parse
+  routine through the Cloudflare Worker (`runTripsyRefreshViaWorker`, gated by the owner-only
+  "Tripsy Refresh Worker Secret" Drive file). One caveat: conflict detection needs the loaded trips
+  to date-match proposals against, so before `trips-data.json` loads the badge can briefly read
+  green while a trip card would read yellow — `syncTripsyRelays` loads trips before its badge
+  refresh and `renderTripsyEventsList` refreshes the badge after each render to close that gap.
+  Owner-only.
+- **Categories**: flight / transportation / hotel / dining / concert / tour / spa / reception /
+  cooking / other — each event's display `type`, derived from its `tripsyRaw.category` slug
+  (`TRIPSY_ACTIVITY_CATEGORY_TO_TYPE`, mirrored in `tools/build_tripsy_snapshot.py`), including the
+  owner's custom category slugs.
 - **Manual edit overrides**: the per-event Edit panel queues an `edit_event`/`edit_trip` pending
   change (see above) rather than touching the locally-decrypted snapshot directly — the edit only
   becomes real once a refresh applies it, at which point the next snapshot pull reflects it
