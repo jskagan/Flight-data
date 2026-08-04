@@ -433,8 +433,11 @@ step 4; git history has it if ever needed.
   skipped entirely (also the slow half, so a mid-trip Refresh is fast). The reason is correctness,
   not just speed: the bag is already packed, and packing picks/skips are keyed by tier + line NAME,
   so a regenerated list that renames or resizes a line silently strands every selection made against
-  the old one. Such a guide is stamped `packingFrozen: true`, which the toast and the stale-note
-  surface so the behavior isn't invisible. Unlike `tripsyUpdatePages` above, a saved guide
+  the old one. Such a guide is stamped `packingFrozen: true`. The behavior is surfaced in all three
+  places the owner meets it: the ⚠️ tap-through confirm dialog gets its own started-trip wording
+  (and an "Update dress codes" button instead of "Refresh now") rather than the usual copy promising
+  re-sized packing quantities and discarded packing-list edits; the stale note says the same; and the
+  success toast confirms the list was kept as-is. Unlike `tripsyUpdatePages` above, a saved guide
   never auto-invalidates on an unrelated edit — `showTripsyAttireOverlay` just recomputes a light,
   non-cryptographic fingerprint (`tripsyAttireFingerprint`) from the trip's current events and shows
   a non-blocking "may be out of date — Refresh" note if it no longer matches the saved one, since
