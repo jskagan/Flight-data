@@ -378,7 +378,9 @@ that catches drift between them.
   `tripsyItineraryStartDayKey(trip)` — the earliest day any visible, dated event falls on — rather
   than the trip's own `starts_at` (which drifts, e.g. Tripsy leaving the old start after a flight
   time moves, producing a leading day with nothing on it). Falls back to `trip.start` only when the
-  trip has no dated events. (The range's *end* still comes from `trip.end`.)
+  trip has no dated events. The range's *end* is derived the same way from
+  `tripsyItineraryEndDayKey(trip)` (the last day any visible dated event falls on), so a stale
+  `end_date` can't add a trailing empty day either.
 - **Collapse/expand per trip card** is a personal display preference stored in `localStorage`
   (`isTripsyTripCollapsed`/`setTripsyTripCollapsed`, `index.html:6313` area) — deliberately *not*
   in `driveData`, since view-only users have no Drive write access to persist anything into the
