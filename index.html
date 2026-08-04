@@ -21903,25 +21903,33 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
   if (!blocks.length) throw new Error('This trip has no events to compose outfits for.');
 
   // Labeled garment images, then the schedule + rules as the final text block.
-  const content = [];
+  // Tags/metadata are assigned synchronously first so ordering stays
+  // deterministic, THEN every garment photo is downloaded+resized+encoded in
+  // PARALLEL (Promise.all) rather than one-at-a-time -- on a big wardrobe the
+  // old serial loop spent many seconds of Drive round-trips before the API call
+  // even started. Content is reassembled in the original order afterward.
   const idByTag = new Map();
-  let n = 0;
-  for (const { g, qty } of chosen) {
-    const tag = `G${++n}`;
+  const items = chosen.map(({ g, qty }, i) => {
+    const tag = `G${i + 1}`;
     idByTag.set(tag, g.id);
     const tiers = (g.tiers || []).map(t => TRIPSY_ATTIRE_CATEGORY_LABEL[t] || t).join('/') || 'any';
     const typeKey = tripsyGarmentTypeKey(g.name || '') || g.group || '';
     const meta = `[${tag}] ${g.name || 'garment'} — ${[g.color, typeKey, tiers, qty > 1 ? `own ${qty}` : ''].filter(Boolean).join(', ')}`;
-    content.push({ type: 'text', text: meta });
-    if (g.driveFileId) {
-      try {
-        const blob = await downloadDriveFileBlob(g.driveFileId);
-        const small = await tripsyResizeImageBlob(blob, 512, 0.8);
-        const data = await tripsyFileToBase64(small);
-        content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } });
-      } catch (e) { console.error('Outfit compose: photo load failed for', g.id, e); }
-    }
-  }
+    return { g, meta };
+  });
+  const images = await Promise.all(items.map(async ({ g }) => {
+    if (!g.driveFileId) return null;
+    try {
+      const blob = await downloadDriveFileBlob(g.driveFileId);
+      const small = await tripsyResizeImageBlob(blob, 512, 0.8);
+      return await tripsyFileToBase64(small);
+    } catch (e) { console.error('Outfit compose: photo load failed for', g.id, e); return null; }
+  }));
+  const content = [];
+  items.forEach((it, i) => {
+    content.push({ type: 'text', text: it.meta });
+    if (images[i]) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: images[i] } });
+  });
   const scheduleLines = blocks.map(b => {
     const label = TRIPSY_ATTIRE_CATEGORY_LABEL[b.category] || b.category || 'Casual';
     return `${b.blockId} | ${b.dayKey}${b.startTime ? ' ' + b.startTime : ''} | ${label} | ${b.label || '(no events named)'}`;
