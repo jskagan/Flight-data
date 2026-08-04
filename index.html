@@ -7883,16 +7883,48 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
   if (flightClaimer) {
     const order = [flightClaimer.tier, TRIPSY_WARDROBE_GENERAL_TIER,
       ...Object.keys(byTier).filter(k => k !== flightClaimer.tier && k !== TRIPSY_WARDROBE_GENERAL_TIER)];
+    // Each claimed role also gets a COMPANION "wearing on the flight" line (need 1) in
+    // the same tier. Deducting alone made the worn garment invisible: with the packed
+    // need at 0 the line vanished, so there was nothing to pick the jeans against and
+    // the outfit composer -- which pools whatever is SELECTED for the trip -- never knew
+    // they existed, even though they're on your body for the whole trip. These lines are
+    // marked flightWorn so the surfaces that count what's IN THE BAG skip them (Packing
+    // Status, and the Summary, which reads personGuidance rather than these lines), while
+    // Plan Packing List shows them and outfit composition picks them up for free.
+    const companions = {};
     for (const tier of order) {
       for (const ln of (byTier[tier] || [])) {
-        if (flightClaimer.claim(ln.name, tier, ln.group)) ln.need = Math.max(0, ln.need - 1);
+        if (!flightClaimer.claim(ln.name, tier, ln.group)) continue;
+        ln.need = Math.max(0, ln.need - 1);
+        // Essentials (underwear/socks) are worn, not styled -- no point asking which.
+        if (ln.group === 'essentials') continue;
+        (companions[tier] = companions[tier] || []).push({
+          name: `${ln.name}${TRIPSY_FLIGHT_WORN_SUFFIX}`,
+          typeKey: ln.typeKey, group: ln.group, need: 1, flightWorn: true,
+        });
       }
     }
     // A line fully covered by what's worn drops out rather than lingering at 0 -- every
     // other line here is guaranteed need >= 1, so this only removes what was just zeroed.
     for (const k of Object.keys(byTier)) byTier[k] = byTier[k].filter(ln => ln.need > 0);
+    for (const k of Object.keys(companions)) byTier[k] = [...(byTier[k] || []), ...companions[k]];
   }
   return byTier;
+}
+// The suffix that marks a companion need line as the garment you FLY IN rather than pack.
+// One constant because three surfaces key off it: the line builder below, Packing Status
+// (which filters these out), and the outfit composer (which reads the SELECTION's stored
+// line name to know which garments are already on your body when the trip starts).
+const TRIPSY_FLIGHT_WORN_SUFFIX = ' — wearing on the flight';
+function tripsyWardrobeLineIsFlightWorn(name) { return String(name || '').endsWith(TRIPSY_FLIGHT_WORN_SUFFIX); }
+// The need lines MINUS the "wearing on the flight" companions -- i.e. what actually goes
+// IN THE BAG. Packing Status is a checklist of things to physically pack, and the flight
+// outfit is on your body, so it has nothing to tick there; Plan Packing List keeps them,
+// since picking WHICH jeans you fly in is what puts them in the outfit composer's pool.
+function tripsyWardrobePackedNeedLines(byTier) {
+  const out = {};
+  for (const k of Object.keys(byTier || {})) out[k] = (byTier[k] || []).filter(ln => !ln.flightWorn);
+  return out;
 }
 // The attire tier of the first time block when the trip STARTS with a flight, else ''.
 // The guide's own event objects carry no Tripsy category, only `resource` -- so a flight
@@ -9351,7 +9383,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   // (e.g. a Clothing Summary card) can preselect His/Hers via initialPerson.
   let person = initialPerson === 'her' ? 'her' : 'him';
   const isPerson = g => (g.person || 'him') === person;
-  let needLines = tripsyWardrobeNeedByTier(guide, person);
+  let needLines = tripsyWardrobePackedNeedLines(tripsyWardrobeNeedByTier(guide, person));
   const genericFilledFor = (tier, ln) => generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
   const genericPackedFor = (tier, ln) => generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + Math.min(x.packed, x.qty), 0);
   const aggregate = () => { const m = new Map(); for (const e of selEntries) { const cur = m.get(e.id) || { qty: 0, packed: 0 }; cur.qty += e.qty; cur.packed += Math.min(e.packed, e.qty); m.set(e.id, cur); } return m; };
@@ -9603,7 +9635,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     wireTripsyPersonToggle(personSlot, p => {
       if (p === person) return;
       person = p;
-      needLines = tripsyWardrobeNeedByTier(guide, person);
+      needLines = tripsyWardrobePackedNeedLines(tripsyWardrobeNeedByTier(guide, person));
       statusView = { mode: 'list' }; // a detail line index may not apply to the other person
       renderPersonToggle();
       render();
@@ -21634,13 +21666,19 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
   // PARALLEL (Promise.all) rather than one-at-a-time -- on a big wardrobe the
   // old serial loop spent many seconds of Drive round-trips before the API call
   // even started. Content is reassembled in the original order afterward.
+  // Garments picked against a "wearing on the flight" line are NOT in the bag -- they are
+  // on the traveler's body from the moment the trip starts, which makes them available to
+  // the composer for free (the jeans you fly in are jeans you have all trip). They are
+  // labeled so the re-wear rules below can treat the flight itself as a wear.
+  const flightWornIds = new Set(selection.filter(s => tripsyWardrobeLineIsFlightWorn(s.line)).map(s => s.id));
   const idByTag = new Map();
   const items = chosen.map(({ g, qty }, i) => {
     const tag = `G${i + 1}`;
     idByTag.set(tag, g.id);
     const tiers = (g.tiers || []).map(t => TRIPSY_ATTIRE_CATEGORY_LABEL[t] || t).join('/') || 'any';
     const typeKey = tripsyGarmentTypeKey(g.name || '') || g.group || '';
-    const meta = `[${tag}] ${g.name || 'garment'} — ${[g.color, typeKey, tiers, qty > 1 ? `own ${qty}` : ''].filter(Boolean).join(', ')}`;
+    const worn = flightWornIds.has(g.id) ? 'WORN ON THE DEPARTING FLIGHT' : '';
+    const meta = `[${tag}] ${g.name || 'garment'} — ${[g.color, typeKey, tiers, qty > 1 ? `own ${qty}` : '', worn].filter(Boolean).join(', ')}`;
     return { g, meta };
   });
   const images = await Promise.all(items.map(async ({ g }) => {
@@ -21670,8 +21708,9 @@ ${scheduleLines}
 
 Rules:
 - Each outfit is a list of garment tags that COORDINATE by color and suit that block's dress code. Prefer a complete look: for suited tiers, a suit/blazer + shirt + trousers + shoes (+ a tie for formal/black-tie/most cocktail); for casual tiers, a top + bottom + shoes.
-- Re-wear limits ACROSS the whole trip, resetting on each wash day above: a dress shirt or any top is worn ONCE before it must be washed; a tie twice; trousers/jeans up to ~10×; suits, blazers, and dresses can be reused freely with a fresh shirt/tie; shoes and belts reused freely.
+- Re-wear limits ACROSS the whole trip, resetting on each wash day above: a dress shirt or any top is worn ONCE before it must be washed; a tie twice; trousers/jeans up to ~20×; suits, blazers, and dresses can be reused freely with a fresh shirt/tie; shoes and belts reused freely.
 - Never assign the same shirt/top to two blocks that fall between the same pair of wash days — rotate shirts and ties so the limits hold.
+- Garments marked WORN ON THE DEPARTING FLIGHT are already on the traveler's body when the trip begins — they arrive with them and are usable like anything else, so DO use them. The flight itself counts as one wear: such a TOP is therefore already used up and must NOT be assigned to any block before the first wash day; the bottoms and shoes have simply used one of their many wears and stay freely available.
 - Coordinate color sensibly (e.g. brown shoes/belt with blues and earth tones; black shoes with charcoal/grey; a tie that complements the shirt and jacket).
 - Add an OUTER LAYER (a jacket, coat, raincoat, or sweater from the selected outerwear) to a block when the weather or the setting calls for it — a chilly or outdoor block, rain, or to dress up a look — coordinating it with the rest. Reuse the same outer layer across many blocks freely; don't force one where it isn't needed.
 - If a block needs a garment TYPE that isn't in the selection (e.g. no dress shirt for a formal block, no shoes), still assign what you can and add a short gap string like "No dress shirt packed".

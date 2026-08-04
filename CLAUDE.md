@@ -699,6 +699,22 @@ a separate always-close button lands beside it on the detail screen wearing the 
   category, only `resource`, and that title shape is what `tools/build_tripsy_snapshot.py`'s
   transportation-title rule produces ("Flight from LAX to LHR • …" against "Car from …"/"Train from
   …").
+  **But it's still WORN, so it stays pickable and reachable by the outfit composer.** Deducting
+  alone made the garment vanish: with the packed need at 0 the line disappeared, so there was
+  nothing to select the jeans against, and `composeTripsyOutfits` — whose pool is whatever is
+  SELECTED for the trip — never knew they existed, even though they're on your body all trip. So
+  each claimed role also gets a **companion need line** in the same tier, named
+  `"<line> — wearing on the flight"` (`TRIPSY_FLIGHT_WORN_SUFFIX`), need 1, flagged
+  `flightWorn: true`; essentials are skipped (underwear/socks are worn, not styled — no point
+  asking which). Because selections are keyed `id::tier::line`, a pick against one of these flows
+  into the composer's pool for free. `tripsyWardrobePackedNeedLines` strips them for **Packing
+  Status**, which is a checklist of things to physically put in a bag; **Plan Packing List** keeps
+  them, since picking which jeans you fly in is the whole point. `composeTripsyOutfits` reads the
+  selection's stored line name through `tripsyWardrobeLineIsFlightWorn` to label those garments
+  `WORN ON THE DEPARTING FLIGHT` in the prompt, and the re-wear rules say the flight counts as one
+  wear: the flight-worn **top** is used up and must not be assigned to any block before the first
+  wash day, while its bottoms/shoes have spent one of their many wears and stay freely available
+  (jeans/trousers are ~20 wears, not the ~10 the prompt used to say).
 - **A partial-itinerary PDF only compares the days it actually covers**: `compareTripsyItineraryPdf`
   determines the PDF's own date range from its day headings (`pdf_date_range`, part of the schema) —
   which can be narrower than the trip's real date range, e.g. a supplement covering just the middle
