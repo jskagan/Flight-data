@@ -702,8 +702,16 @@ a separate always-close button lands beside it on the detail screen wearing the 
   algorithm would have chosen — without a line an entry counts against availability while being
   impossible to deselect. That function also re-homes swim picks (see below).
   `tripsyWardrobeAssignGarments` honours an explicit `item.line`, falling back to its own matching
-  when absent, which is what lets all five call sites share it. A suit in a tier with no suit line
-  still fills both the blazer and trousers lines from one entry.
+  when absent, which is what lets all five call sites share it.
+- **A packed suit covers a tier's blazer + trousers — including one packed for another tier.** A
+  tier whose need is "blazer (or informal suit) + trousers" (e.g. Cocktail) DROPS both lines once
+  any selected suit is wearable at that tier, judged by the garment's own `tiers` — so a suit going
+  in the bag for the Formal occasions also dresses the cocktail nights, and neither a sport coat nor
+  separate trousers is asked for. Done in `tripsyWardrobeNeedByTier` (which reads the trip's
+  selection from `driveData` directly, same as the custom lines above) so every call site sees the
+  same lines. A tier whose real need IS a suit keeps its suit line. With no suit selected, both
+  lines stay, so the owner can pick either a suit or a blazer+trousers. Picks stranded on a dropped
+  line just stop counting toward that tier, freeing them for the tiers that need them.
 - **Skips reduce a line's need**; they don't mark it satisfied. `driveData.tripsyTripAttireDone` is a
   map `key -> count` (`tripsyNormalizeAttireSkips` / `tripsyAttireSkippedFor`); the key name is
   historical — it used to be a flat ARRAY of "this optional line is Done" keys, which normalise to
