@@ -1370,6 +1370,24 @@
     padding: 7px 8px; border-radius: 6px; font: inherit;
   }
   .tripsy-attire-category-menu-item:hover, .tripsy-attire-category-menu-item:focus-visible { background: var(--panel); outline: none; }
+  /* Daily Dress Guide filter: same shell as the category menu, but rows are
+     multi-select checkboxes (the menu deliberately stays open between picks). */
+  .tripsy-dg-filter-item {
+    display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; background: none;
+    border: none; cursor: pointer; padding: 7px 8px; border-radius: 6px; font: inherit; color: var(--text);
+  }
+  .tripsy-dg-filter-item:hover, .tripsy-dg-filter-item:focus-visible { background: var(--panel); outline: none; }
+  .tripsy-dg-filter-box {
+    flex-shrink: 0; width: 15px; height: 15px; border: 1px solid var(--line); border-radius: 4px;
+    display: flex; align-items: center; justify-content: center; font-size: 11px; line-height: 1; color: #04210F;
+  }
+  .tripsy-dg-filter-item[aria-checked="true"] .tripsy-dg-filter-box { background: var(--home-green); border-color: var(--home-green); }
+  .tripsy-dg-filter-foot { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+  .tripsy-dg-filter-note {
+    margin: 0 0 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel-2); font-size: 12.5px; color: var(--muted);
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
 </style>
 </head>
 <body>
@@ -20668,14 +20686,22 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
   const tripOutfits = (driveData.tripsyTripOutfits || []).find(o => o.tripKey === guide.tripKey && (o.person || 'him') === person) || null;
   const outfitEventIds = new Set();
   if (tripOutfits) (tripOutfits.blocks || []).forEach(b => { if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => outfitEventIds.add(id)); });
+  const filterOn = tripsyDressGuideFilter.size > 0;
   const dailyDressGuideHtml = (guide.days || []).map(day => {
     const events = (day.events || []).map(ev => ({ ...ev, dayKey: day.dayKey }));
     if (!events.length) return '';
+    // A day with nothing matching the filter drops out entirely rather than
+    // rendering an empty day bar.
+    if (filterOn && !events.some(ev => tripsyDressGuideFilter.has(tripsyAttireDisplayCategory(ev)))) return '';
     const dayDispCats = events.map(ev => tripsyAttireDisplayCategory(ev));
     const singleCategoryDay = dayDispCats.every(c => c === dayDispCats[0]);
     const rows = events.map((ev, i) => {
       const prev = i > 0 ? events[i - 1] : null;
       const disp = tripsyAttireDisplayCategory(ev);
+      // Filtered out: emit nothing for this event -- including its lead-in, which
+      // belongs to it. Everything above is still computed over the FULL day, so a
+      // shown event's "⇄ Change to" text stays truthful about the real schedule.
+      if (filterOn && !tripsyDressGuideFilter.has(disp)) return '';
       const leadInText = i === 0
         ? `${singleCategoryDay ? 'Entire day is' : 'Start the day in'} ${tripsyAttireBadgeHtml(disp)}`
         : (disp !== tripsyAttireDisplayCategory(prev)
@@ -20714,10 +20740,28 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
     `;
   }).join('');
 
+  // When a filter is on, say so on the page itself -- the toolbar button alone is
+  // easy to miss, and a partial day list otherwise looks like missing data.
+  const filterNoteHtml = filterOn
+    ? `<div class="tripsy-dg-filter-note">🔎 <span>Showing only ${[...tripsyDressGuideFilter]
+        .sort((a, b) => TRIPSY_ATTIRE_CATEGORY_ORDER.indexOf(a) - TRIPSY_ATTIRE_CATEGORY_ORDER.indexOf(b))
+        .map(c => tripsyAttireBadgeHtml(c)).join(' ')}</span>
+        <button type="button" class="tripsy-update-btn" data-dg-filter-clear style="margin-left:auto; font-size:12px; padding:4px 10px;">Show all</button></div>`
+    : '';
   content.innerHTML = `
     <p class="tripsy-attire-heading-sub">What to wear before your first event each day, and when to change if the plan calls for it.</p>
-    ${dailyDressGuideHtml || `<div style="padding:40px 20px; text-align:center; color:var(--muted);">No events to dress for.</div>`}
+    ${filterNoteHtml}
+    ${dailyDressGuideHtml || `<div style="padding:40px 20px; text-align:center; color:var(--muted);">${filterOn ? 'No events match this filter.' : 'No events to dress for.'}</div>`}
   `;
+  const clearBtn = content.querySelector('[data-dg-filter-clear]');
+  if (clearBtn) clearBtn.addEventListener('click', () => {
+    tripsyDressGuideFilter.clear();
+    const fb = document.getElementById('tripsy-attire-dressguide-filter-btn');
+    if (fb) fb.textContent = tripsyDressGuideFilterLabel();
+    const fm = document.getElementById('tripsy-dg-filter-menu');
+    if (fm) fm.style.display = 'none';
+    if (renderOpts && renderOpts.rerender) renderOpts.rerender();
+  });
   content.querySelectorAll('[data-tripsy-outfit-block]').forEach(el => {
     const open = () => showTripsyOutfitModal(guide.tripKey, el.dataset.tripsyOutfitBlock, person);
     el.addEventListener('click', open);
@@ -20734,6 +20778,85 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
   });
 }
 
+// Dress codes the Daily Dress Guide is filtered to. EMPTY = show everything (the
+// default, and what opening the page always resets to, so a filter left on can
+// never silently hide a day on the next visit). Multi-select: the menu stays open
+// between picks. Matching is on tripsyAttireDisplayCategory -- the block tier the
+// guide actually SHOWS -- so filtering to Formal finds every event displayed as
+// Formal, including a lesser event folded into a Formal block.
+let tripsyDressGuideFilter = new Set();
+
+function getOrCreateTripsyDressGuideFilterMenu() {
+  let menu = document.getElementById('tripsy-dg-filter-menu');
+  if (menu) return menu;
+  menu = document.createElement('div');
+  menu.id = 'tripsy-dg-filter-menu';
+  menu.className = 'tripsy-attire-category-menu';
+  document.body.appendChild(menu);
+  document.addEventListener('click', e => {
+    if (menu.style.display === 'none' || !menu.style.display) return;
+    if (menu.contains(e.target) || e.target.closest('#tripsy-attire-dressguide-filter-btn')) return;
+    menu.style.display = 'none';
+  });
+  return menu;
+}
+// Only tiers this trip actually uses are offered -- a filter listing dress codes
+// with nothing behind them would just be dead options.
+function tripsyDressGuideUsedCategories(guide) {
+  const used = new Set();
+  for (const day of ((guide && guide.days) || [])) {
+    for (const ev of (day.events || [])) {
+      const c = tripsyAttireDisplayCategory(ev);
+      if (c) used.add(c);
+    }
+  }
+  return TRIPSY_ATTIRE_CATEGORY_ORDER.filter(c => used.has(c));
+}
+function tripsyDressGuideFilterLabel() {
+  return tripsyDressGuideFilter.size ? `Filter (${tripsyDressGuideFilter.size})` : 'Filter';
+}
+// Builds/opens the multi-select menu. Each row toggles in place and re-renders the
+// guide behind it, so the effect is visible while the menu is still open.
+function tripsyDressGuideOpenFilterMenu(btn, guide, renderOpts) {
+  const menu = getOrCreateTripsyDressGuideFilterMenu();
+  const cats = tripsyDressGuideUsedCategories(guide);
+  const counts = new Map();
+  for (const day of ((guide && guide.days) || [])) {
+    for (const ev of (day.events || [])) {
+      const c = tripsyAttireDisplayCategory(ev);
+      if (c) counts.set(c, (counts.get(c) || 0) + 1);
+    }
+  }
+  const rows = cats.map(c => {
+    const on = tripsyDressGuideFilter.has(c);
+    return `<button type="button" class="tripsy-dg-filter-item" role="checkbox" aria-checked="${on}" data-category="${esc(c)}">
+      <span class="tripsy-dg-filter-box">${on ? '✓' : ''}</span>
+      ${tripsyAttireBadgeHtml(c)}
+      <span style="color:var(--muted); font-size:12px; margin-left:auto;">${counts.get(c) || 0}</span>
+    </button>`;
+  }).join('');
+  menu.innerHTML = `${rows}
+    <div class="tripsy-dg-filter-foot">
+      <button type="button" class="tripsy-attire-category-menu-item" data-dg-filter-all style="color:var(--muted); font-size:13px;">Show all dress codes</button>
+    </div>`;
+  positionTripsyFixedMenu(btn, menu);
+  const refresh = () => {
+    btn.textContent = tripsyDressGuideFilterLabel();
+    renderOpts.rerender();
+    tripsyDressGuideOpenFilterMenu(btn, guide, renderOpts); // rebuild ticks in place
+  };
+  menu.querySelectorAll('.tripsy-dg-filter-item').forEach(item => {
+    item.onclick = e => {
+      e.stopPropagation();
+      const c = item.dataset.category;
+      if (tripsyDressGuideFilter.has(c)) tripsyDressGuideFilter.delete(c); else tripsyDressGuideFilter.add(c);
+      refresh();
+    };
+  });
+  const allBtn = menu.querySelector('[data-dg-filter-all]');
+  if (allBtn) allBtn.onclick = e => { e.stopPropagation(); tripsyDressGuideFilter.clear(); refresh(); };
+}
+
 // Which person's garments the Daily Dress Guide is showing (His default / Hers).
 // Module-level so it survives a Regenerate, which rebuilds the whole overlay via
 // showTripsyDailyDressGuide rather than the in-place rerender closure.
@@ -20748,6 +20871,7 @@ function getOrCreateTripsyDressGuideOverlay() {
     <div class="tripsy-attire-toolbar">
       <div class="tripsy-attire-toolbar-title" data-tripsy-dressguide-title></div>
       <div class="tripsy-attire-toolbar-actions">
+        <button class="tripsy-update-btn" id="tripsy-attire-dressguide-filter-btn">Filter</button>
         <span id="tripsy-attire-dressguide-person"></span>
         <button class="tripsy-update-btn" id="tripsy-attire-dressguide-regen-btn" style="display:none;">Regenerate</button>
         <button class="tripsy-update-btn" id="tripsy-attire-dressguide-close-btn">Close</button>
@@ -20773,6 +20897,19 @@ async function showTripsyDailyDressGuide(tripKey, scrollToEventId) {
   renderOpts.rerender = () => renderTripsyDressGuideInto(content, guide, renderOpts);
   // His/Hers toggle (everyone) — flips which person's garments the guide shows;
   // the shared schedule/change-markers stay. Re-render in place via rerender.
+  // Fresh page = fresh filter, so a filter left on for one trip can never silently
+  // hide days on the next open.
+  tripsyDressGuideFilter.clear();
+  const filterBtn = overlay.querySelector('#tripsy-attire-dressguide-filter-btn');
+  if (filterBtn) {
+    filterBtn.textContent = tripsyDressGuideFilterLabel();
+    filterBtn.onclick = e => {
+      e.stopPropagation();
+      const menu = document.getElementById('tripsy-dg-filter-menu');
+      if (menu && menu.style.display === 'block') { menu.style.display = 'none'; return; }
+      tripsyDressGuideOpenFilterMenu(filterBtn, guide, renderOpts);
+    };
+  }
   const personSlot = overlay.querySelector('#tripsy-attire-dressguide-person');
   const renderPersonToggle = () => {
     personSlot.innerHTML = tripsyPersonToggleHtml(tripsyDressGuidePerson);

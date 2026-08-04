@@ -497,6 +497,19 @@ step 4; git history has it if ever needed.
   block-dress-level-propagation model — see the `displayCategory` note under the manual-override
   bullet below; before it, the receptions kept their own Cocktail tier and this drill-down showed
   only the Concert.)
+- **The Daily Dress Guide has a multi-select dress-code filter** (`Filter` in its toolbar;
+  `tripsyDressGuideFilter`, a Set, empty = show everything). The dropdown
+  (`tripsyDressGuideOpenFilterMenu`, same `positionTripsyFixedMenu` shell as every other Tripsy
+  menu) lists only the tiers this trip actually uses (`tripsyDressGuideUsedCategories`) with a count
+  each, as checkbox rows that toggle in place — the menu deliberately stays open between picks and
+  re-renders the guide behind it. Matching is on `tripsyAttireDisplayCategory`, the tier actually
+  displayed, so filtering to Formal also catches a lesser event folded into a Formal block.
+  Filtered-out events emit nothing (their lead-in belongs to them), and a day with no matches drops
+  out rather than showing an empty day bar; the lead-in/⇄-change text for events that DO show is
+  still computed over the full day, so it stays truthful about the real schedule. An on-page note
+  lists the active tiers with a "Show all" button, since a partial day list would otherwise look
+  like missing data. The filter resets every time the page opens, so one left on can't silently hide
+  days on the next visit.
 - **An event's title jumps to its own read-only detail view on My Trips, and back again**
   (`tripsyAttireGoToEvent`, available to every viewer, not owner-gated — viewing that detail panel
   on My Trips needs no write access either): hides (not destroys) the Attire overlay, navigates to
