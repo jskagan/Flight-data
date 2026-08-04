@@ -13577,6 +13577,24 @@ function tripsyDayKeyRange(startDayKey, endDayKey) {
   return keys;
 }
 
+// The day the app treats as a trip's START for all itinerary/day views (day
+// ranges, "Day N" numbering, the empty-day span): the earliest day any
+// visible, dated event actually falls on -- NOT the trip's own start_date in
+// Tripsy, which can drift a day early/late (e.g. a flight time moves and Tripsy
+// leaves the trip's old start date, so the itinerary opens on an empty leading
+// day). Falls back to the trip's start_date only when the trip has no dated
+// events at all (e.g. an undated or empty trip). This is why the itinerary
+// never shows a leading day with nothing on it.
+function tripsyItineraryStartDayKey(trip) {
+  let earliest = null;
+  for (const ev of ((trip && trip.events) || [])) {
+    if (ev._pendingDeleteId || isTripsyEventEffectivelyHidden(ev)) continue;
+    const k = tripsyDayKey(ev.start) || tripsyDayKey(ev.end);
+    if (k && (earliest === null || k < earliest)) earliest = k;
+  }
+  return earliest || tripsyDayKey(trip && trip.start);
+}
+
 // Cluster heuristic for the doc-parse review page: how tightly a doc's
 // unmatched events need to fall together in time to be offered as "these
 // look like their own trip" rather than shown as separate one-off
@@ -16550,7 +16568,7 @@ function tripsyStripDayLabelFromTitle(title) {
 // day with nothing scheduled has no narrative to generate in the first
 // place.
 function tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByDay, narrativeCache) {
-  const tripStartDayKey = tripsyDayKey(effectiveTrip.start);
+  const tripStartDayKey = tripsyItineraryStartDayKey(effectiveTrip);
   const summaryEntry = narrativeCache[`${tripKey}::summary`];
   const summaryBlurbByKey = new Map((summaryEntry ? summaryEntry.content.rows : []).map(r => [r.row_key, r.blurb]));
 
@@ -18867,7 +18885,7 @@ async function buildTripsyPrintHtml(tripKey) {
   // its own placeholder block -- one block per run, not one per day, with
   // a day-number range (e.g. "03 | 04") and date range rather than
   // repeating "No events" once per day.
-  const tripStartDayKey = tripsyDayKey(effectiveTrip.start);
+  const tripStartDayKey = tripsyItineraryStartDayKey(effectiveTrip);
   const tripEndDayKey = tripsyDayKey(effectiveTrip.end);
   const eventDayKeySet = new Set(dayKeys.filter(k => k !== 'undated'));
   const tripsyFullDayKeys = tripsyDayKeyRange(tripStartDayKey, tripEndDayKey);
@@ -22140,7 +22158,7 @@ async function runTripsyUpdateComparison(tripKey, file) {
     const pdfBase64 = await tripsyFileToBase64(file);
     const pendingChanges = await Store.listTripsyPendingChanges();
     const effectiveTrip = getEffectiveTripsyTrip(trip, pendingChanges);
-    tripsyUpdateTripStartDayKey = tripsyDayKey(effectiveTrip.start);
+    tripsyUpdateTripStartDayKey = tripsyItineraryStartDayKey(effectiveTrip);
     const currentEventsForPrompt = buildTripsyCurrentEventsPrompt(trip, pendingChanges);
     const result = await compareTripsyItineraryPdf(effectiveTrip, currentEventsForPrompt, pdfBase64);
     const rowsRaw = result.rows || [];
@@ -22182,7 +22200,7 @@ async function runTripsyUpdateComparison(tripKey, file) {
     // BEFORE showing the rows -- otherwise a partial-itinerary PDF (e.g.
     // just the middle leg of a longer trip) could silently look like it
     // compared the whole thing.
-    const tripStartKey = tripsyDayKey(effectiveTrip.start);
+    const tripStartKey = tripsyItineraryStartDayKey(effectiveTrip);
     const tripEndKey = tripsyDayKey(effectiveTrip.end);
     if (pdfRangeStart && pdfRangeEnd && tripStartKey && tripEndKey && (pdfRangeStart > tripStartKey || pdfRangeEnd < tripEndKey)) {
       alert(`This PDF only has events for ${formatTripDateRange(pdfRangeStart, pdfRangeEnd)} (the full trip runs ${formatTripDateRange(effectiveTrip.start, effectiveTrip.end)}). Only that date range was compared -- other days weren't touched.`);

@@ -373,6 +373,12 @@ that catches drift between them.
   by `parseTripLocalParts`/`formatTripTime` (`index.html:6235` area) rather than being
   reinterpreted through the browser's own time zone — a flight's 4:25pm departure should read
   4:25pm no matter where the app is being viewed from.
+- **Itinerary/day views start from the earliest event, not the trip's `start_date`**: the day
+  ranges, "Day N" numbering, and empty-day span all derive their first day from
+  `tripsyItineraryStartDayKey(trip)` — the earliest day any visible, dated event falls on — rather
+  than the trip's own `starts_at` (which drifts, e.g. Tripsy leaving the old start after a flight
+  time moves, producing a leading day with nothing on it). Falls back to `trip.start` only when the
+  trip has no dated events. (The range's *end* still comes from `trip.end`.)
 - **Collapse/expand per trip card** is a personal display preference stored in `localStorage`
   (`isTripsyTripCollapsed`/`setTripsyTripCollapsed`, `index.html:6313` area) — deliberately *not*
   in `driveData`, since view-only users have no Drive write access to persist anything into the
