@@ -425,7 +425,16 @@ step 4; git history has it if ever needed.
   call's prompt only (it informs essentials/packing items like a rain layer or warm coat; the events
   call gets no weather at all, since weather was never allowed to change an event's category and the
   per-event notes it used to color are retired) — never stored in the guide itself
-  (re-fetched fresh each generation, same cache as everywhere else). Unlike `tripsyUpdatePages` above, a saved guide
+  (re-fetched fresh each generation, same cache as everywhere else).
+  **Once a trip has STARTED, a Refresh stops touching the packing side**: from its first event day
+  onward (`tripsyTripHasStarted`, off `tripsyItineraryStartDayKey` vs `tripsyTodayDayKey`) the guide
+  re-categorizes events only — `personGuidance` (garment counts/essentials), `packingList` and
+  `laundryDays` are carried over verbatim from the previous guide and the guidance Claude call is
+  skipped entirely (also the slow half, so a mid-trip Refresh is fast). The reason is correctness,
+  not just speed: the bag is already packed, and packing picks/skips are keyed by tier + line NAME,
+  so a regenerated list that renames or resizes a line silently strands every selection made against
+  the old one. Such a guide is stamped `packingFrozen: true`, which the toast and the stale-note
+  surface so the behavior isn't invisible. Unlike `tripsyUpdatePages` above, a saved guide
   never auto-invalidates on an unrelated edit — `showTripsyAttireOverlay` just recomputes a light,
   non-cryptographic fingerprint (`tripsyAttireFingerprint`) from the trip's current events and shows
   a non-blocking "may be out of date — Refresh" note if it no longer matches the saved one, since

@@ -13075,6 +13075,22 @@ function tripsyItineraryEndDayKey(trip) {
   return latest || tripsyDayKey(trip && trip.end) || tripsyDayKey(trip && trip.start);
 }
 
+// Today's day key in the VIEWER's local time, in the same YYYY-MM-DD shape every
+// trip/event day key uses, so the two compare as plain strings.
+function tripsyTodayDayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Has this trip already begun (its first event day is today or earlier)? Once it
+// has, the bag is packed and the packing plan/status can no longer be acted on,
+// which is why regenerating the attire guide stops resizing the packing list from
+// that point on -- see generateTripsyAttireGuide's `preservePacking`.
+function tripsyTripHasStarted(trip) {
+  const start = tripsyItineraryStartDayKey(trip);
+  return !!start && start <= tripsyTodayDayKey();
+}
+
 // Cluster heuristic for the doc-parse review page: how tightly a doc's
 // unmatched events need to fall together in time to be offered as "these
 // look like their own trip" rather than shown as separate one-off
@@ -20304,7 +20320,9 @@ async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
       const { weatherTargetsByDay, tripStartDayKey } = await tripsyAttireLoadWeatherBar(trip, guide);
       renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
     }
-    toast(isRefresh ? 'Attire guide refreshed.' : 'Attire guide generated.', 'success');
+    toast(guide && guide.packingFrozen
+      ? 'Attire guide refreshed — dress codes updated. Your packing list and counts were kept as-is because the trip has started.'
+      : (isRefresh ? 'Attire guide refreshed.' : 'Attire guide generated.'), 'success');
   } catch (e) {
     console.error('Attire generation failed:', e);
     if (summaryLiveForTrip()) {
@@ -20486,7 +20504,7 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
   ` : '';
 
   content.innerHTML = `
-    ${stale ? `<div class="tripsy-attire-stale-note">Trip events have changed since this guide was generated — Refresh to update.</div>` : ''}
+    ${stale ? `<div class="tripsy-attire-stale-note">Trip events have changed since this guide was generated — Refresh to update.${guide.packingFrozen || tripsyTripHasStarted((tripsyDecryptedTrips || []).find(t => t.key === guide.tripKey)) ? ' The trip has started, so a Refresh updates the dress codes only — your packing list and counts stay as they are.' : ''}</div>` : ''}
     ${generatedLabel ? `<div class="tripsy-attire-generated-line">Generated ${esc(generatedLabel)}</div>` : ''}
     <div class="tripsy-attire-summary">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
@@ -21183,6 +21201,18 @@ async function generateTripsyAttireGuide(tripKey) {
   // the owner's tweaks (the whole point) AND is faster: one guidance call, no
   // wasted events call, and no block arithmetic for the model to redo.
   const existing = await Store.getTripsyAttireGuide(tripKey);
+  // ONCE THE TRIP HAS STARTED, THE PACKING SIDE IS FROZEN. Events still move
+  // mid-trip (a dinner is added, a time shifts), and the owner still wants the
+  // Daily Dress Guide to reflect that -- but the bag is already packed, so the
+  // packing plan and Packing Status can no longer be acted on. Regenerating the
+  // garment counts then would be worse than useless: the need lines are keyed by
+  // line NAME, so a resized/reworded list silently strands every pick made
+  // against the old names. So from the trip's first event day onward a Refresh
+  // re-categorizes events only, and carries the previous guide's personGuidance
+  // (garments/essentials), packingList and laundryDays over verbatim. It also
+  // skips the guidance Claude call entirely, which is the slow half.
+  const preservePacking = !!(existing && existing.packingList && existing.personGuidance && tripsyTripHasStarted(trip));
+  if (preservePacking) console.log('[attire] trip has started -- preserving packing list, garment counts and laundry days');
   const priorById = new Map();
   if (existing && Array.isArray(existing.days)) existing.days.forEach(d => (d.events || []).forEach(e => priorById.set(e.id, e)));
   const fingerprint = tripsyAttireFingerprint(currentEventsForPrompt);
@@ -21213,8 +21243,8 @@ async function generateTripsyAttireGuide(tripKey) {
     const tierCounts = {};
     TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(cat => { const n = authCounts[TRIPSY_ATTIRE_CAMEL_KEY[cat]] || 0; if (n) tierCounts[cat] = n; });
     const tieredBlocks = tripsyAttireTieredTimeBlocks(days);
-    const guidance = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { tieredBlocks, tierCounts, skipEvents: true });
-    result = { events: [], person_guidance: guidance.person_guidance, laundry_days: guidance.laundry_days || [] };
+    const guidance = preservePacking ? null : await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { tieredBlocks, tierCounts, skipEvents: true });
+    result = { events: [], person_guidance: guidance ? guidance.person_guidance : existing.personGuidance, laundry_days: guidance ? (guidance.laundry_days || []) : [] };
   } else {
     // First generate, or the trip's events actually changed: categorize events
     // FIRST (events-only call), apply the fresh categories -- still PRESERVING
@@ -21256,8 +21286,8 @@ async function generateTripsyAttireGuide(tripKey) {
     const tierCounts = {};
     TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(cat => { const n = authCounts[TRIPSY_ATTIRE_CAMEL_KEY[cat]] || 0; if (n) tierCounts[cat] = n; });
     const tieredBlocks = tripsyAttireTieredTimeBlocks(days);
-    const guidance = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { tieredBlocks, tierCounts, skipEvents: true });
-    result = { events: eventsResult.events || [], person_guidance: guidance.person_guidance, laundry_days: guidance.laundry_days || [] };
+    const guidance = preservePacking ? null : await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { tieredBlocks, tierCounts, skipEvents: true });
+    result = { events: eventsResult.events || [], person_guidance: guidance ? guidance.person_guidance : existing.personGuidance, laundry_days: guidance ? (guidance.laundry_days || []) : [] };
   }
 
   const { blocks, counts } = computeTripsyAttireBlocks(days);
@@ -21324,9 +21354,12 @@ async function generateTripsyAttireGuide(tripKey) {
     days,
     blocks,
     counts,
-    laundryDays,
+    laundryDays: preservePacking ? (existing.laundryDays || []) : laundryDays,
     personGuidance: result.person_guidance || null,
-    packingList: { him: buildPackingList('him'), her: buildPackingList('her') },
+    // Carried over verbatim once the trip has started (see preservePacking) so
+    // every packing pick/skip -- keyed by tier + line NAME -- stays addressable.
+    packingList: preservePacking ? existing.packingList : { him: buildPackingList('him'), her: buildPackingList('her') },
+    packingFrozen: preservePacking || undefined,
   };
   const saveStart = performance.now();
   const ok = await Store.saveTripsyAttireGuide(guide);
