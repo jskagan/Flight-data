@@ -11043,6 +11043,37 @@ function isTripsyEventEffectivelyHidden(ev) {
   return !!ev.hidden;
 }
 
+// The Drive-hosted trip database ("step 2" of the Tripsy migration): trips
+// live as plain JSON in a private Drive file instead of the encrypted
+// TRIPSY_ENCRYPTED snapshot baked into this page. Privacy is Drive sharing
+// itself (the file never touches the public repo), exactly like
+// flight-log-data.json -- so no passphrase and no client-side crypto are
+// involved on this path. Shape: { schemaVersion: 1, updatedAt, trips: [...] }
+// where trips[] is byte-for-byte the same trip/event shape decryptTripsyData
+// used to return (tools/build_tripsy_snapshot.py output), so everything
+// downstream is unchanged. While the migration is in progress this is the
+// PRIMARY source with the encrypted snapshot as fallback -- see
+// ensureTripsyDecrypted.
+const TRIPS_DATA_DRIVE_FILENAME = 'trips-data.json';
+
+async function fetchTripsDataFromDrive() {
+  const q = encodeURIComponent(`name='${TRIPS_DATA_DRIVE_FILENAME}' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,modifiedTime)&spaces=drive`);
+  const json = await res.json();
+  // Guard against the passphrase file's old trap: a same-named Google-native
+  // Doc can't be fetched with alt=media, so only real files count; prefer the
+  // most recently modified if duplicates ever exist.
+  const candidates = ((json.files || []))
+    .filter(f => !(f.mimeType || '').startsWith('application/vnd.google-apps'))
+    .sort((a, b) => (b.modifiedTime || '').localeCompare(a.modifiedTime || ''));
+  if (!candidates.length) throw new Error('trips-data.json not found (or not shared with this account).');
+  const contentRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${candidates[0].id}?alt=media`);
+  const doc = await contentRes.json();
+  const trips = Array.isArray(doc) ? doc : (doc && doc.trips);
+  if (!Array.isArray(trips)) throw new Error('trips-data.json has an unexpected shape.');
+  return trips;
+}
+
 const TRIPSY_PASSPHRASE_DRIVE_FILENAME = 'Tripsy Trips Passphrase';
 
 // Primary passphrase source: the same private Drive file the scheduled
@@ -27247,10 +27278,10 @@ function renderTripsyFlightChangeReviewDialog(reviews) {
   });
 }
 
-// Tries a cached passphrase first (silent, no UI flash); falls back to the
-// unlock form on first visit to this device or if the cached one no longer
-// works (e.g. it was rotated).
-// Decrypts and caches tripsyDecryptedTrips if it isn't already, with NO
+// Loads the trip data (silently, no UI flash) -- from the Drive trip
+// database first, then the encrypted-snapshot fallbacks; the unlock form
+// only appears if every silent path fails.
+// Loads and caches tripsyDecryptedTrips if it isn't already, with NO
 // page-specific rendering side-effects -- shared by the Tripsy Trips page
 // (unlockTripsyTrips below, which also repopulates that page's own
 // #tripsy-card) and Home's "Upcoming Trips" card, which needs the same
@@ -27260,7 +27291,21 @@ function renderTripsyFlightChangeReviewDialog(reviews) {
 async function ensureTripsyDecrypted() {
   if (tripsyDecryptedTrips) return tripsyDecryptedTrips;
 
-  // Primary path: fetch the passphrase live from Drive, gated by whether
+  // PRIMARY (migration step 2): the plain-JSON trip database in Drive
+  // (trips-data.json). Access is gated by Drive sharing alone -- anyone the
+  // file is shared with loads trips with no passphrase at all. The encrypted
+  // snapshot paths below survive as fallback until the migration completes,
+  // so a missing/misnamed/unshared file degrades to exactly the old behavior
+  // instead of a broken page.
+  try {
+    tripsyDecryptedTrips = await fetchTripsDataFromDrive();
+    await reconcileTripsyFlightChanges(tripsyDecryptedTrips);
+    return tripsyDecryptedTrips;
+  } catch (e) {
+    console.error('trips-data.json load failed, falling back to encrypted snapshot:', e);
+  }
+
+  // Fallback 1: fetch the passphrase live from Drive, gated by whether
   // the signed-in user has actually been shared that file. Deliberately
   // not cached in localStorage -- fetching it fresh each load means access
   // changes (sharing/unsharing the passphrase file) take effect immediately

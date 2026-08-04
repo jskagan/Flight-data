@@ -154,6 +154,18 @@ actually refreshes.
 
 ### Tripsy Trips (labeled "My Trips" in the nav; render code `index.html:12301`/`14198` area)
 
+**⚠️ MIGRATION IN PROGRESS (started 2026-08-04): trip data is moving OFF Tripsy into a private
+Drive file, `trips-data.json` (same folder as `flight-log-data.json`; shape
+`{schemaVersion, updatedAt, trips:[...]}` where `trips` is exactly the old decrypted-snapshot
+array).** Step 2 (read path) is live: `ensureTripsyDecrypted()` now loads `trips-data.json` from
+Drive FIRST (`fetchTripsDataFromDrive`) and only falls back to the encrypted-snapshot/passphrase
+paths below if that fails. Writes (edits/creates/deletes) still go through the pending-changes
+queue + refresh push to Tripsy until step 3 lands — **which means a change applied to Tripsy does
+NOT appear in the app until `trips-data.json` is updated too**; prefer holding trip edits until
+step 3 (direct writes to the Drive file, retiring the queue) ships. Historical (pre-2026) trips
+are not yet in the file (planned backfill). Once steps 3–4 land, everything below about the
+snapshot/refresh/queue machinery becomes historical.
+
 Tripsy's own API isn't reachable from a public browser (no public/CORS-friendly developer access),
 so there is no in-browser sync at all for this pipeline — unlike PS Reservations/Balance above.
 Instead, a Claude Code agent following the `tripsy-trips-refresh` runbook (see the Git workflow
