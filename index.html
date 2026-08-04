@@ -2300,85 +2300,65 @@ const Store = {
   // owner dismisses it) if it doesn't land. `change.eventSummary`/
   // `change.tripName` and TRIPSY_PENDING_CHANGE_LABEL[change.type] give a
   // human description regardless of which caller queued it.
+  // MIGRATION STEP 3: despite the name (kept so its many call sites stay
+  // untouched), this no longer queues anything -- it applies the change
+  // DIRECTLY to the trips array and saves trips-data.json to Drive. The change
+  // objects themselves are the same plain-data shapes callers always built, so
+  // "queue a change" and "apply a change" are the same call. The in-flight /
+  // failed-write badge machinery and the rollback-on-failure contract are
+  // preserved: the badge shows while the Drive write is actually in flight, a
+  // failure restores the pre-change trips and raises the red Write Failed
+  // block, and a mid-write conflict (another device saved) transparently
+  // reloads + re-applies + retries.
   async queueTripsyChange(change) {
     const writeLabel = `${TRIPSY_PENDING_CHANGE_LABEL[change.type] || change.type}: ${change.eventSummary || change.tripName || ''}`.trim();
     const writeId = tripsyBeginInFlightWrite(writeLabel);
-    // Applies this change's mutations to the CURRENT driveData and returns the
-    // pre-mutation array references so a real (non-conflict) failure can roll
-    // back in place. Every mutation REPLACES these arrays rather than mutating
-    // them, so restoring the references undoes all of it at once. It's a
-    // callable because a mid-write CONFLICT reloads driveData with a fresh copy
-    // (discarding this change) -- we then re-apply onto that fresh copy and
-    // retry, so a benign cross-device/refresh race adds the item transparently
-    // instead of throwing a scary "write failed".
-    const applyMutation = () => {
-      const rbP = driveData.tripsyPendingChanges;
-      const rbU = driveData.tripsyUpdatePages;
-      if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
-      // Stamp with the snapshot version live at queue time (see the "Sync
-      // Complete" note in updateTripsyPendingWarningBadge).
-      let c = { ...change, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT };
-      // Re-saving with the same id replaces the earlier entry (no duplicates).
-      driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(x => x.id !== c.id);
-      // An edit queued twice for the same event/trip AMENDS the existing pending
-      // edit -- this edit's changed fields merge ONTO the earlier one's (a field
-      // this edit left untouched isn't in c.changes, so replacing outright would
-      // drop it); any field this edit DID change still wins (lands last).
-      if (c.type === 'edit_event') {
-        const existingEdit = driveData.tripsyPendingChanges.find(x => x.type === 'edit_event' && x.eventKey === c.eventKey);
-        if (existingEdit) c = { ...c, changes: { ...existingEdit.changes, ...c.changes } };
-        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(x => !(x.type === 'edit_event' && x.eventKey === c.eventKey));
-      }
-      if (c.type === 'edit_trip') {
-        const existingEdit = driveData.tripsyPendingChanges.find(x => x.type === 'edit_trip' && x.tripKey === c.tripKey);
-        if (existingEdit) c = { ...c, changes: { ...existingEdit.changes, ...c.changes } };
-        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(x => !(x.type === 'edit_trip' && x.tripKey === c.tripKey));
-      }
-      // A delete makes any pending edit for the same event/trip moot.
-      if (c.type === 'delete_event') {
-        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(x => !(x.type === 'edit_event' && x.eventKey === c.eventKey));
-      }
-      if (c.type === 'delete_trip') {
-        driveData.tripsyPendingChanges = driveData.tripsyPendingChanges.filter(x => !(x.type === 'edit_trip' && x.tripKey === c.tripKey));
-      }
-      // A saved Update comparison page is a snapshot of specific events -- if one
-      // gets edited/deleted through anything OTHER than the Update page's own
-      // actions (source: 'tripsy_update_page'), that page is now stale and gets
-      // dropped. Deleting a trip drops every Update page for it, any source.
-      if (driveData.tripsyUpdatePages && driveData.tripsyUpdatePages.length) {
-        if (c.type === 'delete_trip') {
-          driveData.tripsyUpdatePages = driveData.tripsyUpdatePages.filter(p => p.tripKey !== c.tripKey);
-        } else if ((c.type === 'edit_event' || c.type === 'delete_event') && c.source !== 'tripsy_update_page') {
-          driveData.tripsyUpdatePages = driveData.tripsyUpdatePages.filter(p => !(p.eventKeys || []).includes(c.eventKey));
-        }
-      }
-      driveData.tripsyPendingChanges = [...driveData.tripsyPendingChanges, c];
-      return { rbP, rbU };
-    };
+    const rbTrips = tripsyDecryptedTrips;
     try {
-      let rb = applyMutation();
+      applyTripsyChangeToTrips(change);
       for (let attempt = 0; ; attempt++) {
         try {
-          await persistDriveData();
-          return true;
+          await persistTripsData();
+          break;
         } catch (e) {
-          // CONFLICT = the shared file changed on Drive since we loaded it, so
-          // persistDriveData reloaded the newer copy and discarded our change.
+          // CONFLICT = trips-data.json changed on Drive since we loaded it;
+          // persistTripsData already reloaded the newer copy (discarding our
+          // change) -- re-apply onto the fresh data and retry (bounded).
           if (e && e.conflict) {
-            // Re-apply onto the fresh data and try again (bounded). This turns the
-            // common "someone/a refresh just wrote" race into a transparent success.
-            if (attempt < 2) { rb = applyMutation(); continue; }
-            // Retries exhausted: driveData is already the fresh reloaded copy (our
-            // change discarded), so do NOT roll back -- that would clobber the reload.
+            if (attempt < 2) { applyTripsyChangeToTrips(change); continue; }
+            // Retries exhausted: trips are the fresh reloaded copy; do NOT
+            // roll back -- that would clobber the reload.
             throw e;
           }
-          // A real (non-conflict) failure: our mutation is still in the in-memory
-          // driveData -- undo it so the queue doesn't look falsely updated.
-          driveData.tripsyPendingChanges = rb.rbP;
-          driveData.tripsyUpdatePages = rb.rbU;
+          // A real (non-conflict) failure: undo the in-memory change so the
+          // timeline doesn't show an edit that never saved.
+          tripsyDecryptedTrips = rbTrips;
           throw e;
         }
       }
+      // A saved Update comparison page is a snapshot of specific events -- if
+      // one gets edited/deleted through anything OTHER than the Update page's
+      // own actions (source: 'tripsy_update_page'), that page is now stale and
+      // gets dropped. Deleting a trip drops every Update page for it, any
+      // source. This bookkeeping lives in flight-log-data.json, so it's a
+      // separate, best-effort write: the trip change itself already saved, and
+      // a stale-but-present Update page is a nuisance, not data loss.
+      try {
+        const before = driveData.tripsyUpdatePages;
+        if (before && before.length) {
+          if (change.type === 'delete_trip') {
+            driveData.tripsyUpdatePages = before.filter(p => p.tripKey !== change.tripKey);
+          } else if ((change.type === 'edit_event' || change.type === 'delete_event') && change.source !== 'tripsy_update_page') {
+            driveData.tripsyUpdatePages = before.filter(p => !(p.eventKeys || []).includes(change.eventKey));
+          }
+          if (driveData.tripsyUpdatePages.length !== before.length) {
+            await persistDriveData({ silentConflict: true });
+          }
+        }
+      } catch (e) {
+        console.error('Update-page invalidation write failed (non-fatal):', e);
+      }
+      return true;
     } catch (e) {
       console.error('Store.queueTripsyChange failed:', e);
       // An expired sign-in (silent refresh couldn't recover it) gets a clearer
@@ -2502,19 +2482,15 @@ const Store = {
       const known = driveData.tripsyKnownFlights || {};
       delete known[review.oldTripsyId];
       if (resolution === 'create' && review.oldFields) {
-        if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
-        driveData.tripsyPendingChanges.push({
-          id: crypto.randomUUID(),
+        // MIGRATION STEP 3: applied directly to trips-data.json (the same
+        // create_event shape it used to queue), not queued for a push.
+        applyTripsyChangeToTrips({
           type: 'create_event',
-          createdAt: new Date().toISOString(),
           tripKey: review.tripKey,
-          tripName: review.tripName,
           tripsyResource: 'transportation',
-          tripsyTripId: tripsyTripIdFromKey(review.tripKey),
-          eventSummary: review.oldSummary,
           fields: review.oldFields,
-          queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT,
         });
+        await persistTripsData();
       }
       driveData.tripsyFlightChangeReviews = reviews.filter(r => r.id !== reviewId);
       driveData.tripsyKnownFlights = known;
@@ -2825,25 +2801,50 @@ const Store = {
   // conflict box's own delete_event change for the REAL conflicting event),
   // so that action's queue-the-delete + import-the-new-event also lands in
   // this same single write instead of two sequential ones.
+  // MIGRATION STEP 3: the changes apply directly to trips-data.json (no
+  // queue); the proposal-resolution bookkeeping stays in flight-log-data.json,
+  // so an import is now two writes to two files. Ordering matters: the trip
+  // data lands first -- if it fails, the proposal stays pending (nothing
+  // lost); if only the bookkeeping write fails, the event is imported and the
+  // proposal re-offers it (visible, re-resolvable), never silently dropped.
   async importTripsyParseProposalEvent({ newTripChange, eventChange, deleteExistingChange, proposalId, eventId, resolutionPatch }) {
     try {
-      if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
-      if (deleteExistingChange) driveData.tripsyPendingChanges.push({ ...deleteExistingChange, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
-      if (newTripChange) driveData.tripsyPendingChanges.push({ ...newTripChange, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
-      driveData.tripsyPendingChanges.push({ ...eventChange, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
-
-      const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
-      const event = proposal && proposal.events.find(e => e.id === eventId);
-      if (!event) return false;
-      Object.assign(event, resolutionPatch);
-
-      if (proposal.events.every(e => e.resolution !== 'pending')) {
-        const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
-        if (a) a.parseStatus = 'done';
-        driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== proposalId);
+      const rbTrips = tripsyDecryptedTrips;
+      const applyAll = () => {
+        if (deleteExistingChange) applyTripsyChangeToTrips(deleteExistingChange);
+        if (newTripChange) applyTripsyChangeToTrips(newTripChange);
+        applyTripsyChangeToTrips(eventChange);
+      };
+      applyAll();
+      for (let attempt = 0; ; attempt++) {
+        try { await persistTripsData(); break; }
+        catch (e) {
+          if (e && e.conflict) {
+            if (attempt < 2) { applyAll(); continue; }
+            throw e;
+          }
+          tripsyDecryptedTrips = rbTrips;
+          throw e;
+        }
       }
-
-      await persistDriveData();
+      for (let attempt = 0; ; attempt++) {
+        const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
+        const event = proposal && proposal.events.find(e => e.id === eventId);
+        if (!event) break; // resolved elsewhere (or reloaded past it) -- the import itself already saved
+        Object.assign(event, resolutionPatch);
+        if (proposal.events.every(e => e.resolution !== 'pending')) {
+          const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
+          if (a) a.parseStatus = 'done';
+          driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== proposalId);
+        }
+        try { await persistDriveData({ silentConflict: true }); break; }
+        catch (e) {
+          // On conflict the reloaded driveData may have the proposal back in a
+          // pre-resolution state -- the loop re-finds and re-applies onto it.
+          if (e && e.conflict && attempt < 2) continue;
+          throw e;
+        }
+      }
       return true;
     } catch (e) {
       console.error('Store.importTripsyParseProposalEvent failed:', e);
@@ -2864,28 +2865,46 @@ const Store = {
   // which proposal event this create_event change/resolution patch belongs
   // to; patch is applied as-is (appliedChangeId included by the caller), so
   // this method stores exactly what it's given without inferring anything.
+  // MIGRATION STEP 3: same two-file split as importTripsyParseProposalEvent
+  // above -- the new trip + its events land in trips-data.json first, then the
+  // proposal resolutions in flight-log-data.json.
   async acceptTripsyParseProposalCluster({ tripChange, eventChanges, proposalId }) {
     try {
-      if (!driveData.tripsyPendingChanges) driveData.tripsyPendingChanges = [];
-      driveData.tripsyPendingChanges.push({ ...tripChange, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
-      for (const { change } of eventChanges) {
-        driveData.tripsyPendingChanges.push({ ...change, queuedSnapshotAt: TRIPSY_SNAPSHOT_GENERATED_AT });
+      const rbTrips = tripsyDecryptedTrips;
+      const applyAll = () => {
+        applyTripsyChangeToTrips(tripChange);
+        for (const { change } of eventChanges) applyTripsyChangeToTrips(change);
+      };
+      applyAll();
+      for (let attempt = 0; ; attempt++) {
+        try { await persistTripsData(); break; }
+        catch (e) {
+          if (e && e.conflict) {
+            if (attempt < 2) { applyAll(); continue; }
+            throw e;
+          }
+          tripsyDecryptedTrips = rbTrips;
+          throw e;
+        }
       }
-
-      const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
-      if (!proposal) return false;
-      for (const { eventId, patch } of eventChanges) {
-        const event = proposal.events.find(e => e.id === eventId);
-        if (event) Object.assign(event, patch);
+      for (let attempt = 0; ; attempt++) {
+        const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
+        if (!proposal) break; // resolved elsewhere -- the trips write already saved
+        for (const { eventId, patch } of eventChanges) {
+          const event = proposal.events.find(e => e.id === eventId);
+          if (event) Object.assign(event, patch);
+        }
+        if (proposal.events.every(e => e.resolution !== 'pending')) {
+          const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
+          if (a) a.parseStatus = 'done';
+          driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== proposalId);
+        }
+        try { await persistDriveData({ silentConflict: true }); break; }
+        catch (e) {
+          if (e && e.conflict && attempt < 2) continue;
+          throw e;
+        }
       }
-
-      if (proposal.events.every(e => e.resolution !== 'pending')) {
-        const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
-        if (a) a.parseStatus = 'done';
-        driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== proposalId);
-      }
-
-      await persistDriveData();
       return true;
     } catch (e) {
       console.error('Store.acceptTripsyParseProposalCluster failed:', e);
@@ -11055,10 +11074,16 @@ function isTripsyEventEffectivelyHidden(ev) {
 // PRIMARY source with the encrypted snapshot as fallback -- see
 // ensureTripsyDecrypted.
 const TRIPS_DATA_DRIVE_FILENAME = 'trips-data.json';
+// File id + head revision of trips-data.json, captured at load so writes can
+// use the same optimistic-concurrency guard flight-log-data.json has (see
+// persistDriveData): if another device wrote since we loaded, reload theirs
+// and retry ours rather than silently overwriting.
+let tripsDataFileId = null;
+let tripsDataRevision = null;
 
 async function fetchTripsDataFromDrive() {
   const q = encodeURIComponent(`name='${TRIPS_DATA_DRIVE_FILENAME}' and trashed=false`);
-  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,modifiedTime)&spaces=drive`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,modifiedTime,headRevisionId)&spaces=drive`);
   const json = await res.json();
   // Guard against the passphrase file's old trap: a same-named Google-native
   // Doc can't be fetched with alt=media, so only real files count; prefer the
@@ -11071,7 +11096,95 @@ async function fetchTripsDataFromDrive() {
   const doc = await contentRes.json();
   const trips = Array.isArray(doc) ? doc : (doc && doc.trips);
   if (!Array.isArray(trips)) throw new Error('trips-data.json has an unexpected shape.');
+  tripsDataFileId = candidates[0].id;
+  tripsDataRevision = candidates[0].headRevisionId || null;
   return trips;
+}
+
+// Writes the CURRENT tripsyDecryptedTrips back to trips-data.json ("step 3"
+// of the Tripsy migration: edits are real the moment they save, no queue, no
+// refresh). Mirrors persistDriveData's optimistic-concurrency shape: on a
+// revision mismatch it reloads the newer copy into tripsyDecryptedTrips and
+// throws { conflict: true } so the caller can re-apply its change onto the
+// fresh data and retry. Owner-only by construction (every caller is behind
+// isOwner-gated UI); a viewer without write permission just gets a Drive 403
+// surfaced as a failed write.
+async function persistTripsData() {
+  if (!tripsDataFileId) throw new Error('trips-data.json is not loaded — cannot save.');
+  if (tripsDataRevision) {
+    const currentRev = await fetchDriveHeadRevision(tripsDataFileId);
+    if (currentRev && currentRev !== tripsDataRevision) {
+      try { tripsyDecryptedTrips = await fetchTripsDataFromDrive(); }
+      catch (e) { console.error('trips-data conflict reload failed:', e); }
+      const conflict = new Error('CONFLICT_RELOADED');
+      conflict.conflict = true;
+      throw conflict;
+    }
+  }
+  const doc = { schemaVersion: 1, updatedAt: new Date().toISOString(), trips: tripsyDecryptedTrips || [] };
+  const newRev = await updateDriveDataFile(tripsDataFileId, doc);
+  tripsDataRevision = newRev || await fetchDriveHeadRevision(tripsDataFileId);
+}
+
+// Locally-minted event ids for created events, now that Tripsy no longer
+// assigns them: epoch-millis * 1000 + jitter keeps them numeric (same type as
+// Tripsy's ids, so every `${resource}:${id}` key and `${resource}-${id}` DOM
+// id works unchanged) and far above Tripsy's own ranges, so they can never
+// collide with an id that came from the migration export.
+function tripsyMintLocalId() {
+  return Date.now() * 1000 + Math.floor(Math.random() * 1000);
+}
+
+// Applies one plain-data change object -- the exact shape Store.queueTripsyChange
+// has always been handed by every edit/create/delete call site -- directly to
+// tripsyDecryptedTrips, REPLACING the array (and any touched trip) rather than
+// mutating in place, so a failed persist can roll back by restoring the prior
+// reference. Display fields are re-derived with tripsyRawToDisplay, the same
+// lockstep mirror of tools/build_tripsy_snapshot.py the pending-edit overlay
+// already used, so an edited event looks byte-for-byte like a refreshed one.
+function applyTripsyChangeToTrips(change) {
+  const trips = tripsyDecryptedTrips || [];
+  const sortEvents = evs => [...evs].sort((a, b) => ((a.start || '') < (b.start || '') ? -1 : ((a.start || '') > (b.start || '') ? 1 : 0)));
+  const sortTrips = ts => [...ts].sort((a, b) => ((a.start || '') < (b.start || '') ? -1 : ((a.start || '') > (b.start || '') ? 1 : 0)));
+  const replaceTrip = (key, fn) => {
+    const i = trips.findIndex(t => t.key === key);
+    if (i < 0) throw new Error(`trip not found: ${key}`);
+    const out = [...trips];
+    out[i] = fn(trips[i]);
+    return out;
+  };
+  let next;
+  if (change.type === 'edit_event' || change.type === 'delete_event') {
+    const ti = trips.findIndex(t => (t.events || []).some(ev => tripsyEventKey(ev.tripsyRaw) === change.eventKey));
+    if (ti < 0) throw new Error(`event not found: ${change.eventKey}`);
+    const trip = trips[ti];
+    let events;
+    if (change.type === 'delete_event') {
+      events = trip.events.filter(ev => tripsyEventKey(ev.tripsyRaw) !== change.eventKey);
+    } else {
+      events = sortEvents(trip.events.map(ev => {
+        if (tripsyEventKey(ev.tripsyRaw) !== change.eventKey) return ev;
+        const mergedRaw = { ...ev.tripsyRaw, ...(change.changes || {}) };
+        return { ...ev, ...tripsyRawToDisplay(mergedRaw.resource, mergedRaw), tripsyRaw: mergedRaw };
+      }));
+    }
+    next = [...trips];
+    next[ti] = { ...trip, events };
+  } else if (change.type === 'create_event') {
+    const id = tripsyMintLocalId();
+    const raw = { ...tripsyBlankRaw(change.tripsyResource, null), ...(change.fields || {}), resource: change.tripsyResource, id };
+    const ev = { id: `${change.tripsyResource}-${id}`, hidden: false, ...tripsyRawToDisplay(change.tripsyResource, raw), tripsyRaw: raw };
+    next = replaceTrip(change.tripKey, t => ({ ...t, events: sortEvents([...(t.events || []), ev]) }));
+  } else if (change.type === 'edit_trip') {
+    next = sortTrips(replaceTrip(change.tripKey, t => ({ ...t, ...(change.changes || {}) })));
+  } else if (change.type === 'delete_trip') {
+    next = trips.filter(t => t.key !== change.tripKey);
+  } else if (change.type === 'create_trip') {
+    next = sortTrips([...trips, { key: change.tripKey, name: change.name || null, start: change.start || null, end: change.end || null, location: null, events: [] }]);
+  } else {
+    throw new Error(`unknown change type: ${change.type}`);
+  }
+  tripsyDecryptedTrips = next;
 }
 
 const TRIPSY_PASSPHRASE_DRIVE_FILENAME = 'Tripsy Trips Passphrase';
