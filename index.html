@@ -1905,18 +1905,71 @@ async function openDriveFileInNewTab(driveFileId) {
 // break the actual save/view/delete flows if IndexedDB is unavailable.
 const TRIPSY_OFFLINE_DB_NAME = 'travel-tracker-offline';
 const TRIPSY_OFFLINE_STORE = 'tripsyDocs';
+// v2 store: small app-level blobs kept for offline use, keyed by a plain string
+// ('trips' is the only entry today -- the last trips-data.json this device loaded,
+// used ONLY by Travel View when there's no network; see tripsyCacheTripsForOffline).
+const TRIPSY_OFFLINE_APP_STORE = 'appCache';
 const TRIPSY_OFFLINE_PURGE_DAYS_AFTER_TRIP = 7;
 function openTripsyOfflineDb() {
   return new Promise((resolve, reject) => {
     if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
-    const req = indexedDB.open(TRIPSY_OFFLINE_DB_NAME, 1);
+    const req = indexedDB.open(TRIPSY_OFFLINE_DB_NAME, 2);
+    // Guarded creates, not an else-branch on oldVersion: a device upgrading from
+    // v1 needs only appCache, a fresh device needs both, and this covers each.
     req.onupgradeneeded = () => {
-      req.result.createObjectStore(TRIPSY_OFFLINE_STORE, { keyPath: 'driveFileId' });
+      const db = req.result;
+      if (!db.objectStoreNames.contains(TRIPSY_OFFLINE_STORE)) db.createObjectStore(TRIPSY_OFFLINE_STORE, { keyPath: 'driveFileId' });
+      if (!db.objectStoreNames.contains(TRIPSY_OFFLINE_APP_STORE)) db.createObjectStore(TRIPSY_OFFLINE_APP_STORE, { keyPath: 'key' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
+
+// ---- Offline trip cache (Travel View only) ----
+// Every successful trips-data.json load writes a copy here, stamped with when it
+// was fetched, so Travel View can still show the schedule with no signal. All of
+// it fails soft: a device without IndexedDB simply has no offline mode.
+// Deliberately NOT used by My Trips -- that page edits data, and editing a stale
+// copy would write it back over newer data; it shows its normal unavailable card
+// instead (see unlockTripsyTrips).
+async function tripsyCacheTripsForOffline(trips, updatedAt) {
+  try {
+    const db = await openTripsyOfflineDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_APP_STORE, 'readwrite');
+      tx.objectStore(TRIPSY_OFFLINE_APP_STORE).put({
+        key: 'trips', trips, updatedAt: updatedAt || null, cachedAt: new Date().toISOString(),
+      });
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    return true;
+  } catch (e) {
+    console.error('tripsyCacheTripsForOffline failed (non-fatal):', e);
+    return false;
+  }
+}
+async function loadTripsyOfflineTrips() {
+  try {
+    const db = await openTripsyOfflineDb();
+    const rec = await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_APP_STORE, 'readonly');
+      const req = tx.objectStore(TRIPSY_OFFLINE_APP_STORE).get('trips');
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+    return (rec && Array.isArray(rec.trips) && rec.trips.length) ? rec : null;
+  } catch (e) {
+    console.error('loadTripsyOfflineTrips failed (non-fatal):', e);
+    return null;
+  }
+}
+// Set when the trips currently in memory came from the offline cache rather than
+// Drive. Drives Travel View's "not live" banner, and blocks My Trips from
+// rendering (and therefore from editing) stale data.
+let tripsyTripsAreOffline = false;
+let tripsyOfflineCacheInfo = null; // { updatedAt, cachedAt }
 async function saveTripsyOfflineDoc(record) {
   try {
     const db = await openTripsyOfflineDb();
@@ -10661,6 +10714,10 @@ async function fetchTripsDataFromDrive() {
   tripsDataFileId = candidates[0].id;
   tripsDataRevision = candidates[0].headRevisionId || null;
   tripsDataUpdatedAt = (doc && doc.updatedAt) || candidates[0].modifiedTime || null;
+  // Keep the offline copy in step with what we just loaded (fire-and-forget).
+  tripsyTripsAreOffline = false;
+  tripsyOfflineCacheInfo = null;
+  tripsyCacheTripsForOffline(trips, tripsDataUpdatedAt);
   return trips;
 }
 
@@ -26454,14 +26511,19 @@ async function ensureTripsyDecrypted() {
 
 async function unlockTripsyTrips() {
   const trips = await ensureTripsyDecrypted();
-  if (trips) {
+  // Deliberately NOT offline-capable, unlike Travel View: this page edits trips,
+  // and saving an edit made against a stale cached copy would overwrite newer
+  // data. Show the unavailable card instead.
+  if (trips && !tripsyTripsAreOffline) {
     renderTripsyEventsList();
   } else {
     const container = document.getElementById("tripsy-card");
     if (container) container.innerHTML = `
       <div class="card" style="max-width:460px;">
-        <div class="card-title">Trip Data Unavailable</div>
-        <p style="color:var(--muted); font-size:13.5px; margin:0 0 14px;">The trip database (trips-data.json in Drive) could not be loaded. If you were given access to this page, ask the owner to share that file with your Google account; otherwise try reloading.</p>
+        <div class="card-title">${tripsyTripsAreOffline ? 'Offline' : 'Trip Data Unavailable'}</div>
+        <p style="color:var(--muted); font-size:13.5px; margin:0 0 14px;">${tripsyTripsAreOffline
+          ? 'My Trips needs a connection, because anything you change here saves straight back to Drive. Your saved schedule is still readable offline in <b>Travel View</b>.'
+          : 'The trip database (trips-data.json in Drive) could not be loaded. If you were given access to this page, ask the owner to share that file with your Google account; otherwise try reloading.'}</p>
         <button class="btn primary" id="tripsy-data-retry" style="margin-top:2px;">Retry</button>
       </div>
     `;
@@ -26819,6 +26881,10 @@ function ensureTravelViewStyles() {
     html.travel-view-open, html.travel-view-open body { overflow:hidden !important; height:100%; }
     .tv-root { position:fixed; inset:0; z-index:9998; overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; background:var(--bg); }
     .tv-inner { max-width:560px; margin:0 auto; padding:0 14px 48px; }
+    .tv-offline { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 8px;
+      padding:8px 10px; border:1px solid var(--amber); border-radius:8px;
+      background:rgba(227,164,56,0.10); color:var(--text); font-size:12.5px; line-height:1.45; }
+    .tv-offline b { color:var(--amber); }
     .tv-topbar { position:sticky; top:0; z-index:3; background:var(--bg); padding:12px 0 8px; }
     .tv-month { font-size:13px; color:var(--muted); font-weight:600; letter-spacing:0.02em; }
     .tv-titlerow { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin:2px 0 14px; }
@@ -26969,8 +27035,18 @@ async function renderTravelView(chosenTripKey) {
     _tvResizeHandler = measureTopbar;
     window.addEventListener('resize', measureTopbar);
   };
+  // "This is not live" strip. Shown whenever the schedule on screen came from the
+  // offline cache rather than Drive, with WHEN it was last refreshed -- inside the
+  // sticky topbar, so it stays visible while scrolling the day list rather than
+  // scrolling away at the top.
+  const offlineNoticeHtml = () => {
+    if (!tripsyTripsAreOffline) return '';
+    const info = tripsyOfflineCacheInfo || {};
+    const when = formatSyncTimestamp(info.cachedAt || info.updatedAt);
+    return `<div class="tv-offline">📴 <span><b>Offline — this schedule is not live.</b> Last refreshed ${esc(when || 'earlier')}. Changes made since then won't be here; reconnect to update.</span></div>`;
+  };
   const shell = (title, body) => wrap(`
-    <div class="tv-topbar"><div class="tv-titlerow"><div class="tv-title">${esc(title)}</div>${closeBtnHtml}</div></div>
+    <div class="tv-topbar">${offlineNoticeHtml()}<div class="tv-titlerow"><div class="tv-title">${esc(title)}</div>${closeBtnHtml}</div></div>
     ${body}`);
 
   main.innerHTML = shell('Travel View', `<div class="empty-state">Loading your trip…</div>`);
@@ -26982,7 +27058,10 @@ async function renderTravelView(chosenTripKey) {
   // lazy-loads these too, but entering Travel View directly (the sign-in button)
   // skips that page, so load them here rather than depend on My Trips having run.
   if (!tripsyPsReservations) {
-    try { tripsyPsReservations = await Store.listReservations(); } catch (e) { tripsyPsReservations = []; }
+    // Offline these live in flight-log-data.json, which isn't loaded -- an empty
+    // list just means no P/S cards woven in, rather than a failed render.
+    if (tripsyTripsAreOffline || !driveData) tripsyPsReservations = [];
+    else { try { tripsyPsReservations = await Store.listReservations(); } catch (e) { tripsyPsReservations = []; } }
   }
   // Pick the trip: an explicitly-chosen one (from the picker below), else the
   // default candidate(s) -- current/nearest-upcoming. More than one candidate
@@ -27280,6 +27359,7 @@ async function renderTravelView(chosenTripKey) {
   const bodyDays = allDays.map(daySectionHtml).filter(Boolean).join('');
   main.innerHTML = wrap(`
     <div class="tv-topbar">
+      ${offlineNoticeHtml()}
       <div class="tv-month">${esc(monthYear)}</div>
       <div class="tv-titlerow">
         <div class="tv-title">${esc(trip.name || 'Trip')}</div>
@@ -28216,6 +28296,57 @@ function initGoogleAuth() {
   }
   document.getElementById('splash-screen').style.display = 'none';
   document.getElementById('signin-gate').style.display = 'flex';
+  maybeOfferOfflineTravelView();
+}
+
+// OFFLINE ENTRY. Google sign-in needs the network, so with no signal the normal
+// path can only ever fail -- but the schedule itself is already on the device.
+// When we're offline AND there's a cached copy, offer a read-only way in. Only
+// Travel View is reachable this way (My Trips edits and would need Drive), and
+// the view carries its own "not live / last refreshed" strip.
+async function maybeOfferOfflineTravelView() {
+  try {
+    if (navigator.onLine) return;
+    const cached = await loadTripsyOfflineTrips();
+    if (!cached) return;
+    const gate = document.getElementById('signin-gate');
+    if (!gate || document.getElementById('signin-offline-btn')) return;
+    const when = formatSyncTimestamp(cached.cachedAt || cached.updatedAt) || 'earlier';
+    const box = document.createElement('div');
+    box.style.cssText = 'display:flex; flex-direction:column; align-items:center; gap:8px; margin-top:4px; padding:12px 16px; border:1px solid var(--amber); border-radius:10px; background:rgba(227,164,56,0.10); max-width:420px;';
+    box.innerHTML = `
+      <div style="font-size:13px; color:var(--text); text-align:center; line-height:1.5;">
+        📴 <b style="color:var(--amber);">You're offline</b>, so signing in isn't possible — but your saved schedule is on this device.
+        <br><span style="color:var(--muted);">Last refreshed ${esc(when)}.</span>
+      </div>
+      <button id="signin-offline-btn" class="btn" style="padding:10px 20px; font-size:14px;">Open Travel View (offline)</button>`;
+    gate.appendChild(box);
+    document.getElementById('signin-offline-btn').addEventListener('click', async () => {
+      tripsyDecryptedTrips = cached.trips;
+      tripsyTripsAreOffline = true;
+      tripsyOfflineCacheInfo = { updatedAt: cached.updatedAt, cachedAt: cached.cachedAt };
+      // Minimal shape so the Store's readers don't throw on a null driveData --
+      // nothing offline writes, and every list it can ask for is legitimately empty.
+      if (!driveData) driveData = { invoices: [], report: null, reservations: [], psBalanceDeductions: [], syncTimestamps: {} };
+      tripsyPsReservations = [];
+      document.getElementById('signin-gate').style.display = 'none';
+      document.getElementById('app-root').style.display = '';
+      try { await navigate('travelview'); } catch (e) { console.error('Offline Travel View failed:', e); }
+    });
+  } catch (e) {
+    console.error('maybeOfferOfflineTravelView failed (non-fatal):', e);
+  }
+}
+
+// Service worker: makes the app SHELL openable with no signal (the trip data
+// itself is cached separately, in IndexedDB). Network-first inside sw.js, so a
+// new build always wins when there IS a connection -- see that file's header.
+// Registered late and best-effort: unsupported browsers (and the Claude iPad
+// WebView) simply carry on with no offline mode.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(e => console.error('Service worker registration failed (non-fatal):', e));
+  });
 }
 
 // Google Identity Services loads asynchronously (the <script> tag has

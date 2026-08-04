@@ -728,6 +728,33 @@ The NetJets report's Hours/Legs/Flight Log mode is a nav-rail-driven toggle (not
 `passengerReportMode`, set by clicking the nav submenu items, independent of the
 Totals/Kagan/Lopata filter which *is* passed as `navigate`'s `param`.
 
+### Offline (Travel View only)
+
+The app works with no signal, but **only Travel View** — deliberately, since it's read-only. Three
+pieces:
+
+- **`sw.js`** — the one real exception to "everything lives in `index.html`" (a service worker
+  cannot be inlined or registered from a blob URL; `manifest.json` is the existing sidecar
+  precedent). It caches the app SHELL so the page opens with no network. **Strategy is
+  NETWORK-FIRST**, not cache-first: this app republishes constantly, so a cache-first worker would
+  strand users on a stale build — the classic footgun. Same-origin shell requests only; Drive/Google/
+  Anthropic calls are auth-bearing and never touched. Bump `CACHE_VERSION` to evict.
+- **The trip data** is cached separately by the app, in IndexedDB (`travel-tracker-offline` DB,
+  bumped to v2 for an `appCache` store; `tripsyCacheTripsForOffline`/`loadTripsyOfflineTrips`).
+  Every successful `fetchTripsDataFromDrive` writes a copy stamped with `cachedAt`. All of it fails
+  soft — no IndexedDB simply means no offline mode.
+- **Getting in without sign-in**: Google auth needs the network, so with no signal the sign-in gate
+  offers "Open Travel View (offline)" whenever a cached copy exists (`maybeOfferOfflineTravelView`).
+  It sets a minimal `driveData` so `Store` readers don't throw on null, and empties
+  `tripsyPsReservations` (P/S cards live in `flight-log-data.json`, which isn't loaded offline).
+
+`tripsyTripsAreOffline` marks that the in-memory trips came from cache. It drives Travel View's
+`.tv-offline` strip — **"Offline — this schedule is not live. Last refreshed &lt;when&gt;"**, rendered
+inside the sticky topbar of BOTH Travel View shells so it can't scroll away — and it BLOCKS My Trips
+from rendering (`unlockTripsyTrips`), which shows an "Offline" card instead. That block is the
+point: My Trips edits, and saving an edit made against a stale cached copy would overwrite newer
+data. Note the Claude iPad WebView has no service worker, so offline doesn't apply there.
+
 ## Notable constraints
 
 - **iPad/Safari compatibility**: the pdf.js version is pinned and several ES2024 features
