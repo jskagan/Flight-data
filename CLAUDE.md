@@ -636,6 +636,18 @@ a separate always-close button lands beside it on the detail screen wearing the 
   are clamped to the need so a stale one can't drive it negative. In the UI a **Skip** card sits in
   the garment grid on any unmet line (with **Unskip**); when more than one item is outstanding it
   asks how many. **Done** now appears only once a line's need is MET, and merely returns to the list.
+- **Composed outfits go stale STRUCTURALLY, not on any event edit.** An outfit dresses a
+  time-block, so `tripsyOutfitsUncoveredBlocks` compares the trip's CURRENT blocks
+  (`tripsyEnumerateAttireBlocks` — adjacent/close same-dress-level events are already one block)
+  against the saved outfits as a multiset of `dayKey|tier`, and flags only a block nothing covers.
+  So: an event added next to an existing block at a similar dress level folds in and is NOT flagged;
+  a deleted event can only shrink blocks, so it never flags; a moved event flags only if it lands
+  somewhere uncovered (e.g. another day). A new block, a block whose tier moved (including by manual
+  override), or a second block of the same tier on a day that had one, all flag. The per-block stale
+  note in the outfit modal uses `tripsyOutfitBlockTierMoved` (that block's own level, ignoring
+  deleted events). A changed packing selection still flags via `selectionFingerprint`. This replaced
+  a blunt `guide.eventFingerprint` comparison that fired on ANY event edit; `outfits.guideFingerprint`
+  is still written but no longer consulted.
 - **The "you finished — create outfits?" prompt** (`tripsyPackingCompleteDialog`, via
   `maybeCongratulate`) fires on the incomplete→complete transition, from the **Done** button or from
   `closePage`, *not* from every pick — picking the last garment used to interrupt mid-flow. Ordinary

@@ -8622,12 +8622,14 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
   // excluded still lists them in its saved garmentIds.
   const cards = (block.garmentIds || []).map(id => byId.get(id)).filter(g => g && !tripsyWardrobeGarmentExcludedFromOutfits(g));
   const label = TRIPSY_ATTIRE_CATEGORY_LABEL[block.category] || block.category || '';
-  // "May be out of date" if the guide's events or the packing selection changed since compose.
+  // "May be out of date" if this block's dress level or the packing selection changed since compose.
   let stale = false;
   try {
     const guide = await Store.getTripsyAttireGuide(tripKey);
     const sel = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey));
-    stale = !!(guide && guide.eventFingerprint && outfits.guideFingerprint && guide.eventFingerprint.hash !== outfits.guideFingerprint.hash)
+    // Per-block: stale only if THIS block's dress level moved, or the packed garments
+    // changed. Events added next to it at the same level (or deleted) don't touch it.
+    stale = (!!guide && tripsyOutfitBlockTierMoved(guide, block))
       || !!(outfits.selectionFingerprint && tripsyOutfitSelectionFingerprint(sel).hash !== outfits.selectionFingerprint.hash);
   } catch (e) { /* staleness is best-effort */ }
   const cardHtml = cards.length ? cards.map(g => `
@@ -17924,6 +17926,50 @@ function tripsyEnumerateAttireBlocks(guide) {
   }
   return blocks.map((b, i) => ({ ...b, blockId: `B${i + 1}`, label: b.names.join(' → ') }));
 }
+// ---- Outfit staleness, judged STRUCTURALLY rather than by an event fingerprint ----
+// A composed outfit dresses a TIME-BLOCK, not a list of events, so the only changes
+// that can invalidate one are changes to the blocks themselves. Adding an event that
+// simply folds into an existing block (adjacent/close in time at a similar dress level
+// -- exactly what tripsyEnumerateAttireBlocks already groups together) leaves that
+// block's day+tier untouched, so the outfit still dresses it and nothing is flagged.
+// Deleting an event can only shrink or remove blocks, so it never flags either, and a
+// moved event flags only if it lands somewhere no saved outfit covers. This replaced a
+// blunt guide.eventFingerprint comparison that fired on ANY event edit, including all
+// three of those harmless cases.
+//
+// Current blocks with no saved outfit of the same day + tier to dress them. Compared as
+// a MULTISET (counts, not just presence) so a second Cocktail block appearing on a day
+// that already had one is still caught.
+function tripsyOutfitsUncoveredBlocks(guide, outfits) {
+  const keyOf = b => `${b.dayKey}|${b.category}`;
+  const savedCounts = new Map();
+  for (const b of ((outfits && outfits.blocks) || [])) {
+    const k = keyOf(b);
+    savedCounts.set(k, (savedCounts.get(k) || 0) + 1);
+  }
+  const seen = new Map();
+  const uncovered = [];
+  for (const b of tripsyEnumerateAttireBlocks(guide)) {
+    const k = keyOf(b);
+    const n = (seen.get(k) || 0) + 1;
+    seen.set(k, n);
+    if (n > (savedCounts.get(k) || 0)) uncovered.push(b);
+  }
+  return uncovered;
+}
+// Has THIS saved outfit's block changed dress level since it was composed? Only its
+// still-existing events are consulted, so a deleted event never makes a block stale.
+function tripsyOutfitBlockTierMoved(guide, block) {
+  const catByEvent = new Map();
+  for (const day of ((guide && guide.days) || [])) {
+    for (const ev of (day.events || [])) catByEvent.set(ev.id, tripsyAttireDisplayCategory(ev));
+  }
+  return ((block && block.eventIds) || []).some(id => {
+    const now = catByEvent.get(id);
+    return now !== undefined && block.category !== undefined && now !== block.category;
+  });
+}
+
 // Light change-detection hash over a Pack-For-Trip selection ({id,qty}[]), so a
 // saved outfit set can flag itself "may be out of date" if the owner changed what
 // they're bringing since composing. Same djb2 style as tripsyAttireFingerprint.
@@ -21507,25 +21553,13 @@ async function tripsyOutfitsNeedRecompose(tripKey, person = 'him') {
     // introduce a whole new tier (a semi-formal line appearing with nothing picked for
     // it), which makes the plan incomplete AND the outfits stale at the same moment.
     // An unfinished plan is a separate problem, said separately in the dialog.
-    const guideMoved = !!(guide.eventFingerprint && outfits.guideFingerprint
-      && guide.eventFingerprint.hash !== outfits.guideFingerprint.hash);
     const sel = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey));
     const selMoved = !!(outfits.selectionFingerprint
       && tripsyOutfitSelectionFingerprint(sel).hash !== outfits.selectionFingerprint.hash);
-    // A manual dress-code override changes neither fingerprint -- the guide's own
-    // eventFingerprint is stamped at generation and the picks don't move -- yet it is
-    // exactly the kind of change that invalidates a composition. So compare each saved
-    // block's tier against what the guide says that event's tier is NOW.
-    const catByEvent = new Map();
-    for (const day of (guide.days || [])) {
-      for (const ev of (day.events || [])) catByEvent.set(ev.id, ev.displayCategory || ev.category);
-    }
-    const categoryMoved = (outfits.blocks || []).some(b => {
-      const first = (b.eventIds || [])[0];
-      const now = first != null ? catByEvent.get(first) : undefined;
-      return now !== undefined && b.category !== undefined && now !== b.category;
-    });
-    return guideMoved || selMoved || categoryMoved;
+    // A block with no outfit to dress it (a genuinely new time-block, or one whose tier
+    // moved -- including via a manual dress-code override, which no fingerprint sees).
+    const uncovered = tripsyOutfitsUncoveredBlocks(guide, outfits).length > 0;
+    return selMoved || uncovered;
   } catch (e) {
     console.error('Outfit staleness check failed (non-fatal):', e);
     return false;
@@ -24277,7 +24311,7 @@ async function renderTripsyEventsListImpl() {
               const planDone = tripsyPlanPackingIsComplete(
                 (driveData.tripsyAttireGuides || []).find(x => x.tripKey === key) || null, key, who);
               const regen = await tripsyConfirmDialog(
-                `These outfits were composed from an earlier version of this trip — the itinerary, your dress-code choices or your packing picks have changed since. Regenerate them to be sure they match what you are actually taking.${planDone ? '' : ' Note your packing list still has lines with nothing picked for them, so finish those first if you want the outfits to cover everything.'}`,
+                `Something on this trip now has no outfit to cover it — a new time-block appeared, one changed dress level, or your packing picks changed. (Events added next to an existing block at the same dress level, and deleted events, don't count.) Regenerate to dress what's currently on the schedule from what you are actually taking.${planDone ? '' : ' Note your packing list still has lines with nothing picked for them, so finish those first if you want the outfits to cover everything.'}`,
                 { title: '⚠️ Outfits may be out of date', yes: 'Regenerate', no: 'Ignore' });
               if (regen) {
                 const hide = tripsyShowOutfitComposingSpinner(who);
