@@ -18007,11 +18007,6 @@ function tripsyAttireFingerprint(currentEventsForPrompt) {
 // failure reports "not stale" rather than throwing.
 async function tripsyAttireGuideIsStale(trip, guide) {
   if (!guide) return false;
-  // A dress-code override can change how many occasions each level has, which is what
-  // the packing quantities were sized from -- so the guide is stale even though the
-  // trip's own events never moved. Recorded at override time (the fingerprints below
-  // cannot see it) and cleared by the Refresh that rebuilds the packing list.
-  if (guide.packingCountsStale) return true;
   if (!guide.eventFingerprint) return false;
   try {
     const { days } = await tripsyAttireBuildDays(trip);
@@ -19607,23 +19602,15 @@ async function tripsyAttireMaybeDowngradeBlock(guide, ev, newCategory) {
 // what's mechanically re-derivable (displayCategory, block lists, counts)
 // updates. `renderOpts` is passed straight through to the re-render -- weather
 // doesn't change from a category edit, so there's no reason to refetch it.
-// Apply freshly recomputed blocks/counts to the guide, and notice when the OCCASION
-// COUNTS actually moved. The packing list's quantities were sized from the counts at
-// generation time, so a dress-code override that turns a Cocktail evening Formal leaves
-// those quantities describing a trip that no longer exists -- but nothing detected it:
-// the guide's eventFingerprint is stamped at generation and the trip's events never
-// changed. The flag is cleared by a Refresh, which rebuilds the packing list from the
-// current counts. Only the APPLY paths call this; the failure-restore paths put the old
-// values back and must not raise it.
+// Apply freshly recomputed blocks/counts to the guide. Called only by the APPLY paths
+// of a dress-code override; the failure-restore paths put the old values back. Note a
+// manual override CAN move the occasion counts without the packing quantities (sized
+// from the counts at generation time) following -- that drift is deliberately not
+// flagged: the owner can always Refresh, and on a started trip the quantities are
+// frozen anyway, so a warning about it would be unactionable noise.
 function tripsyAttireApplyRecomputedBlocks(guide, recomputed) {
-  // Compared on SORTED keys: a plain JSON.stringify is order-sensitive, and these
-  // objects come round-trips through Drive, so identical counts written in a different
-  // order would otherwise read as a change and raise the flag for nothing.
-  const norm = c => JSON.stringify(Object.entries(c || {}).map(([k, v]) => [k, v]).sort((a, b) => a[0].localeCompare(b[0])));
-  const before = norm(guide.counts);
   guide.blocks = recomputed.blocks;
   guide.counts = recomputed.counts;
-  if (norm(recomputed.counts) !== before) guide.packingCountsStale = true;
 }
 async function tripsyAttireOverrideCategory(guide, dayKey, eventId, newCategory, renderOpts) {
   const day = (guide.days || []).find(d => d.dayKey === dayKey);
@@ -24518,8 +24505,6 @@ async function renderTripsyEventsListImpl() {
   wireTripsyHeaderMenuToggle("[data-tripsy-attire-menu-toggle]", "data-tripsy-attire-menu", async (btn, tripKey) => {
     const badge = btn.querySelector('.tripsy-attire-stale-badge');
     if (!isOwner || !badge || badge.className.includes('--generating')) return true;
-    const guideNow = (driveData.tripsyAttireGuides || []).find(x => x.tripKey === tripKey) || null;
-    const countsMoved = !!(guideNow && guideNow.packingCountsStale);
     // Once the trip has started the packing side is frozen (see
     // generateTripsyAttireGuide's preservePacking), so the usual "it re-sizes
     // the packing quantities / discards packing-list edits" wording would be
@@ -24529,8 +24514,6 @@ async function renderTripsyEventsListImpl() {
     const refresh = await tripsyConfirmDialog(
       startedNow
         ? 'This trip has started, so your packing list, garment counts and Packing Status stay exactly as they are — your bag is already packed. Refreshing only re-reads the events and updates the dress codes and the Daily Dress Guide to match the current itinerary, then clears the ⚠️. Dress codes you set by hand are re-derived.'
-        : countsMoved
-        ? 'Your dress-code changes moved how many occasions each level has, but the packing quantities were worked out from the old counts — so how many shirts, ties and pairs of shoes it asks for may now be wrong. Refreshing re-sizes them from the current dress codes. It regenerates the whole guide, so hand-set dress codes are re-derived and packing-list edits are discarded.'
         : 'This trip’s events have changed since its attire guide was built, so the dress codes, packing counts and daily guide may no longer match the itinerary. Refreshing rebuilds the guide from the current events and clears the ⚠️ — but it regenerates the whole guide, so any dress codes you set by hand are discarded.',
       { title: '⚠️ Attire guide is out of date', yes: startedNow ? 'Update dress codes' : 'Refresh now', no: 'Not now' });
     if (!refresh) return true; // let the menu open as usual
