@@ -12475,6 +12475,76 @@ async function tripsyGuardPanelClose(panel) {
   return true; // discard
 }
 
+// NAME -> ADDRESS + WEBSITE AUTO-FILL, for the two kinds of event where the name alone
+// identifies a real, searchable place: LODGING (every hosting event) and DINING (an
+// activity in the restaurant category). Everything else is left alone -- a concert or a
+// tour is named for the performance, not the venue, and a transportation leg has no name
+// field at all.
+//
+// Deliberate constraints:
+//  - Fires on `change` (blur / Enter), never on `input`. One billed Places call per name
+//    the owner actually finished typing, not one per keystroke.
+//  - Only fills a field that is EMPTY. Anything already typed -- or already synced from
+//    Tripsy -- is never overwritten, so this can only ever add information.
+//  - The trip's own location is appended to the query. "Founders" or "The Ivy" alone
+//    resolves somewhere arbitrary in the world; with the destination it resolves to the
+//    place actually being booked.
+//  - Latest-wins via a request token, so a slow answer for an earlier name can't land on
+//    top of a newer one.
+//  - Filled fields get a synthetic `input` event so the form's own change detection sees
+//    them and reveals Save/Cancel -- otherwise an auto-filled address would look saved
+//    when it isn't.
+// Fails soft and silently in every direction: no Places key, no match, a network error
+// -- the owner just types the address themselves, exactly as before.
+function tripsyWireNameLookupAutofill(panel, raw, tripKey) {
+  const isLodging = raw.resource === 'hosting';
+  const nameInput = panel.querySelector('[data-tripsy-edit-field="name"]');
+  if (!nameInput) return;
+  const categorySelect = panel.querySelector('[data-tripsy-edit-field="category"]');
+  const isDining = () => raw.resource === 'activity'
+    && ((categorySelect ? categorySelect.value : raw.category) === 'restaurant');
+  const addressInput = panel.querySelector('[data-tripsy-edit-field="address"]');
+  const websiteInput = panel.querySelector('[data-tripsy-edit-field="website"]');
+  if (!addressInput && !websiteInput) return;
+
+  const status = document.createElement('div');
+  status.style.cssText = 'grid-column:1 / -1; font-size:12px; color:var(--muted); min-height:16px;';
+  if (nameInput.parentElement && nameInput.parentElement.parentElement) {
+    nameInput.parentElement.parentElement.appendChild(status);
+  }
+
+  let token = 0;
+  const fill = (input, value) => {
+    if (!input || !value || input.value.trim()) return false;
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  };
+  nameInput.addEventListener('change', async () => {
+    if (!isLodging && !isDining()) return;
+    const name = nameInput.value.trim();
+    // Two characters can't identify a place, and searching on them wastes a call.
+    if (name.length < 3) return;
+    // Nothing to fill: don't spend the call at all.
+    if ((!addressInput || addressInput.value.trim()) && (!websiteInput || websiteInput.value.trim())) return;
+    const mine = ++token;
+    status.textContent = 'Looking up address…';
+    const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+    const hint = (trip && trip.location) || '';
+    const found = await tripsyLookupPlaceContactDetails(hint ? `${name}, ${hint}` : name);
+    if (mine !== token) return; // a newer name is already in flight
+    if (!found) { status.textContent = ''; return; }
+    const filled = [];
+    if (fill(addressInput, found.address)) filled.push('address');
+    if (fill(websiteInput, found.website)) filled.push('website');
+    // Name the place that was matched, so a wrong match is obvious and correctable
+    // rather than silently accepted.
+    status.textContent = filled.length
+      ? `Filled ${filled.join(' and ')} from “${found.displayName || name}” — check it's the right place.`
+      : '';
+  });
+}
+
 // Close one of the My Trips timeline's shared per-row panels, whatever mode it's in.
 // The teardown (hide, empty, clear mode, un-highlight the ✏️, re-run the connectors)
 // was copy-pasted into every handler that closes one; the unsaved-changes guard below
@@ -12702,6 +12772,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
   // After the datetime cross-sync above, so its auto-fill doesn't itself
   // register as a "change" the moment the form opens.
   tripsyWireEditFormChangeDetection(panel, 'data-tripsy-edit-save', '[data-tripsy-edit-field], [data-tripsy-edit-field-date], [data-tripsy-edit-time-hour], [data-tripsy-edit-time-min], [data-tripsy-edit-time-ampm]');
+  tripsyWireNameLookupAutofill(panel, raw, tripKey);
   if (createOptions && createOptions.copyFrom) tripsyWireConflictCopyButtons(panel, createOptions.copyFrom, raw.resource);
 
   panel.querySelector("[data-tripsy-edit-exit]").addEventListener("click", async () => {
@@ -15326,6 +15397,33 @@ async function tripsyPlaceLocationCandidates(query, limit = 6) {
   }
 }
 
+// Address + website for a named place, for the add/edit form's auto-fill below.
+// Same searchText endpoint as the geocoder above, just a different field mask.
+// Never throws; null when there's no key, no query, or no usable hit.
+async function tripsyLookupPlaceContactDetails(query) {
+  try {
+    const apiKey = await Store.getPlacesApiKey();
+    if (!apiKey || !query || !query.trim()) return null;
+    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey,
+                 'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.websiteUri' },
+      body: JSON.stringify({ textQuery: query.trim(), maxResultCount: 1 }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const p = (data && data.places && data.places[0]) || null;
+    if (!p) return null;
+    return {
+      displayName: (p.displayName && p.displayName.text) || '',
+      address: p.formattedAddress || '',
+      website: p.websiteUri || '',
+    };
+  } catch (e) {
+    console.error('tripsyLookupPlaceContactDetails failed:', e);
+    return null;
+  }
+}
 async function tripsyFetchPlacePhotoBlob(apiKey, photoName) {
   const photoRes = await fetch(`https://places.googleapis.com/v1/${photoName}/media?maxWidthPx=800&key=${encodeURIComponent(apiKey)}`);
   if (!photoRes.ok) return null;

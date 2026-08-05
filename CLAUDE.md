@@ -273,6 +273,18 @@ step 4; git history has it if ever needed.
   Docs page's inline "Modify New"/"Modify Existing" conflict editors, which pass a `createOptions.onSave`
   callback instead of writing directly — that's a different feature's own async flow (with its own
   `rerender()`/`ctx.overrides` bookkeeping) and stays blocking.
+- **Typing a name on a LODGING or DINING form auto-fills address + website**
+  (`tripsyWireNameLookupAutofill`, backed by `tripsyLookupPlaceContactDetails` — the same
+  Places `searchText` endpoint as the geocoder, different field mask). Only those two: every
+  `hosting` event, and an `activity` whose category is `restaurant` — a concert or tour is named
+  for the performance rather than the venue, and transportation has no name field. It fires on
+  `change` (blur/Enter), never `input`, so it's one billed call per finished name; it only fills
+  a field that is EMPTY, so it can only ever add information; the trip's own `location` is
+  appended to the query (bare "Founders" resolves somewhere arbitrary); a request token makes it
+  latest-wins; and filled fields get a synthetic `input` event so the form's change detection
+  reveals Save/Cancel rather than leaving an auto-filled address looking already-saved. It names
+  the matched place in a small status line under the field so a wrong match is obvious. Fails
+  soft and silently — no Places key, no match, or a network error just leaves the fields blank.
 - **Display times are the event's own local time, not the viewer's**: event start/end are stored
   as literal local-time digits (no real UTC offset) by the refresh task, and read back out verbatim
   by `parseTripLocalParts`/`formatTripTime` (`index.html:6235` area) rather than being
