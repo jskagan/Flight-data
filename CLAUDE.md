@@ -707,7 +707,13 @@ a separate always-close button lands beside it on the detail screen wearing the 
   `"<line> — wearing on the flight"` (`TRIPSY_FLIGHT_WORN_SUFFIX`), need 1, flagged
   `flightWorn: true`; essentials are skipped (underwear/socks are worn, not styled — no point
   asking which). Because selections are keyed `id::tier::line`, a pick against one of these flows
-  into the composer's pool for free. `tripsyWardrobePackedNeedLines` strips them for **Packing
+  into the composer's pool for free. Within a tier the claim goes to whichever line comes first,
+  which picked the wrong bottom — this trip's casual tier lists "shorts" ahead of "trousers", so
+  the flight-worn bottom came out as SHORTS — so shorts and swimwear are offered to the claimer
+  LAST (a tier with only shorts still claims one). That rank is typed off the line NAME, not
+  `ln.typeKey`: the mix-and-match tiers collapse their lines to generic group lines, so
+  casual/smart-casual/athletic lines carry no type at all — exactly the tiers a flight departs in.
+  `tripsyWardrobePackedNeedLines` strips them for **Packing
   Status**, which is a checklist of things to physically put in a bag; **Plan Packing List** keeps
   them, since picking which jeans you fly in is the whole point. `composeTripsyOutfits` reads the
   selection's stored line name through `tripsyWardrobeLineIsFlightWorn` to label those garments
