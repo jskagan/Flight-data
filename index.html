@@ -15362,6 +15362,15 @@ let tripsyPlacePhotoCacheDirty = false;
 // last left, with nothing regenerated or swapped. Manual search / gallery /
 // "try another" fetch through their own paths, so they're unaffected.
 let _tripsyAllowPhotoFetch = false;
+// The NARROW half of the flag above: fetch a photo for a place that has NONE, and
+// nothing else. A place that already has one is still returned verbatim -- never
+// refetched past its TTL, never deduped, never swapped -- so the hard rule that a photo
+// only changes when the owner changes it is untouched. This exists for the itinerary-
+// changes dialog: regenerating no narratives should still leave a newly-added event's
+// card with a picture rather than a blank one, and fetching a first photo is a Places
+// lookup, not a generation. Deliberately NOT on for a plain open: a place Places has no
+// photo for caches nothing, so it would re-query on every single open forever.
+let _tripsyAllowNewPlacePhotoFetch = false;
 // Session-only cache of the full built itinerary HTML, keyed by tripKey and
 // gated on a content fingerprint (tripsyItineraryFingerprint) -- lets
 // previewTripsyItinerary reuse an already-built itinerary verbatim when
@@ -15391,7 +15400,9 @@ async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
       }
     }
   }
-  if (!_tripsyAllowPhotoFetch) return null; // open/print: cached-only, never fetch
+  // Reached only with no usable cached photo (every cached branch above returns when
+  // _tripsyAllowPhotoFetch is off), so the narrow flag can only ever fetch a FIRST photo.
+  if (!_tripsyAllowPhotoFetch && !_tripsyAllowNewPlacePhotoFetch) return null; // open/print: cached-only, never fetch
   const apiKey = await Store.getPlacesApiKey();
   if (!apiKey) return null;
   try {
@@ -15523,7 +15534,8 @@ async function fetchTripsyTransportationPhoto(company, category) {
       }
     }
   }
-  if (!_tripsyAllowPhotoFetch) return null; // open/print: cached-only, never fetch
+  // Same "first photo only" reasoning as fetchTripsyPlacePhoto above.
+  if (!_tripsyAllowPhotoFetch && !_tripsyAllowNewPlacePhotoFetch) return null; // open/print: cached-only, never fetch
   const apiKey = await Store.getPlacesApiKey();
   if (!apiKey) return null;
   try {
@@ -16845,10 +16857,30 @@ async function tripsyItineraryEventList(trip) {
   });
   return [...visibleEvents, ...pendingCreateEvents];
 }
+// The same fields MINUS start/end. Part 1's one-line summary blurb describes WHAT an
+// event is, never when -- the time on that row is rendered from live data alongside it --
+// so a pure time move leaves the blurb perfectly accurate, while a changed title, venue,
+// address or notes makes it describe the wrong thing. Recorded next to the full
+// fingerprint so the changes dialog can tell those two cases apart and only discard a
+// blurb that is genuinely wrong (see its Continue handler).
+function tripsyItineraryBlurbFingerprint(ev) {
+  const r = ev.tripsyRaw || {};
+  return tripsyContentFingerprint({
+    summary: ev.summary || '', location: ev.location || '', notes: ev.notes || '',
+    resource: r.resource || '', category: r.category || '',
+    company: r.company || '', transportNumber: r.transportNumber || '',
+    confirmation: r.confirmation || '', address: r.address || '',
+  });
+}
 function tripsyItineraryBaselineFromEvents(events) {
   const fp = {};
-  for (const ev of events) fp[tripsyItineraryEventKey(ev)] = tripsyItineraryEventFingerprint(ev);
-  return { fp, recordedAt: new Date().toISOString() };
+  const bfp = {};
+  for (const ev of events) {
+    const key = tripsyItineraryEventKey(ev);
+    fp[key] = tripsyItineraryEventFingerprint(ev);
+    bfp[key] = tripsyItineraryBlurbFingerprint(ev);
+  }
+  return { fp, bfp, recordedAt: new Date().toISOString() };
 }
 // A single fingerprint over everything buildTripsyPrintHtml's output depends
 // on, so previewTripsyItinerary can reuse a cached build when it hasn't
@@ -16925,8 +16957,17 @@ async function tripsyItineraryChangedEvents(trip, narrativeCache, { allowBackfil
   for (const ev of events) {
     const key = tripsyItineraryEventKey(ev);
     const fp = tripsyItineraryEventFingerprint(ev);
-    if (!(key in baseline.fp)) changed.push({ ev, key, changeType: 'added' });
-    else if (baseline.fp[key] !== fp) changed.push({ ev, key, changeType: 'modified' });
+    if (!(key in baseline.fp)) changed.push({ ev, key, changeType: 'added', blurbStale: false });
+    else if (baseline.fp[key] !== fp) {
+      // Does Part 1's cached one-line blurb still DESCRIBE this event? A time move
+      // doesn't touch it (the row's time comes from live data); a retitled or relocated
+      // event makes it describe the wrong thing. A baseline recorded before `bfp`
+      // existed can't tell the two apart, so it assumes stale -- falling back to the
+      // plain live description beats showing text about something else.
+      const prevBlurbFp = baseline.bfp ? baseline.bfp[key] : null;
+      const blurbStale = prevBlurbFp == null ? true : prevBlurbFp !== tripsyItineraryBlurbFingerprint(ev);
+      changed.push({ ev, key, changeType: 'modified', blurbStale });
+    }
   }
   return changed;
 }
@@ -17004,13 +17045,46 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
         _tripsyAllowPhotoFetch = true; // this pass MAY fetch new photos (it's a regeneration)
         try { await buildTripsyPrintHtml(trip.key); } finally { _tripsyAllowPhotoFetch = false; } // pre-fetch photos for the (re)generated days
       }
+      // PART 1's SUMMARY ROWS, when nothing was regenerated. Those one-line blurbs are
+      // cached per event id, which is stable across an edit -- so a retitled or relocated
+      // event kept describing its OLD self in the Summary while its Detailed card (built
+      // from live data) showed the change. Dropping the blurb makes the row fall back to
+      // tripsySummaryRowFallbackText, i.e. the event's own current description: the change
+      // is reflected, and no narrative is generated. Only the genuinely-wrong ones go
+      // (see blurbStale) -- a pure time move keeps its blurb, which is still accurate.
+      // Not needed when any day IS checked: that path passes includeSummary:true, which
+      // rewrites every row from live data anyway.
+      if (!checkedDayKeys.length) {
+        const staleIds = changedEvents.filter(c => c.blurbStale).map(c => String(c.ev.id));
+        if (staleIds.length) {
+          const cache = await Store.getTripsyNarrativeCache();
+          const entry = cache[`${trip.key}::summary`];
+          const rows = (entry && entry.content && entry.content.rows) || null;
+          if (rows) {
+            // A multi-day stay is ONE event here but can appear as `<id>-checkin` /
+            // `-checkout` rows, so match the id prefix as well as the exact key.
+            const kept = rows.filter(r => !staleIds.some(id => r.row_key === `ev:${id}` || String(r.row_key || '').startsWith(`ev:${id}-`)));
+            if (kept.length !== rows.length) {
+              await Store.saveTripsyNarrativeSections({
+                [`${trip.key}::summary`]: { ...entry, content: { ...entry.content, rows: kept } },
+              });
+            }
+          }
+        }
+      }
       // Acknowledge every listed event (checked ones regenerated, unchecked left
       // as-is), so the warning clears until something changes again.
       await tripsyRecordItineraryBaseline(trip);
       const warnEl = document.querySelector(`[data-tripsy-itin-warning="${CSS.escape(trip.key)}"]`);
       if (warnEl) warnEl.style.display = 'none'; // clear the ▲ now (no timeline re-render happens here)
       overlay.remove();
-      await previewTripsyItinerary(trip.key, { forceGeneratedView: true });
+      // A newly-added event's card would otherwise open picture-less whenever its day
+      // wasn't regenerated -- an added place has no cached photo, and a plain open never
+      // fetches. Continue IS a deliberate action, so allow a FIRST photo here (the narrow
+      // flag: an existing photo is still shown verbatim, never refetched or swapped).
+      _tripsyAllowNewPlacePhotoFetch = true;
+      try { await previewTripsyItinerary(trip.key, { forceGeneratedView: true }); }
+      finally { _tripsyAllowNewPlacePhotoFetch = false; }
     } catch (e) {
       console.error('Itinerary changes generation failed:', e);
       status.textContent = checkedDayKeys.length
