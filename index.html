@@ -27919,6 +27919,7 @@ async function renderTravelView(chosenTripKey) {
       ${allDays.some(k => k !== 'undated') ? stripHtml : ''}
     </div>
     <div class="tv-timeline">${bodyDays || `<div class="empty-state" style="margin-top:16px;">No events on this trip yet.</div>`}</div>
+    ${isOwner ? `<div id="tv-diag" title="Tap to dismiss" style="position:fixed; left:0; right:0; bottom:0; z-index:10000; background:rgba(0,0,0,0.88); color:#7CFF9E; font-family:var(--mono); font-size:11px; line-height:1.5; padding:8px 10px; white-space:pre-wrap; border-top:1px solid #444; cursor:pointer;">[travel view] measuring…</div>` : ''}
   `);
   wireExit();
   armMeasure();
@@ -28195,6 +28196,7 @@ async function renderTravelView(chosenTripKey) {
     const todayInTrip = !!(datedSections.length
       && todayKey >= datedSections[0] && todayKey <= datedSections[datedSections.length - 1]);
     const initDay = (todayInTrip && (datedSections.find(k => k >= todayKey) || datedSections[datedSections.length - 1])) || currentTopDay();
+    let ownerScrolled = false; // also read by the diagnostic below, outside this block
     if (initDay) {
       selectedDay = initDay; setActiveDate(initDay); recenterCal(false);
       if (todayInTrip) {
@@ -28211,7 +28213,6 @@ async function renderTravelView(chosenTripKey) {
         // early under 1px -- so this costs nothing after it lands, and it stops the
         // moment the owner touches the page, so a late correction can never yank the
         // view out from under someone already reading it.
-        let ownerScrolled = false;
         const markOwnerScrolled = () => { ownerScrolled = true; };
         ['wheel', 'touchstart', 'keydown'].forEach(evName =>
           root.addEventListener(evName, markOwnerScrolled, { passive: true, once: true }));
@@ -28224,21 +28225,35 @@ async function renderTravelView(chosenTripKey) {
         recenterCal(false);
         requestAnimationFrame(() => requestAnimationFrame(settleAlign));
         [120, 350, 800].forEach(ms => setTimeout(settleAlign, ms));
-        // One line naming every input to the jump, so "it opened on the wrong day"
-        // can be read off rather than guessed at: which day it decided today is,
-        // which section it aimed for, and where that actually put the scroll.
-        setTimeout(() => {
-          const sec = document.getElementById(`tv-day-${initDay}`);
-          console.log(`[travel view] today=${todayKey} initDay=${initDay}`
-            + ` | sections ${datedSections[0]}..${datedSections[datedSections.length - 1]}`
-            + ` | topbar ${Math.round(topbarH())}px, scrollTop ${Math.round(root.scrollTop)}`
-            + (sec ? `, target ${Math.round(contentTopOf(sec) - topbarH())}` : ', target n/a (no section)')
-            + (ownerScrolled ? ' | owner scrolled, alignment stopped early' : ''));
-        }, 900);
         // Images/fonts finishing after all of the above (a cold load) get one last pass.
         if (document.readyState !== 'complete') window.addEventListener('load', settleAlign, { once: true });
       }
     }
+    // TEMPORARY DIAGNOSTIC (owner-only). Names every input to the open-on-today jump
+    // so a "it opened on the wrong day" report can be READ OFF rather than guessed at.
+    // Deliberately OUTSIDE the todayInTrip branch, so it distinguishes "never even
+    // tried" (todayInTrip=false) from "tried and landed wrong". Mirrored to an
+    // on-screen bar because iPad Safari has no console without a tethered Mac, and
+    // this app is used mostly on iPad. The bar is position:fixed, so it adds NO height
+    // to the topbar -- whose measurement is itself part of what's being debugged.
+    // Remove both this and the #tv-diag element once the jump is confirmed good.
+    setTimeout(() => {
+      const sec = initDay ? document.getElementById(`tv-day-${initDay}`) : null;
+      const target = sec ? Math.round(contentTopOf(sec) - topbarH()) : null;
+      const msg = `[travel view] today=${todayKey} todayInTrip=${todayInTrip} initDay=${initDay}`
+        + ` topOfScreen=${currentTopDay()}`
+        + ` | sections ${datedSections[0]}..${datedSections[datedSections.length - 1]} (${datedSections.length})`
+        + ` | topbar ${Math.round(topbarH())}px`
+        + ` | scrollTop ${Math.round(root.scrollTop)} vs target ${target == null ? 'n/a (no section)' : target}`
+        + ` | scrollHeight ${Math.round(root.scrollHeight)}, clientHeight ${Math.round(root.clientHeight)}`
+        + (ownerScrolled ? ' | owner scrolled, alignment stopped early' : '');
+      console.log(msg);
+      const diag = document.getElementById('tv-diag');
+      if (diag) {
+        diag.textContent = msg;
+        diag.addEventListener('click', () => { diag.style.display = 'none'; }, { once: true });
+      }
+    }, 900);
   }
 }
 
