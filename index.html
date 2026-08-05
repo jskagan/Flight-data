@@ -24365,10 +24365,14 @@ async function renderTripsyEventsListImpl() {
       else dayGroups.push({ dayKey: item.dayKey, items: [item] });
     });
     const renderTimelineGroup = items => items.map(it => tripsyTimelineRowHtml(it.spec)).join('');
-    // "Day N" on the right of each header bar is numbered from the trip's own
-    // start (falling back to the earliest event day if the trip has no start),
-    // same as the Detailed Itinerary's day dividers (tripsyDayNumberFromTripStart).
-    const tlTripStartDayKey = tripsyDayKey(trip.start) || (dayGroups.length ? dayGroups[0].dayKey : null);
+    // "Day N" on the right of each header bar counts from the trip's first day with
+    // an actual event (tripsyItineraryStartDayKey), NOT its declared trip.start --
+    // the same rule the Detailed Itinerary's day dividers use, so the two screens
+    // agree. trip.start drifts (Tripsy leaves the old start behind when a flight
+    // moves), which had this reading "Day 1" against a leading empty day while the
+    // itinerary view called the first real day "Day 1" -- the same date numbered
+    // differently depending on which screen you were looking at.
+    const tlTripStartDayKey = tripsyItineraryStartDayKey(trip) || (dayGroups.length ? dayGroups[0].dayKey : null);
     // z-index:2 (above the connector's 0) + position:relative + its own
     // opaque background is what makes each day header visually interrupt
     // the connecting line running behind it -- see .tripsy-tl-connector.
@@ -27650,11 +27654,24 @@ async function renderTravelView(chosenTripKey) {
 
   const firstDay = tripsyDayKey(trip.start) || [...eventsByDay.keys()].filter(k => k !== 'undated').sort()[0] || null;
   const lastDay = tripsyDayKey(trip.end) || [...eventsByDay.keys()].filter(k => k !== 'undated').sort().pop() || firstDay;
-  const tripStartKey = firstDay;
+  // "Day N" counts from the first day with an actual event, matching the itinerary
+  // view and the My Trips timeline rather than the declared (and drift-prone)
+  // trip.start -- see tripsyItineraryStartDayKey. Only the NUMBERING uses this;
+  // firstDay above still drives the day strip's own range.
+  const tripStartKey = tripsyItineraryStartDayKey(trip) || firstDay;
+  // The span of days that ACTUALLY have events -- the range the open-on-today jump
+  // below reasons about. Deliberately NOT trip.start/trip.end: those drift (Tripsy
+  // leaves a stale start after a flight moves, which is the whole reason the itinerary
+  // views use tripsyItineraryStartDayKey/EndDayKey instead of them). A stale-early
+  // trip.end made today read as "outside the trip", so the jump was skipped entirely
+  // and Travel View opened on day 1.
+  const eventDayKeys = [...eventsByDay.keys()].filter(k => k !== 'undated').sort();
+  const eventsFirstDay = eventDayKeys[0] || firstDay;
+  const eventsLastDay = eventDayKeys[eventDayKeys.length - 1] || lastDay;
   // "Today", for the initial scroll-to-today jump below -- in the TRIP'S OWN local
   // time, not the viewer's device clock. See tripsyTravelViewTodayKey's own comment
   // for why the device clock alone puts the wrong day at the top.
-  const todayKey = tripsyTravelViewTodayKey(trip, firstDay, lastDay);
+  const todayKey = tripsyTravelViewTodayKey(trip, eventsFirstDay, eventsLastDay);
   const allDays = (firstDay && lastDay) ? tripsyDayKeyRange(firstDay, lastDay) : [...eventsByDay.keys()];
   if (eventsByDay.has('undated')) allDays.push('undated');
 
@@ -28152,23 +28169,30 @@ async function renderTravelView(chosenTripKey) {
     }));
     // Initial state: if today falls within this trip, start on today's section
     // (the first dated section on/after today); otherwise start at the top.
-    const todayInTrip = !!(firstDay && lastDay && todayKey >= firstDay && todayKey <= lastDay);
+    // Is today inside the part of the trip that actually has a day section to scroll
+    // to? Tested against the RENDERED sections rather than trip.start/trip.end, which
+    // drift -- a stale-early trip.end put today "outside the trip" and skipped the
+    // jump altogether, opening on day 1.
     const datedSections = sectionDays.filter(k => k !== 'undated');
+    const todayInTrip = !!(datedSections.length
+      && todayKey >= datedSections[0] && todayKey <= datedSections[datedSections.length - 1]);
     const initDay = (todayInTrip && (datedSections.find(k => k >= todayKey) || datedSections[datedSections.length - 1])) || currentTopDay();
     if (initDay) {
       selectedDay = initDay; setActiveDate(initDay); recenterCal(false);
       if (todayInTrip) {
-        // Jump to today's spot in the itinerary -- but the first attempt runs before
-        // the browser has finished its first layout pass, so --tv-topbar-h can still
-        // be measuring a header that hasn't settled (fonts, the weather chips in each
-        // day bar, the wrapping title). A topbar measured even slightly TALLER than it
-        // ends up scrolls the section that much too far, tucking the day header and
-        // the day's first event rows up under the frozen header -- which is exactly
-        // "the top event isn't the first event of the day".
-        // So: land it immediately (no visible lurch on a fast load), then re-measure
-        // and re-align once layout has actually settled. Bails the moment the owner
-        // touches the page, so a late correction can never yank the view out from
-        // under someone already reading it.
+        // Jump to today's spot in the itinerary. ONE attempt is not enough, and the
+        // failure is silent: on a long trip the page is still growing when this first
+        // runs (fonts, the per-day weather chips, the day bars all settling), so an
+        // early scroll gets CLAMPED against a document shorter than its final height
+        // -- it lands short, or not at all, and Travel View sits on the first day.
+        // A double-rAF isn't reliably late enough either on a 17-day itinerary.
+        // So: re-assert the position over a short window, re-measuring the topbar each
+        // time (--tv-topbar-h can also still be settling, and a topbar measured tall
+        // scrolls too far, hiding the day's first rows under the frozen header).
+        // Each pass is a no-op once it's already correct -- scrollItineraryTo returns
+        // early under 1px -- so this costs nothing after it lands, and it stops the
+        // moment the owner touches the page, so a late correction can never yank the
+        // view out from under someone already reading it.
         let ownerScrolled = false;
         const markOwnerScrolled = () => { ownerScrolled = true; };
         ['wheel', 'touchstart', 'keydown'].forEach(evName =>
@@ -28177,10 +28201,13 @@ async function renderTravelView(chosenTripKey) {
           if (ownerScrolled) return;
           measureTopbar();
           scrollItineraryTo(initDay, false);
-          recenterCal(false);
         };
         scrollItineraryTo(initDay, false);
+        recenterCal(false);
         requestAnimationFrame(() => requestAnimationFrame(settleAlign));
+        [120, 350, 800].forEach(ms => setTimeout(settleAlign, ms));
+        // Images/fonts finishing after all of the above (a cold load) get one last pass.
+        if (document.readyState !== 'complete') window.addEventListener('load', settleAlign, { once: true });
       }
     }
   }
