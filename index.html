@@ -18610,6 +18610,31 @@ async function buildTripsyPrintHtml(tripKey) {
   await tripsyFixCachedNarrativeUnicodeForTrip(tripKey, narrativeCache);
   const summaryEntry = narrativeCache[`${tripKey}::summary`];
   const summaryBlurbByKey = new Map((summaryEntry ? summaryEntry.content.rows : []).map(r => [r.row_key, r.blurb]));
+  // A SUMMARY BLURB STOPS SHOWING AS SOON AS ITS EVENT NO LONGER MATCHES IT. The blurbs
+  // are cached by event id, which survives an edit, so a retitled or relocated event went
+  // on describing its old self here while its Detailed card (built from live data) showed
+  // the change -- on EVERY open, not just the one through the changes dialog. Compared
+  // against the itinerary baseline's per-event blurb fingerprint (start/end excluded: a
+  // blurb says what an event is, never when), so a pure time move keeps its text. A
+  // suppressed row falls back to tripsySummaryRowFallbackText, the event's own current
+  // description. This covers the window BEFORE the owner acknowledges the change; the
+  // changes dialog then either regenerates the row or drops it outright, which is what
+  // makes it permanent once the baseline moves.
+  // Keyed off the UNEXPANDED events, since expandMultiDayTripsyEvents rewrites summary/
+  // start/end on a split half and its fingerprint would never match the baseline's.
+  // tripsyItineraryEventKey reads tripsyRaw, which both halves share, so a hotel's
+  // check-in and check-out rows both resolve to the one underlying event.
+  const staleBlurbEventKeys = new Set();
+  const itinBaselineEntry = narrativeCache[`${tripKey}${TRIPSY_ITIN_BASELINE_SUFFIX}`];
+  if (itinBaselineEntry && itinBaselineEntry.bfp) {
+    for (const ev of await tripsyItineraryEventList(trip)) {
+      const evKey = tripsyItineraryEventKey(ev);
+      const prev = itinBaselineEntry.bfp[evKey];
+      // Absent = added since the baseline, so it has no cached blurb to be wrong.
+      if (prev != null && prev !== tripsyItineraryBlurbFingerprint(ev)) staleBlurbEventKeys.add(evKey);
+    }
+  }
+  const summaryBlurbIsStale = item => !!(item && item.ev && staleBlurbEventKeys.has(tripsyItineraryEventKey(item.ev)));
 
   // ---- Cover header: "Kagan Trip to <countries, or states if entirely
   // domestic>" plus the trip's date range, derived from the same place
@@ -18657,7 +18682,7 @@ async function buildTripsyPrintHtml(tripKey) {
       // (<tripKey>::eventblurb::<rowKey>) lives ONLY on the Detailed
       // Itinerary card -- it would blow out a one-line summary row -- so
       // it's intentionally NOT consulted here.
-      const text = (rowKey && tripsySummaryRowWantsBlurb(item) && summaryBlurbByKey.get(rowKey))
+      const text = (rowKey && tripsySummaryRowWantsBlurb(item) && !summaryBlurbIsStale(item) && summaryBlurbByKey.get(rowKey))
         || tripsySummaryRowFallbackText(item);
       const timeLabel = tripsySummaryRowTime(item);
       return `
