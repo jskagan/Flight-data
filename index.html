@@ -28138,12 +28138,30 @@ async function renderTravelView(chosenTripKey) {
       }
       return found || firstVisible;
     };
+    // Where a day section sits inside the scroll container's CONTENT, in scrollTop
+    // units. Summed from offsetTop up the offsetParent chain (.tv-daysec ->
+    // .tv-timeline, which is position:relative -> .tv-root), which is a pure layout
+    // measurement: unlike getBoundingClientRect().top it does not move as the page
+    // scrolls, so the value is the same no matter when it's read.
+    const contentTopOf = el => {
+      let y = 0;
+      for (let node = el; node && node !== root; node = node.offsetParent) y += node.offsetTop;
+      return y;
+    };
+    // ABSOLUTE target, never a relative delta. A delta-based scroll fails in BOTH
+    // directions here and neither failure is visible in the code: computed while the
+    // page is still growing it gets clamped and lands short (Travel View opening on
+    // day 1), and computed again by a retry before the previous scroll has settled it
+    // adds a second full delta and overshoots (landing mid-way down a later day).
+    // Setting an absolute scrollTop is idempotent -- every pass computes the same
+    // target and re-running it is a no-op, so retries can only ever converge.
     const scrollItineraryTo = (day, smooth) => {
       const sec = document.getElementById(`tv-day-${day}`); if (!sec) return;
-      const delta = sec.getBoundingClientRect().top - usableTopY();
-      if (Math.abs(delta) < 1) return;
+      const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
+      const target = Math.max(0, Math.min(contentTopOf(sec) - topbarH(), maxTop));
+      if (Math.abs(root.scrollTop - target) < 1) return;
       itinLockUntil = Date.now() + 800; // ignore the scroll this triggers while it animates
-      root.scrollBy({ top: delta, behavior: smooth ? 'smooth' : 'auto' });
+      root.scrollTo({ top: target, behavior: smooth ? 'smooth' : 'auto' });
     };
     // Change the selection: highlight, buzz, keep the highlight on-screen now, and
     // (re)schedule the debounced ~0.5s snap-back to the 4th/5th slot.
@@ -28206,6 +28224,17 @@ async function renderTravelView(chosenTripKey) {
         recenterCal(false);
         requestAnimationFrame(() => requestAnimationFrame(settleAlign));
         [120, 350, 800].forEach(ms => setTimeout(settleAlign, ms));
+        // One line naming every input to the jump, so "it opened on the wrong day"
+        // can be read off rather than guessed at: which day it decided today is,
+        // which section it aimed for, and where that actually put the scroll.
+        setTimeout(() => {
+          const sec = document.getElementById(`tv-day-${initDay}`);
+          console.log(`[travel view] today=${todayKey} initDay=${initDay}`
+            + ` | sections ${datedSections[0]}..${datedSections[datedSections.length - 1]}`
+            + ` | topbar ${Math.round(topbarH())}px, scrollTop ${Math.round(root.scrollTop)}`
+            + (sec ? `, target ${Math.round(contentTopOf(sec) - topbarH())}` : ', target n/a (no section)')
+            + (ownerScrolled ? ' | owner scrolled, alignment stopped early' : ''));
+        }, 900);
         // Images/fonts finishing after all of the above (a cold load) get one last pass.
         if (document.readyState !== 'complete') window.addEventListener('load', settleAlign, { once: true });
       }
