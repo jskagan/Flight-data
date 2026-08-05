@@ -2350,13 +2350,16 @@ const Store = {
       return false;
     }
   },
-  // Tripsy Trips edit/delete actions can't touch the real Tripsy account or
-  // the deployed index.html directly (the browser has no Tripsy API access
-  // and no way to write to a static GitHub Pages file) -- so instead they
-  // queue an intent here, in the same shared driveData every device reads.
-  // A Claude Code session later applies the queue against Tripsy's real API
-  // and republishes a fresh encrypted snapshot, which is also when these
-  // entries get cleared.
+  // VESTIGIAL, AND PERMANENTLY EMPTY since the 2026-08-04 migration. This used to be a
+  // queue of intents: with trip data baked into the deployed index.html as an encrypted
+  // snapshot, the browser had no way to actually apply an edit, so it recorded one here
+  // and a Claude Code session later replayed the queue against Tripsy's API and
+  // republished the snapshot. Now Store.queueTripsyChange (name kept for its dozens of
+  // call sites) applies each change straight to trips-data.json in Drive, so nothing is
+  // ever queued. The array and its readers survive because the timeline's pending-overlay
+  // plumbing (getEffectiveTripsyEvent/getEffectiveTripsyTrip, pendingCreates,
+  // cancelTripsyChange) reads them and is inert-on-empty by construction -- cheaper to
+  // leave correct than to unpick. Do not build anything new on it.
   async listTripsyPendingChanges() {
     return [...(driveData.tripsyPendingChanges || [])];
   },
@@ -6990,7 +6993,7 @@ async function renderUtilitiesUsers() {
     </div>
 
     <div class="card">
-      <div class="card-title">3. Share the data file with them in Google Drive</div>
+      <div class="card-title">3. Share the data files with them in Google Drive</div>
       <p style="color:var(--text); line-height:1.6; font-size:14px;">
         In Google Drive, find <strong>flight-log-data.json</strong>, right-click → <strong>Share</strong> → enter the <em>same exact email</em> used in step 2 → choose:
       </p>
@@ -7002,8 +7005,10 @@ async function renderUtilitiesUsers() {
         The email here must match the one used in Step 2 exactly, or they'll sign in fine but see "no shared data found."
       </p>
       <p style="color:var(--text); line-height:1.6; font-size:14px; margin-top:10px;">
-        For them to see the <strong>My Trips</strong> / <strong>Travel View</strong> itinerary, also Share the
-        <strong>"Tripsy Trips Passphrase"</strong> file with the same email (Viewer) -- that's what unlocks the trip data.
+        For them to see the <strong>My Trips</strong> / <strong>Travel View</strong> itinerary, share
+        <strong>trips-data.json</strong> the same way, with the same email, as <strong>Viewer</strong>. Trip data lives in
+        its own Drive file, so sharing <strong>flight-log-data.json</strong> alone gets them everything <em>except</em> the
+        trips. Viewer is the right level even for someone you gave Editor above -- trip editing is owner-only in the app.
       </p>
     </div>
 
@@ -7087,9 +7092,9 @@ async function renderUtilitiesTripsOnly() {
       <p style="color:var(--muted); line-height:1.6; font-size:12.5px; margin-top:6px;">This is what lets them read the shared data (weather, document icons). Keep it "Viewer," never "Editor."</p>
     `)}
 
-    ${step(4, 'Share the passphrase file with them (Viewer)', `
-      ${p(`Still in Drive, find <strong>"Tripsy Trips Passphrase"</strong> → <strong>Share</strong> → same email → <strong>Viewer</strong> → Send.`)}
-      <p style="color:var(--muted); line-height:1.6; font-size:12.5px; margin-top:6px;">This is what unlocks the encrypted trip data so My Trips / Travel View actually show the itinerary. Without it they'd see a "locked / enter passphrase" screen.</p>
+    ${step(4, 'Share the trips file with them (Viewer)', `
+      ${p(`Still in Drive, find <strong>trips-data.json</strong> → <strong>Share</strong> → same email → <strong>Viewer</strong> → Send.`)}
+      <p style="color:var(--muted); line-height:1.6; font-size:12.5px; margin-top:6px;">Trip data lives in its own file, so this is what makes My Trips / Travel View actually show the itinerary. Without it they sign in fine and see everything <em>except</em> the trips. Keep it "Viewer" — trip editing is owner-only in the app regardless.</p>
     `)}
 
     ${step(5, 'Turn on "Trips-only" for them', `
@@ -9955,9 +9960,9 @@ async function renderUsersListBody() {
       <p style="color:var(--muted); font-size:12px; margin-top:8px; line-height:1.5;">
         <strong>Trips-only</strong> limits that person to just the <strong>My Trips</strong> and <strong>Travel View</strong> pages
         (the NetJets and P/S pages are hidden). They stay read-only either way. Takes effect at their <strong>next</strong> sign-in.
-        For trips to unlock, also share the <strong>"Tripsy Trips Passphrase"</strong> file with their Google account in Drive
-        (same as the data file). Note: this scopes what they <em>see</em> in the app -- it does not stop a technically-savvy
-        person from reading the raw shared file directly.
+        For trips to appear at all, also share <strong>trips-data.json</strong> with their Google account in Drive
+        (same as the data file) -- trip data lives in its own file. Note: this scopes what they <em>see</em> in the app --
+        it does not stop a technically-savvy person from reading the raw shared files directly.
       </p>
     `;
     body.querySelectorAll('[data-user-access-toggle]').forEach(cb => {
@@ -10747,17 +10752,14 @@ function isTripsyEventEffectivelyHidden(ev) {
   return !!ev.hidden;
 }
 
-// The Drive-hosted trip database ("step 2" of the Tripsy migration): trips
-// live as plain JSON in a private Drive file instead of the encrypted
-// TRIPSY_ENCRYPTED snapshot baked into this page. Privacy is Drive sharing
-// itself (the file never touches the public repo), exactly like
-// flight-log-data.json -- so no passphrase and no client-side crypto are
-// involved on this path. Shape: { schemaVersion: 1, updatedAt, trips: [...] }
-// where trips[] is the trip/event shape tools/build_tripsy_snapshot.py
-// produced at migration time, so everything
-// downstream is unchanged. While the migration is in progress this is the
-// PRIMARY source with the encrypted snapshot as fallback -- see
-// ensureTripsyDecrypted.
+// The Drive-hosted trip database, and since the 2026-08-04 migration completed, the
+// ONLY source: trips live as plain JSON in a private Drive file. The encrypted snapshot
+// that used to be baked into this page (and the passphrase and client-side crypto that
+// went with it) is gone -- privacy is Drive sharing itself, the file never touching the
+// public repo, exactly like flight-log-data.json.
+// Shape: { schemaVersion: 1, updatedAt, trips: [...] } where trips[] is the trip/event
+// shape tools/build_tripsy_snapshot.py produced at migration time, so everything
+// downstream is unchanged.
 const TRIPS_DATA_DRIVE_FILENAME = 'trips-data.json';
 // File id + head revision of trips-data.json, captured at load so writes can
 // use the same optimistic-concurrency guard flight-log-data.json has (see
@@ -10773,9 +10775,9 @@ async function fetchTripsDataFromDrive() {
   const q = encodeURIComponent(`name='${TRIPS_DATA_DRIVE_FILENAME}' and trashed=false`);
   const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,modifiedTime,headRevisionId)&spaces=drive`);
   const json = await res.json();
-  // Guard against the passphrase file's old trap: a same-named Google-native
-  // Doc can't be fetched with alt=media, so only real files count; prefer the
-  // most recently modified if duplicates ever exist.
+  // Guard against the trap the old passphrase file fell into: a same-named
+  // Google-native Doc can't be fetched with alt=media, so only real files count;
+  // prefer the most recently modified if duplicates ever exist.
   const candidates = ((json.files || []))
     .filter(f => !(f.mimeType || '').startsWith('application/vnd.google-apps'))
     .sort((a, b) => (b.modifiedTime || '').localeCompare(a.modifiedTime || ''));
@@ -10893,9 +10895,8 @@ const ANTHROPIC_KEY_DRIVE_FILENAME = 'Claude Narrative API Key';
 // dedicated Drive file limits exposure to whoever the owner explicitly
 // shares that file with -- see openTripsyItineraryPrintView, which only
 // calls this for isOwner. No localStorage fallback and no manual-entry
-// form (unlike the passphrase) -- narrative generation is optional and
-// non-blocking, so a fetch failure just means no narrative this print,
-// not a broken page.
+// form -- narrative generation is optional and non-blocking, so a fetch
+// failure just means no narrative this print, not a broken page.
 async function fetchAnthropicApiKeyFromDrive() {
   const q = encodeURIComponent(`name='${ANTHROPIC_KEY_DRIVE_FILENAME}' and mimeType='text/plain' and trashed=false`);
   const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&spaces=drive`);
@@ -10915,8 +10916,8 @@ async function fetchAnthropicApiKeyFromDrive() {
 // the click goes through a tiny Cloudflare Worker that holds the routine token
 // and calls /fire server-side. The Worker is gated by a shared secret the app
 // reads at click time from an owner-only Drive file (same private-Drive-file
-// pattern as the passphrase / narrative key above) -- so only the owner, who
-// alone can read that file, can trigger a refresh. Owner-only.
+// pattern as the narrative key above) -- so only the owner, who alone can read
+// that file, can trigger a refresh. Owner-only.
 const TRIPSY_REFRESH_WORKER_URL = 'https://tripsy-refresh-proxy.jskagan.workers.dev/';
 const TRIPSY_REFRESH_WORKER_SECRET_FILENAME = 'Tripsy Refresh Worker Secret';
 
@@ -11950,7 +11951,7 @@ function tripsyShortenPlaceDescription(desc) {
 // country name. Works on ev.location directly (rather than a field added to
 // tripsyRawToDisplay) so it applies uniformly whether this event's display
 // fields came from a fresh tripsyRawToDisplay call (a pending edit) or
-// straight from the encrypted snapshot (the common case, precomputed by
+// straight from trips-data.json (the common case, precomputed at migration time by
 // tools/build_tripsy_snapshot.py, which never runs this JS function at all).
 function tripsyShortenRouteLocation(location) {
   if (!location) return location;
@@ -12054,8 +12055,8 @@ function tripsyRawToDisplay(resource, raw) {
     // at that one call site instead of a field added here) uses this as a
     // detail/meta line, where the full address is exactly what's wanted.
     // NOT computing a shortened variant here: for an event with no pending
-    // edit, `location` comes straight from the encrypted snapshot (built by
-    // tools/build_tripsy_snapshot.py) rather than a fresh call to this
+    // edit, `location` comes straight from trips-data.json (built at migration
+    // time by tools/build_tripsy_snapshot.py) rather than a fresh call to this
     // function -- a field only this JS function knew how to compute would
     // silently be missing on every un-edited event, the vast majority of
     // them. Deriving the short form from `location` itself at the one
@@ -23960,10 +23961,10 @@ function renderTripsyEventsList() {
   // tripsyDecryptedTrips is populated -- refresh the global status badge from
   // that same data so it doesn't sit green while a trip shows a yellow conflict
   // triangle. syncTripsyRelays already tries a silent unlock before its own
-  // badge refresh, which covers the startup case on any device that can unlock
-  // without prompting; this covers the rest (first visit to a device, a rotated
-  // passphrase, or a manual unlock), where the badge can't see conflicts until
-  // something decrypts. So the two agree from the first render onward, not
+  // badge refresh, which covers the startup case on any device that already has the
+  // trips loaded; this covers the rest (a first visit to a device, or any render that
+  // beats the trips-data.json fetch), where the badge can't see conflicts until
+  // something loads them. So the two agree from the first render onward, not
   // necessarily before it. Best-effort, owner-only; runs alongside (not in
   // place of) the returned promise below.
   run.then(() => { if (isOwner) return updateTripsyStatusBadge(); }).catch(() => {});
@@ -28189,11 +28190,11 @@ async function renderHome() {
     window.open("https://reservations.reserveps.com/ps/sign_in", "_blank", "noopener");
   });
 
-  // Deferred, NOT awaited: decrypting Tripsy trips (passphrase fetch + PBKDF2 ~250k)
-  // is the single slowest step on Home (~0.8s desktop, more on iPad). Running it
+  // Deferred, NOT awaited: loading the trips (a trips-data.json fetch from Drive) is
+  // the single slowest step on Home. Running it
   // unawaited lets the rest of Home paint and the app reveal immediately; this card
-  // fills in over its "Loading…" placeholder when the decrypt resolves. (On later
-  // in-app navigations the decrypt is memoized, so it's effectively instant.) Because
+  // fills in over its "Loading…" placeholder when the load resolves. (On later
+  // in-app navigations the loaded trips are memoized, so it's effectively instant.) Because
   // it's async now, guard every DOM lookup -- the owner may have navigated away from
   // Home before it resolves.
   (async () => {
