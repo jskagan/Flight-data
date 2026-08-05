@@ -12357,9 +12357,16 @@ function tripsyWireEditFormChangeDetection(panel, saveDataAttr, fieldSelector) {
   const initialValues = new Map(inputs.map(el => [el, el.value]));
   const buttonsRow = panel.querySelector(`[${saveDataAttr}]`)?.parentElement;
   if (!buttonsRow) return;
+  // RESTORE THE ROW'S OWN display, not ''. The buttons row carries an INLINE
+  // `display:flex` (tripsyEditActionButtonsHtml lays Save/Cancel out side by side);
+  // setting .style.display = '' deletes that declaration rather than reverting it, so
+  // the div fell back to `display:block` and the two buttons stacked VERTICALLY the
+  // moment the form became dirty -- i.e. always, by the time anyone saw them. Captured
+  // once here, before the first hide, so this keeps working if the layout ever changes.
+  const shownDisplay = buttonsRow.style.display || 'flex';
   const updateVisibility = () => {
     const changed = inputs.some(el => el.value !== initialValues.get(el));
-    buttonsRow.style.display = changed ? '' : 'none';
+    buttonsRow.style.display = changed ? shownDisplay : 'none';
   };
   updateVisibility();
   inputs.forEach(el => {
@@ -12468,6 +12475,36 @@ async function tripsyGuardPanelClose(panel) {
   return true; // discard
 }
 
+// Close one of the My Trips timeline's shared per-row panels, whatever mode it's in.
+// The teardown (hide, empty, clear mode, un-highlight the ✏️, re-run the connectors)
+// was copy-pasted into every handler that closes one; the unsaved-changes guard below
+// needs it from a fourth place, so it lives here once.
+function tripsyCloseTimelineRowPanel(panel) {
+  if (!panel) return;
+  const key = panel.getAttribute('data-tripsy-edit-panel');
+  panel.style.display = 'none';
+  panel.innerHTML = '';
+  panel.dataset.mode = '';
+  if (key) setTripsyEditIconActive(key, false);
+  positionTripsyTimelineConnectors();
+}
+// The open per-event EDIT form on the My Trips timeline, or null. Only 'edit' mode:
+// a read-only view panel has nothing to lose and is closed without ceremony.
+function tripsyOpenTimelineEditPanel() {
+  return [...document.querySelectorAll('[data-tripsy-edit-panel]')]
+    .find(p => p.style.display !== 'none' && p.dataset.mode === 'edit') || null;
+}
+// Guard + close for the timeline's per-event edit form. Returns true when the caller
+// should carry on (nothing open, nothing unsaved, or the owner chose Discard), false
+// when it must abort (Keep editing, or Save -- which closes the panel itself on
+// success). Every path that would DROP a half-typed edit routes through this: clicking
+// away, clicking the same ✏️ again, and switching the row back to its read-only view.
+async function tripsyGuardTimelineEditPanel(panel) {
+  if (!panel) return true;
+  if (!(await tripsyGuardPanelClose(panel))) return false;
+  tripsyCloseTimelineRowPanel(panel);
+  return true;
+}
 // Renders the inline edit form for one Tripsy-sourced event's raw fields
 // into `panel`, wiring Save (queues an edit_event pending change) and Exit
 // without saving. `raw` is the CURRENT effective raw fields (including any
@@ -23565,10 +23602,19 @@ function tripsyCloseOpenViewPanels() {
   });
   if (closedAny) positionTripsyTimelineConnectors();
 }
-function tripsyHandleTimelineOutsideClick(e) {
+async function tripsyHandleTimelineOutsideClick(e) {
   if (currentView !== 'tripsytrips') return;
+  if (_tripsyDiscardDialogOpen) return; // clicks on the Save/Discard dialog itself
   // These own the panel's open/switch behavior -- don't fight them.
   if (e.target.closest('[data-tripsy-edit-panel], [data-tripsy-view-event], [data-tripsy-view-ps-reservation], [data-tripsy-edit-event], [data-tripsy-edit-pending-create]')) return;
+  // An open EDIT form with unsaved edits asks before it's dropped. Only when dirty:
+  // a clean form is left open exactly as before, so clicking around the page doesn't
+  // silently close a form the owner is still working in.
+  const editPanel = tripsyOpenTimelineEditPanel();
+  if (editPanel && typeof editPanel._tripsyIsDirty === 'function' && editPanel._tripsyIsDirty()) {
+    await tripsyGuardTimelineEditPanel(editPanel);
+    return; // Save/Discard/Keep-editing all resolve this click on their own
+  }
   tripsyCloseOpenViewPanels();
 }
 
@@ -25123,6 +25169,10 @@ async function renderTripsyEventsListImpl() {
       const key = el.dataset.tripsyViewEvent;
       const panel = container.querySelector(`[data-tripsy-edit-panel="${key}"]`);
       if (!panel) return;
+      // Clicking a row while ANY edit form is open replaces it -- ask before dropping
+      // unsaved edits, whether that form belongs to this row or another one.
+      const openEdit = tripsyOpenTimelineEditPanel();
+      if (openEdit && !(await tripsyGuardTimelineEditPanel(openEdit))) return;
       if (panel.style.display !== "none" && panel.dataset.mode === "view") {
         panel.style.display = "none";
         panel.innerHTML = "";
@@ -25612,11 +25662,8 @@ async function renderTripsyEventsListImpl() {
       // form rather than closing it.
       const isEditOpen = panel.style.display !== "none" && panel.dataset.mode === "edit";
       if (isEditOpen) {
-        panel.style.display = "none";
-        panel.innerHTML = "";
-        panel.dataset.mode = "";
-        setTripsyEditIconActive(key, false);
-        positionTripsyTimelineConnectors();
+        // Toggling the form shut with unsaved edits asks first, same as clicking away.
+        await tripsyGuardTimelineEditPanel(panel);
         return;
       }
       const found = findTripsyRawByKey(key);
