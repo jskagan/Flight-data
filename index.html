@@ -27498,6 +27498,47 @@ function showTripsyTravelDocs(atts) {
 // lodging banners, day ordinals, titles/subtitles, and times. Reuses the My
 // Trips timeline's own dot-color/icon/detail-line helpers so it stays visually
 // consistent. Never a trapped mode -- the ✕ clears the pref and returns Home.
+//
+// "Today" for Travel View's initial scroll-to-today jump -- in the TRIP'S OWN
+// local time, never the viewer's device clock. Event dayKeys are literal
+// destination-local wall-clock digits with no real UTC offset (see CLAUDE.md's
+// "Display times are the event's own local time, not the viewer's" rule); a
+// device whose OS timezone hasn't caught up to where the traveler actually is
+// (a WiFi-only iPad, or checking the itinerary before departure) disagrees with
+// that by exactly one day right around midnight in either zone -- which is what
+// put TOMORROW's date header at the top instead of today's.
+// `new Date()` still gives a real UTC instant (unlike the event dayKeys, which
+// carry none) -- reinterpret THAT through an IANA zone actually carried on one
+// of this trip's own events (hosting/activity's `timezone`, or a transportation
+// leg's `departureTimezone`/`arrivalTimezone`), and use whichever zone's "today"
+// both falls within the trip's own date range AND is within a day of the
+// device's own guess -- that guard is what stops one stray/wrong timezone on an
+// odd record from hijacking the result. Falls back to the device's own local
+// date when nothing on the trip qualifies (no events yet, or none carry a
+// timezone at all).
+function tripsyTravelViewTodayKey(trip, firstDay, lastDay) {
+  const deviceD = new Date();
+  const deviceToday = `${deviceD.getFullYear()}-${String(deviceD.getMonth() + 1).padStart(2, '0')}-${String(deviceD.getDate()).padStart(2, '0')}`;
+  if (!firstDay || !lastDay) return deviceToday;
+  const zones = [];
+  const seenZones = new Set();
+  for (const ev of (trip.events || [])) {
+    const r = ev.tripsyRaw || {};
+    for (const tz of [r.timezone, r.departureTimezone, r.arrivalTimezone]) {
+      if (tz && !seenZones.has(tz)) { seenZones.add(tz); zones.push(tz); }
+    }
+  }
+  const dayIndex = k => { const [y, m, dd] = k.split('-').map(Number); return Math.round(Date.UTC(y, m - 1, dd) / 86400000); };
+  const deviceIdx = dayIndex(deviceToday);
+  for (const tz of zones) {
+    let zoneToday;
+    try { zoneToday = new Date().toLocaleDateString('en-CA', { timeZone: tz }); } catch (e) { continue; } // bad/unknown IANA name
+    if (!zoneToday || zoneToday < firstDay || zoneToday > lastDay) continue;
+    if (Math.abs(dayIndex(zoneToday) - deviceIdx) > 1) continue; // implausibly far from the device's own guess
+    return zoneToday;
+  }
+  return deviceToday;
+}
 async function renderTravelView(chosenTripKey) {
   ensureTravelViewStyles();
   const exit = () => { saveTravelViewPref(false); navigate('home'); };
@@ -27571,8 +27612,6 @@ async function renderTravelView(chosenTripKey) {
   // month/year label -- all off the literal dayKey, no timezone reinterpretation.
   const partsOf = dayKey => { const [y, m, d] = dayKey.split('-').map(Number); return tripPartsToUtcDate({ year: y, month: m, day: d }); };
   const dayHeader = dayKey => partsOf(dayKey).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }).toUpperCase();
-  const d = new Date();
-  const todayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
   // Event-scoped document attachments, keyed by eventKey ("resource:id") like the
   // My Trips timeline, so an event with attached docs can show a doc icon.
@@ -27612,6 +27651,10 @@ async function renderTravelView(chosenTripKey) {
   const firstDay = tripsyDayKey(trip.start) || [...eventsByDay.keys()].filter(k => k !== 'undated').sort()[0] || null;
   const lastDay = tripsyDayKey(trip.end) || [...eventsByDay.keys()].filter(k => k !== 'undated').sort().pop() || firstDay;
   const tripStartKey = firstDay;
+  // "Today", for the initial scroll-to-today jump below -- in the TRIP'S OWN local
+  // time, not the viewer's device clock. See tripsyTravelViewTodayKey's own comment
+  // for why the device clock alone puts the wrong day at the top.
+  const todayKey = tripsyTravelViewTodayKey(trip, firstDay, lastDay);
   const allDays = (firstDay && lastDay) ? tripsyDayKeyRange(firstDay, lastDay) : [...eventsByDay.keys()];
   if (eventsByDay.has('undated')) allDays.push('undated');
 
@@ -28061,8 +28104,15 @@ async function renderTravelView(chosenTripKey) {
     };
     // Day whose section sits at the top of the usable area (just below the frozen
     // header + calendar) -- the adjacent date bar the selection should match.
+    // Viewport y of the usable area's top edge -- just under the frozen header.
+    // Measured from the SCROLL CONTAINER's own box rather than assuming it starts at
+    // viewport 0. .tv-root is position:fixed/inset:0, so that's normally true, but a
+    // transformed ancestor or iOS's visual-viewport offset (URL bar, keyboard) moves
+    // it -- and every jump then lands that many pixels too far down the page, pushing
+    // the target day's header and its first events up behind the frozen header.
+    const usableTopY = () => root.getBoundingClientRect().top + topbarH();
     const currentTopDay = () => {
-      const line = topbarH() + 2; let found = null, firstVisible = null;
+      const line = usableTopY() + 2; let found = null, firstVisible = null;
       for (const k of sectionDays) {
         const s = document.getElementById(`tv-day-${k}`);
         if (!s || s.offsetParent === null) continue; // skip filtered-out (hidden) days
@@ -28073,7 +28123,7 @@ async function renderTravelView(chosenTripKey) {
     };
     const scrollItineraryTo = (day, smooth) => {
       const sec = document.getElementById(`tv-day-${day}`); if (!sec) return;
-      const delta = sec.getBoundingClientRect().top - topbarH();
+      const delta = sec.getBoundingClientRect().top - usableTopY();
       if (Math.abs(delta) < 1) return;
       itinLockUntil = Date.now() + 800; // ignore the scroll this triggers while it animates
       root.scrollBy({ top: delta, behavior: smooth ? 'smooth' : 'auto' });
@@ -28107,7 +28157,31 @@ async function renderTravelView(chosenTripKey) {
     const initDay = (todayInTrip && (datedSections.find(k => k >= todayKey) || datedSections[datedSections.length - 1])) || currentTopDay();
     if (initDay) {
       selectedDay = initDay; setActiveDate(initDay); recenterCal(false);
-      if (todayInTrip) scrollItineraryTo(initDay, false); // jump to today's spot in the itinerary
+      if (todayInTrip) {
+        // Jump to today's spot in the itinerary -- but the first attempt runs before
+        // the browser has finished its first layout pass, so --tv-topbar-h can still
+        // be measuring a header that hasn't settled (fonts, the weather chips in each
+        // day bar, the wrapping title). A topbar measured even slightly TALLER than it
+        // ends up scrolls the section that much too far, tucking the day header and
+        // the day's first event rows up under the frozen header -- which is exactly
+        // "the top event isn't the first event of the day".
+        // So: land it immediately (no visible lurch on a fast load), then re-measure
+        // and re-align once layout has actually settled. Bails the moment the owner
+        // touches the page, so a late correction can never yank the view out from
+        // under someone already reading it.
+        let ownerScrolled = false;
+        const markOwnerScrolled = () => { ownerScrolled = true; };
+        ['wheel', 'touchstart', 'keydown'].forEach(evName =>
+          root.addEventListener(evName, markOwnerScrolled, { passive: true, once: true }));
+        const settleAlign = () => {
+          if (ownerScrolled) return;
+          measureTopbar();
+          scrollItineraryTo(initDay, false);
+          recenterCal(false);
+        };
+        scrollItineraryTo(initDay, false);
+        requestAnimationFrame(() => requestAnimationFrame(settleAlign));
+      }
     }
   }
 }

@@ -290,6 +290,19 @@ step 4; git history has it if ever needed.
   by `parseTripLocalParts`/`formatTripTime` (`index.html:6235` area) rather than being
   reinterpreted through the browser's own time zone — a flight's 4:25pm departure should read
   4:25pm no matter where the app is being viewed from.
+  **The corollary bites when you need "today"**: because event days carry no real offset, comparing
+  them against a device-clock date is comparing two different things. Travel View's open-on-today
+  jump got this wrong and opened on TOMORROW for a traveler whose device timezone hadn't caught up
+  (a WiFi-only iPad, or checking before departure) — one day off across the midnight boundary.
+  `tripsyTravelViewTodayKey(trip, firstDay, lastDay)` takes the real UTC instant (`new Date()` is
+  still trustworthy for that — only deriving a LOCAL date from it was wrong) and reinterprets it
+  through an IANA zone actually carried on one of the trip's own events (`timezone`, or a
+  transportation leg's `departureTimezone`/`arrivalTimezone`), accepting it only when that zone's
+  today falls inside the trip's date range AND is within a day of the device's own guess — the
+  second guard stops one stray or malformed zone on an odd record from hijacking the answer. Falls
+  back to the device date when nothing qualifies. Note `tripsyTravelTripCandidates` still uses a
+  device-local today deliberately: it picks WHICH trip is current, so there's no trip-specific zone
+  to reinterpret through yet.
 - **Itinerary/day views start from the earliest event, not the trip's `start_date`**: the day
   ranges, "Day N" numbering, and empty-day span all derive their first day from
   `tripsyItineraryStartDayKey(trip)` — the earliest day any visible, dated event falls on — rather
