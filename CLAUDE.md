@@ -704,7 +704,8 @@ a separate always-close button lands beside it on the detail screen wearing the 
   nothing to select the jeans against, and `composeTripsyOutfits` — whose pool is whatever is
   SELECTED for the trip — never knew they existed, even though they're on your body all trip. So
   each claimed role also gets a **companion need line** in the same tier, named
-  `"<line> — wearing on the flight"` (`TRIPSY_FLIGHT_WORN_SUFFIX`), need 1, flagged
+  `"<role> — wearing on the flight"` (`TRIPSY_FLIGHT_WORN_ROLE_LABEL` +
+  `TRIPSY_FLIGHT_WORN_SUFFIX`, so "Top"/"Bottoms"/"Shoes"), need 1, flagged
   `flightWorn: true`; essentials are skipped (underwear/socks are worn, not styled — no point
   asking which). Because selections are keyed `id::tier::line`, a pick against one of these flows
   into the composer's pool for free. Within a tier the claim goes to whichever line comes first,
@@ -713,7 +714,13 @@ a separate always-close button lands beside it on the detail screen wearing the 
   LAST (a tier with only shorts still claims one). That rank is typed off the line NAME, not
   `ln.typeKey`: the mix-and-match tiers collapse their lines to generic group lines, so
   casual/smart-casual/athletic lines carry no type at all — exactly the tiers a flight departs in.
-  `tripsyWardrobePackedNeedLines` strips them for **Packing
+  The companion is named for the ROLE, never for the line it was deducted from: on a
+  mix-and-match tier the claimed line is whichever the tier happened to offer, and this trip's
+  casual tier has only ONE bottoms line ("Shorts"), so `"Shorts — wearing on the flight"` read
+  plainly wrong when the garment being asked for is the jeans. Those tiers are untyped generic
+  group lines anyway, so any `pants` garment already matched — the specific word carried no
+  behaviour and only misled. A role name is also stable across regenerations, which the
+  `id::tier::line` selection key wants. `tripsyWardrobePackedNeedLines` strips them for **Packing
   Status**, which is a checklist of things to physically put in a bag; **Plan Packing List** keeps
   them, since picking which jeans you fly in is the whole point. `composeTripsyOutfits` reads the
   selection's stored line name through `tripsyWardrobeLineIsFlightWorn` to label those garments
