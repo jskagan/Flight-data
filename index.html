@@ -21660,7 +21660,12 @@ async function generateTripsyAttireGuide(tripKey) {
 // looked up by eventIds membership on both display surfaces (Daily Dress Guide boxes,
 // Travel View event taps). Needs a saved attire guide (for the schedule) AND a non-
 // empty Pack-For-Trip selection.
+// driveFileId -> Promise<base64 jpeg>, the 512px copies uploaded with the compose prompt.
+// Session-scoped and deliberately never persisted: it is a speed cache for repeated
+// regenerations, not data.
+const tripsyOutfitPhotoCache = new Map();
 async function composeTripsyOutfits(tripKey, person = 'him') {
+  const composeStart = performance.now();
   const guide = await Store.getTripsyAttireGuide(tripKey);
   if (!guide) throw new Error('Generate an attire guide for this trip first.');
   const [garments, selectedRaw, apiKey] = await Promise.all([
@@ -21704,14 +21709,32 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
     const meta = `[${tag}] ${g.name || 'garment'} — ${[g.color, typeKey, tiers, qty > 1 ? `own ${qty}` : '', worn].filter(Boolean).join(', ')}`;
     return { g, meta };
   });
+  // REGENERATING used to redo this whole phase from scratch: every garment photo
+  // downloaded from Drive again and re-resized, even though the bytes are identical to
+  // the run a minute earlier. On a full wardrobe selection that is dozens of round trips
+  // before the API call even starts, and it is the part of "why is regenerating so slow"
+  // that costs nothing to remove. Cached in memory for the session, keyed by Drive file
+  // id (the resize parameters are constant) -- a re-photographed garment gets a new
+  // driveFileId, so a stale entry can't outlive its picture. The PROMISE is cached, not
+  // the result, so two overlapping composes share one download rather than racing.
+  const photoStart = performance.now();
   const images = await Promise.all(items.map(async ({ g }) => {
     if (!g.driveFileId) return null;
-    try {
-      const blob = await downloadDriveFileBlob(g.driveFileId);
-      const small = await tripsyResizeImageBlob(blob, 512, 0.8);
-      return await tripsyFileToBase64(small);
-    } catch (e) { console.error('Outfit compose: photo load failed for', g.id, e); return null; }
+    let p = tripsyOutfitPhotoCache.get(g.driveFileId);
+    if (!p) {
+      p = (async () => {
+        const blob = await downloadDriveFileBlob(g.driveFileId);
+        const small = await tripsyResizeImageBlob(blob, 512, 0.8);
+        return await tripsyFileToBase64(small);
+      })();
+      // A failed load must not be remembered as a permanent "no photo".
+      p.catch(() => tripsyOutfitPhotoCache.delete(g.driveFileId));
+      tripsyOutfitPhotoCache.set(g.driveFileId, p);
+    }
+    try { return await p; } catch (e) { console.error('Outfit compose: photo load failed for', g.id, e); return null; }
   }));
+  const cachedCount = items.filter(({ g }) => g.driveFileId && tripsyOutfitPhotoCache.has(g.driveFileId)).length;
+  console.log(`[outfit timing] photos: ${Math.round(performance.now() - photoStart)}ms for ${cachedCount} garment photos (cache holds ${tripsyOutfitPhotoCache.size})`);
   const content = [];
   items.forEach((it, i) => {
     content.push({ type: 'text', text: it.meta });
@@ -21788,6 +21811,10 @@ Rules:
   };
   const ok = await Store.saveTripsyTripOutfits(outfits);
   if (!ok) throw new Error('Could not save the composed outfits.');
+  // Read alongside the "[attire timing] outfit composition" line the API call itself
+  // logs: total minus that, minus the photo phase, is the Drive read/write around them.
+  console.log(`[outfit timing] ${person}: ${Math.round(performance.now() - composeStart)}ms total`
+    + ` | ${chosen.length} garments, ${blocks.length} blocks`);
   return outfits;
 }
 // Runs Compose Outfits from the Attire toolbar button, then re-renders the guide so

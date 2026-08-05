@@ -661,6 +661,16 @@ a separate always-close button lands beside it on the detail screen wearing the 
   deleted events). A changed packing selection still flags via `selectionFingerprint`. This replaced
   a blunt `guide.eventFingerprint` comparison that fired on ANY event edit; `outfits.guideFingerprint`
   is still written but no longer consulted.
+- **Garment photos for the compose prompt are cached in memory** (`tripsyOutfitPhotoCache`,
+  `driveFileId` → `Promise<base64>`). A REGENERATE otherwise re-downloaded and re-resized every
+  selected garment's picture from Drive, identical bytes to the run a minute before — dozens of
+  round trips before the API call even starts. The PROMISE is cached (two overlapping composes
+  share one download) and a rejection evicts itself, so a transient failure isn't remembered as
+  "no photo"; a re-photographed garment gets a new `driveFileId`, so a stale entry can't outlive
+  its picture. Session-scoped, never persisted — a speed cache, not data. Two `[outfit timing]`
+  console lines (photo phase, and total with garment/block counts) sit alongside the
+  `[attire timing] outfit composition` line the API call itself logs, so the next "why is this
+  slow" is answered by reading the split rather than guessing.
 - **The "you finished — create outfits?" prompt** (`tripsyPackingCompleteDialog`, via
   `maybeCongratulate`) fires on the incomplete→complete transition, from the **Done** button or from
   `closePage`, *not* from every pick — picking the last garment used to interrupt mid-flow. Ordinary
