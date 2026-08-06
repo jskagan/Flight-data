@@ -649,6 +649,35 @@ reopens the first with fresh numbers. Both use one **contextual Close**: on a ga
 it returns to the list of need lines, on the list it closes the page. Keep that single-button shape —
 a separate always-close button lands beside it on the detail screen wearing the same label.
 
+- **Packing cubes: packing a garment IS assigning it to one.** Cubes are the physical zip cubes
+  garments go into, identified by three traits rather than a typed-in name — **brand** (Briggs &
+  Riley, Eagle Creek), **size** (Large/Medium/Small/Extra small) and **color** (Black, Blue, Purple,
+  Orange, Yellow, Gray, Brown, Zebra), as fixed lists (`TRIPSY_CUBE_BRANDS`/`_SIZES`/`_COLORS`;
+  extend them when a cube is bought and nothing else needs changing). Fixed rather than free text
+  because the label is DERIVED: `tripsyCubeName` reads "colour + size" ("Blue Medium") and appends
+  the brand ONLY when another cube shares that colour and size, so twins stay distinguishable while
+  everything else stays short — a "navy"/"Navy" typo would split one cube into two labels. Colour
+  and size are required, brand optional (it only ever disambiguates). A cube with no photo yet falls
+  back to a swatch of its own colour (`TRIPSY_CUBE_COLOR_CSS`; Zebra is a stripe pattern, since a
+  flat grey would be indistinguishable from Gray), so it is still tellable apart in the grid.
+  `tripsyCubesSorted` gives a stable biggest-first order so the grid doesn't reshuffle. The LIBRARY
+  (`driveData.tripsyPackingCubes`, `{id, brand, size, color, driveFileId, addedAt}`,
+  `Store.listPackingCubes`/`savePackingCube`/`deletePackingCube`) is persistent like the wardrobe
+  itself — you own the same cubes trip after trip and photograph each once — and is managed
+  **inline from the picker**, not a Utilities page, so a cube can be created at the moment of
+  packing into it. WHICH copy is in which cube is per-trip and rides on the trip's own selection
+  entries as a **per-copy** `cubes` array (`cubes[i]` = the cube copy *i* went into), because
+  several of one garment can legitimately be split across cubes. `tripsyCubesForEntry` is the only
+  place that array is derived and it guarantees `cubes.length === packed` — truncating a list
+  longer than the packed count, padding a shorter one with `''` — so "how many are packed" and
+  "where each one is" can never disagree. `''` means packed-but-location-unknown, which is exactly
+  what a pre-cubes entry and a deleted cube both degrade to; both render as "cube not set" rather
+  than vanishing. `showTripsyCubePicker` is the ONLY way to mark something packed (`packed` is just
+  how many slots are filled), one copy commits immediately while several advance to the next
+  unassigned copy, and the **Cubes** header button opens `showTripsyCubeContents` — the same live
+  entries read from the cube's side, not a second store that could drift. Deleting a cube keeps its
+  contents packed and only forgets the location; it scrubs the id from `driveData` AND from the
+  open page's own copies, or the next persist would write the dangling id straight back.
 - **Allocation is per LINE, not per tier.** A pick is keyed `id::tier::line` (the line's NAME, not
   its index — indices shift whenever the guide is regenerated, which is also why skip keys use
   names), persisted in `driveData.tripsyTripWardrobe`. `availableFor` subtracts copies allocated to

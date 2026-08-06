@@ -3212,6 +3212,60 @@ const Store = {
       return true;
     } catch (e) { console.error('Store.deleteWardrobeGarment failed:', e); return false; }
   },
+  // PACKING CUBES -- the physical zip cubes garments get packed INTO. A persistent
+  // library like the wardrobe itself (you own the same cubes trip after trip, and
+  // photograph each one once), deliberately NOT per-trip; which garment copy is in
+  // which cube IS per-trip and rides on the trip's own selection entries instead
+  // (see the `cubes` array in setTripWardrobe's entries). Same record shape and the
+  // same conflict-retry as the wardrobe: { id, name, color, driveFileId, addedAt }.
+  async listPackingCubes() {
+    return [...(driveData.tripsyPackingCubes || [])];
+  },
+  async savePackingCube(cube) {
+    try {
+      const apply = () => {
+        if (!driveData.tripsyPackingCubes) driveData.tripsyPackingCubes = [];
+        const i = driveData.tripsyPackingCubes.findIndex(c => c.id === cube.id);
+        if (i >= 0) driveData.tripsyPackingCubes[i] = cube; else driveData.tripsyPackingCubes.push(cube);
+      };
+      apply();
+      for (let attempt = 0; ; attempt++) {
+        try { await persistDriveData({ silentConflict: true }); return true; }
+        catch (e) { if (e && e.conflict && attempt < 2) { apply(); continue; } throw e; }
+      }
+    } catch (e) { console.error('Store.savePackingCube failed:', e); return false; }
+  },
+  // Deleting a cube also clears it from every trip's assignments -- a copy assigned to
+  // a cube that no longer exists would otherwise read as packed into nothing, with no
+  // way to see or fix it. The copy stays PACKED (it is physically in the bag); only its
+  // location is forgotten, which the UI shows as "cube not set".
+  async deletePackingCube(id) {
+    try {
+      const cube = (driveData.tripsyPackingCubes || []).find(c => c.id === id);
+      const apply = () => {
+        driveData.tripsyPackingCubes = (driveData.tripsyPackingCubes || []).filter(c => c.id !== id);
+        const sel = driveData.tripsyTripWardrobe || {};
+        for (const k of Object.keys(sel)) {
+          sel[k] = (sel[k] || []).map(e => (e && Array.isArray(e.cubes))
+            ? { ...e, cubes: e.cubes.map(c => (c === id ? '' : c)) } : e);
+        }
+        const gen = driveData.tripsyTripGenericGarments || {};
+        for (const k of Object.keys(gen)) {
+          gen[k] = (gen[k] || []).map(e => (e && Array.isArray(e.cubes))
+            ? { ...e, cubes: e.cubes.map(c => (c === id ? '' : c)) } : e);
+        }
+      };
+      apply();
+      for (let attempt = 0; ; attempt++) {
+        try { await persistDriveData({ silentConflict: true }); break; }
+        catch (e) { if (e && e.conflict && attempt < 2) { apply(); continue; } throw e; }
+      }
+      // Its photo file is now unreachable from driveData -- same fire-and-forget
+      // cleanup deleteWardrobeGarment does for a garment photo.
+      if (cube && cube.driveFileId) deleteDriveFile(cube.driveFileId).catch(e => console.error('Failed to delete cube photo:', e));
+      return true;
+    } catch (e) { console.error('Store.deletePackingCube failed:', e); return false; }
+  },
   async getTripWardrobe(tripKey) {
     return [...((driveData.tripsyTripWardrobe || {})[tripKey] || [])];
   },
@@ -7635,7 +7689,7 @@ function tripsyWardrobePackedCardHtml(g, qty) {
 // A per-trip selection entry is {id, qty}; older data was a bare id string.
 function tripsyNormalizeTripSelection(arr) {
   return (arr || []).map(e => {
-    if (typeof e === 'string') return { id: e, category: '', line: '', qty: 1, packed: 0 };
+    if (typeof e === 'string') return { id: e, category: '', line: '', qty: 1, packed: 0, cubes: [] };
     const qty = Math.max(1, e.qty || 1);
     // `category` is the dress-code tier this allocation is for. Legacy entries (from
     // before per-category selection) have '' and are treated as unrecognized by the
@@ -7643,8 +7697,69 @@ function tripsyNormalizeTripSelection(arr) {
     // `line` is the NEED LINE within that tier (its name, not its index -- indices
     // shift whenever the guide is regenerated). '' means an entry saved before
     // per-line allocation; tripsyWardrobeResolveSelectionLines stamps one on.
-    return { id: e.id, category: e.category || '', line: e.line || '', qty, packed: Math.max(0, Math.min(qty, e.packed || 0)) };
+    const packed = Math.max(0, Math.min(qty, e.packed || 0));
+    // `cubes` is PER COPY: cubes[i] is the packing cube copy i went into, '' for a copy
+    // that is packed but whose cube isn't known (an entry packed before cubes existed,
+    // or one whose cube was later deleted). Length is always exactly `packed`, so
+    // "how many are packed" and "where each one is" can never disagree -- see
+    // tripsyCubesForEntry, which is the only place this is derived.
+    return { id: e.id, category: e.category || '', line: e.line || '', qty, packed, cubes: tripsyCubesForEntry(e, packed) };
   }).filter(e => e.id);
+}
+// The per-copy cube list for a selection/generic entry, normalised to exactly `packed`
+// slots. Truncates a list longer than the packed count (copies were un-packed) and pads
+// with '' when it's shorter (packed before cubes existed, so the location is simply
+// unknown rather than wrong). Every reader goes through this, so no screen has to cope
+// with a ragged array.
+function tripsyCubesForEntry(entry, packed) {
+  const raw = (entry && Array.isArray(entry.cubes)) ? entry.cubes : [];
+  const out = [];
+  for (let i = 0; i < packed; i++) out.push(typeof raw[i] === 'string' ? raw[i] : '');
+  return out;
+}
+// A cube record by id, or null. Kept as its own helper because a DELETED cube is a
+// normal state here, not an error -- the copy stays packed and just loses its location.
+function tripsyCubeById(id) {
+  if (!id) return null;
+  return (driveData.tripsyPackingCubes || []).find(c => c.id === id) || null;
+}
+// A cube is identified by three traits rather than a typed-in name: BRAND, SIZE and
+// COLOR. Fixed lists, not free text, because the everyday label is DERIVED from them --
+// a typo ("navy" vs "Navy") would split one cube into two different-looking labels.
+// Extend these lists when a new cube is bought; nothing else needs changing.
+const TRIPSY_CUBE_BRANDS = ['Briggs & Riley', 'Eagle Creek'];
+const TRIPSY_CUBE_SIZES = ['Large', 'Medium', 'Small', 'Extra small'];
+const TRIPSY_CUBE_COLORS = ['Black', 'Blue', 'Purple', 'Orange', 'Yellow', 'Gray', 'Brown', 'Zebra'];
+// Swatch for the picker tile when a cube has no photo yet. Zebra is a PATTERN, not a
+// colour, so it gets stripes -- a flat grey would make it indistinguishable from Gray.
+const TRIPSY_CUBE_COLOR_CSS = {
+  Black: '#23262B', Blue: '#2E62C8', Purple: '#7B4BC9', Orange: '#E07A28',
+  Yellow: '#E3C22B', Gray: '#8A9099', Brown: '#7A5230',
+  Zebra: 'repeating-linear-gradient(135deg,#F2F2F2 0 7px,#1B1B1B 7px 14px)',
+};
+// How the owner actually refers to a cube: colour + size ("Blue Medium"). Brand is only
+// appended when another cube shares that same colour+size -- carrying it always made
+// every label long for no gain, and omitting it entirely made twins indistinguishable.
+// `name` is honoured as a fallback so a cube saved before this shape still reads sanely.
+function tripsyCubeName(cube) {
+  if (!cube) return '';
+  const base = [cube.color, cube.size].filter(Boolean).join(' ');
+  if (!base) return cube.name || 'Cube';
+  const twins = (driveData.tripsyPackingCubes || [])
+    .filter(c => c && (c.color || '') === (cube.color || '') && (c.size || '') === (cube.size || ''));
+  return (twins.length > 1 && cube.brand) ? `${base} (${cube.brand})` : base;
+}
+function tripsyCubeLabel(id) {
+  const cube = tripsyCubeById(id);
+  return cube ? tripsyCubeName(cube) : '';
+}
+// Stable display order for the picker and the cube list: biggest first, then colour in
+// the order above -- so the grid doesn't reshuffle as cubes are added.
+function tripsyCubesSorted() {
+  const sizeIdx = c => { const i = TRIPSY_CUBE_SIZES.indexOf(c.size); return i < 0 ? TRIPSY_CUBE_SIZES.length : i; };
+  const colorIdx = c => { const i = TRIPSY_CUBE_COLORS.indexOf(c.color); return i < 0 ? TRIPSY_CUBE_COLORS.length : i; };
+  return [...(driveData.tripsyPackingCubes || [])]
+    .sort((a, b) => sizeIdx(a) - sizeIdx(b) || colorIdx(a) - colorIdx(b) || (a.brand || '').localeCompare(b.brand || ''));
 }
 // Per dress-code tier, the packing-list garment LINES (name + quantity). Dress-code-
 // specific garments go under their tier; UNDERWEAR (essentials) and anything not tied
@@ -8491,28 +8606,208 @@ function tripsyWardrobeChooseQty(max, garmentName, verb = 'pack', needed = null)
 }
 // "How many packed?" chooser for a multi-copy garment (one photo standing for N
 // copies) -- a DROPDOWN of 0..total, pre-set to the current packed count. Resolves
-// to the chosen count, or null on cancel. Used by the Packing Status detail page.
-function tripsyWardrobeChoosePackedCount(garmentName, total, current = 0) {
+// ---- Packing cubes -------------------------------------------------------------
+// Small photo tile for one cube, reused by the picker and the cube-contents page.
+function tripsyCubeTileHtml(cube, { size = 74, selected = false } = {}) {
+  // No photo yet -> fall back to the cube's own COLOUR as a swatch. That is still a
+  // real identifier (it is one of the three traits), so an unphotographed cube stays
+  // tellable apart in the grid instead of being one of N identical suitcase glyphs.
+  const swatch = TRIPSY_CUBE_COLOR_CSS[cube.color] || 'var(--panel-2)';
+  const inner = cube.driveFileId
+    ? `<img data-tw-cube-photo="${esc(cube.driveFileId)}" alt="" style="width:100%; height:100%; object-fit:cover; display:block;">`
+    : `<div style="width:100%; height:100%; background:${swatch};"></div>`;
+  return `<div style="width:${size}px; height:${size}px; border-radius:10px; overflow:hidden; background:var(--panel-2);
+    border:${selected ? '3px solid var(--amber)' : '1px solid var(--line)'}; flex-shrink:0;">${inner}</div>`;
+}
+// Cube photos live in Drive like garment photos, so they need the same authenticated
+// fetch + object-URL swap rather than a plain src=. Memoised per Drive file id for the
+// page's lifetime: the picker re-renders on every pick, and re-downloading each cube's
+// photo each time made it visibly flash.
+const tripsyCubePhotoUrlCache = new Map();
+async function tripsyPaintCubePhotos(rootEl) {
+  if (!rootEl) return;
+  const imgs = [...rootEl.querySelectorAll('img[data-tw-cube-photo]')];
+  await Promise.all(imgs.map(async img => {
+    const fileId = img.getAttribute('data-tw-cube-photo');
+    if (!fileId || img.src) return;
+    try {
+      if (!tripsyCubePhotoUrlCache.has(fileId)) {
+        const p = downloadDriveFileBlob(fileId).then(b => URL.createObjectURL(b));
+        p.catch(() => tripsyCubePhotoUrlCache.delete(fileId)); // a failure must not be cached as "no photo"
+        tripsyCubePhotoUrlCache.set(fileId, p);
+      }
+      img.src = await tripsyCubePhotoUrlCache.get(fileId);
+    } catch (e) { /* leave the tile blank rather than break the picker */ }
+  }));
+}
+// Add or rename a cube, with an optional photo. Deliberately reachable from INSIDE the
+// picker (no separate Utilities page) so a cube can be created at the moment of packing
+// into it. Resolves to the saved cube, or null if cancelled.
+function showTripsyCubeForm(existing) {
   return new Promise(resolve => {
-    let ov = document.getElementById('tw-packed-qty-overlay');
-    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-packed-qty-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
-    const cur = Math.max(0, Math.min(total, current));
-    const opts = Array.from({ length: total + 1 }, (_, i) => `<option value="${i}"${i === cur ? ' selected' : ''}>${i}</option>`).join('');
+    const cube = existing || {};
+    let ov = document.getElementById('tw-cube-form-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-cube-form-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483200'; // above the picker that opened it
+    const selHtml = (id, options, current, blank) => `<select id="${id}" class="btn"
+      style="width:100%; font-size:15px; padding:9px; text-align:left; margin-bottom:12px;">
+      <option value=""${current ? '' : ' selected'}>${esc(blank)}</option>
+      ${options.map(o => `<option value="${esc(o)}"${o === current ? ' selected' : ''}>${esc(o)}</option>`).join('')}
+    </select>`;
     ov.innerHTML = `
-      <div class="tw-modal-paper" style="max-width:360px; text-align:center;">
-        <h2 style="margin:0 0 6px; font-size:17px;">How many packed?</h2>
-        <div style="font-size:13px; color:var(--muted); margin-bottom:14px;">${esc(garmentName || 'garment')} — ${total} selected</div>
-        <select id="tw-packed-qty-select" class="btn" style="font-size:15px; padding:8px 14px; min-width:90px; text-align:center;">${opts}</select>
-        <div style="margin-top:16px; display:flex; gap:10px; justify-content:center;">
-          <button class="btn" data-packed-cancel>Cancel</button>
-          <button class="btn primary" data-packed-ok>OK</button>
+      <div class="tw-modal-paper" style="max-width:380px;">
+        <h2 style="margin:0 0 12px; font-size:17px;">${existing ? 'Edit' : 'New'} packing cube</h2>
+        <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Color</label>
+        ${selHtml('tw-cube-color', TRIPSY_CUBE_COLORS, cube.color || '', 'Choose a color…')}
+        <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Size</label>
+        ${selHtml('tw-cube-size', TRIPSY_CUBE_SIZES, cube.size || '', 'Choose a size…')}
+        <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Brand <span style="font-weight:400; color:var(--muted);">(optional)</span></label>
+        ${selHtml('tw-cube-brand', TRIPSY_CUBE_BRANDS, cube.brand || '', '—')}
+        <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Photo <span style="font-weight:400; color:var(--muted);">(optional)</span></label>
+        <input type="file" id="tw-cube-photo" accept="image/*" style="font-size:13px; margin-bottom:6px;">
+        <div id="tw-cube-status" style="font-size:12px; color:var(--muted); min-height:16px;"></div>
+        <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:14px;">
+          <button class="btn" data-cube-cancel>Cancel</button>
+          <button class="btn primary" data-cube-save>Save</button>
         </div>
       </div>`;
     ov.style.display = 'flex';
+    let pendingBlob = null;
+    ov.querySelector('#tw-cube-photo').onchange = e => { pendingBlob = (e.target.files || [])[0] || null; };
     const close = val => { ov.style.display = 'none'; ov.onclick = null; resolve(val); };
-    ov.onclick = e => {
-      if (e.target.closest('[data-packed-ok]')) { const n = parseInt(ov.querySelector('#tw-packed-qty-select').value, 10); close(Number.isFinite(n) ? n : null); return; }
-      if (e.target.closest('[data-packed-cancel]') || e.target === ov) close(null);
+    ov.onclick = async e => {
+      if (e.target.closest('[data-cube-cancel]') || e.target === ov) { close(null); return; }
+      if (!e.target.closest('[data-cube-save]')) return;
+      const color = ov.querySelector('#tw-cube-color').value;
+      const size = ov.querySelector('#tw-cube-size').value;
+      const brand = ov.querySelector('#tw-cube-brand').value;
+      const statusEl = ov.querySelector('#tw-cube-status');
+      // Colour and size are what the label is built from, so both are required; brand
+      // only ever disambiguates two cubes of the same colour and size, so it is not.
+      if (!color || !size) { statusEl.textContent = 'Please choose a color and a size.'; return; }
+      const saveBtn = ov.querySelector('[data-cube-save]');
+      saveBtn.disabled = true;
+      statusEl.textContent = pendingBlob ? 'Uploading photo…' : 'Saving…';
+      try {
+        let photoFileId = cube.driveFileId || '';
+        if (pendingBlob) {
+          const small = await tripsyResizeImageBlob(pendingBlob);
+          const newId = await uploadBlobToDrive(small, `packing-cube-${Date.now()}`, 'image/jpeg');
+          if (photoFileId && photoFileId !== newId) deleteDriveFile(photoFileId).catch(() => {});
+          photoFileId = newId;
+        }
+        const saved = {
+          ...cube,
+          id: cube.id || crypto.randomUUID(),
+          color, size, brand,
+          driveFileId: photoFileId,
+          addedAt: cube.addedAt || new Date().toISOString(),
+        };
+        // Same optimistic pattern as the garment form: savePackingCube applies to the
+        // in-memory library before its first await, so the picker can re-render at once
+        // while the full-file Drive PATCH finishes behind it.
+        const savePromise = Store.savePackingCube(saved);
+        close(saved);
+        savePromise
+          .then(ok => { if (!ok) toast('Cube saved on this device but didn’t sync to Drive — open it and Save again.', 'error'); })
+          .catch(() => toast('Cube saved on this device but didn’t sync to Drive — open it and Save again.', 'error'));
+      } catch (err) {
+        console.error('Packing cube save failed:', err);
+        statusEl.textContent = 'Could not save the photo. Please try again.';
+        saveBtn.disabled = false;
+      }
+    };
+  });
+}
+// THE cube picker. `copies` is the per-copy cube list being edited (length = how many
+// copies are selected for this line); each slot holds a cube id, '' for "not packed".
+// Resolves to a NEW array, or null if cancelled. Per-copy rather than one-cube-per-
+// garment because several of the same garment can legitimately be split across cubes.
+function showTripsyCubePicker(garmentName, copies) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tw-cube-picker-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-cube-picker-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483150';
+    let working = copies.slice();
+    // Which copy the next cube tap applies to. With one copy there is nothing to
+    // choose, so it stays 0 and the grid acts as a plain "put it here".
+    let activeCopy = 0;
+    const render = () => {
+      const cubes = tripsyCubesSorted();
+      const packedCount = working.filter(Boolean).length;
+      const copyRows = working.length > 1 ? `
+        <div style="display:flex; flex-wrap:wrap; gap:6px; margin:0 0 12px;">
+          ${working.map((cid, i) => {
+            const label = cid ? tripsyCubeLabel(cid) : 'Not packed';
+            const isActive = i === activeCopy;
+            return `<button class="btn" data-tw-copy="${i}" style="font-size:12px; padding:5px 9px;
+              ${isActive ? 'border-color:var(--amber); color:var(--amber);' : ''}">#${i + 1}: ${esc(label)}</button>`;
+          }).join('')}
+        </div>` : '';
+      const cubeCards = cubes.map(c => `
+        <button data-tw-pick-cube="${esc(c.id)}" style="background:none; border:none; padding:0; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:4px; width:82px;">
+          ${tripsyCubeTileHtml(c, { selected: working[activeCopy] === c.id })}
+          <span style="font-size:11px; color:var(--text); line-height:1.25; text-align:center; word-break:break-word;">${esc(tripsyCubeName(c))}</span>
+        </button>`).join('');
+      ov.innerHTML = `
+        <div class="tw-modal-paper" style="max-width:460px;">
+          <h2 style="margin:0 0 4px; font-size:17px;">Which cube?</h2>
+          <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">
+            ${esc(garmentName || 'garment')}${working.length > 1 ? ` — ${packedCount} of ${working.length} packed` : ''}
+          </div>
+          ${working.length > 1 ? `<div style="font-size:12px; color:var(--muted); margin-bottom:6px;">Pick a copy, then tap its cube.</div>` : ''}
+          ${copyRows}
+          <div style="display:flex; flex-wrap:wrap; gap:12px;">
+            ${cubeCards}
+            <button data-tw-new-cube style="background:none; border:none; padding:0; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:4px; width:82px;">
+              <div style="width:74px; height:74px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:26px; color:var(--muted);">+</div>
+              <span style="font-size:11px; color:var(--muted);">New cube</span>
+            </button>
+          </div>
+          ${cubes.length ? '' : `<div style="font-size:12px; color:var(--muted); margin-top:10px;">No cubes yet — add one to start assigning.</div>`}
+          <div style="display:flex; gap:10px; justify-content:space-between; margin-top:18px;">
+            <button class="btn" data-tw-cube-clear style="border-color:var(--red); color:var(--red);">${working.length > 1 ? 'Not packed' : 'Unpack'}</button>
+            <span style="display:flex; gap:10px;">
+              <button class="btn" data-tw-cube-cancel>Cancel</button>
+              <button class="btn primary" data-tw-cube-done>Done</button>
+            </span>
+          </div>
+        </div>`;
+      tripsyPaintCubePhotos(ov);
+    };
+    render();
+    ov.style.display = 'flex';
+    const close = val => { ov.style.display = 'none'; ov.onclick = null; resolve(val); };
+    ov.onclick = async e => {
+      const copyBtn = e.target.closest('[data-tw-copy]');
+      if (copyBtn) { activeCopy = parseInt(copyBtn.dataset.twCopy, 10) || 0; render(); return; }
+      const pick = e.target.closest('[data-tw-pick-cube]');
+      if (pick) {
+        working[activeCopy] = pick.dataset.twPickCube;
+        // One copy: choosing a cube IS the whole decision, so commit immediately --
+        // an extra "Done" tap on every single-copy garment would be pure friction.
+        if (working.length === 1) { close(working); return; }
+        // Several copies: advance to the next one still unassigned, so tapping down a
+        // row of cubes fills them in order without re-selecting a copy each time.
+        const nextUnset = working.findIndex((c, i) => i > activeCopy && !c);
+        activeCopy = nextUnset >= 0 ? nextUnset : activeCopy;
+        render();
+        return;
+      }
+      if (e.target.closest('[data-tw-new-cube]')) {
+        const created = await showTripsyCubeForm(null);
+        if (created) { working[activeCopy] = created.id; }
+        render();
+        return;
+      }
+      if (e.target.closest('[data-tw-cube-clear]')) {
+        if (working.length === 1) { close(['']); return; } // "Unpack" -> caller drops the copy
+        working[activeCopy] = '';
+        render();
+        return;
+      }
+      if (e.target.closest('[data-tw-cube-done]')) { close(working); return; }
+      if (e.target.closest('[data-tw-cube-cancel]') || e.target === ov) close(null);
     };
   });
 }
@@ -8956,7 +9251,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   let skips = tripsyWardrobeResolveSkipLines(skipsRaw, guide);
   const skippedFor = (tier, ln) => tripsyAttireSkippedFor(skips, person, tier, ln);
   const persistSkips = () => Store.setTripAttireSkips(tripKey, skips);
-  let generics = tripsyWardrobeResolveGenericLines(genericRaw, guide).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
+  let generics = tripsyWardrobeResolveGenericLines(genericRaw, guide).map(x => { const qty = Math.max(1, x.qty || 1); const packed = Math.max(0, Math.min(qty, x.packed || 0)); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed, cubes: tripsyCubesForEntry(x, packed), person: x.person || 'him' }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-LINE selection: a garment is picked FOR one specific need line within one
   // dress-code tier, and its owned quantity is spread across the lines it's allocated
@@ -9365,6 +9660,7 @@ function getOrCreateWardrobePackingListOverlay() {
           <button class="btn" id="tw-packlist-unpacked">Unpacked Items Only</button>
           <button class="btn" id="tw-packlist-listtoggle">List</button>
           <button class="btn" id="tw-packlist-plan">Packing Plan</button>
+          <button class="btn" id="tw-packlist-cubes">Cubes</button>
           <button class="btn" id="tw-packlist-done">Close</button>
         </div>
       </div>
@@ -9404,7 +9700,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   // but shown COMBINED per garment (sum qty + packed across the tiers it's allocated
   // to). Legacy category-less picks are ignored, matching the Plan Packing List.
   const selEntries = tripsyWardrobeResolveSelectionLines(tripsyNormalizeTripSelection(selectedRaw), guide, new Map(garments.map(g => [g.id, g]))).filter(e => e.category);
-  let generics = tripsyWardrobeResolveGenericLines(genericRaw, guide).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
+  let generics = tripsyWardrobeResolveGenericLines(genericRaw, guide).map(x => { const qty = Math.max(1, x.qty || 1); const packed = Math.max(0, Math.min(qty, x.packed || 0)); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed, cubes: tripsyCubesForEntry(x, packed), person: x.person || 'him' }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-person Packing Status: His (default) / Hers each show only that person's
   // chosen garments + generics, scored against that person's need lines. The opener
@@ -9416,7 +9712,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   const genericPackedFor = (tier, ln) => generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + Math.min(x.packed, x.qty), 0);
   const aggregate = () => { const m = new Map(); for (const e of selEntries) { const cur = m.get(e.id) || { qty: 0, packed: 0 }; cur.qty += e.qty; cur.packed += Math.min(e.packed, e.qty); m.set(e.id, cur); } return m; };
   let chosen = aggregate(); // id -> { qty, packed } combined across categories
-  const persist = () => Store.setTripWardrobe(tripKey, selEntries.map(e => ({ id: e.id, category: e.category, line: e.line, qty: e.qty, packed: Math.min(e.qty, e.packed) })));
+  const persist = () => Store.setTripWardrobe(tripKey, selEntries.map(e => ({ id: e.id, category: e.category, line: e.line, qty: e.qty, packed: Math.min(e.qty, e.packed), cubes: (e.cubes || []).filter(Boolean).slice(0, e.qty) })));
   const persistGenerics = () => Store.setTripGenericGarments(tripKey, generics);
 
   // This page is now a dress-code CATEGORY -> garment-TYPE browser (no grid/list
@@ -9444,7 +9740,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   const TIER_ROWS = [...TRIPSY_ATTIRE_CATEGORY_ORDER.slice().reverse(), TRIPSY_WARDROBE_GENERAL_TIER];
   // Selected wardrobe pieces for a tier as {g, qty, packed} -- same filter the fill
   // math uses; `packed` (this tier's entry) rides along so the Packed column can sum it.
-  const selectedForTier = tier => selEntries.filter(e => e.category === tier).map(e => ({ g: garmentById.get(e.id), qty: e.qty, packed: Math.min(e.packed, e.qty), line: e.line }))
+  const selectedForTier = tier => selEntries.filter(e => e.category === tier).map(e => ({ g: garmentById.get(e.id), qty: e.qty, packed: Math.min(e.packed, e.qty), cubes: e.cubes || [], line: e.line }))
     .filter(x => x.g && isPerson(x.g) && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (x.g.tiers || []).includes(tier)));
   // Generics selected for a tier+line, carrying their ORIGINAL array index (for packed toggling).
   const genericsForLine = (tier, ln) => generics.map((x, i) => ({ x, i })).filter(({ x }) => (x.person || 'him') === person && x.category === tier && x.name === ln.name);
@@ -9462,21 +9758,38 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     return (ln && selEntries.find(x => x.id === id && x.category === tier && x.line === ln.name))
       || selEntries.find(x => x.id === id && x.category === tier);
   };
-  const setEntryPacked = (id, tier, n) => { const e = entryFor(id, tier, statusView.lineIndex); if (!e) return; e.packed = Math.max(0, Math.min(e.qty, n)); chosen = aggregate(); persist(); render(); };
+  // Packing a garment IS assigning it to a cube -- the picker is the only way in, so a
+  // packed copy always has a known location. The picker edits a per-copy list of cube
+  // ids; `packed` is then simply how many of those slots are filled, which is what
+  // keeps the count and the locations from ever disagreeing.
+  // The list handed to the picker is `qty` long (every copy is assignable), and what
+  // comes back is compacted so the filled slots lead -- the stored `cubes` array is
+  // exactly `packed` long by contract (see tripsyCubesForEntry).
+  const applyCubes = (target, picked) => {
+    const filled = picked.filter(Boolean);
+    target.cubes = filled;
+    target.packed = Math.max(0, Math.min(target.qty, filled.length));
+  };
+  // Slots for the picker: the copies already assigned, padded out to qty with ''.
+  const cubeSlotsFor = target => {
+    const cur = (target.cubes || []).filter(Boolean).slice(0, target.qty);
+    return [...cur, ...Array.from({ length: Math.max(0, target.qty - cur.length) }, () => '')];
+  };
   const markGarmentPacked = async id => {
     const tier = statusView.tier;
     const e = entryFor(id, tier, statusView.lineIndex);
     if (!e) return;
-    if (e.qty <= 1) { setEntryPacked(id, tier, e.packed >= 1 ? 0 : 1); return; }
-    const n = await tripsyWardrobeChoosePackedCount((garmentById.get(id) || {}).name || 'garment', e.qty, e.packed);
-    if (n != null) setEntryPacked(id, tier, n);
+    const picked = await showTripsyCubePicker((garmentById.get(id) || {}).name || 'garment', cubeSlotsFor(e));
+    if (picked == null) return; // cancelled -- leave the entry exactly as it was
+    applyCubes(e, picked);
+    chosen = aggregate(); persist(); render();
   };
   const markGenericPacked = async idx => {
     const entry = generics[idx]; if (!entry) return;
-    if (entry.qty <= 1) { entry.packed = entry.packed >= 1 ? 0 : 1; persistGenerics(); render(); return; }
-    const n = await tripsyWardrobeChoosePackedCount(entry.name, entry.qty, entry.packed);
-    if (n == null) return;
-    entry.packed = Math.max(0, Math.min(entry.qty, n)); persistGenerics(); render();
+    const picked = await showTripsyCubePicker(entry.name, cubeSlotsFor(entry));
+    if (picked == null) return;
+    applyCubes(entry, picked);
+    persistGenerics(); render();
   };
 
   const packedBadge = `<div style="position:absolute; top:6px; right:6px; background:var(--home-green); color:#04210F; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:13px;">✓</div>`;
@@ -9561,17 +9874,34 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const cardPackedBits = (packed, qty) => {
       const full = qty > 0 && packed >= qty;
       const partial = packed > 0 && packed < qty;
-      const meta = full ? '✓ packed' : (partial ? `${packed}/${qty} packed` : 'tap to mark packed');
+      const meta = full ? '✓ packed' : (partial ? `${packed}/${qty} packed` : 'tap to pack into a cube');
       const color = full ? 'var(--home-green)' : (partial ? 'var(--amber)' : 'var(--muted)');
       const badge = full ? packedBadge : (partial ? partialBadge(packed) : '');
       return { meta, color, badge };
     };
-    const garmentCards = garmentItems.map(({ g, qty, packed }) => {
+    // WHERE each packed copy actually is. Counted per cube rather than listed per copy,
+    // so five shirts in one cube read "Shirts cube x5" instead of five identical lines.
+    // A copy whose cube was deleted (or that was packed before cubes existed) still
+    // shows -- as "cube not set" -- rather than silently looking unplaced.
+    const cubeLineHtml = cubes => {
+      const filled = (cubes || []).filter(Boolean);
+      const unknown = (cubes || []).length - filled.length;
+      const counts = new Map();
+      for (const cid of filled) counts.set(cid, (counts.get(cid) || 0) + 1);
+      const parts = [...counts].map(([cid, n]) => {
+        const label = tripsyCubeLabel(cid) || 'cube not set';
+        return `${esc(label)}${n > 1 ? ` x${n}` : ''}`;
+      });
+      if (unknown > 0) parts.push(`cube not set${unknown > 1 ? ` x${unknown}` : ''}`);
+      if (!parts.length) return '';
+      return `<div class="tw-meta" style="color:var(--muted); display:flex; align-items:center; gap:4px;"><span>&#129523;</span><span style="min-width:0; overflow:hidden; text-overflow:ellipsis;">${parts.join(', ')}</span></div>`;
+    };
+    const garmentCards = garmentItems.map(({ g, qty, packed, cubes }) => {
       const b = cardPackedBits(packed, qty);
       return `<div class="tw-card" data-tw-detail-garment="${esc(g.id)}" style="cursor:pointer; position:relative;">
           <div class="tw-actions tw-actions-top"><button class="btn" data-tw-wear-days="${esc(g.id)}">Wear Days</button></div>
           <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}"${g.driveFileId ? ` data-tw-photo="${esc(g.driveFileId)}"` : ''}>${g.driveFileId ? '' : tripsyGarmentGlyph(tripsyGarmentTypeKey(g.name), g.group, g.name)}</div>
-          <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div></div>
+          <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${cubeLineHtml(cubes)}</div>
           ${b.badge}
         </div>`;
     }).join('');
@@ -9580,7 +9910,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
       return `<div class="tw-card" data-tw-detail-generic="${i}" style="cursor:pointer; position:relative;">
           <div class="tw-actions tw-actions-top"><button class="btn" data-tw-gen-wear-days="${i}">Wear Days</button></div>
           <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(x.typeKey, '', x.name)}</div>
-          <div class="tw-info"><div class="tw-name">${esc(x.name)}${x.qty > 1 ? ` <span style="color:var(--muted);">×${x.qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div></div>
+          <div class="tw-info"><div class="tw-name">${esc(x.name)}${x.qty > 1 ? ` <span style="color:var(--muted);">×${x.qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${cubeLineHtml(x.cubes)}</div>
           ${b.badge}
         </div>`;
     }).join('');
@@ -9656,6 +9986,22 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     ov.style.display = 'none';
     tripsyWardrobePackForTrip(tripKey, tripName, person, () => tripsyWardrobePackingList(tripKey, tripName, person, null, where), where);
   };
+  // "Cubes" -> the same packing data read from the CUBE's side: what is in each one on
+  // this trip. Built from the live in-memory entries rather than a second store, so it
+  // can never disagree with the garment cards. Passed a re-render callback because
+  // editing or deleting a cube from in there changes what those cards say.
+  const cubesBtn = ov.querySelector('#tw-packlist-cubes');
+  if (cubesBtn) cubesBtn.onclick = () => showTripsyCubeContents(
+    () => ({ selEntries, generics, garmentById }),
+    () => {
+      // Store.deletePackingCube scrubs the id out of driveData, but THIS page is holding
+      // its own copies of those entries -- drop it here too, or the next persist would
+      // write the dangling id straight back.
+      const live = new Set((driveData.tripsyPackingCubes || []).map(c => c.id));
+      const scrub = arr => arr.forEach(e => { if (Array.isArray(e.cubes)) e.cubes = e.cubes.map(c => (c && live.has(c) ? c : '')); });
+      scrub(selEntries); scrub(generics);
+      render();
+    });
   const personSlot = ov.querySelector('#tw-packlist-person');
   const renderPersonToggle = () => {
     if (!personSlot) return;
@@ -9671,6 +10017,102 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   };
   renderPersonToggle();
   render();
+}
+
+// What is inside each packing cube on this trip -- the garment->cube assignments read
+// from the cube's side, for when you are standing over a suitcase wondering which cube
+// the dress shirts went into. `getState` returns the Packing Status page's OWN live
+// entries, so this is a different VIEW of the same data rather than a second copy that
+// could drift. Editing or deleting a cube here calls `onChanged` so the garment cards
+// behind it pick the change up.
+function showTripsyCubeContents(getState, onChanged) {
+  let ov = document.getElementById('tw-cube-contents-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tw-cube-contents-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483140';
+  const render = () => {
+    const { selEntries, generics, garmentById } = getState();
+    const cubes = tripsyCubesSorted();
+    // cubeId -> [{name, count}]. A garment allocated across several tiers contributes
+    // each of its entries, which is right: those are genuinely separate copies in the bag.
+    const contents = new Map();
+    const add = (cubeId, name) => {
+      if (!contents.has(cubeId)) contents.set(cubeId, new Map());
+      const m = contents.get(cubeId);
+      m.set(name, (m.get(name) || 0) + 1);
+    };
+    for (const e of selEntries) {
+      const g = garmentById.get(e.id);
+      for (const cid of (e.cubes || [])) add(cid || '', (g && g.name) || 'Garment');
+    }
+    for (const x of generics) for (const cid of (x.cubes || [])) add(cid || '', x.name || 'Item');
+    const listFor = cubeId => {
+      const m = contents.get(cubeId);
+      if (!m || !m.size) return `<div style="font-size:12.5px; color:var(--muted);">Empty</div>`;
+      return `<div style="font-size:13px; color:var(--text); line-height:1.5;">`
+        + [...m].map(([name, n]) => `${esc(name)}${n > 1 ? ` <span style="color:var(--muted);">x${n}</span>` : ''}`).join('<br>')
+        + `</div>`;
+    };
+    const cubeBlocks = cubes.map(c => `
+      <div style="display:flex; gap:12px; align-items:flex-start; padding:10px 0; border-bottom:1px solid var(--line);">
+        ${tripsyCubeTileHtml(c, { size: 64 })}
+        <div style="flex:1; min-width:0;">
+          <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px; flex-wrap:wrap;">
+            <span style="font-weight:700; font-size:14px;">${esc(tripsyCubeName(c))}</span>
+            ${c.brand ? `<span style="font-size:11.5px; color:var(--muted);">${esc(c.brand)}</span>` : ''}
+            <button class="btn" data-tw-edit-cube="${esc(c.id)}" style="font-size:11px; padding:3px 8px;">Edit</button>
+            <button class="btn" data-tw-del-cube="${esc(c.id)}" style="font-size:11px; padding:3px 8px; border-color:var(--red); color:var(--red);">Delete</button>
+          </div>
+          ${listFor(c.id)}
+        </div>
+      </div>`).join('');
+    // Copies that are packed but whose cube is unknown, shown as their own block so they
+    // are visible and fixable rather than quietly missing from every cube.
+    const orphan = contents.get('');
+    const orphanBlock = (orphan && orphan.size) ? `
+      <div style="display:flex; gap:12px; align-items:flex-start; padding:10px 0; border-bottom:1px solid var(--line);">
+        <div style="width:64px; height:64px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:26px; color:var(--muted); flex-shrink:0;">?</div>
+        <div style="flex:1; min-width:0;">
+          <div style="font-weight:700; font-size:14px; margin-bottom:4px; color:var(--amber);">Cube not set</div>
+          ${listFor('')}
+        </div>
+      </div>` : '';
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:520px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px;">
+          <h2 style="margin:0; font-size:18px;">Packing cubes</h2>
+          <div style="display:flex; gap:8px;">
+            <button class="btn" data-tw-add-cube>Add cube</button>
+            <button class="btn" data-tw-cubes-close>Close</button>
+          </div>
+        </div>
+        ${cubes.length || orphanBlock ? (cubeBlocks + orphanBlock) : `<div class="empty-state" style="margin-top:12px;">No cubes yet — add one, or create one while packing a garment.</div>`}
+      </div>`;
+    tripsyPaintCubePhotos(ov);
+  };
+  render();
+  ov.style.display = 'flex';
+  ov.onclick = async e => {
+    if (e.target.closest('[data-tw-cubes-close]') || e.target === ov) { ov.style.display = 'none'; ov.onclick = null; return; }
+    if (e.target.closest('[data-tw-add-cube]')) { if (await showTripsyCubeForm(null)) { render(); onChanged && onChanged(); } return; }
+    const editBtn = e.target.closest('[data-tw-edit-cube]');
+    if (editBtn) {
+      const cube = tripsyCubeById(editBtn.dataset.twEditCube);
+      if (cube && await showTripsyCubeForm(cube)) { render(); onChanged && onChanged(); }
+      return;
+    }
+    const delBtn = e.target.closest('[data-tw-del-cube]');
+    if (delBtn) {
+      const cube = tripsyCubeById(delBtn.dataset.twDelCube);
+      if (!cube) return;
+      const ok = await tripsyConfirmDialog(
+        `Delete “${tripsyCubeName(cube) || 'this cube'}”? Anything packed in it stays packed, but its location is forgotten and will read “cube not set”.`,
+        { title: 'Delete packing cube', yes: 'Delete', no: 'Keep' });
+      if (!ok) return;
+      await Store.deletePackingCube(cube.id);
+      render();
+      onChanged && onChanged();
+    }
+  };
 }
 
 // ---- Bulk import from the "Travel Wardrobe" Drive folder ----
@@ -20359,7 +20801,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
   ]);
   // The user may have closed/reopened onto another category while this loaded.
   if (!document.body.contains(packEl)) return;
-  let generics = tripsyWardrobeResolveGenericLines(genericRaw, guide).map(x => { const qty = Math.max(1, x.qty || 1); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed: Math.max(0, Math.min(qty, x.packed || 0)) }; });
+  let generics = tripsyWardrobeResolveGenericLines(genericRaw, guide).map(x => { const qty = Math.max(1, x.qty || 1); const packed = Math.max(0, Math.min(qty, x.packed || 0)); return { category: x.category, typeKey: x.typeKey || '', name: x.name || 'garment', qty, packed, cubes: tripsyCubesForEntry(x, packed), person: x.person || 'him' }; });
   const garmentById = new Map(garments.map(g => [g.id, g]));
   // Per-LINE selection keyed by "id::tier::line" (see tripsyWardrobePackForTrip). This
   // embedded picker only edits the drill-down's own `category`, but availability still
