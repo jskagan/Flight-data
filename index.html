@@ -27512,36 +27512,52 @@ function showTripsyTravelDocs(atts) {
 // that by exactly one day right around midnight in either zone -- which is what
 // put TOMORROW's date header at the top instead of today's.
 // `new Date()` still gives a real UTC instant (unlike the event dayKeys, which
-// carry none) -- reinterpret THAT through an IANA zone actually carried on one
-// of this trip's own events (hosting/activity's `timezone`, or a transportation
-// leg's `departureTimezone`/`arrivalTimezone`), and use whichever zone's "today"
-// both falls within the trip's own date range AND is within a day of the
-// device's own guess -- that guard is what stops one stray/wrong timezone on an
-// odd record from hijacking the result. Falls back to the device's own local
-// date when nothing on the trip qualifies (no events yet, or none carry a
-// timezone at all).
+// carry none) -- reinterpret THAT through an IANA zone taken from this trip's
+// own events. WHICH zone matters, and picking the wrong one is its own bug: an
+// earlier version took the FIRST zone it found anywhere on the trip, which on a
+// LAX->LHR trip is the departure zone -- so at 01:00 on the 6th in London, still
+// the 5th in Los Angeles, it confidently answered the 5th and passed both guards
+// below. The zone has to be the one the itinerary puts the traveler in RIGHT NOW:
+// the last place reached on or before the device's own date (or, before the trip
+// starts, the first place it goes). Each event contributes where it puts you and
+// when -- a hosting/activity its own `timezone`, a transportation leg BOTH its
+// `departureTimezone` at departure and its `arrivalTimezone` on arrival, which is
+// what makes the zone flip mid-flight rather than at some arbitrary later event.
+// The answer is then accepted only when it falls inside the trip's own date range
+// AND lands within a day of the device's own guess -- that second guard stops one
+// stray or malformed zone on an odd record from hijacking the result. Falls back
+// to the device's own local date when nothing qualifies (no events yet, or none
+// carrying a timezone at all).
 function tripsyTravelViewTodayKey(trip, firstDay, lastDay) {
   const deviceD = new Date();
   const deviceToday = `${deviceD.getFullYear()}-${String(deviceD.getMonth() + 1).padStart(2, '0')}-${String(deviceD.getDate()).padStart(2, '0')}`;
   if (!firstDay || !lastDay) return deviceToday;
-  const zones = [];
-  const seenZones = new Set();
+  // Every point the itinerary places the traveler somewhere: {day, tz}.
+  const marks = [];
   for (const ev of (trip.events || [])) {
     const r = ev.tripsyRaw || {};
-    for (const tz of [r.timezone, r.departureTimezone, r.arrivalTimezone]) {
-      if (tz && !seenZones.has(tz)) { seenZones.add(tz); zones.push(tz); }
+    if (r.resource === 'transportation') {
+      const dep = tripsyDayKey(ev.start), arr = tripsyDayKey(ev.end);
+      if (dep && r.departureTimezone) marks.push({ day: dep, tz: r.departureTimezone });
+      if (arr && r.arrivalTimezone) marks.push({ day: arr, tz: r.arrivalTimezone });
+    } else {
+      const day = tripsyDayKey(ev.start);
+      if (day && r.timezone) marks.push({ day, tz: r.timezone });
     }
   }
+  if (!marks.length) return deviceToday;
+  marks.sort((a, b) => a.day.localeCompare(b.day));
+  // The last place reached on or before the device's date; before the trip starts,
+  // the first place it goes.
+  let current = marks[0];
+  for (const m of marks) { if (m.day > deviceToday) break; current = m; }
+  let zoneToday;
+  try { zoneToday = new Date().toLocaleDateString('en-CA', { timeZone: current.tz }); }
+  catch (e) { return deviceToday; } // bad/unknown IANA name
+  if (!zoneToday || zoneToday < firstDay || zoneToday > lastDay) return deviceToday;
   const dayIndex = k => { const [y, m, dd] = k.split('-').map(Number); return Math.round(Date.UTC(y, m - 1, dd) / 86400000); };
-  const deviceIdx = dayIndex(deviceToday);
-  for (const tz of zones) {
-    let zoneToday;
-    try { zoneToday = new Date().toLocaleDateString('en-CA', { timeZone: tz }); } catch (e) { continue; } // bad/unknown IANA name
-    if (!zoneToday || zoneToday < firstDay || zoneToday > lastDay) continue;
-    if (Math.abs(dayIndex(zoneToday) - deviceIdx) > 1) continue; // implausibly far from the device's own guess
-    return zoneToday;
-  }
-  return deviceToday;
+  if (Math.abs(dayIndex(zoneToday) - dayIndex(deviceToday)) > 1) return deviceToday; // implausibly far off
+  return zoneToday;
 }
 async function renderTravelView(chosenTripKey) {
   ensureTravelViewStyles();
