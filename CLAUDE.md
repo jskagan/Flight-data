@@ -673,14 +673,18 @@ a separate always-close button lands beside it on the detail screen wearing the 
   "where each one is" can never disagree. `''` means packed-but-location-unknown, which is exactly
   what a pre-cubes entry and a deleted cube both degrade to; both render as "cube not set" rather
   than vanishing.
-  **Garments that HANG never go in a cube** — suits, tuxedos, blazers, jackets, raincoats,
-  dresses and gowns (`TRIPSY_UNCUBED_TYPES` / `tripsyGarmentSkipsCube`, typed off
-  `tripsyGarmentTypeKey` so it inherits that function's ordering guarantees — two of which
-  matter here: swimwear matches before `suit` so a bathing suit isn't read as tailoring, and
+  **Some garments never go in a cube** — the ones that HANG (suits, tuxedos, blazers, jackets,
+  raincoats, dresses and gowns) plus **ties**, which are rolled or laid flat rather than folded
+  into a cube (`TRIPSY_UNCUBED_TYPES` / `tripsyGarmentSkipsCube`, typed off
+  `tripsyGarmentTypeKey` so it inherits that function's ordering guarantees — three of which
+  matter here: swimwear matches before `suit` so a bathing suit isn't read as tailoring;
   dress-shirt/dress-socks/dress-shoes all match before the bare `dress` rule so none is read as
-  a gown and pulled out of its cube). Those keep the original count/toggle packing via
-  `tripsyWardrobeChoosePackedCount` and render "hung, not in a cube" rather than a blank where a
-  cube would be, so a suit with no cube doesn't read as one you forgot to assign.
+  a gown and pulled out of its cube; and the tie rule's `\b` word boundary is what keeps
+  "booties"/"panties" from typing as `tie`). Those keep the original count/toggle packing via
+  `tripsyWardrobeChoosePackedCount` and render an explicit uncubed line rather than a blank where
+  a cube would be, so a suit with no cube doesn't read as one you forgot to assign —
+  "hung, not in a cube" for the hanging types, and "packed loose, not in a cube" (👔) for a tie,
+  which isn't on a hanger (`uncubedLineHtml`, which takes the typeKey for exactly this).
   `showTripsyCubePicker` is the ONLY way to mark a CUBED garment packed (`packed` is just
   how many slots are filled), one copy commits immediately while several advance to the next
   unassigned copy, and the **Cubes** header button opens `showTripsyCubeContents` — the same live

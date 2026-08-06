@@ -7756,9 +7756,11 @@ function tripsyCubeLabel(id) {
   const cube = tripsyCubeById(id);
   return cube ? tripsyCubeName(cube) : '';
 }
-// Garments that HANG rather than fold never go into a packing cube -- a suit, a tuxedo,
-// a blazer, a jacket, a raincoat, a dress or a gown travels on a hanger or laid flat, so
-// asking "which cube?" for one is a question with no right answer. These still get marked
+// Garments that never go into a packing cube. Mostly the ones that HANG rather than
+// fold -- a suit, a tuxedo, a blazer, a jacket, a raincoat, a dress or a gown travels on
+// a hanger or laid flat -- plus TIES, which are rolled or laid flat in their own place
+// rather than folded into a cube. For any of these, asking "which cube?" is a question
+// with no right answer. These still get marked
 // packed, just by count (tripsyWardrobeChoosePackedCount) instead of by cube.
 // Typed off the garment NAME through tripsyGarmentTypeKey, so it inherits that
 // function's ordering guarantees for free, and two of them matter here: swimwear is
@@ -7766,8 +7768,9 @@ function tripsyCubeLabel(id) {
 // dress-shirt/dress-socks/dress-shoes are all matched BEFORE the bare 'dress' rule, so
 // none of those is mistaken for a gown and pulled out of its cube.
 // 'jacket' is where tripsyGarmentTypeKey already puts raincoats and rain jackets, and
-// 'dress' is its single type for both dresses and gowns.
-const TRIPSY_UNCUBED_TYPES = ['suit', 'tuxedo', 'blazer', 'jacket', 'dress'];
+// 'dress' is its single type for both dresses and gowns. 'tie' covers bow ties and
+// neckties, and its \b word boundary is what keeps "booties" from matching.
+const TRIPSY_UNCUBED_TYPES = ['suit', 'tuxedo', 'blazer', 'jacket', 'dress', 'tie'];
 function tripsyGarmentSkipsCube(name, typeKey) {
   return TRIPSY_UNCUBED_TYPES.includes(typeKey || tripsyGarmentTypeKey(name || ''));
 }
@@ -8712,7 +8715,20 @@ function showTripsyCubeForm(existing) {
         <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Brand <span style="font-weight:400; color:var(--muted);">(optional)</span></label>
         ${selHtml('tw-cube-brand', TRIPSY_CUBE_BRANDS, cube.brand || '', '—')}
         <label style="font-size:13px; font-weight:600; display:block; margin-bottom:6px;">Photo <span style="font-weight:400; color:var(--muted);">(optional)</span></label>
-        <input type="file" id="tw-cube-photo" accept="image/*" style="font-size:13px; margin-bottom:6px;">
+        <!-- Two EXPLICIT buttons over hidden inputs, matching the garment form's proven
+             shape. A bare visible <input type="file"> renders as a tiny native control
+             that is easy to miss and unreliable inside a modal on iPad. Two inputs
+             rather than one because the capture attribute is what decides the behaviour: with it
+             iOS opens the camera directly, without it iOS offers the photo library.
+             Splitting them means the choice is made by the button you tap, instead of
+             depending on an OS action sheet that may not appear. -->
+        <div class="tw-form-photo" id="tw-cube-photobox" style="width:120px; font-size:34px;">&#129523;</div>
+        <div style="display:flex; gap:8px; justify-content:center; margin-bottom:12px;">
+          <button type="button" class="btn" id="tw-cube-take">Take Photo</button>
+          <button type="button" class="btn" id="tw-cube-choose">Choose Photo</button>
+        </div>
+        <input type="file" id="tw-cube-file-cam" accept="image/*" capture="environment" style="display:none;">
+        <input type="file" id="tw-cube-file-lib" accept="image/*" style="display:none;">
         <div id="tw-cube-status" style="font-size:12px; color:var(--muted); min-height:16px;"></div>
         <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:14px;">
           <button class="btn" data-cube-cancel>Cancel</button>
@@ -8721,7 +8737,41 @@ function showTripsyCubeForm(existing) {
       </div>`;
     ov.style.display = 'flex';
     let pendingBlob = null;
-    ov.querySelector('#tw-cube-photo').onchange = e => { pendingBlob = (e.target.files || [])[0] || null; };
+    // Preview box: the cube's existing photo when editing, else its own colour swatch so
+    // the box isn't a bare grey square, then whatever was just picked.
+    const photoBox = ov.querySelector('#tw-cube-photobox');
+    const paintSwatch = () => {
+      const c = ov.querySelector('#tw-cube-color');
+      const swatch = TRIPSY_CUBE_COLOR_CSS[c && c.value];
+      photoBox.style.background = swatch || '#2a2a3a';
+      photoBox.textContent = swatch ? '' : '\u{1F9F3}';
+    };
+    if (cube.driveFileId) {
+      photoBox.textContent = '';
+      tripsyPlacePhotoDisplayUrl(cube.driveFileId)
+        .then(u => { photoBox.style.background = `#2a2a3a center/cover no-repeat url("${u}")`; photoBox.textContent = ''; })
+        .catch(() => paintSwatch());
+    } else {
+      paintSwatch();
+      ov.querySelector('#tw-cube-color').addEventListener('change', () => { if (!pendingBlob) paintSwatch(); });
+    }
+    const showPreview = blob => {
+      photoBox.style.background = `#2a2a3a center/cover no-repeat url("${URL.createObjectURL(blob)}")`;
+      photoBox.textContent = '';
+    };
+    // Each button drives its own hidden input. `input.value = ''` first so re-picking the
+    // SAME file still fires change (otherwise the second attempt looks like nothing happened).
+    const wirePicker = (inputId, btnId) => {
+      const input = ov.querySelector(`#${inputId}`);
+      input.value = '';
+      input.onchange = () => {
+        const f = input.files && input.files[0];
+        if (f) { pendingBlob = f; showPreview(f); }
+      };
+      ov.querySelector(`#${btnId}`).onclick = e => { e.preventDefault(); e.stopPropagation(); input.click(); };
+    };
+    wirePicker('tw-cube-file-cam', 'tw-cube-take');
+    wirePicker('tw-cube-file-lib', 'tw-cube-choose');
     const close = val => { ov.style.display = 'none'; ov.onclick = null; resolve(val); };
     ov.onclick = async e => {
       if (e.target.closest('[data-cube-cancel]') || e.target === ov) { close(null); return; }
@@ -9829,12 +9879,13 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const cur = (target.cubes || []).filter(Boolean).slice(0, target.qty);
     return [...cur, ...Array.from({ length: Math.max(0, target.qty - cur.length) }, () => '')];
   };
-  // A hanging garment (suit/blazer/jacket/raincoat) is packed by COUNT -- there is no
-  // cube to put it in -- so it keeps the original toggle-or-count behaviour. Everything
+  // An uncubed garment (suit/blazer/jacket/raincoat/dress, or a tie) is packed by COUNT
+  // -- there is no cube to put it in -- so it keeps the original toggle-or-count
+  // behaviour. Everything
   // else goes through the cube picker, where picking the cube IS what marks it packed.
   const setPackedCount = (target, n) => {
     target.packed = Math.max(0, Math.min(target.qty, n));
-    target.cubes = []; // hangs -- never has a location
+    target.cubes = []; // uncubed -- never has a location
   };
   const packByCount = async (target, label) => {
     if (target.qty <= 1) { setPackedCount(target, target.packed >= 1 ? 0 : 1); return true; }
@@ -9962,10 +10013,14 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     // A copy whose cube was deleted (or that was packed before cubes existed) still
     // shows -- as "cube not set" -- rather than silently looking unplaced.
     // Said outright rather than left blank, so a suit showing no cube reads as "this one
-    // hangs" instead of "you forgot to assign it".
-    const hangingLineHtml = packed => (packed > 0
-      ? `<div class="tw-meta" style="color:var(--muted); display:flex; align-items:center; gap:4px;"><span>&#129509;</span><span>hung, not in a cube</span></div>`
-      : '');
+    // hangs" instead of "you forgot to assign it". A tie is uncubed for a different
+    // reason (rolled, not hung), so it gets its own wording rather than being told it is
+    // on a hanger.
+    const uncubedLineHtml = (packed, typeKey) => {
+      if (!(packed > 0)) return '';
+      const tie = typeKey === 'tie';
+      return `<div class="tw-meta" style="color:var(--muted); display:flex; align-items:center; gap:4px;"><span>${tie ? '&#128084;' : '&#129509;'}</span><span>${tie ? 'packed loose, not in a cube' : 'hung, not in a cube'}</span></div>`;
+    };
     const cubeLineHtml = cubes => {
       const filled = (cubes || []).filter(Boolean);
       const unknown = (cubes || []).length - filled.length;
@@ -9980,22 +10035,24 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
       return `<div class="tw-meta" style="color:var(--muted); display:flex; align-items:center; gap:4px;"><span>&#129523;</span><span style="min-width:0; overflow:hidden; text-overflow:ellipsis;">${parts.join(', ')}</span></div>`;
     };
     const garmentCards = garmentItems.map(({ g, qty, packed, cubes }) => {
-      const hangs = tripsyGarmentSkipsCube(g.name);
-      const b = cardPackedBits(packed, qty, hangs);
+      const gType = tripsyGarmentTypeKey(g.name);
+      const uncubed = tripsyGarmentSkipsCube(g.name, gType);
+      const b = cardPackedBits(packed, qty, uncubed);
       return `<div class="tw-card" data-tw-detail-garment="${esc(g.id)}" style="cursor:pointer; position:relative;">
           <div class="tw-actions tw-actions-top"><button class="btn" data-tw-wear-days="${esc(g.id)}">Wear Days</button></div>
-          <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}"${g.driveFileId ? ` data-tw-photo="${esc(g.driveFileId)}"` : ''}>${g.driveFileId ? '' : tripsyGarmentGlyph(tripsyGarmentTypeKey(g.name), g.group, g.name)}</div>
-          <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${hangs ? hangingLineHtml(packed) : cubeLineHtml(cubes)}</div>
+          <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}"${g.driveFileId ? ` data-tw-photo="${esc(g.driveFileId)}"` : ''}>${g.driveFileId ? '' : tripsyGarmentGlyph(gType, g.group, g.name)}</div>
+          <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${uncubed ? uncubedLineHtml(packed, gType) : cubeLineHtml(cubes)}</div>
           ${b.badge}
         </div>`;
     }).join('');
     const genCards = genItems.map(({ x, i }) => {
-      const xHangs = tripsyGarmentSkipsCube(x.name, x.typeKey);
-      const b = cardPackedBits(Math.min(x.packed, x.qty), x.qty, xHangs);
+      const xType = x.typeKey || tripsyGarmentTypeKey(x.name);
+      const xUncubed = tripsyGarmentSkipsCube(x.name, xType);
+      const b = cardPackedBits(Math.min(x.packed, x.qty), x.qty, xUncubed);
       return `<div class="tw-card" data-tw-detail-generic="${i}" style="cursor:pointer; position:relative;">
           <div class="tw-actions tw-actions-top"><button class="btn" data-tw-gen-wear-days="${i}">Wear Days</button></div>
           <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(x.typeKey, '', x.name)}</div>
-          <div class="tw-info"><div class="tw-name">${esc(x.name)}${x.qty > 1 ? ` <span style="color:var(--muted);">×${x.qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${xHangs ? hangingLineHtml(Math.min(x.packed, x.qty)) : cubeLineHtml(x.cubes)}</div>
+          <div class="tw-info"><div class="tw-name">${esc(x.name)}${x.qty > 1 ? ` <span style="color:var(--muted);">×${x.qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${xUncubed ? uncubedLineHtml(Math.min(x.packed, x.qty), xType) : cubeLineHtml(x.cubes)}</div>
           ${b.badge}
         </div>`;
     }).join('');
