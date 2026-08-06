@@ -651,9 +651,14 @@ a separate always-close button lands beside it on the detail screen wearing the 
 
 - **Packing cubes: packing a garment IS assigning it to one.** Cubes are the physical zip cubes
   garments go into, identified by three traits rather than a typed-in name — **brand** (Briggs &
-  Riley, Eagle Creek), **size** (Large/Medium/Small/Extra small) and **color** (Black, Blue, Purple,
+  Riley, Eagle Creek Reveal, Eagle Creek Pack-It — split by LINE, since two Eagle Creek lines
+  look nothing alike and telling same-colour/same-size cubes apart is the whole point of
+  recording a brand), **size** (Large/Medium/Small/Extra small) and **color** (Black, Blue, Purple,
   Orange, Yellow, Gray, Brown, Zebra), as fixed lists (`TRIPSY_CUBE_BRANDS`/`_SIZES`/`_COLORS`;
-  extend them when a cube is bought and nothing else needs changing). Fixed rather than free text
+  extend them when a cube is bought and nothing else needs changing — a cube saved under a value
+  since removed from one of these lists keeps it, because `showTripsyCubeForm`'s `selHtml` appends
+  an unrecognised current value rather than letting the browser fall back to the first option and
+  silently blank it on the next save). Fixed rather than free text
   because the label is DERIVED: `tripsyCubeName` reads "colour + size" ("Blue Medium") and appends
   the brand ONLY when another cube shares that colour and size, so twins stay distinguishable while
   everything else stays short — a "navy"/"Navy" typo would split one cube into two labels. Colour
@@ -674,17 +679,27 @@ a separate always-close button lands beside it on the detail screen wearing the 
   what a pre-cubes entry and a deleted cube both degrade to; both render as "cube not set" rather
   than vanishing.
   **Some garments never go in a cube** — the ones that HANG (suits, tuxedos, blazers, jackets,
-  raincoats, dresses and gowns) plus **ties**, which are rolled or laid flat rather than folded
-  into a cube (`TRIPSY_UNCUBED_TYPES` / `tripsyGarmentSkipsCube`, typed off
+  raincoats, dresses and gowns), plus **ties** (rolled or laid flat) and **cufflinks** (they
+  travel in a case). Cufflinks are typed *only* so this rule can reach them, since it is
+  type-keyed; their packing group stays `accessories` and their glyph stays 💎
+  (`TRIPSY_UNCUBED_TYPES` / `tripsyGarmentSkipsCube`, typed off
   `tripsyGarmentTypeKey` so it inherits that function's ordering guarantees — three of which
   matter here: swimwear matches before `suit` so a bathing suit isn't read as tailoring;
   dress-shirt/dress-socks/dress-shoes all match before the bare `dress` rule so none is read as
-  a gown and pulled out of its cube; and the tie rule's `\b` word boundary is what keeps
-  "booties"/"panties" from typing as `tie`). Those keep the original count/toggle packing via
+  a gown and pulled out of its cube; the tie rule's `\b` word boundary is what keeps
+  "booties"/"panties" from typing as `tie`; and the cufflinks rule REQUIRES the word "link", so a
+  French-cuff shirt is still a shirt). Those keep the original count/toggle packing via
   `tripsyWardrobeChoosePackedCount` and render an explicit uncubed line rather than a blank where
-  a cube would be, so a suit with no cube doesn't read as one you forgot to assign —
-  "hung, not in a cube" for the hanging types, and "packed loose, not in a cube" (👔) for a tie,
-  which isn't on a hanger (`uncubedLineHtml`, which takes the typeKey for exactly this).
+  a cube would be, so a suit with no cube doesn't read as one you forgot to assign. The wording
+  comes from `TRIPSY_UNCUBED_NOTE` (default `TRIPSY_UNCUBED_NOTE_HANGS`), keyed by typeKey,
+  because the types aren't uncubed for the same reason: 🧥 "hung, not in a cube", 👔 "packed
+  loose, not in a cube" for a tie, 💎 "packed in a case, not in a cube" for cufflinks. **Add an
+  entry there whenever a non-hanging type joins `TRIPSY_UNCUBED_TYPES`**, or it will claim to be
+  on a hanger. They are
+  also skipped by the Cubes page's **"Cube not set"** block: `tripsyNormalizeTripSelection` pads
+  every PACKED copy to a cube slot, and an uncubed garment's slots are empty strings by
+  construction, so without an explicit skip in `showTripsyCubeContents` a packed suit reads as a
+  location you forgot to assign when there was never a cube to assign.
   `showTripsyCubePicker` is the ONLY way to mark a CUBED garment packed (`packed` is just
   how many slots are filled), one copy commits immediately while several advance to the next
   unassigned copy, and the **Cubes** header button opens `showTripsyCubeContents` — the same live
