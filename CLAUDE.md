@@ -679,9 +679,11 @@ a separate always-close button lands beside it on the detail screen wearing the 
   what a pre-cubes entry and a deleted cube both degrade to; both render as "cube not set" rather
   than vanishing.
   **Some garments never go in a cube** — the ones that HANG (suits, tuxedos, blazers, jackets,
-  raincoats, dresses and gowns), plus **ties** (rolled or laid flat) and **cufflinks** (they
-  travel in a case). Cufflinks are typed *only* so this rule can reach them, since it is
-  type-keyed; their packing group stays `accessories` and their glyph stays 💎
+  raincoats, dresses and gowns), plus **ties** (rolled or laid flat), **cufflinks** and
+  **sunglasses** (both travel in a case), and **shoes** (packed separately). Cufflinks and
+  sunglasses are typed *only* so this rule can reach them, since it is type-keyed; their packing
+  group stays `accessories` and their glyphs stay 💎 / 🕶️ (the sunglasses rule is deliberately
+  narrow — `sunglasses`/`shades` only — so prescription glasses stay untyped)
   (`TRIPSY_UNCUBED_TYPES` / `tripsyGarmentSkipsCube`, typed off
   `tripsyGarmentTypeKey` so it inherits that function's ordering guarantees — three of which
   matter here: swimwear matches before `suit` so a bathing suit isn't read as tailoring;
@@ -693,13 +695,20 @@ a separate always-close button lands beside it on the detail screen wearing the 
   a cube would be, so a suit with no cube doesn't read as one you forgot to assign. The wording
   comes from `TRIPSY_UNCUBED_NOTE` (default `TRIPSY_UNCUBED_NOTE_HANGS`), keyed by typeKey,
   because the types aren't uncubed for the same reason: 🧥 "hung, not in a cube", 👔 "packed
-  loose, not in a cube" for a tie, 💎 "packed in a case, not in a cube" for cufflinks. **Add an
-  entry there whenever a non-hanging type joins `TRIPSY_UNCUBED_TYPES`**, or it will claim to be
-  on a hanger. They are
+  loose, not in a cube" for a tie, 💎/🕶️ "packed in a case, not in a cube" for cufflinks and
+  sunglasses, 👞 "packed separately, not in a cube" for shoes. **Add an entry there whenever a
+  non-hanging type joins `TRIPSY_UNCUBED_TYPES`**, or it will claim to be on a hanger. They are
   also skipped by the Cubes page's **"Cube not set"** block: `tripsyNormalizeTripSelection` pads
   every PACKED copy to a cube slot, and an uncubed garment's slots are empty strings by
   construction, so without an explicit skip in `showTripsyCubeContents` a packed suit reads as a
   location you forgot to assign when there was never a cube to assign.
+  Tapping a cube's **picture or its name** on the Cubes page drills into that cube alone —
+  its garments as photo cards (`view = {mode:'cube', id}` inside `showTripsyCubeContents`;
+  contents are keyed by garment ID rather than name so each one's `driveFileId` is available,
+  and copies of the same garment allocated across several tiers total into one ×N card). The
+  "Cube not set" pseudo-cube drills down the same way, under id `''`. Close is contextual, the
+  same single-button shape the packing screens use: from a drill-down it returns to the list,
+  from the list it closes the page.
   `showTripsyCubePicker` is the ONLY way to mark a CUBED garment packed (`packed` is just
   how many slots are filled), one copy commits immediately while several advance to the next
   unassigned copy, and the **Cubes** header button opens `showTripsyCubeContents` — the same live
