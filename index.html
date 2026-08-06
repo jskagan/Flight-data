@@ -7753,6 +7753,21 @@ function tripsyCubeLabel(id) {
   const cube = tripsyCubeById(id);
   return cube ? tripsyCubeName(cube) : '';
 }
+// Garments that HANG rather than fold never go into a packing cube -- a suit, a tuxedo,
+// a blazer, a jacket, a raincoat, a dress or a gown travels on a hanger or laid flat, so
+// asking "which cube?" for one is a question with no right answer. These still get marked
+// packed, just by count (tripsyWardrobeChoosePackedCount) instead of by cube.
+// Typed off the garment NAME through tripsyGarmentTypeKey, so it inherits that
+// function's ordering guarantees for free, and two of them matter here: swimwear is
+// matched BEFORE 'suit', so a bathing suit is not mistaken for tailoring; and
+// dress-shirt/dress-socks/dress-shoes are all matched BEFORE the bare 'dress' rule, so
+// none of those is mistaken for a gown and pulled out of its cube.
+// 'jacket' is where tripsyGarmentTypeKey already puts raincoats and rain jackets, and
+// 'dress' is its single type for both dresses and gowns.
+const TRIPSY_UNCUBED_TYPES = ['suit', 'tuxedo', 'blazer', 'jacket', 'dress'];
+function tripsyGarmentSkipsCube(name, typeKey) {
+  return TRIPSY_UNCUBED_TYPES.includes(typeKey || tripsyGarmentTypeKey(name || ''));
+}
 // Stable display order for the picker and the cube list: biggest first, then colour in
 // the order above -- so the grid doesn't reshuffle as cubes are added.
 function tripsyCubesSorted() {
@@ -8606,6 +8621,36 @@ function tripsyWardrobeChooseQty(max, garmentName, verb = 'pack', needed = null)
 }
 // "How many packed?" chooser for a multi-copy garment (one photo standing for N
 // copies) -- a DROPDOWN of 0..total, pre-set to the current packed count. Resolves
+// to the chosen count, or null on cancel. Used by the Packing Status detail page.
+function tripsyWardrobeChoosePackedCount(garmentName, total, current = 0) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tw-packed-qty-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-packed-qty-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    const cur = Math.max(0, Math.min(total, current));
+    const opts = Array.from({ length: total + 1 }, (_, i) => `<option value="${i}"${i === cur ? ' selected' : ''}>${i}</option>`).join('');
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:360px; text-align:center;">
+        <h2 style="margin:0 0 6px; font-size:17px;">How many packed?</h2>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:14px;">${esc(garmentName || 'garment')} — ${total} selected</div>
+        <select id="tw-packed-qty-select" class="btn" style="font-size:15px; padding:8px 14px; min-width:90px; text-align:center;">${opts}</select>
+        <div style="margin-top:16px; display:flex; gap:10px; justify-content:center;">
+          <button class="btn" data-packed-cancel>Cancel</button>
+          <button class="btn primary" data-packed-ok>OK</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const close = val => { ov.style.display = 'none'; ov.onclick = null; resolve(val); };
+    ov.onclick = e => {
+      if (e.target.closest('[data-packed-ok]')) { const n = parseInt(ov.querySelector('#tw-packed-qty-select').value, 10); close(Number.isFinite(n) ? n : null); return; }
+      if (e.target.closest('[data-packed-cancel]') || e.target === ov) close(null);
+    };
+  });
+}
+
+// Still used, despite packing normally going through the cube picker: garments that
+// HANG rather than fold (suits, blazers, jackets, raincoats -- see
+// tripsyGarmentSkipsCube) never go into a cube, so for those this stays the way a
+// count is set.
 // ---- Packing cubes -------------------------------------------------------------
 // Small photo tile for one cube, reused by the picker and the cube-contents page.
 function tripsyCubeTileHtml(cube, { size = 74, selected = false } = {}) {
@@ -9775,20 +9820,44 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const cur = (target.cubes || []).filter(Boolean).slice(0, target.qty);
     return [...cur, ...Array.from({ length: Math.max(0, target.qty - cur.length) }, () => '')];
   };
+  // A hanging garment (suit/blazer/jacket/raincoat) is packed by COUNT -- there is no
+  // cube to put it in -- so it keeps the original toggle-or-count behaviour. Everything
+  // else goes through the cube picker, where picking the cube IS what marks it packed.
+  const setPackedCount = (target, n) => {
+    target.packed = Math.max(0, Math.min(target.qty, n));
+    target.cubes = []; // hangs -- never has a location
+  };
+  const packByCount = async (target, label) => {
+    if (target.qty <= 1) { setPackedCount(target, target.packed >= 1 ? 0 : 1); return true; }
+    const n = await tripsyWardrobeChoosePackedCount(label, target.qty, target.packed);
+    if (n == null) return false;
+    setPackedCount(target, n);
+    return true;
+  };
   const markGarmentPacked = async id => {
     const tier = statusView.tier;
     const e = entryFor(id, tier, statusView.lineIndex);
     if (!e) return;
-    const picked = await showTripsyCubePicker((garmentById.get(id) || {}).name || 'garment', cubeSlotsFor(e));
-    if (picked == null) return; // cancelled -- leave the entry exactly as it was
-    applyCubes(e, picked);
+    const g = garmentById.get(id) || {};
+    const label = g.name || 'garment';
+    if (tripsyGarmentSkipsCube(g.name)) {
+      if (!(await packByCount(e, label))) return;
+    } else {
+      const picked = await showTripsyCubePicker(label, cubeSlotsFor(e));
+      if (picked == null) return; // cancelled -- leave the entry exactly as it was
+      applyCubes(e, picked);
+    }
     chosen = aggregate(); persist(); render();
   };
   const markGenericPacked = async idx => {
     const entry = generics[idx]; if (!entry) return;
-    const picked = await showTripsyCubePicker(entry.name, cubeSlotsFor(entry));
-    if (picked == null) return;
-    applyCubes(entry, picked);
+    if (tripsyGarmentSkipsCube(entry.name, entry.typeKey)) {
+      if (!(await packByCount(entry, entry.name))) return;
+    } else {
+      const picked = await showTripsyCubePicker(entry.name, cubeSlotsFor(entry));
+      if (picked == null) return;
+      applyCubes(entry, picked);
+    }
     persistGenerics(); render();
   };
 
@@ -9871,10 +9940,10 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const skipped = Math.max(0, (ln.need || 0) - need);
     const met = selected >= need;
 
-    const cardPackedBits = (packed, qty) => {
+    const cardPackedBits = (packed, qty, hangs) => {
       const full = qty > 0 && packed >= qty;
       const partial = packed > 0 && packed < qty;
-      const meta = full ? '✓ packed' : (partial ? `${packed}/${qty} packed` : 'tap to pack into a cube');
+      const meta = full ? '✓ packed' : (partial ? `${packed}/${qty} packed` : (hangs ? 'tap to mark packed' : 'tap to pack into a cube'));
       const color = full ? 'var(--home-green)' : (partial ? 'var(--amber)' : 'var(--muted)');
       const badge = full ? packedBadge : (partial ? partialBadge(packed) : '');
       return { meta, color, badge };
@@ -9883,6 +9952,11 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     // so five shirts in one cube read "Shirts cube x5" instead of five identical lines.
     // A copy whose cube was deleted (or that was packed before cubes existed) still
     // shows -- as "cube not set" -- rather than silently looking unplaced.
+    // Said outright rather than left blank, so a suit showing no cube reads as "this one
+    // hangs" instead of "you forgot to assign it".
+    const hangingLineHtml = packed => (packed > 0
+      ? `<div class="tw-meta" style="color:var(--muted); display:flex; align-items:center; gap:4px;"><span>&#129509;</span><span>hung, not in a cube</span></div>`
+      : '');
     const cubeLineHtml = cubes => {
       const filled = (cubes || []).filter(Boolean);
       const unknown = (cubes || []).length - filled.length;
@@ -9897,20 +9971,22 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
       return `<div class="tw-meta" style="color:var(--muted); display:flex; align-items:center; gap:4px;"><span>&#129523;</span><span style="min-width:0; overflow:hidden; text-overflow:ellipsis;">${parts.join(', ')}</span></div>`;
     };
     const garmentCards = garmentItems.map(({ g, qty, packed, cubes }) => {
-      const b = cardPackedBits(packed, qty);
+      const hangs = tripsyGarmentSkipsCube(g.name);
+      const b = cardPackedBits(packed, qty, hangs);
       return `<div class="tw-card" data-tw-detail-garment="${esc(g.id)}" style="cursor:pointer; position:relative;">
           <div class="tw-actions tw-actions-top"><button class="btn" data-tw-wear-days="${esc(g.id)}">Wear Days</button></div>
           <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}"${g.driveFileId ? ` data-tw-photo="${esc(g.driveFileId)}"` : ''}>${g.driveFileId ? '' : tripsyGarmentGlyph(tripsyGarmentTypeKey(g.name), g.group, g.name)}</div>
-          <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${cubeLineHtml(cubes)}</div>
+          <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${hangs ? hangingLineHtml(packed) : cubeLineHtml(cubes)}</div>
           ${b.badge}
         </div>`;
     }).join('');
     const genCards = genItems.map(({ x, i }) => {
-      const b = cardPackedBits(Math.min(x.packed, x.qty), x.qty);
+      const xHangs = tripsyGarmentSkipsCube(x.name, x.typeKey);
+      const b = cardPackedBits(Math.min(x.packed, x.qty), x.qty, xHangs);
       return `<div class="tw-card" data-tw-detail-generic="${i}" style="cursor:pointer; position:relative;">
           <div class="tw-actions tw-actions-top"><button class="btn" data-tw-gen-wear-days="${i}">Wear Days</button></div>
           <div class="tw-photo tw-photo-glyph">${tripsyGarmentGlyph(x.typeKey, '', x.name)}</div>
-          <div class="tw-info"><div class="tw-name">${esc(x.name)}${x.qty > 1 ? ` <span style="color:var(--muted);">×${x.qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${cubeLineHtml(x.cubes)}</div>
+          <div class="tw-info"><div class="tw-name">${esc(x.name)}${x.qty > 1 ? ` <span style="color:var(--muted);">×${x.qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${xHangs ? hangingLineHtml(Math.min(x.packed, x.qty)) : cubeLineHtml(x.cubes)}</div>
           ${b.badge}
         </div>`;
     }).join('');
