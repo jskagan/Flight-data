@@ -1235,6 +1235,46 @@
   }
   .tripsy-diary-text { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; resize: vertical; min-height: 160px; }
   .tripsy-diary-text:focus { outline: none; border-color: var(--amber); }
+  /* Book mode: the day rendered as it will print, edited in place. Editing assumes a WIDE
+     screen (the owner's stated workflow), so float widths are fixed to the print measure
+     rather than fluid -- what you edit is what prints. The collapse below is for READING
+     on a narrow screen only. */
+  .tripsy-diary-book { font-family: Georgia, 'Times New Roman', serif; font-size: 16px; line-height: 1.75; }
+  .tripsy-diary-pararow { display: flex; align-items: flex-start; gap: 8px; }
+  .tripsy-diary-para {
+    flex: 1; min-width: 0; margin: 0 0 16px; padding: 4px 6px; border-radius: 6px;
+    border: 1px solid transparent; white-space: pre-wrap;
+  }
+  .tripsy-diary-para:focus { outline: none; border-color: var(--line); background: var(--bg); }
+  .tripsy-diary-addphoto { flex-shrink: 0; font-size: 11px; padding: 3px 8px; margin-top: 4px; opacity: 0.55; }
+  .tripsy-diary-addphoto:hover { opacity: 1; }
+  .tripsy-diary-fig { margin: 4px 0 10px; }
+  .tripsy-diary-fig--right { float: right; width: 46%; margin-left: 20px; }
+  .tripsy-diary-fig--left  { float: left;  width: 46%; margin-right: 20px; }
+  .tripsy-diary-fig--full  { float: none;  width: 100%; margin: 14px 0; }
+  .tripsy-diary-figimg { width: 100%; aspect-ratio: 4 / 3; background: var(--panel-2) center/cover no-repeat; border-radius: 8px; border: 1px solid var(--line); }
+  .tripsy-diary-fig figcaption { font-size: 12.5px; line-height: 1.45; color: var(--muted); margin-top: 6px; font-family: 'Avenir Next', sans-serif; }
+  /* The photo list under a day: captions and controls live OUT of the editable prose, so
+     an input can never end up nested inside a contenteditable region. */
+  .tripsy-diary-photolist { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+  .tripsy-diary-photorow { display: flex; gap: 10px; align-items: flex-start; }
+  .tripsy-diary-thumb { width: 64px; aspect-ratio: 1 / 1; flex-shrink: 0; }
+  .tripsy-diary-caption { width: 100%; font-size: 13px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font-family: 'Avenir Next', sans-serif; }
+  .tripsy-diary-photoctl { display: flex; gap: 6px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+  .tripsy-diary-photoctl .btn { font-size: 11px; padding: 3px 8px; }
+  .tripsy-diary-dayactions { margin-top: 8px; }
+  .tripsy-diary-photobox { background: var(--bg); border: 1px solid var(--amber); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+  .tripsy-diary-candidates { display: flex; flex-wrap: wrap; gap: 12px; }
+  .tripsy-diary-cand { width: 150px; }
+  .tripsy-diary-candimg { width: 150px; aspect-ratio: 4 / 3; background: var(--panel-2) center/cover no-repeat; border-radius: 8px; border: 1px solid var(--line); }
+  .tripsy-diary-candname { font-size: 11.5px; color: var(--muted); margin: 4px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tripsy-diary-candctl { display: flex; gap: 6px; }
+  .tripsy-diary-candctl .btn { flex: 1; font-size: 13px; padding: 2px 0; }
+  /* Reading on a narrow screen: floats would leave an unreadable column, so they become
+     full-width blocks in reading order. The PDF is fixed-width and always honours them. */
+  @media (max-width: 700px) {
+    .tripsy-diary-fig--right, .tripsy-diary-fig--left { float: none; width: 100%; margin: 14px 0; }
+  }
   .tripsy-attire-generated-line { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
   .tripsy-attire-day-section { margin-bottom: 24px; }
   .tripsy-attire-day-section:last-child { margin-bottom: 0; }
@@ -18472,6 +18512,143 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList
   return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
 }
 
+// ---- Trip Diary: the photo/text token model ------------------------------------
+// A photo's position lives INSIDE the day's text as a "[photo 3]" token, not as a
+// paragraph index alongside it. That is what lets a photo travel with the words it
+// belongs to when the prose is rewritten, split or merged -- an index would silently
+// point at different words after any edit above it.
+// The number is STABLE per day, handed out by tripsyDiaryNextPhotoNo and never reused,
+// so deleting photo 2 leaves [photo 1] and [photo 3] pointing exactly where they were.
+const TRIPSY_DIARY_TOKEN_RE = /\[photo (\d+)\]/g;
+function tripsyDiaryParagraphs(text) {
+  // Blank line = paragraph break, which is what the plain-textarea mode already implies.
+  // A day with no text yet still offers ONE empty paragraph, or there would be nowhere
+  // to put a photo or to start typing in book mode.
+  const parts = String(text || '').split(/\n\s*\n/).map(p => p.trim());
+  const kept = parts.filter(p => p !== '');
+  return kept.length ? kept : [''];
+}
+function tripsyDiaryNextPhotoNo(day) {
+  const used = ((day && day.photos) || []).map(p => Number(p.no) || 0);
+  return (used.length ? Math.max(...used) : 0) + 1;
+}
+function tripsyDiaryTokenNumbers(text) {
+  const out = [];
+  String(text || '').replace(TRIPSY_DIARY_TOKEN_RE, (m, n) => { out.push(Number(n)); return m; });
+  return out;
+}
+// Which paragraph a place's photo should land in: the first one that MENTIONS it, so a
+// photo of Brown's arrives beside the sentence about Brown's rather than in a pile at the
+// bottom. Falls back to the last paragraph when the name isn't mentioned at all.
+function tripsyDiaryParagraphForPlace(paragraphs, placeName) {
+  const needle = String(placeName || '').trim().toLowerCase();
+  if (needle) {
+    // Try the whole name, then its first significant word -- "Brown's Hotel, a Rocco
+    // Forte hotel" is how the event is titled, but the prose just says "Brown's".
+    const words = needle.split(/[^a-z0-9']+/i).filter(w => w.length > 3);
+    for (const probe of [needle, ...words]) {
+      const i = paragraphs.findIndex(p => p.toLowerCase().includes(probe));
+      if (i >= 0) return i;
+    }
+  }
+  return Math.max(0, paragraphs.length - 1);
+}
+function tripsyDiaryInsertToken(text, no, paragraphIndex) {
+  const paras = tripsyDiaryParagraphs(text);
+  const i = Math.max(0, Math.min(paragraphIndex, paras.length - 1));
+  paras[i] = paras[i] ? `${paras[i]} [photo ${no}]` : `[photo ${no}]`;
+  return paras.join('\n\n');
+}
+function tripsyDiaryRemoveToken(text, no) {
+  return String(text || '')
+    .replace(new RegExp(`\\s*\\[photo ${no}\\]`, 'g'), '')
+    .replace(/[ \t]+\n/g, '\n');
+}
+// Moves a photo one paragraph earlier or later. Used by the photo list's arrows, so the
+// owner can reposition without hunting for the token in the prose.
+function tripsyDiaryMoveToken(text, no, direction) {
+  const paras = tripsyDiaryParagraphs(text);
+  const from = paras.findIndex(p => p.includes(`[photo ${no}]`));
+  if (from < 0) return text;
+  const to = from + (direction < 0 ? -1 : 1);
+  if (to < 0 || to >= paras.length) return text; // already at an end -- a no-op, not an error
+  paras[from] = paras[from].replace(new RegExp(`\\s*\\[photo ${no}\\]`), '').trim();
+  paras[to] = paras[to] ? `${paras[to]} [photo ${no}]` : `[photo ${no}]`;
+  return paras.join('\n\n');
+}
+// Reads an edited paragraph element back out as plain text, turning each embedded figure
+// back into its token. Without this, editing a paragraph in book mode would drop every
+// photo it contains the moment it was saved.
+function tripsyDiarySerializeParagraph(el) {
+  let out = '';
+  for (const node of (el ? el.childNodes : [])) {
+    if (node.nodeType === 3) { out += node.nodeValue; continue; }
+    if (node.nodeType !== 1) continue;
+    const no = node.getAttribute && node.getAttribute('data-photo-no');
+    if (no) { out += `[photo ${no}]`; continue; }
+    if (node.tagName === 'BR') { out += '\n'; continue; }
+    out += node.textContent || '';
+  }
+  return out.replace(/ /g, ' ').trim();
+}
+// A photo record the day's text no longer references (its token was deleted while
+// editing) is not lost -- it drops back to the day's unplaced tray so it can be
+// re-placed. Only an explicit remove deletes it.
+function tripsyDiaryUnplacedPhotos(day) {
+  const placed = new Set(tripsyDiaryTokenNumbers(day && day.text));
+  return ((day && day.photos) || []).filter(p => !placed.has(Number(p.no)));
+}
+
+// Fills each diary photo slot from Drive. Its own painter rather than
+// tripsyWardrobeLoadPhotos, which only looks at .tw-photo nodes and would silently skip
+// these; and background-image (not <img>) so a figure keeps its aspect box while loading.
+async function tripsyDiaryPaintPhotos(root) {
+  if (!root) return;
+  for (const node of root.querySelectorAll('[data-diary-img]')) {
+    const id = node.getAttribute('data-diary-img');
+    if (!id || node.dataset.painted === '1') continue;
+    try {
+      node.style.backgroundImage = `url("${await tripsyPlacePhotoDisplayUrl(id)}")`;
+      node.dataset.painted = '1';
+    } catch (e) { /* leave the empty box rather than break the page */ }
+  }
+}
+// Take Photo / Choose Photo over two hidden inputs -- the shape that works on iPad, where
+// a single accept="image/*" input inside a modal is unreliable: `capture` is what opens
+// the camera directly, and its absence is what offers the library, so the button tapped
+// decides rather than an OS action sheet that may not appear.
+function tripsyPickImageFile(onPick) {
+  let ov = document.getElementById('tripsy-image-pick-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-image-pick-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483200';
+  ov.innerHTML = `
+    <div class="tw-modal-paper" style="max-width:340px; text-align:center;">
+      <h2 style="margin:0 0 14px; font-size:17px;">Add a photo</h2>
+      <div style="display:flex; gap:8px; justify-content:center; margin-bottom:12px;">
+        <button type="button" class="btn" data-pick-take>Take Photo</button>
+        <button type="button" class="btn" data-pick-choose>Choose Photo</button>
+      </div>
+      <input type="file" data-pick-cam accept="image/*" capture="environment" style="display:none;">
+      <input type="file" data-pick-lib accept="image/*" style="display:none;">
+      <button class="btn" data-pick-cancel style="font-size:12px;">Cancel</button>
+    </div>`;
+  ov.style.display = 'flex';
+  const close = () => { ov.style.display = 'none'; ov.onclick = null; };
+  const wire = (inputSel, btnSel) => {
+    const input = ov.querySelector(inputSel);
+    input.value = ''; // so re-picking the SAME file still fires change
+    input.onchange = () => {
+      const f = input.files && input.files[0];
+      close();
+      if (f) onPick(f);
+    };
+    ov.querySelector(btnSel).onclick = e => { e.preventDefault(); e.stopPropagation(); input.click(); };
+  };
+  wire('[data-pick-cam]', '[data-pick-take]');
+  wire('[data-pick-lib]', '[data-pick-choose]');
+  ov.onclick = e => { if (e.target === ov || e.target.closest('[data-pick-cancel]')) close(); };
+}
+
 // ---- Trip Diary page ----------------------------------------------------------
 // Reached from a trip card's gear menu. Days come from buildTripsyPrintDayData, so the
 // diary's day boundaries are IDENTICAL to the itinerary's (earliest dated event, not
@@ -18569,6 +18746,114 @@ async function showTripsyTripDiary(tripKey) {
     diary = { ...diary, days };
   };
 
+  // Days whose "See photos" box is currently open. Transient -- never persisted; a
+  // reopened diary starts with every box shut.
+  const photoBoxDays = new Set();
+  const photoCandidates = new Map();  // dayKey -> [{photoName, dataUrl, placeName}]
+  const photoOf = (d, no) => (d.photos || []).find(p => Number(p.no) === Number(no)) || null;
+  // One paragraph per block, each editable in place, with its photos floated INSIDE it so
+  // the text wraps around them exactly as it will in print. contenteditable rather than a
+  // textarea for precisely that reason: a textarea is a block box and would reflow away
+  // from the float the instant you tapped in to edit.
+  const tripsyDiaryBookBodyHtml = (d, dayKey) => {
+    const paras = tripsyDiaryParagraphs(d.text || '');
+    const figHtml = no => {
+      const ph = photoOf(d, no);
+      if (!ph) return ''; // token for a photo that was removed -- render nothing
+      return `<figure class="tripsy-diary-fig tripsy-diary-fig--${esc(ph.side || 'right')}" data-photo-no="${esc(ph.no)}" contenteditable="false">
+        <div class="tripsy-diary-figimg" data-diary-img="${esc(ph.driveFileId || '')}"></div>
+        ${ph.caption ? `<figcaption>${esc(ph.caption)}</figcaption>` : ''}
+      </figure>`;
+    };
+    const rows = paras.map((para, pi) => {
+      const withFigs = esc(para).replace(TRIPSY_DIARY_TOKEN_RE, (m, n) => figHtml(n));
+      return `<div class="tripsy-diary-pararow">
+        <p class="tripsy-diary-para" data-diary-para="${esc(dayKey)}" data-para-index="${pi}"${isOwner ? ' contenteditable="plaintext-only"' : ''}>${withFigs}</p>
+        ${isOwner ? `<button class="btn tripsy-diary-addphoto" data-diary-addphoto="${esc(dayKey)}" data-para-index="${pi}" title="Add a photo here">+ Photo</button>` : ''}
+      </div>`;
+    }).join('');
+    return `<div class="tripsy-diary-book">${rows}</div>`;
+  };
+  // Captions, side and position live in a list under the day rather than inside the
+  // editable prose: an <input> nested in a contenteditable region is a reliable way to
+  // lose a caption on iPad, and the arrows need somewhere stable to sit.
+  const tripsyDiaryPhotoListHtml = (d, dayKey) => {
+    const unplaced = new Set(tripsyDiaryUnplacedPhotos(d).map(p => Number(p.no)));
+    return `<div class="tripsy-diary-photolist">
+      ${(d.photos || []).map(ph => `
+        <div class="tripsy-diary-photorow">
+          <div class="tripsy-diary-figimg tripsy-diary-thumb" data-diary-img="${esc(ph.driveFileId || '')}"></div>
+          <div style="flex:1; min-width:0;">
+            <input class="tripsy-diary-caption" data-diary-caption="${esc(dayKey)}" data-photo-no="${esc(ph.no)}" value="${esc(ph.caption || '')}" placeholder="Caption…">
+            <div class="tripsy-diary-photoctl">
+              ${unplaced.has(Number(ph.no))
+                ? `<span style="color:var(--amber); font-size:11.5px;">not placed —</span><button class="btn" data-diary-replace="${esc(dayKey)}" data-photo-no="${esc(ph.no)}">Place in text</button>`
+                : `<button class="btn" data-diary-move="-1" data-day="${esc(dayKey)}" data-photo-no="${esc(ph.no)}" title="Move up a paragraph">▲</button>
+                   <button class="btn" data-diary-move="1" data-day="${esc(dayKey)}" data-photo-no="${esc(ph.no)}" title="Move down a paragraph">▼</button>`}
+              <button class="btn" data-diary-side="${esc(dayKey)}" data-photo-no="${esc(ph.no)}" title="Left / right / full width">${ph.side === 'left' ? '◧' : (ph.side === 'full' ? '▣' : '◨')}</button>
+              <button class="btn" data-diary-delphoto="${esc(dayKey)}" data-photo-no="${esc(ph.no)}" style="border-color:var(--red); color:var(--red);" title="Remove this photo">✕</button>
+            </div>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  };
+  // Uploads one picked image and places its token in `paraIndex`.
+  const addOwnPhoto = async (dayKey, paraIndex, file) => {
+    const d = dayOf(dayKey) || { dayKey };
+    setSaveState('Uploading…');
+    try {
+      const small = await tripsyResizeImageBlob(file);
+      const driveFileId = await uploadBlobToDrive(small, `diary-photo-${Date.now()}`, 'image/jpeg');
+      const no = tripsyDiaryNextPhotoNo(d);
+      upsertDay(dayKey, {
+        photos: [...(d.photos || []), { no, driveFileId, caption: '', side: 'right', source: 'upload' }],
+        text: tripsyDiaryInsertToken(d.text || '', no, paraIndex),
+      });
+      await save();
+      render();
+    } catch (e) {
+      console.error('Diary photo upload failed:', e);
+      setSaveState('Not saved');
+      toast('Could not add that photo — see console for details.', 'error');
+    }
+  };
+  // Fetches candidate photos for every place on a day, once per box opening. Each place
+  // costs a Places call, which is why this is behind a button rather than eager.
+  const loadDayCandidates = async (dayKey) => {
+    const box = content.querySelector(`[data-diary-photobox="${CSS.escape(dayKey)}"]`);
+    if (!box) return;
+    const d = dayOf(dayKey) || {};
+    const rejected = new Set(d.rejectedPhotoNames || []);
+    const already = new Set((d.photos || []).map(p => p.photoName).filter(Boolean));
+    const items = (summaryByDay.get(dayKey) || []).filter(it => it.ev && it.ev.tripsyRaw && !it.isLayover);
+    const seen = new Set();
+    const found = [];
+    for (const it of items) {
+      const raw = it.ev.tripsyRaw;
+      const placeName = raw.name || it.ev.summary || '';
+      if (!placeName || seen.has(placeName)) continue;
+      seen.add(placeName);
+      const thumbs = await tripsyGatherPlacePhotoThumbnails(placeName, raw.address || '', it.ev.summary || '', trip.location || '');
+      for (const t of thumbs) {
+        if (rejected.has(t.photoName) || already.has(t.photoName)) continue;
+        found.push({ ...t, placeName });
+      }
+    }
+    photoCandidates.set(dayKey, found);
+    if (!content.contains(box)) return; // the page re-rendered while we were fetching
+    box.innerHTML = found.length
+      ? `<div class="tripsy-diary-candidates">${found.map((c, ci) => `
+          <div class="tripsy-diary-cand">
+            <div class="tripsy-diary-candimg" style="background-image:url('${c.dataUrl}');"></div>
+            <div class="tripsy-diary-candname">${esc(c.placeName)}</div>
+            <div class="tripsy-diary-candctl">
+              <button class="btn" data-diary-cand-yes="${esc(dayKey)}" data-ci="${ci}" style="color:var(--home-green); border-color:var(--home-green);">✓</button>
+              <button class="btn" data-diary-cand-no="${esc(dayKey)}" data-ci="${ci}" style="color:var(--red); border-color:var(--red);">✕</button>
+            </div>
+          </div>`).join('')}</div>`
+      : `<div style="color:var(--muted); font-size:13px;">No new photos found for this day's places. Use <b>+ Photo</b> on a paragraph to add your own.</div>`;
+  };
+
   const render = () => {
     const written = (diary.days || []).some(d => (d.text || '').trim());
     seedBtn.style.display = isOwner ? 'inline-block' : 'none';
@@ -18586,9 +18871,16 @@ async function showTripsyTripDiary(tripKey) {
           </div>
           ${lines.map(l => `<div class="tripsy-diary-schedule-row"><span>${esc(l.time)}</span><span>${esc(l.label)}${l.place ? ` <span style="color:var(--muted);">· ${esc(l.place)}</span>` : ''}</span></div>`).join('')}
         </div>` : '';
-      const body = isOwner
-        ? `<textarea class="tripsy-diary-text" data-diary-text="${esc(dayKey)}" rows="8" placeholder="What happened on this day…">${esc(d.text || '')}</textarea>`
-        : `<div class="tripsy-diary-read">${esc(d.text || '')}</div>`;
+      // A day is in BOOK mode once it has photos, or the moment the owner asks for them:
+      // the per-paragraph + buttons have to exist before the first photo does, or there
+      // is no way to place one.
+      const photos = d.photos || [];
+      const bookMode = photos.length > 0 || photoBoxDays.has(dayKey);
+      const body = bookMode
+        ? tripsyDiaryBookBodyHtml(d, dayKey)
+        : (isOwner
+          ? `<textarea class="tripsy-diary-text" data-diary-text="${esc(dayKey)}" rows="8" placeholder="What happened on this day…">${esc(d.text || '')}</textarea>`
+          : `<div class="tripsy-diary-read">${esc(d.text || '')}</div>`);
       return `
         <section class="tripsy-diary-day">
           <div class="tripsy-diary-dayhead">
@@ -18596,9 +18888,14 @@ async function showTripsyTripDiary(tripKey) {
             ${isOwner
               ? `<input class="tripsy-diary-heading" data-diary-heading="${esc(dayKey)}" value="${esc(d.heading || '')}" placeholder="Give this day a title…">`
               : (d.heading ? `<div class="tripsy-diary-heading-read">${esc(d.heading)}</div>` : '')}
+            ${isOwner ? `<div class="tripsy-diary-dayactions">
+              <button class="btn" data-diary-photos="${esc(dayKey)}">${photoBoxDays.has(dayKey) ? 'Done' : 'Add photos'}</button>
+            </div>` : ''}
           </div>
           ${scheduleHtml}
+          ${photoBoxDays.has(dayKey) ? `<div class="tripsy-diary-photobox" data-diary-photobox="${esc(dayKey)}"><div style="color:var(--muted); font-size:13px;">Looking for photos of this day's places…</div></div>` : ''}
           ${body}
+          ${(isOwner && photos.length) ? tripsyDiaryPhotoListHtml(d, dayKey) : ''}
         </section>`;
     }).join('');
     content.innerHTML = sections || `<div class="empty-state" style="margin-top:12px;">This trip has no dated events yet, so there are no days to write up.</div>`;
@@ -18627,6 +18924,137 @@ async function showTripsyTripDiary(tripKey) {
         render();
       });
     });
+    // Book mode: a paragraph persists on blur, its figures serialized back to tokens.
+    content.querySelectorAll('[data-diary-para]').forEach(el => {
+      el.addEventListener('blur', () => {
+        const dayKey = el.getAttribute('data-diary-para');
+        const idx = Number(el.getAttribute('data-para-index'));
+        const d = dayOf(dayKey) || {};
+        const paras = tripsyDiaryParagraphs(d.text || '');
+        const next = tripsyDiarySerializeParagraph(el);
+        if (paras[idx] === next) return;
+        paras[idx] = next;
+        upsertDay(dayKey, { text: paras.filter(p => p !== '').join('\n\n') });
+        save();
+      });
+    });
+    content.querySelectorAll('[data-diary-photos]').forEach(el => {
+      el.addEventListener('click', async () => {
+        const dayKey = el.getAttribute('data-diary-photos');
+        if (photoBoxDays.has(dayKey)) {
+          // Done: shut the box. A day that gained no photos drops back to the textarea.
+          photoBoxDays.delete(dayKey);
+          render();
+          return;
+        }
+        photoBoxDays.add(dayKey);
+        render();
+        await loadDayCandidates(dayKey);
+      });
+    });
+    // + Photo on a paragraph -> the device's camera or library, same two-hidden-input
+    // shape the packing-cube form uses (which is what works on iPad).
+    content.querySelectorAll('[data-diary-addphoto]').forEach(el => {
+      el.addEventListener('click', () => {
+        const dayKey = el.getAttribute('data-diary-addphoto');
+        const idx = Number(el.getAttribute('data-para-index'));
+        tripsyPickImageFile(file => addOwnPhoto(dayKey, idx, file));
+      });
+    });
+    content.querySelectorAll('[data-diary-cand-yes]').forEach(el => {
+      el.addEventListener('click', async () => {
+        const dayKey = el.getAttribute('data-diary-cand-yes');
+        const c = (photoCandidates.get(dayKey) || [])[Number(el.getAttribute('data-ci'))];
+        if (!c) return;
+        const d = dayOf(dayKey) || {};
+        setSaveState('Uploading…');
+        try {
+          const driveFileId = await uploadTripsyPlacePhotoToDrive(c.blob, c.blob.type || 'image/jpeg');
+          const no = tripsyDiaryNextPhotoNo(d);
+          const paras = tripsyDiaryParagraphs(d.text || '');
+          upsertDay(dayKey, {
+            photos: [...(d.photos || []), { no, driveFileId, caption: '', side: 'right', source: 'place', photoName: c.photoName, placeName: c.placeName }],
+            text: tripsyDiaryInsertToken(d.text || '', no, tripsyDiaryParagraphForPlace(paras, c.placeName)),
+          });
+          await save();
+          render();
+          await loadDayCandidates(dayKey); // drop the one just taken from the grid
+        } catch (e) {
+          console.error('Diary place-photo add failed:', e);
+          setSaveState('Not saved');
+          toast('Could not add that photo — see console for details.', 'error');
+        }
+      });
+    });
+    content.querySelectorAll('[data-diary-cand-no]').forEach(el => {
+      el.addEventListener('click', async () => {
+        const dayKey = el.getAttribute('data-diary-cand-no');
+        const c = (photoCandidates.get(dayKey) || [])[Number(el.getAttribute('data-ci'))];
+        if (!c) return;
+        // Remembered, so a rejected photo doesn't come back the next time the box opens.
+        const d = dayOf(dayKey) || {};
+        upsertDay(dayKey, { rejectedPhotoNames: [...new Set([...(d.rejectedPhotoNames || []), c.photoName])] });
+        await save();
+        await loadDayCandidates(dayKey);
+      });
+    });
+    content.querySelectorAll('[data-diary-caption]').forEach(el => {
+      el.addEventListener('change', () => {
+        const dayKey = el.getAttribute('data-diary-caption');
+        const no = Number(el.getAttribute('data-photo-no'));
+        const d = dayOf(dayKey) || {};
+        upsertDay(dayKey, { photos: (d.photos || []).map(p => Number(p.no) === no ? { ...p, caption: el.value } : p) });
+        save();
+        render();
+      });
+    });
+    content.querySelectorAll('[data-diary-move]').forEach(el => {
+      el.addEventListener('click', () => {
+        const dayKey = el.getAttribute('data-day');
+        const no = Number(el.getAttribute('data-photo-no'));
+        const d = dayOf(dayKey) || {};
+        upsertDay(dayKey, { text: tripsyDiaryMoveToken(d.text || '', no, Number(el.getAttribute('data-diary-move'))) });
+        save();
+        render();
+      });
+    });
+    content.querySelectorAll('[data-diary-side]').forEach(el => {
+      el.addEventListener('click', () => {
+        const dayKey = el.getAttribute('data-diary-side');
+        const no = Number(el.getAttribute('data-photo-no'));
+        const d = dayOf(dayKey) || {};
+        const nextSide = { right: 'left', left: 'full', full: 'right' };
+        upsertDay(dayKey, { photos: (d.photos || []).map(p => Number(p.no) === no ? { ...p, side: nextSide[p.side || 'right'] } : p) });
+        save();
+        render();
+      });
+    });
+    content.querySelectorAll('[data-diary-replace]').forEach(el => {
+      el.addEventListener('click', () => {
+        const dayKey = el.getAttribute('data-diary-replace');
+        const no = Number(el.getAttribute('data-photo-no'));
+        const d = dayOf(dayKey) || {};
+        const paras = tripsyDiaryParagraphs(d.text || '');
+        const ph = photoOf(d, no);
+        upsertDay(dayKey, { text: tripsyDiaryInsertToken(d.text || '', no, tripsyDiaryParagraphForPlace(paras, ph && ph.placeName)) });
+        save();
+        render();
+      });
+    });
+    content.querySelectorAll('[data-diary-delphoto]').forEach(el => {
+      el.addEventListener('click', () => {
+        const dayKey = el.getAttribute('data-diary-delphoto');
+        const no = Number(el.getAttribute('data-photo-no'));
+        const d = dayOf(dayKey) || {};
+        upsertDay(dayKey, {
+          photos: (d.photos || []).filter(p => Number(p.no) !== no),
+          text: tripsyDiaryRemoveToken(d.text || '', no),
+        });
+        save();
+        render();
+      });
+    });
+    tripsyDiaryPaintPhotos(content);
   };
   render();
 

@@ -941,13 +941,35 @@ not.**
   button**, so the page has to SAY it saved: a header line reads "Saving…" then "Saved"/"Not
   saved" (without it the page reads as unsaved work). Closing blurs the focused field first —
   blur is what persists, so closing straight out of the textarea used to drop the last edit.
-- **Planned (phase 3+):** photos. Placement will ride INSIDE the text as `[photo N]` tokens so a
-  photo travels with the words it belongs to instead of being pinned to a paragraph index; a
-  per-day "See photos / Done" box fetches candidates from Places on demand (the cache's
-  `triedPhotoNames` records only what was already shown — usually one name — so alternates must
-  be fetched, not read); ✓ places, ✕ rejects and is remembered; each photo carries a caption,
-  a side (left/right/full) and a size, floated so text wraps around it, collapsing to full-width
-  blocks on narrow screens while the PDF always honours the float.
+- **Photos (phase 3, built).** Placement rides INSIDE the text as `[photo N]` tokens
+  (`TRIPSY_DIARY_TOKEN_RE`), never a paragraph index: a token travels with the words it belongs
+  to when the prose is rewritten, split or merged. Numbers are stable per day
+  (`tripsyDiaryNextPhotoNo`) and never reused, so deleting photo 2 leaves 1 and 3 pointing where
+  they were.
+- **A day switches to BOOK mode once it has photos — or the moment "Add photos" is pressed.**
+  That second half matters: the per-paragraph **+ Photo** buttons must exist before the first
+  photo does, or there is no way to place one. Book mode renders each paragraph as its own
+  `contenteditable="plaintext-only"` block with its figures floated INSIDE it, so text wraps
+  around them exactly as it prints — a textarea is a block box and would reflow away from the
+  float the instant you tapped in. `tripsyDiarySerializeParagraph` reads the block back out,
+  turning each embedded figure into its token; without it, editing a paragraph would drop every
+  photo in it. Pressing Done with no photos added drops back to the plain textarea.
+- **Two photo sources.** The day's **See photos** box fetches Places candidates per place
+  (`tripsyGatherPlacePhotoThumbnails`, one call per place, hence a button rather than eager
+  loading) — ✓ uploads it and drops its token in the paragraph that MENTIONS that place
+  (`tripsyDiaryParagraphForPlace`, whole name then first significant word, falling back to the
+  last paragraph), ✕ records it in `rejectedPhotoNames` so it is never offered again. The
+  per-paragraph **+ Photo** button takes the owner's own via `tripsyPickImageFile` (Take Photo /
+  Choose Photo over two hidden inputs — the shape that works on iPad) and places it exactly
+  where pressed; it is resized first, since a day of iPhone photos is otherwise tens of MB.
+- **Caption / side / move / remove live in a list UNDER the day**, not in the prose: an `<input>`
+  nested in a contenteditable region is a reliable way to lose a caption on iPad. Side cycles
+  right → left → full. A photo whose token was deleted while editing is not lost — it shows as
+  "not placed" with a Place in text button. Diary photos are painted by `tripsyDiaryPaintPhotos`,
+  its own pass, because `tripsyWardrobeLoadPhotos` only matches `.tw-photo` nodes.
+- **Editing assumes a wide screen** (the owner's stated workflow), so float widths are fixed to
+  the print measure. The narrow-screen collapse to full-width blocks is for READING only.
+- **Still to come (phase 4):** the book/PDF export itself.
 
 ### Review / ambiguity resolution
 
