@@ -13330,6 +13330,63 @@ async function tripsyGuardPanelClose(panel) {
 //    when it isn't.
 // Fails soft and silently in every direction: no Places key, no match, a network error
 // -- the owner just types the address themselves, exactly as before.
+// "address", "address and website", "address, website and phone" -- the status line can
+// now name up to three filled fields, where a bare join would read "address, website, phone".
+function tripsyJoinList(items) {
+  const list = (items || []).filter(Boolean);
+  if (list.length <= 1) return list[0] || '';
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+// Asked when a looked-up place disagrees with what a field already holds -- renaming a
+// restaurant should bring its address/website/phone along, but silently overwriting what
+// the owner typed is exactly what the old fill-only-empty rule existed to prevent. So the
+// choice is put to them, per field, current vs found, defaulting to the found value since
+// the name change is what prompted the lookup. Cancel (or the backdrop) keeps everything.
+// Resolves to a map of field key -> chosen string; an unchecked row simply isn't in it.
+function tripsyPlaceConflictDialog(placeName, rows) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-place-conflict-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-place-conflict-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    // Above the edit panel (and the confirm dialog) it is answering a question about.
+    ov.style.zIndex = '2147483110';
+    const rowHtml = (r, i) => `
+      <div style="text-align:left; padding:10px 0; border-top:1px solid var(--line);">
+        <div style="font-weight:700; font-size:13px; margin-bottom:6px;">${esc(r.label)}</div>
+        <label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:5px; cursor:pointer;">
+          <input type="radio" name="pc-${i}" value="found" checked style="margin-top:3px;">
+          <span style="min-width:0; font-size:13px;"><span style="color:var(--muted);">Found:</span> ${esc(r.found)}</span>
+        </label>
+        <label style="display:flex; gap:8px; align-items:flex-start; cursor:pointer;">
+          <input type="radio" name="pc-${i}" value="current" style="margin-top:3px;">
+          <span style="min-width:0; font-size:13px;"><span style="color:var(--muted);">Keep:</span> ${esc(r.current)}</span>
+        </label>
+      </div>`;
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:460px;">
+        <h2 style="margin:0 0 6px; font-size:18px;">Update details?</h2>
+        <div style="font-size:13.5px; line-height:1.5; color:var(--muted); margin-bottom:10px;">
+          “${esc(placeName)}” has different details from what's in the form. Pick which to keep.
+        </div>
+        ${rows.map(rowHtml).join('')}
+        <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:16px;">
+          <button class="btn" data-pc-cancel>Keep all current</button>
+          <button class="btn primary" data-pc-ok>Apply</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; ov.onclick = null; resolve(v); };
+    ov.onclick = e => {
+      if (e.target === ov || e.target.closest('[data-pc-cancel]')) { done({}); return; }
+      if (!e.target.closest('[data-pc-ok]')) return;
+      const chosen = {};
+      rows.forEach((r, i) => {
+        const picked = ov.querySelector(`input[name="pc-${i}"]:checked`);
+        if (picked && picked.value === 'found') chosen[r.key] = r.found;
+      });
+      done(chosen);
+    };
+  });
+}
 function tripsyWireNameLookupAutofill(panel, raw, tripKey) {
   const isLodging = raw.resource === 'hosting';
   const nameInput = panel.querySelector('[data-tripsy-edit-field="name"]');
@@ -13339,7 +13396,8 @@ function tripsyWireNameLookupAutofill(panel, raw, tripKey) {
     && ((categorySelect ? categorySelect.value : raw.category) === 'restaurant');
   const addressInput = panel.querySelector('[data-tripsy-edit-field="address"]');
   const websiteInput = panel.querySelector('[data-tripsy-edit-field="website"]');
-  if (!addressInput && !websiteInput) return;
+  const phoneInput = panel.querySelector('[data-tripsy-edit-field="phone"]');
+  if (!addressInput && !websiteInput && !phoneInput) return;
 
   const status = document.createElement('div');
   status.style.cssText = 'grid-column:1 / -1; font-size:12px; color:var(--muted); min-height:16px;';
@@ -13348,34 +13406,68 @@ function tripsyWireNameLookupAutofill(panel, raw, tripKey) {
   }
 
   let token = 0;
-  const fill = (input, value) => {
-    if (!input || !value || input.value.trim()) return false;
+  // The name this panel last spent a lookup on. `change` fires on every blur, not only
+  // on an actual edit, so without this a tab through the form would re-bill the same
+  // query -- and, worse, re-ask the conflict question the owner just answered.
+  let lastLookedUp = nameInput.value.trim();
+  const setValue = (input, value) => {
+    if (!input || !value) return false;
     input.value = value;
+    // Synthetic input event so the form's change detection reveals Save/Cancel -- an
+    // auto-filled field must not sit there looking already-saved.
     input.dispatchEvent(new Event('input', { bubbles: true }));
     return true;
   };
+  // Same string, allowing for the trailing-slash / case / spacing differences between a
+  // typed value and Google's canonical one -- those are not a disagreement worth asking about.
+  const same = (a, b) => String(a || '').trim().toLowerCase().replace(/\/+$/, '')
+                      === String(b || '').trim().toLowerCase().replace(/\/+$/, '');
   nameInput.addEventListener('change', async () => {
     if (!isLodging && !isDining()) return;
     const name = nameInput.value.trim();
     // Two characters can't identify a place, and searching on them wastes a call.
     if (name.length < 3) return;
-    // Nothing to fill: don't spend the call at all.
-    if ((!addressInput || addressInput.value.trim()) && (!websiteInput || websiteInput.value.trim())) return;
+    if (name === lastLookedUp) return; // blurred without actually changing the name
+    if (!addressInput && !websiteInput && !phoneInput) return;
+    lastLookedUp = name;
     const mine = ++token;
-    status.textContent = 'Looking up address…';
+    status.textContent = 'Looking up details…';
     const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
     const hint = (trip && trip.location) || '';
     const found = await tripsyLookupPlaceContactDetails(hint ? `${name}, ${hint}` : name);
     if (mine !== token) return; // a newer name is already in flight
     if (!found) { status.textContent = ''; return; }
+    const placeLabel = found.displayName || name;
+    // An EMPTY field is filled outright -- there is nothing to lose. A field that already
+    // holds something DIFFERENT is a genuine disagreement: changing the restaurant should
+    // bring its address/website/phone along, but the owner may have typed a better value,
+    // so that one is asked rather than assumed.
+    const targets = [
+      { key: 'address', label: 'Address', input: addressInput, found: found.address },
+      { key: 'website', label: 'Website', input: websiteInput, found: found.website },
+      { key: 'phone', label: 'Phone', input: phoneInput, found: found.phone },
+    ].filter(t => t.input && t.found);
     const filled = [];
-    if (fill(addressInput, found.address)) filled.push('address');
-    if (fill(websiteInput, found.website)) filled.push('website');
+    const conflicts = [];
+    for (const t of targets) {
+      const current = t.input.value.trim();
+      if (!current) { if (setValue(t.input, t.found)) filled.push(t.label.toLowerCase()); continue; }
+      if (!same(current, t.found)) conflicts.push({ ...t, current });
+    }
+    if (conflicts.length) {
+      const chosen = await tripsyPlaceConflictDialog(placeLabel, conflicts);
+      if (mine !== token) return; // the name moved on while the dialog was open
+      for (const c of conflicts) {
+        if (Object.prototype.hasOwnProperty.call(chosen, c.key) && setValue(c.input, chosen[c.key])) {
+          filled.push(c.label.toLowerCase());
+        }
+      }
+    }
     // Name the place that was matched, so a wrong match is obvious and correctable
     // rather than silently accepted.
     status.textContent = filled.length
-      ? `Filled ${filled.join(' and ')} from “${found.displayName || name}” — check it's the right place.`
-      : '';
+      ? `Filled ${tripsyJoinList(filled)} from “${placeLabel}” — check it's the right place.`
+      : `Matched “${placeLabel}” — nothing to change.`;
   });
 }
 
@@ -16240,8 +16332,10 @@ async function tripsyLookupPlaceContactDetails(query) {
     if (!apiKey || !query || !query.trim()) return null;
     const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
+      // nationalPhoneNumber sits in the same (Enterprise) billing tier websiteUri already
+      // put this call in, so adding it costs nothing extra per lookup.
       headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey,
-                 'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.websiteUri' },
+                 'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.internationalPhoneNumber' },
       body: JSON.stringify({ textQuery: query.trim(), maxResultCount: 1 }),
     });
     if (!res.ok) return null;
@@ -16252,6 +16346,9 @@ async function tripsyLookupPlaceContactDetails(query) {
       displayName: (p.displayName && p.displayName.text) || '',
       address: p.formattedAddress || '',
       website: p.websiteUri || '',
+      // National format reads better for a local number; international is the fallback
+      // for a place that only publishes one (and for anything outside its own country).
+      phone: p.nationalPhoneNumber || p.internationalPhoneNumber || '',
     };
   } catch (e) {
     console.error('tripsyLookupPlaceContactDetails failed:', e);
