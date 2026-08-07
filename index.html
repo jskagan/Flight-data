@@ -18617,6 +18617,8 @@ async function tripsyDiaryPaintPhotos(root) {
 // a single accept="image/*" input inside a modal is unreliable: `capture` is what opens
 // the camera directly, and its absence is what offers the library, so the button tapped
 // decides rather than an OS action sheet that may not appear.
+// Calls back with an ARRAY of files, in the order picked -- one for the camera, one or
+// more from the library.
 function tripsyPickImageFile(onPick) {
   let ov = document.getElementById('tripsy-image-pick-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-image-pick-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -18629,7 +18631,10 @@ function tripsyPickImageFile(onPick) {
         <button type="button" class="btn" data-pick-choose>Choose Photo</button>
       </div>
       <input type="file" data-pick-cam accept="image/*" capture="environment" style="display:none;">
-      <input type="file" data-pick-lib accept="image/*" style="display:none;">
+      <!-- The multiple attribute is on the LIBRARY input only: a camera returns one shot,
+           but picking eight photos of one dinner should be one trip through the Photos app,
+           not eight. iOS honours multi-select here and returns them in the order picked. -->
+      <input type="file" data-pick-lib accept="image/*" multiple style="display:none;">
       <button class="btn" data-pick-cancel style="font-size:12px;">Cancel</button>
     </div>`;
   ov.style.display = 'flex';
@@ -18638,9 +18643,9 @@ function tripsyPickImageFile(onPick) {
     const input = ov.querySelector(inputSel);
     input.value = ''; // so re-picking the SAME file still fires change
     input.onchange = () => {
-      const f = input.files && input.files[0];
+      const files = [...(input.files || [])];
       close();
-      if (f) onPick(f);
+      if (files.length) onPick(files);
     };
     ov.querySelector(btnSel).onclick = e => { e.preventDefault(); e.stopPropagation(); input.click(); };
   };
@@ -18798,24 +18803,34 @@ async function showTripsyTripDiary(tripKey) {
     </div>`;
   };
   // Uploads one picked image and places its token in `paraIndex`.
-  const addOwnPhoto = async (dayKey, paraIndex, file) => {
-    const d = dayOf(dayKey) || { dayKey };
-    setSaveState('Uploading…');
-    try {
-      const small = await tripsyResizeImageBlob(file);
-      const driveFileId = await uploadBlobToDrive(small, `diary-photo-${Date.now()}`, 'image/jpeg');
-      const no = tripsyDiaryNextPhotoNo(d);
-      upsertDay(dayKey, {
-        photos: [...(d.photos || []), { no, driveFileId, caption: '', side: 'right', source: 'upload' }],
-        text: tripsyDiaryInsertToken(d.text || '', no, paraIndex),
-      });
-      await save();
-      render();
-    } catch (e) {
-      console.error('Diary photo upload failed:', e);
-      setSaveState('Not saved');
-      toast('Could not add that photo — see console for details.', 'error');
+  // Uploads the picked images and places their tokens in `paraIndex`, in the order picked.
+  // Sequential rather than Promise.all: each photo's number depends on the ones before it,
+  // and a phone-sized batch uploaded in parallel is a good way to have Drive rate-limit
+  // the lot. One save at the end, not one per photo.
+  const addOwnPhoto = async (dayKey, paraIndex, files) => {
+    const list = Array.isArray(files) ? files : [files];
+    if (!list.length) return;
+    let failed = 0;
+    for (let i = 0; i < list.length; i++) {
+      const d = dayOf(dayKey) || { dayKey };
+      setSaveState(list.length > 1 ? `Uploading ${i + 1} of ${list.length}…` : 'Uploading…');
+      try {
+        const small = await tripsyResizeImageBlob(list[i]);
+        const driveFileId = await uploadBlobToDrive(small, `diary-photo-${Date.now()}-${i}`, 'image/jpeg');
+        const no = tripsyDiaryNextPhotoNo(d);
+        upsertDay(dayKey, {
+          photos: [...(d.photos || []), { no, driveFileId, caption: '', side: 'right', source: 'upload' }],
+          text: tripsyDiaryInsertToken(d.text || '', no, paraIndex),
+        });
+      } catch (e) {
+        console.error('Diary photo upload failed:', e);
+        failed++;
+      }
     }
+    // Whatever DID upload is kept -- one bad file in a batch must not discard the rest.
+    await save();
+    render();
+    if (failed) toast(`${failed} photo${failed === 1 ? '' : 's'} could not be added — see console for details.`, 'error');
   };
   // Fetches candidate photos for every place on a day, once per box opening. Each place
   // costs a Places call, which is why this is behind a button rather than eager.
@@ -18958,7 +18973,7 @@ async function showTripsyTripDiary(tripKey) {
       el.addEventListener('click', () => {
         const dayKey = el.getAttribute('data-diary-addphoto');
         const idx = Number(el.getAttribute('data-para-index'));
-        tripsyPickImageFile(file => addOwnPhoto(dayKey, idx, file));
+        tripsyPickImageFile(files => addOwnPhoto(dayKey, idx, files));
       });
     });
     content.querySelectorAll('[data-diary-cand-yes]').forEach(el => {
