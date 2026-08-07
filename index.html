@@ -13028,6 +13028,24 @@ function formatTripsyFieldDateTime(iso) {
 // that end up entirely empty) are skipped rather than shown blank.
 // `onEdit`, if provided, renders an Edit button that swaps this same panel
 // over to renderTripsyEditPanel -- omitted entirely for view-only users.
+// A safe, openable https/http URL for a stored website value, or '' if it isn't one.
+// The stored value is free text -- often typed without a scheme ("elpirata.co.uk"), which
+// a browser reads as a RELATIVE path and would navigate the app away to a 404 -- so a
+// bare host is prefixed. Anything that parses to a scheme other than http/https is
+// refused outright rather than linked: `javascript:` in an href is script execution, and
+// this text can arrive from a parsed email or document, not just from the owner typing.
+function tripsyExternalUrl(value) {
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return '';
+  const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw) ? raw : `https://${raw}`;
+  try {
+    const u = new URL(candidate);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+    return u.href;
+  } catch (e) {
+    return '';
+  }
+}
 function renderTripsyViewPanel(panel, raw, eventSummary, onEdit) {
   const { groupOrder, byGroup } = tripsyFieldGroups(raw.resource);
   const displayValue = f => {
@@ -13044,12 +13062,21 @@ function renderTripsyViewPanel(panel, raw, eventSummary, onEdit) {
       <div style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px 18px;">
         <div style="font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:var(--amber); margin-bottom:12px;">${esc(TRIPSY_EDIT_GROUP_LABEL[group] || group)}</div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px;">
-          ${rows.map(({ f, val }) => `
+          ${rows.map(({ f, val }) => {
+            // A website is opened, not read out: the value becomes a real link to a new
+            // tab. Only for the website fields, and only when it resolves to a safe
+            // http(s) URL -- anything else keeps rendering as plain escaped text.
+            const href = (f.key === 'website' || f.key === 'agentWebsite') ? tripsyExternalUrl(val) : '';
+            const shown = href
+              ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer" style="color:var(--amber); text-decoration:underline; word-break:break-all;">${esc(val)}</a>`
+              : esc(val);
+            return `
             <div style="${f.kind === 'textarea' ? 'grid-column:1 / -1;' : ''}">
               <div style="font-size:12px; font-weight:600; color:var(--muted); margin-bottom:6px;">${esc(f.label)}</div>
-              <div style="font-size:14px; color:var(--text); white-space:${f.kind === 'textarea' ? 'pre-line' : 'normal'};">${esc(val)}</div>
+              <div style="font-size:14px; color:var(--text); white-space:${f.kind === 'textarea' ? 'pre-line' : 'normal'};">${shown}</div>
             </div>
-          `).join('')}
+          `;
+          }).join('')}
         </div>
       </div>
     `;
@@ -18120,7 +18147,9 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
     try {
       if (checkedDayKeys.length) {
         const { effectiveTrip, dayKeys, byDay: pdByDay, summaryByDay } = await buildTripsyPrintDayData(trip);
-        await tripsyGenerateNarrativeSections(trip.key, effectiveTrip, dayKeys, pdByDay, summaryByDay, { includeIntro: false, includeSummary: true, dayKeysToGenerate: checkedDayKeys });
+        await tripsyGenerateNarrativeSections(trip.key, effectiveTrip, dayKeys, pdByDay, summaryByDay,
+          // Only the checked days' summary rows are rewritten; the rest are kept from cache.
+          { includeIntro: false, includeSummary: true, dayKeysToGenerate: checkedDayKeys, summaryDayKeys: checkedDayKeys });
         setStage('Fetching photos for the new places…');
         _tripsyAllowPhotoFetch = true; // this pass MAY fetch new photos (it's a regeneration)
         try { await buildTripsyPrintHtml(trip.key); } finally { _tripsyAllowPhotoFetch = false; } // pre-fetch photos for the (re)generated days
@@ -19688,14 +19717,44 @@ async function generateTripsyEventNarrative(effectiveTrip, eventPromptData) {
 // Edit Narrative panel this replaced), but it costs nothing to keep
 // recording and means a future "this looks stale" indicator wouldn't need
 // a data migration.
-async function tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, { includeIntro, includeSummary, dayKeysToGenerate }) {
+async function tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, { includeIntro, includeSummary, dayKeysToGenerate, summaryDayKeys = null }) {
   const sectionsToSave = {};
 
   if (includeSummary) {
-    const summaryRowItems = dayKeys.flatMap(dayKey => summaryByDay.get(dayKey) || []).filter(item => tripsySummaryRowKey(item) && tripsySummaryRowWantsBlurb(item));
-    const summaryPromptData = summaryRowItems.map(tripsySummaryRowPromptData);
-    const summaryResult = await generateTripsySummaryBlurbs(effectiveTrip, summaryPromptData);
-    sectionsToSave[`${tripKey}::summary`] = { content: { rows: summaryResult.rows || [] }, fingerprint: tripsyContentFingerprint(summaryPromptData), generatedAt: new Date().toISOString() };
+    const rowItemsFor = keys => keys.flatMap(dayKey => summaryByDay.get(dayKey) || [])
+      .filter(item => tripsySummaryRowKey(item) && tripsySummaryRowWantsBlurb(item));
+    const allRowItems = rowItemsFor(dayKeys);
+    // `summaryDayKeys` scopes the rewrite to the days actually being regenerated. Without
+    // it every regeneration rewrote EVERY summary row on the trip -- 62 of them on a
+    // 17-day trip -- which was the dominant cost of the changes dialog and cost exactly
+    // the same whether one event changed or twenty. null keeps the whole-trip behaviour,
+    // which is what a full generate wants.
+    const scoped = Array.isArray(summaryDayKeys);
+    const targetItems = scoped ? rowItemsFor(summaryDayKeys) : allRowItems;
+    // Scoped with nothing to rewrite: skip the call rather than spend one on an empty set.
+    if (targetItems.length || !scoped) {
+      const summaryResult = await generateTripsySummaryBlurbs(effectiveTrip, targetItems.map(tripsySummaryRowPromptData));
+      let rows = summaryResult.rows || [];
+      if (scoped) {
+        // Merge onto what's cached: keep every row NOT rewritten here, drop the ones that
+        // were, then append the new text. Rows whose event no longer exists anywhere on
+        // the trip are dropped as well -- a whole-trip rewrite used to clear those as a
+        // side effect, and without this they would linger forever once scoping is on.
+        const liveKeys = new Set(allRowItems.map(tripsySummaryRowKey));
+        const replaced = new Set(targetItems.map(tripsySummaryRowKey));
+        const existingCache = await Store.getTripsyNarrativeCache();
+        const priorEntry = existingCache[`${tripKey}::summary`];
+        const prior = (priorEntry && priorEntry.content && priorEntry.content.rows) || [];
+        rows = prior.filter(r => liveKeys.has(r.row_key) && !replaced.has(r.row_key)).concat(rows);
+      }
+      sectionsToSave[`${tripKey}::summary`] = {
+        content: { rows },
+        // Over the FULL current row set, so the stored fingerprint describes what is
+        // stored rather than just the slice this run happened to rewrite.
+        fingerprint: tripsyContentFingerprint(allRowItems.map(tripsySummaryRowPromptData)),
+        generatedAt: new Date().toISOString(),
+      };
+    }
   }
 
   if (includeIntro || dayKeysToGenerate.length) {

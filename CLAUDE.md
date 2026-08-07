@@ -311,6 +311,18 @@ step 4; git history has it if ever needed.
   back to the device date when nothing qualifies. Note `tripsyTravelTripCandidates` still uses a
   device-local today deliberately: it picks WHICH trip is current, so there's no trip-specific zone
   to reinterpret through yet.
+- **A partial itinerary regeneration only rewrites the changed days' SUMMARY rows.**
+  `tripsyGenerateNarrativeSections` takes `summaryDayKeys`: when it's an array, only those days'
+  rows go to `generateTripsySummaryBlurbs` and the result is MERGED onto the cached set (rows not
+  rewritten are kept; rows whose event no longer exists anywhere on the trip are dropped, since a
+  whole-trip rewrite used to clear those as a side effect). `null` keeps the whole-trip behaviour,
+  which is what a full generate passes. Before this, the changes dialog passed `includeSummary:
+  true` unconditionally and rewrote EVERY row on the trip — 62 of them on a 17-day trip — so a
+  one-event edit cost the same as changing everything, and that call, not the day narrative, was
+  the dominant wait. An empty scope skips the call entirely. The stored `fingerprint` is computed
+  over the full current row set, not the rewritten slice, so it describes what is actually stored
+  (nothing reads it for staleness today — that comes from the itinerary baseline's per-event blurb
+  fingerprints — but a fingerprint of a slice would be a trap for whoever does).
 - **A regenerating itinerary blinks in two places and reports its stage**: `▲` badges mark a trip
   whose events changed since its itinerary was written — steady on the 🧭 glyph
   (`tripsySetItineraryGlyphBadge`) and beside **Edit** inside the menu (`data-tripsy-itin-warning`),
