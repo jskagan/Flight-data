@@ -937,7 +937,10 @@ not.**
   before the flag existed still shows one. Removing it is per day.
 - **Editing** is a plain textarea per day, saved on blur (not per keystroke), skipped when the
   value is unchanged, and chained through one promise so two quick edits can't race the same
-  file. Viewers get read-only prose and no seeding button.
+  file. Viewers get read-only prose and no seeding button. **There is deliberately no Save
+  button**, so the page has to SAY it saved: a header line reads "Saving…" then "Saved"/"Not
+  saved" (without it the page reads as unsaved work). Closing blurs the focused field first —
+  blur is what persists, so closing straight out of the textarea used to drop the last edit.
 - **Planned (phase 3+):** photos. Placement will ride INSIDE the text as `[photo N]` tokens so a
   photo travels with the words it belongs to instead of being pinned to a paragraph index; a
   per-day "See photos / Done" box fetches candidates from Places on demand (the cache's
