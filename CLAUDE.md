@@ -702,6 +702,12 @@ a separate always-close button lands beside it on the detail screen wearing the 
   every PACKED copy to a cube slot, and an uncubed garment's slots are empty strings by
   construction, so without an explicit skip in `showTripsyCubeContents` a packed suit reads as a
   location you forgot to assign when there was never a cube to assign.
+  On **Packing Status**, a packed garment's card names its cube **and shows the cube's picture**
+  beside it (`cubeLineHtml` → `tripsyCubeTileHtml` at 26px, painted by `tripsyPaintCubePhotos`,
+  which renderDetail must call alongside `tripsyWardrobeLoadPhotos`) — the thing you recognise on
+  the bed, rather than a colour word to match up. A cube with no photo falls back to its colour
+  swatch; a copy whose cube is unknown or deleted keeps the plain 🧳 glyph, since there is no cube
+  to picture. Copies in the same cube collapse to one chip with a count.
   Tapping a cube's **picture or its name** on the Cubes page drills into that cube alone —
   its garments as photo cards (`view = {mode:'cube', id}` inside `showTripsyCubeContents`;
   contents are keyed by garment ID rather than name so each one's `driveFileId` is available,
