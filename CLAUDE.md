@@ -311,6 +311,21 @@ step 4; git history has it if ever needed.
   back to the device date when nothing qualifies. Note `tripsyTravelTripCandidates` still uses a
   device-local today deliberately: it picks WHICH trip is current, so there's no trip-specific zone
   to reinterpret through yet.
+- **A regenerating itinerary blinks in two places and reports its stage**: `▲` badges mark a trip
+  whose events changed since its itinerary was written — steady on the 🧭 glyph
+  (`tripsySetItineraryGlyphBadge`) and beside **Edit** inside the menu (`data-tripsy-itin-warning`),
+  both driven by the one `tripsyItineraryChangedEvents` call. While a regeneration is actually
+  running (`tripsyItineraryGeneratingKeys`) BOTH blink, sharing one keyframe set so they stay in
+  step; `tripsyRefreshItineraryGeneratingBadges` force-SHOWS the menu ▲ for the duration, since a
+  run started from an already-open page triggers no My Trips render, but never hides it — whether
+  it shows otherwise is the changed-events pass's call. Tapping the glyph mid-run opens
+  `tripsyItineraryProgressDialog` (single OK, no menu behind it) instead of the usual out-of-date
+  review prompt: there is nothing to decide, and opening the menu invited a second regeneration on
+  top of the first. It reports the live stage from `tripsyItineraryGeneratingStatus`, repainted in
+  place via `tripsyItineraryProgressWatchers` as the run moves on, and flips to "Finished." rather
+  than freezing on the last stage. The run publishes every stage through one `setStage` helper that
+  writes the changes dialog's own line *and* that map, so the two can never disagree — and only
+  when a day was actually checked, matching the badge rule.
 - **Itinerary/day views start from the earliest event, not the trip's `start_date`**: the day
   ranges, "Day N" numbering, and empty-day span all derive their first day from
   `tripsyItineraryStartDayKey(trip)` — the earliest day any visible, dated event falls on — rather

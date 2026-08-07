@@ -1202,8 +1202,13 @@
     color: #e02424; pointer-events: none; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.5));
   }
   .tripsy-itin-glyph-badge--generating { animation: tripsy-attire-badge-blink 1s steps(1, end) infinite; }
+  /* The ▲ beside "Edit" INSIDE the menu blinks in step with the glyph's, so opening the
+     menu mid-run doesn't show a steady marker that reads as "out of date, act on me"
+     while a regeneration is already handling it. Same keyframes, so the two are in sync. */
+  .tripsy-itin-warning--generating { animation: tripsy-attire-badge-blink 1s steps(1, end) infinite; }
   @media (prefers-reduced-motion: reduce) {
-    .tripsy-attire-stale-badge--generating, .tripsy-itin-glyph-badge--generating { animation: none; }
+    .tripsy-attire-stale-badge--generating, .tripsy-itin-glyph-badge--generating,
+    .tripsy-itin-warning--generating { animation: none; }
   }
   .tripsy-attire-generated-line { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
   .tripsy-attire-day-section { margin-bottom: 24px; }
@@ -18096,7 +18101,15 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
     // glyph's red ▲ regardless, so an unavoidable few seconds of Drive write + preview
     // build read as a regeneration the owner had explicitly declined.
     const checkedDayKeys = [...new Set([...overlay.querySelectorAll('[data-tripsy-itin-change]:checked')].map(cb => cb.dataset.dayKey))];
-    status.textContent = checkedDayKeys.length ? 'Generating…' : 'Opening itinerary…';
+    // One helper so this dialog's own line and the glyph's progress dialog can never
+    // describe different stages -- they read the same string.
+    const setStage = text => {
+      status.textContent = text;
+      if (checkedDayKeys.length) tripsySetItineraryGeneratingStatus(trip.key, text);
+    };
+    setStage(checkedDayKeys.length
+      ? `Generating write-ups for ${checkedDayKeys.length} day${checkedDayKeys.length === 1 ? '' : 's'}…`
+      : 'Opening itinerary…');
     // Blink the 🧭 glyph's red ▲ for the duration, so the wait is visible on My Trips
     // behind this dialog. Cleared in the `finally` below, so a failure can't strand it.
     // Only when something is genuinely being regenerated.
@@ -18108,6 +18121,7 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       if (checkedDayKeys.length) {
         const { effectiveTrip, dayKeys, byDay: pdByDay, summaryByDay } = await buildTripsyPrintDayData(trip);
         await tripsyGenerateNarrativeSections(trip.key, effectiveTrip, dayKeys, pdByDay, summaryByDay, { includeIntro: false, includeSummary: true, dayKeysToGenerate: checkedDayKeys });
+        setStage('Fetching photos for the new places…');
         _tripsyAllowPhotoFetch = true; // this pass MAY fetch new photos (it's a regeneration)
         try { await buildTripsyPrintHtml(trip.key); } finally { _tripsyAllowPhotoFetch = false; } // pre-fetch photos for the (re)generated days
       }
@@ -18140,6 +18154,7 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       }
       // Acknowledge every listed event (checked ones regenerated, unchecked left
       // as-is), so the warning clears until something changes again.
+      setStage('Saving…');
       await tripsyRecordItineraryBaseline(trip);
       const warnEl = document.querySelector(`[data-tripsy-itin-warning="${CSS.escape(trip.key)}"]`);
       if (warnEl) warnEl.style.display = 'none'; // clear the ▲ now (no timeline re-render happens here)
@@ -18148,14 +18163,15 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       // wasn't regenerated -- an added place has no cached photo, and a plain open never
       // fetches. Continue IS a deliberate action, so allow a FIRST photo here (the narrow
       // flag: an existing photo is still shown verbatim, never refetched or swapped).
+      setStage('Opening itinerary…');
       _tripsyAllowNewPlacePhotoFetch = true;
       try { await previewTripsyItinerary(trip.key, { forceGeneratedView: true }); }
       finally { _tripsyAllowNewPlacePhotoFetch = false; }
     } catch (e) {
       console.error('Itinerary changes generation failed:', e);
-      status.textContent = checkedDayKeys.length
+      setStage(checkedDayKeys.length
         ? 'Could not generate — see console for details.'
-        : 'Could not open the itinerary — see console for details.';
+        : 'Could not open the itinerary — see console for details.');
       contBtn.disabled = false;
     } finally {
       // The baseline was just reset, so there are no changed events left and the glyph's
@@ -18163,7 +18179,11 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       // path the baseline is untouched, and the next My Trips render restores the steady
       // red ▲ from tripsyItineraryChangedEvents.
       tripsyItineraryGeneratingKeys.delete(trip.key);
+      tripsyItineraryGeneratingStatus.delete(trip.key);
       tripsyRefreshItineraryGeneratingBadges();
+      // Repaint any open progress dialog so it flips to "Finished." rather than sitting
+      // on the last stage as though the run were still going.
+      tripsyItineraryProgressWatchers.forEach(fn => { try { fn(); } catch (e) {} });
     }
   });
   document.body.appendChild(overlay);
@@ -19384,6 +19404,17 @@ function tripsyRefreshAttireGeneratingBadges() {
 // generalised: the states differ (changed-events vs stale-guide), the mark differs (red ▲
 // vs ⚠️), and the two are computed by different passes.
 const tripsyItineraryGeneratingKeys = new Set();
+// tripKey -> what that run is doing right now ("Generating write-ups for 3 days…").
+// Shown by tripsyItineraryProgressDialog when the owner taps the glyph mid-run, and by
+// the changes dialog's own status line, so the two can never describe different states.
+const tripsyItineraryGeneratingStatus = new Map();
+// Every open progress dialog's repaint function, so a stage change reaches it without
+// the dialog polling. Keyed by the dialog node so a closed one removes exactly its own.
+const tripsyItineraryProgressWatchers = new Map();
+function tripsySetItineraryGeneratingStatus(tripKey, text) {
+  tripsyItineraryGeneratingStatus.set(tripKey, text);
+  tripsyItineraryProgressWatchers.forEach(fn => { try { fn(); } catch (e) { /* a dead dialog must not break the run */ } });
+}
 // `state` is 'generating' (blinking -- a regeneration is running), 'changed' (steady --
 // events were added/modified since the itinerary was generated), or '' for none.
 // Generating outranks changed, exactly as it does for attire.
@@ -19411,6 +19442,62 @@ function tripsyRefreshItineraryGeneratingBadges() {
   document.querySelectorAll('[data-tripsy-itinerary-menu-toggle]').forEach(btn => {
     if (tripsyItineraryGeneratingKeys.has(btn.dataset.key)) tripsySetItineraryGlyphBadge(btn, 'generating');
     else if (btn.querySelector('.tripsy-itin-glyph-badge--generating')) tripsySetItineraryGlyphBadge(btn, '');
+  });
+  // The ▲ beside "Edit" in the menu follows the glyph: shown and blinking for the
+  // duration of a run, whatever it was doing before. It is force-SHOWN here because the
+  // pass that normally reveals it only runs on a My Trips render, and a regeneration
+  // started from an already-open page never triggers one.
+  document.querySelectorAll('[data-tripsy-itin-warning]').forEach(el => {
+    const running = tripsyItineraryGeneratingKeys.has(el.getAttribute('data-tripsy-itin-warning'));
+    el.classList.toggle('tripsy-itin-warning--generating', running);
+    if (running) {
+      el.style.display = 'inline-flex';
+      el.title = 'Regenerating this trip’s itinerary…';
+    } else {
+      el.title = 'Events changed since this itinerary was generated';
+      // Left as-is when not running: whether it should show at all is the changed-events
+      // pass's call, and the run's own finally-block hides it once the baseline resets.
+    }
+  });
+}
+// Shown when the owner taps a trip's 🧭 glyph while that trip is mid-regeneration. There
+// is nothing to decide -- the answer is "it's running" -- so this is a single-button
+// dialog that just reports the stage, updating in place as the run moves through them
+// rather than freezing whatever was true when it opened.
+function tripsyItineraryProgressDialog(tripKey) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-itin-progress-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-itin-progress-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100';
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:420px; text-align:center;">
+        <h2 style="margin:0 0 8px; font-size:19px;">▲ Update in progress</h2>
+        <div style="font-size:14.5px; line-height:1.55; color:var(--text);">
+          This trip's itinerary is being regenerated. It will open on its own when it finishes.
+        </div>
+        <div data-itin-progress-status style="font-size:13.5px; line-height:1.5; color:var(--amber); margin:12px 0 20px; min-height:20px;"></div>
+        <div style="display:flex; gap:10px; justify-content:center;">
+          <button class="btn primary" data-itin-progress-ok>OK</button>
+        </div>
+      </div>`;
+    const statusEl = ov.querySelector('[data-itin-progress-status]');
+    const paint = () => {
+      // Once the run ends the key is gone from the set; say so rather than leaving the
+      // last stage on screen looking like it is still working.
+      statusEl.textContent = tripsyItineraryGeneratingKeys.has(tripKey)
+        ? (tripsyItineraryGeneratingStatus.get(tripKey) || 'Working…')
+        : 'Finished.';
+    };
+    paint();
+    tripsyItineraryProgressWatchers.set(ov, paint);
+    ov.style.display = 'flex';
+    const done = () => {
+      tripsyItineraryProgressWatchers.delete(ov);
+      ov.style.display = 'none';
+      ov.onclick = null;
+      resolve();
+    };
+    ov.onclick = e => { if (e.target === ov || e.target.closest('[data-itin-progress-ok]')) done(); };
   });
 }
 // Fire-and-forget pass over the rendered trip cards: for each trip whose saved
@@ -25993,7 +26080,15 @@ async function renderTripsyEventsListImpl() {
   // STEADY badge (a blinking one means a regeneration is already running), owner-only.
   wireTripsyHeaderMenuToggle("[data-tripsy-itinerary-menu-toggle]", "data-tripsy-itinerary-menu", async (btn, tripKey) => {
     const badge = btn.querySelector('.tripsy-itin-glyph-badge');
-    if (!isOwner || !badge || badge.className.includes('--generating')) return true;
+    // Mid-run there is nothing to review and nothing to decide -- the old behaviour just
+    // opened the menu, leaving a blinking ▲ unexplained and the Edit item inviting a
+    // second regeneration on top of the first. Report the stage instead, and don't open
+    // the menu behind it.
+    if (isOwner && badge && badge.className.includes('--generating')) {
+      await tripsyItineraryProgressDialog(tripKey);
+      return false;
+    }
+    if (!isOwner || !badge) return true;
     const review = await tripsyConfirmDialog(
       'Events have been added or changed since this trip’s itinerary was generated, so its write-ups and photos no longer cover them. Reviewing shows you exactly which events changed and lets you pick which days to regenerate — and note that whatever you leave unchecked is marked as seen, so the ▲ clears either way.',
       { title: '▲ Itinerary is out of date', yes: 'Review changes', no: 'Not now' });
