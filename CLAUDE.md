@@ -645,7 +645,15 @@ they agree by construction rather than by two implementations staying in step:
 | Packing Status | `tripsyWardrobePackingList` | mark what's physically packed; Selected/Packed per line |
 
 Each has a header button opening the other, passing an `onClose` callback so closing the second
-reopens the first with fresh numbers. Both use one **contextual Close**: on a garment detail screen
+reopens the first with fresh numbers. **Opened from a garment page, either button hands the current
+need LINE across** (`initialLine` = `{tier, lineName}`, resolved by NAME since a regenerated guide
+renumbers lines, falling back to the list when that name is gone) and takes it back on the return
+leg, so the two pages are two views of one thing rather than a round trip through a menu. Each page
+also hides its own **list-only header controls** on a garment page — Plan's **+ Add Line** and
+**Show Incomplete**, Status' **Unpacked Items Only** and **Cubes** — via its own
+`setListOnlyButtons(show)`, called `true` from `renderList` and `false` from `renderDetail`. Both
+copies query the DOM rather than capturing the button consts (those are declared well below the
+render functions that call it), and both hide rather than remove, so the handlers stay bound. Both use one **contextual Close**: on a garment detail screen
 it returns to the list of need lines, on the list it closes the page. Keep that single-button shape —
 a separate always-close button lands beside it on the detail screen wearing the same label.
 

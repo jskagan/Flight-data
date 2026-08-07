@@ -1077,6 +1077,18 @@
   }
   .tripsy-attire-toolbar-title { color: #fff; font-size: 14px; font-weight: 600; }
   .tripsy-attire-toolbar-actions { display: flex; gap: 8px; align-items: center; }
+  /* The Clothing Summary card's own header row: title left, Definitions then the close X
+     right. Deliberately does NOT wrap -- the title carries the trip name, so wrapping
+     would drop the X onto a second line (the same trap the packing screens hit); instead
+     the title shrinks and ellipsises. */
+  .tripsy-attire-cardhead {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin: 0 0 16px;
+  }
+  .tripsy-attire-cardtitle {
+    margin: 0; font-size: 18px; font-weight: 700; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   /* The close control for the Attire section and the packing screens: a small square box
      with a red X, at the top-right of each page's card. Deliberately NOT .tripsy-update-btn
      or .btn -- it carries no word, so their padding/font rules would size it wrong. Kept
@@ -1221,6 +1233,10 @@
   .tripsy-attire-col-note { width: 220px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
   .tripsy-attire-badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11.5px; font-weight: 600; white-space: nowrap; }
   .tripsy-attire-summary { margin-top: 34px; }
+  /* ...but not when it is the first thing under the card header, which already
+     carries its own bottom margin -- otherwise the two stack into a big empty gap
+     on a guide with no stale note and no generated line above it. */
+  .tripsy-attire-summary:first-child { margin-top: 0; }
   .tripsy-attire-summary h3 { font-size: 16px; margin: 0 0 6px; }
   /* Him/Her summary cards -- one row per dress-code tier (shared occasion
      count + that person's own suggested outfit count), plus their own
@@ -1275,8 +1291,8 @@
 
   /* Section headings shared by the 2 top-level parts of the main report
      (Packing Summary, Daily Dress Guide) -- Definitions moved back to
-     its own page (showTripsyAttireDefinitions), reached via the toolbar
-     button, not rendered inline here. */
+     its own page (showTripsyAttireDefinitions), reached from the card
+     header's own button, not rendered inline here. */
   .tripsy-attire-heading { font-size: 16px; margin: 0 0 6px; }
   .tripsy-attire-heading-sub { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
   .tripsy-attire-daybyday { margin-top: 34px; padding-top: 30px; border-top: 1px solid var(--line); }
@@ -9404,6 +9420,17 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   // since a separate always-close button would sit next to this one on the detail
   // screen with the same label and a different meaning.
   const closeBtn = ov.querySelector('#tw-select-toggle');
+  // "+ Add Line" and "Show Incomplete" both act on the LIST of need lines -- each one
+  // even resets the view back to it -- so on a garment page they are controls for a
+  // screen you are not looking at. Hidden there, restored on the list. Looked up here
+  // rather than closed over, so the render functions can call this before the button
+  // consts further down have been initialised.
+  const setListOnlyButtons = show => {
+    for (const id of ['#tw-select-addline', '#tw-select-incomplete']) {
+      const b = ov.querySelector(id);
+      if (b) b.style.display = show ? 'inline-block' : 'none';
+    }
+  };
   ov.querySelector('#tw-select-title').textContent = `Plan Packing List${tripName ? ` — ${tripName}` : ''}`;
   bodyEl.innerHTML = `<div style="padding:24px 0; color:var(--muted);">Loading…</div>`;
   // Closing (backdrop click) hides the overlay and, when an opener asked to be
@@ -9507,6 +9534,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   const renderList = () => {
     closeBtn.style.display = 'inline-flex'; // .tripsy-close-x centres its glyph with flex
     // No textContent: the button is the red-X box, whose glyph is in the static markup.
+    setListOnlyButtons(true);
     countEl.innerHTML = '';
     if (!tiers.length) {
       bodyEl.innerHTML = guide
@@ -9566,6 +9594,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     if (!ln) { view = { mode: 'list' }; renderList(); return; }
     closeBtn.style.display = 'inline-flex'; // .tripsy-close-x centres its glyph with flex
     // No textContent: the button is the red-X box, whose glyph is in the static markup.
+    setListOnlyButtons(false);
     // The header tally follows the page: on a garment page it is THIS LINE's own
     // selected/needed, not the trip-wide total the list shows. Left alone it kept
     // displaying the whole trip's figure ("65/59") while you were looking at one line,
@@ -9811,10 +9840,17 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   const syncIncompleteBtn = () => { if (incompleteBtn) incompleteBtn.className = incompleteOnly ? 'btn primary' : 'btn'; };
   if (incompleteBtn) incompleteBtn.onclick = () => { incompleteOnly = !incompleteOnly; syncIncompleteBtn(); view = { mode: 'list' }; render(); };
   syncIncompleteBtn();
+  // From a garment page, hand the SAME line to Packing Status (and take it back on the
+  // return leg), mirroring what that page's own "Packing Plan" button already did in the
+  // other direction -- the two are meant to be two views of one thing, and going through
+  // this button used to dump you back on the general list. From the list, both stay on
+  // their lists as before.
   const statusBtn = ov.querySelector('#tw-select-status');
   if (statusBtn) statusBtn.onclick = () => {
+    const ln = view.mode === 'detail' ? (needLines[view.tier] || [])[view.lineIndex] : null;
+    const where = ln ? { tier: view.tier, lineName: ln.name } : null;
     ov.style.display = 'none';
-    tripsyWardrobePackingList(tripKey, tripName, person, () => tripsyWardrobePackForTrip(tripKey, tripName, person, onClose));
+    tripsyWardrobePackingList(tripKey, tripName, person, () => tripsyWardrobePackForTrip(tripKey, tripName, person, onClose, where), where);
   };
   render();
 }
@@ -9868,6 +9904,18 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   const ov = getOrCreateWardrobePackingListOverlay();
   const bodyEl = ov.querySelector('#tw-packlist-body');
   ov.querySelector('#tw-packlist-title').textContent = `Packing Status${tripName ? ` — ${tripName}` : ''}`;
+  // "Unpacked Items Only" and "Cubes" both belong to the LIST of need lines: the filter
+  // re-renders that list (and resets the view to it), and Cubes answers a whole-trip
+  // question. On a garment page they are controls for a screen you are not looking at,
+  // so they are hidden there and restored on the list -- the same treatment the Plan
+  // Packing List gives its own list-only buttons. Queried live rather than closed over,
+  // since the button consts are declared below the render functions that call this.
+  const setListOnlyButtons = show => {
+    for (const id of ['#tw-packlist-unpacked', '#tw-packlist-cubes']) {
+      const b = ov.querySelector(id);
+      if (b) b.style.display = show ? 'inline-block' : 'none';
+    }
+  };
   ov.querySelector('#tw-packlist-done').onclick = () => { ov.style.display = 'none'; };
   ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
   bodyEl.innerHTML = `<div style="padding:24px 0; color:var(--muted);">Loading…</div>`;
@@ -10005,6 +10053,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   const partialBadge = n => `<div style="position:absolute; top:6px; right:6px; background:var(--amber); color:#04210F; border-radius:11px; min-width:22px; height:22px; padding:0 6px; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:12px;">${n}</div>`;
 
   const renderList = () => {
+    setListOnlyButtons(true);
     // Overall physical-packing progress across every selected piece for this person.
     const chosenSel = [...chosen].map(([id, v]) => ({ g: garmentById.get(id), ...v })).filter(x => x.g && isPerson(x.g));
     const genSel = generics.filter(x => (x.person || 'him') === person);
@@ -10069,6 +10118,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const lines = needLines[tier] || [];
     const ln = lines[lineIndex];
     if (!ln) { statusView = { mode: 'list' }; renderList(); return; }
+    setListOnlyButtons(false);
     const { byLine } = tripsyWardrobeAssignGarments(lines, selectedForTier(tier));
     const garmentItems = byLine[lineIndex] || [];       // {g, qty}
     const genItems = genericsForLine(tier, ln);          // {x, i}
@@ -20894,13 +20944,21 @@ function getOrCreateTripsyAttireOverlay() {
   overlay = document.createElement('div');
   overlay.id = 'tripsy-attire-overlay';
   overlay.innerHTML = `
-    <div class="tripsy-attire-toolbar">
-      <div class="tripsy-attire-toolbar-title" data-tripsy-attire-title></div>
-      <div class="tripsy-attire-toolbar-actions">
-        <button class="tripsy-close-x" id="tripsy-attire-close-btn" aria-label="Close" title="Close">&#10005;</button>
+    <!-- The header lives ON the card, not on a bar floating above it: one heading
+         ("Clothing Summary — <trip>") instead of the trip name overhead and a separate
+         "Clothing Summary" repeated inside. Definitions and the close X share that line,
+         and they stay in this STATIC shell rather than the re-rendered content, so both
+         are wired once instead of needing a re-bind after every render. -->
+    <div class="tripsy-attire-paper">
+      <div class="tripsy-attire-cardhead">
+        <h2 class="tripsy-attire-cardtitle" data-tripsy-attire-title></h2>
+        <div class="tripsy-attire-toolbar-actions">
+          <button class="tripsy-update-btn" id="tripsy-attire-definitions-btn">Definitions</button>
+          <button class="tripsy-close-x" id="tripsy-attire-close-btn" aria-label="Close" title="Close">&#10005;</button>
+        </div>
       </div>
+      <div id="tripsy-attire-content"></div>
     </div>
-    <div class="tripsy-attire-paper" id="tripsy-attire-content"></div>
   `;
   document.body.appendChild(overlay);
   // The attire ACTIONS (Clothing Summary / DDG / Pack / Packing List / Outfits /
@@ -20909,6 +20967,7 @@ function getOrCreateTripsyAttireOverlay() {
   overlay.querySelector('#tripsy-attire-close-btn').addEventListener('click', () => {
     overlay.style.display = 'none';
   });
+  overlay.querySelector('#tripsy-attire-definitions-btn').addEventListener('click', () => showTripsyAttireDefinitions());
   overlay.addEventListener('click', e => {
     if (e.target === overlay) overlay.style.display = 'none';
   });
@@ -21435,7 +21494,7 @@ async function showTripsyAttireOverlay(tripKey) {
   if (!trip) return;
   tripsyAttireOverlayTripKey = tripKey;
   const overlay = getOrCreateTripsyAttireOverlay();
-  overlay.querySelector('[data-tripsy-attire-title]').textContent = `Attire — ${trip.name || ''}`;
+  overlay.querySelector('[data-tripsy-attire-title]').textContent = `Clothing Summary${trip.name ? ` — ${trip.name}` : ''}`;
   overlay.style.display = 'flex';
   const content = overlay.querySelector('#tripsy-attire-content');
   const saved = await Store.getTripsyAttireGuide(tripKey);
@@ -21698,15 +21757,9 @@ function renderTripsyAttireOverlayContent(guide, renderOpts) {
     ${stale ? `<div class="tripsy-attire-stale-note">Trip events have changed since this guide was generated — Refresh to update.${guide.packingFrozen || tripsyTripHasStarted((tripsyDecryptedTrips || []).find(t => t.key === guide.tripKey)) ? ' The trip has started, so a Refresh updates the dress codes only — your packing list and counts stay as they are.' : ''}</div>` : ''}
     ${generatedLabel ? `<div class="tripsy-attire-generated-line">Generated ${esc(generatedLabel)}</div>` : ''}
     <div class="tripsy-attire-summary">
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
-        <h3 class="tripsy-attire-heading" style="margin:0;">Clothing Summary</h3>
-        <button class="tripsy-update-btn" data-tripsy-attire-definitions-inline>Definitions</button>
-      </div>
       ${personsHtml}
     </div>
   `;
-  const defBtn = content.querySelector('[data-tripsy-attire-definitions-inline]');
-  if (defBtn) defBtn.addEventListener('click', () => showTripsyAttireDefinitions());
   content.querySelectorAll('[data-tripsy-attire-category-link]').forEach(row => {
     const openCat = () => showTripsyAttireCategoryEvents(guide, row.dataset.tripsyAttireCategoryLink, row.dataset.tripsyAttirePerson || 'him');
     row.addEventListener('click', openCat);
