@@ -649,6 +649,16 @@ reopens the first with fresh numbers. Both use one **contextual Close**: on a ga
 it returns to the list of need lines, on the list it closes the page. Keep that single-button shape —
 a separate always-close button lands beside it on the detail screen wearing the same label.
 
+That control — and every close across the Attire section and the packing screens (Attire, Daily
+Dress Guide, Dress Code Definitions, category drill-down, Plan Packing List, Packing Status, Cubes,
+Outfits, a single outfit, Wear Days) — is the **red ✕ box** at the card's top right,
+`.tripsy-close-x`. It is a restyle only: each button kept its id/attribute, so the contextual ones
+still go back rather than close. The class is deliberately neither `.tripsy-update-btn` nor `.btn`
+(both size themselves for a WORD) and its colours are var-with-fallback, since it spans the Attire
+overlays' light paper and the wardrobe modals' dark panel. Note the Plan page used to relabel its
+button per render (`closeBtn.textContent = 'Close'`) — that assignment is gone, and reinstating it
+would overwrite the glyph with the word.
+
 - **Packing cubes: packing a garment IS assigning it to one.** Cubes are the physical zip cubes
   garments go into, identified by three traits rather than a typed-in name — **brand** (Briggs &
   Riley, Eagle Creek Reveal, Eagle Creek Pack-It — split by LINE, since two Eagle Creek lines
@@ -702,12 +712,17 @@ a separate always-close button lands beside it on the detail screen wearing the 
   every PACKED copy to a cube slot, and an uncubed garment's slots are empty strings by
   construction, so without an explicit skip in `showTripsyCubeContents` a packed suit reads as a
   location you forgot to assign when there was never a cube to assign.
-  On **Packing Status**, a packed garment's card names its cube **and shows the cube's picture**
-  beside it (`cubeLineHtml` → `tripsyCubeTileHtml` at 26px, painted by `tripsyPaintCubePhotos`,
-  which renderDetail must call alongside `tripsyWardrobeLoadPhotos`) — the thing you recognise on
-  the bed, rather than a colour word to match up. A cube with no photo falls back to its colour
-  swatch; a copy whose cube is unknown or deleted keeps the plain 🧳 glyph, since there is no cube
-  to picture. Copies in the same cube collapse to one chip with a count.
+  On **Packing Status**, a garment page shows WHICH CUBES its garments are in as a **banner of
+  large (96px) cube pictures** above the grid — the thing you recognise across a room — each named
+  with a count of packed copies (`pageCubeIds`/`pageCubesHtml` in renderDetail; `tripsyCubeTileHtml`,
+  painted by `tripsyPaintCubePhotos`, which renderDetail must call alongside `tripsyWardrobeLoadPhotos`).
+  **The per-card 26px chip (`cubeLineHtml`) renders ONLY when the page is split across more than one
+  cube** (`pageCubesSplit`): with one cube the banner has already answered the question and a
+  thumbnail on every card is pure repetition, but once the page spans several cubes the chips are the
+  only thing saying which garment went where. A cube with no photo falls back to its colour swatch; a
+  packed copy whose cube is unknown or deleted gets its own "Cube not set" banner entry (dashed box,
+  amber label) and counts as a split. Uncubed types contribute nothing to the banner — their own card
+  already says why they have no cube — so a page of only suits/ties/shoes shows no banner at all.
   Tapping a cube's **picture or its name** on the Cubes page drills into that cube alone —
   its garments as photo cards (`view = {mode:'cube', id}` inside `showTripsyCubeContents`;
   contents are keyed by garment ID rather than name so each one's `driveFileId` is available,
