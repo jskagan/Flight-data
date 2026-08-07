@@ -1210,6 +1210,31 @@
     .tripsy-attire-stale-badge--generating, .tripsy-itin-glyph-badge--generating,
     .tripsy-itin-warning--generating { animation: none; }
   }
+  /* ---- Trip Diary ---- */
+  #tripsy-diary-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9000;
+    overflow-y: auto; overscroll-behavior: contain; padding: 32px 16px; flex-direction: column; align-items: center;
+  }
+  /* Book-ish: a wider measure than the app's UI text, generous leading, and a serif
+     face -- this is meant to be read as prose and printed, not scanned as a form. */
+  .tripsy-diary-day { margin-bottom: 34px; padding-bottom: 30px; border-bottom: 1px solid var(--line); }
+  .tripsy-diary-day:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .tripsy-diary-dayhead { margin-bottom: 12px; }
+  .tripsy-diary-daynum { font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--amber); margin-bottom: 6px; }
+  .tripsy-diary-heading, .tripsy-diary-heading-read {
+    font-size: 21px; font-weight: 700; line-height: 1.25; color: var(--text);
+  }
+  .tripsy-diary-heading { width: 100%; background: none; border: none; border-bottom: 1px dashed transparent; padding: 2px 0; font-family: inherit; }
+  .tripsy-diary-heading:focus { outline: none; border-bottom-color: var(--line); }
+  .tripsy-diary-schedule { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; font-size: 13px; }
+  .tripsy-diary-schedule-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+  .tripsy-diary-schedule-row { display: grid; grid-template-columns: 84px 1fr; gap: 10px; padding: 3px 0; color: var(--text); }
+  .tripsy-diary-text, .tripsy-diary-read {
+    width: 100%; font-family: Georgia, 'Times New Roman', serif; font-size: 16px; line-height: 1.75;
+    color: var(--text); white-space: pre-wrap;
+  }
+  .tripsy-diary-text { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; resize: vertical; min-height: 160px; }
+  .tripsy-diary-text:focus { outline: none; border-color: var(--amber); }
   .tripsy-attire-generated-line { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
   .tripsy-attire-day-section { margin-bottom: 24px; }
   .tripsy-attire-day-section:last-child { margin-bottom: 0; }
@@ -1713,14 +1738,17 @@ async function findOrCreateDriveFolder(folderName) {
   return createJson.id;
 }
 
-async function createDriveDataFile(data) {
+// `name` defaults to the main data file, which is what every pre-existing caller
+// wants; trip-diaries.json passes its own. Same folder either way, so a new sidecar
+// lands beside flight-log-data.json and inherits the same sharing.
+async function createDriveDataFile(data, name = DRIVE_DATA_FILENAME) {
   // New installs get the data file created inside a dedicated folder for
   // tidiness -- existing files created before this was added won't be
   // moved automatically, since drive.file/drive scope access is based on
   // the file itself, not its folder location, so there's no need to.
   const folderId = await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
   const boundary = 'flightlogboundary';
-  const metadata = { name: DRIVE_DATA_FILENAME, mimeType: 'application/json', parents: [folderId] };
+  const metadata = { name, mimeType: 'application/json', parents: [folderId] };
   const body =
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
     `--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(data)}\r\n` +
@@ -11660,6 +11688,86 @@ async function persistTripsData() {
   tripsDataRevision = newRev || await fetchDriveHeadRevision(tripsDataFileId);
 }
 
+// ---- Trip Diary storage -------------------------------------------------------
+// A diary is the trip written up AFTERWARDS, in the past tense, with photos woven
+// through it -- long free prose, one section per day. It lives in its OWN Drive file
+// for the same reason the trips do: flight-log-data.json is rewritten in full on every
+// unrelated save, and diary text is the largest free-text thing this app stores. Same
+// folder, same sharing, same optimistic-concurrency guard as trips-data.json.
+// Shape: { schemaVersion: 1, updatedAt, diaries: [ {tripKey, updatedAt, days:[...] } ] }
+// where a day is { dayKey, heading, text, showSchedule, photos: [...] }. `text` is plain
+// prose; photo placement will ride INSIDE it as [photo N] tokens (phase 3) so a photo
+// travels with the words it belongs to instead of being pinned to a paragraph index.
+const TRIP_DIARIES_DRIVE_FILENAME = 'trip-diaries.json';
+let tripDiariesFileId = null;
+let tripDiariesRevision = null;
+let tripDiaries = null; // null = not loaded yet; [] = loaded and empty
+async function fetchTripDiariesFromDrive() {
+  const q = encodeURIComponent(`name='${TRIP_DIARIES_DRIVE_FILENAME}' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,modifiedTime,headRevisionId)&spaces=drive`);
+  const json = await res.json();
+  // Same trap trips-data.json guards: a same-named Google-native Doc can't be read with
+  // alt=media, so only real files count; newest wins if duplicates ever appear.
+  const candidates = ((json.files || []))
+    .filter(f => !(f.mimeType || '').startsWith('application/vnd.google-apps'))
+    .sort((a, b) => (b.modifiedTime || '').localeCompare(a.modifiedTime || ''));
+  if (!candidates.length) return null; // absent is NORMAL here -- created on first save
+  const contentRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${candidates[0].id}?alt=media`);
+  const doc = await contentRes.json();
+  tripDiariesFileId = candidates[0].id;
+  tripDiariesRevision = candidates[0].headRevisionId || null;
+  return Array.isArray(doc && doc.diaries) ? doc.diaries : [];
+}
+// Loads once per page. A missing file is not an error: nobody has written a diary yet,
+// so the app carries an empty list and creates the file the first time one is saved.
+async function ensureTripDiariesLoaded() {
+  if (tripDiaries) return tripDiaries;
+  try {
+    tripDiaries = (await fetchTripDiariesFromDrive()) || [];
+  } catch (e) {
+    console.error('trip-diaries.json load failed:', e);
+    tripDiaries = [];
+  }
+  return tripDiaries;
+}
+async function writeTripDiariesDoc() {
+  const doc = { schemaVersion: 1, updatedAt: new Date().toISOString(), diaries: tripDiaries || [] };
+  if (!tripDiariesFileId) {
+    tripDiariesFileId = await createDriveDataFile(doc, TRIP_DIARIES_DRIVE_FILENAME);
+    tripDiariesRevision = await fetchDriveHeadRevision(tripDiariesFileId);
+    return;
+  }
+  const newRev = await updateDriveDataFile(tripDiariesFileId, doc);
+  tripDiariesRevision = newRev || await fetchDriveHeadRevision(tripDiariesFileId);
+}
+// Saves ONE trip's diary. On a revision mismatch the newer copy is reloaded and this
+// diary re-applied onto it, rather than overwriting whatever another device wrote --
+// the same shape persistTripsData uses, except the retry happens here: a diary is
+// self-contained per trip, so re-applying it onto fresh data is always well-defined.
+async function saveTripDiaryToDrive(diary) {
+  await ensureTripDiariesLoaded();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const next = (tripDiaries || []).filter(d => d.tripKey !== diary.tripKey);
+    next.push({ ...diary, updatedAt: new Date().toISOString() });
+    tripDiaries = next;
+    try {
+      if (tripDiariesFileId && tripDiariesRevision) {
+        const currentRev = await fetchDriveHeadRevision(tripDiariesFileId);
+        if (currentRev && currentRev !== tripDiariesRevision) {
+          tripDiaries = (await fetchTripDiariesFromDrive()) || [];
+          continue; // re-apply this diary onto the copy we just pulled
+        }
+      }
+      await writeTripDiariesDoc();
+      return true;
+    } catch (e) {
+      console.error('trip diary save failed:', e);
+      return false;
+    }
+  }
+  return false;
+}
+
 // Locally-minted event ids for created events, now that Tripsy no longer
 // assigns them: epoch-millis * 1000 + jitter keeps them numeric (same type as
 // Tripsy's ids, so every `${resource}:${id}` key and `${resource}-${id}` DOM
@@ -18351,6 +18459,258 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList
       messages: [{
         role: 'user',
         content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. ${includeIntro ? 'Write a short, evocative trip_intro paragraph for the whole trip that sets the scene for the destinations involved.' : 'Set trip_intro to an empty string -- it is not being regenerated right now.'} For each day: a short evocative title (e.g. "Travel Day: First Taste of Palma" -- do NOT prefix it with "Day N" or the date, since the printed page already shows that on its own divider bar directly above the title), 1-3 narrative paragraphs that weave the day's events together AND bring in genuinely interesting, accurate background about the specific places and experiences involved -- a hotel's history or standing, what a landmark, museum, or show actually is and why it's notable, the character of a neighborhood -- so the day reads as a rich guide rather than a list. Also return one place_blurbs entry per named place (hotel/activity) in that day's events -- place_name (exactly matching the place_name given in the data) plus a 2-3 sentence blurb sharing real, interesting background about that specific place (its story, significance, what to expect). Draw on what you actually know about these specific named places, venues, and experiences. Do NOT fabricate specifics you're unsure of -- no invented hours, prices, exact founding years or dates, statistics, or made-up review quotes; speak to reputation only in honest, general terms ("long regarded as", "widely praised") and only when genuinely warranted. For anything you don't actually recognize, or a generic/private event, stay warm and evocative without inventing facts. If the SAME place/location appears more than once across this trip's days (e.g. a venue visited twice, a restaurant repeated, a landmark passed on two different days), do NOT write the same descriptive content for it each time -- vary what you say by drawing on that specific occurrence's own details (what's actually happening there that visit, the occasion, time of day, who's around, what's different about it) rather than re-describing the place itself identically twice. This applies both within the days you're writing now and against any already-written content for other days shown below -- never repeat text that already exists for the same place.${existingPlaceBlurbs && existingPlaceBlurbs.length ? `\n\nText already written for these places on OTHER days of this same trip (already generated, not being rewritten now) -- if any of these same places come up again in the day(s) you're writing, give it a genuinely different angle, not a rehash of this:\n${JSON.stringify(existingPlaceBlurbs)}` : ''} Only include a days[] entry for these day_key values, in this exact set -- do not write entries for any other day: ${JSON.stringify(dayKeysToGenerate)}. If a day has no named places, place_blurbs can be an empty array.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
+      }],
+    }),
+  });
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`Claude API error ${res.status}: ${errBody.slice(0, 500)}`);
+  }
+  const data = await res.json();
+  const textBlock = (data.content || []).find(b => b.type === 'text');
+  if (!textBlock) throw new Error('Claude API returned no text block');
+  return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
+}
+
+// ---- Trip Diary page ----------------------------------------------------------
+// Reached from a trip card's gear menu. Days come from buildTripsyPrintDayData, so the
+// diary's day boundaries are IDENTICAL to the itinerary's (earliest dated event, not
+// trip.start, which drifts -- see tripsyItineraryStartDayKey) and a multi-day stay is
+// bucketed the same way in both.
+function tripsyDiaryScheduleLines(items) {
+  const lines = [];
+  for (const item of items || []) {
+    if (item.isLayover) continue;
+    const time = tripsySummaryRowTime(item) || '';
+    if (item.psReservation) {
+      const res = item.psReservation;
+      lines.push({ time, label: `P/S Reservation${res.experience ? ' • ' + res.experience : ''}`, place: '' });
+      continue;
+    }
+    const ev = item.ev;
+    if (!ev) continue;
+    const raw = ev.tripsyRaw || {};
+    lines.push({ time, label: raw.name || ev.summary || '', place: raw.address || '' });
+  }
+  return lines;
+}
+function getOrCreateTripsyDiaryOverlay() {
+  let ov = document.getElementById('tripsy-diary-overlay');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'tripsy-diary-overlay';
+  // Same shell as the Attire overlay: header ON the card, red X at its top right.
+  ov.innerHTML = `
+    <div class="tripsy-attire-paper">
+      <div class="tripsy-attire-cardhead">
+        <h2 class="tripsy-attire-cardtitle" data-tripsy-diary-title></h2>
+        <div class="tripsy-attire-toolbar-actions">
+          <button class="tripsy-update-btn" id="tripsy-diary-seed-btn" style="display:none;">Write first draft</button>
+          <button class="tripsy-close-x" id="tripsy-diary-close-btn" aria-label="Close" title="Close">&#10005;</button>
+        </div>
+      </div>
+      <div id="tripsy-diary-content"></div>
+    </div>
+  `;
+  document.body.appendChild(ov);
+  ov.querySelector('#tripsy-diary-close-btn').addEventListener('click', () => { ov.style.display = 'none'; });
+  ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+  return ov;
+}
+async function showTripsyTripDiary(tripKey) {
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return;
+  const ov = getOrCreateTripsyDiaryOverlay();
+  const content = ov.querySelector('#tripsy-diary-content');
+  const seedBtn = ov.querySelector('#tripsy-diary-seed-btn');
+  ov.querySelector('[data-tripsy-diary-title]').textContent = `Trip Diary${trip.name ? ` — ${trip.name}` : ''}`;
+  content.innerHTML = `<div style="padding:24px 0; color:var(--muted);">Loading…</div>`;
+  ov.style.display = 'flex';
+
+  const [diaries, dayData] = await Promise.all([ensureTripDiariesLoaded(), buildTripsyPrintDayData(trip)]);
+  const { effectiveTrip, dayKeys, byDay, summaryByDay } = dayData;
+  let diary = (diaries || []).find(d => d.tripKey === tripKey)
+    || { tripKey, days: [] };
+  const dayOf = key => (diary.days || []).find(d => d.dayKey === key) || null;
+  const firstDayKey = dayKeys[0];
+
+  // Saves are optimistic, like every other Tripsy edit panel: the page keeps what was
+  // typed and a failure surfaces as a toast rather than reverting the text under the
+  // owner's cursor.
+  let saveChain = Promise.resolve();
+  const save = () => {
+    saveChain = saveChain.then(async () => {
+      const ok = await saveTripDiaryToDrive(diary);
+      if (!ok) toast('Diary saved on this device but didn’t sync to Drive — edit again to retry.', 'error');
+    });
+    return saveChain;
+  };
+  const upsertDay = (dayKey, fields) => {
+    const days = (diary.days || []).slice();
+    const i = days.findIndex(d => d.dayKey === dayKey);
+    if (i >= 0) days[i] = { ...days[i], ...fields };
+    else days.push({ dayKey, heading: '', text: '', showSchedule: true, photos: [], ...fields });
+    days.sort((a, b) => String(a.dayKey).localeCompare(String(b.dayKey)));
+    diary = { ...diary, days };
+  };
+
+  const render = () => {
+    const written = (diary.days || []).some(d => (d.text || '').trim());
+    seedBtn.style.display = isOwner ? 'inline-block' : 'none';
+    seedBtn.textContent = written ? 'Rewrite empty days' : 'Write first draft';
+    const sections = dayKeys.map((dayKey, i) => {
+      const d = dayOf(dayKey) || {};
+      const lines = tripsyDiaryScheduleLines(summaryByDay.get(dayKey) || []);
+      const showSchedule = d.showSchedule !== false && lines.length > 0;
+      const dayNumber = tripsyDayNumberFromTripStart(dayKey, firstDayKey) || (i + 1);
+      const scheduleHtml = showSchedule ? `
+        <div class="tripsy-diary-schedule">
+          <div class="tripsy-diary-schedule-head">
+            <span>What was on the schedule</span>
+            ${isOwner ? `<button class="btn" data-diary-drop-schedule="${esc(dayKey)}" style="font-size:11px; padding:3px 8px;">Remove</button>` : ''}
+          </div>
+          ${lines.map(l => `<div class="tripsy-diary-schedule-row"><span>${esc(l.time)}</span><span>${esc(l.label)}${l.place ? ` <span style="color:var(--muted);">· ${esc(l.place)}</span>` : ''}</span></div>`).join('')}
+        </div>` : '';
+      const body = isOwner
+        ? `<textarea class="tripsy-diary-text" data-diary-text="${esc(dayKey)}" rows="8" placeholder="What happened on this day…">${esc(d.text || '')}</textarea>`
+        : `<div class="tripsy-diary-read">${esc(d.text || '')}</div>`;
+      return `
+        <section class="tripsy-diary-day">
+          <div class="tripsy-diary-dayhead">
+            <div class="tripsy-diary-daynum">Day ${dayNumber} · ${esc(tripsyWeatherDateLabel(dayKey))}</div>
+            ${isOwner
+              ? `<input class="tripsy-diary-heading" data-diary-heading="${esc(dayKey)}" value="${esc(d.heading || '')}" placeholder="Give this day a title…">`
+              : (d.heading ? `<div class="tripsy-diary-heading-read">${esc(d.heading)}</div>` : '')}
+          </div>
+          ${scheduleHtml}
+          ${body}
+        </section>`;
+    }).join('');
+    content.innerHTML = sections || `<div class="empty-state" style="margin-top:12px;">This trip has no dated events yet, so there are no days to write up.</div>`;
+    // Text and heading persist on blur, not on every keystroke -- one Drive write per
+    // finished edit rather than one per character.
+    content.querySelectorAll('[data-diary-text]').forEach(el => {
+      el.addEventListener('blur', () => {
+        const key = el.getAttribute('data-diary-text');
+        if ((dayOf(key) || {}).text === el.value) return;
+        upsertDay(key, { text: el.value });
+        save();
+      });
+    });
+    content.querySelectorAll('[data-diary-heading]').forEach(el => {
+      el.addEventListener('change', () => {
+        const key = el.getAttribute('data-diary-heading');
+        if ((dayOf(key) || {}).heading === el.value) return;
+        upsertDay(key, { heading: el.value });
+        save();
+      });
+    });
+    content.querySelectorAll('[data-diary-drop-schedule]').forEach(el => {
+      el.addEventListener('click', () => {
+        upsertDay(el.getAttribute('data-diary-drop-schedule'), { showSchedule: false });
+        save();
+        render();
+      });
+    });
+  };
+  render();
+
+  // Seeds only days that are still EMPTY, so pressing it again after editing can never
+  // overwrite something already written.
+  seedBtn.onclick = async () => {
+    if (!isOwner) return;
+    const cache = await Store.getTripsyNarrativeCache();
+    const targets = dayKeys.filter(k => !((dayOf(k) || {}).text || '').trim());
+    if (!targets.length) { toast('Every day already has text — clear a day to rewrite it.'); return; }
+    const original = seedBtn.textContent;
+    seedBtn.disabled = true;
+    seedBtn.textContent = `Writing ${targets.length} day${targets.length === 1 ? '' : 's'}…`;
+    try {
+      const drafts = targets.map(dayKey => {
+        const entry = cache[`${trip.key}::day::${dayKey}`];
+        return {
+          day_key: dayKey,
+          date: dayKey,
+          planned_writeup: (entry && entry.content && entry.content.narrative) || '',
+          schedule: tripsyDiaryScheduleLines(summaryByDay.get(dayKey) || [])
+            .map(l => [l.time, l.label, l.place].filter(Boolean).join(' — ')),
+        };
+      });
+      const result = await generateTripsyDiaryDays(effectiveTrip, drafts);
+      for (const d of (result.days || [])) {
+        if (!targets.includes(d.day_key)) continue; // never touch a day we didn't ask about
+        upsertDay(d.day_key, { heading: d.heading || '', text: d.text || '' });
+      }
+      await save();
+      render();
+    } catch (e) {
+      console.error('Trip diary seeding failed:', e);
+      toast('Could not write the first draft — see console for details.', 'error');
+    } finally {
+      seedBtn.disabled = false;
+      seedBtn.textContent = original;
+    }
+  };
+}
+
+// Rewrites the itinerary's planned, second-person day narratives into a PAST-TENSE
+// diary entry -- the starting draft the owner then edits freely. Scoped by dayKeys from
+// the outset (same lesson as summaryDayKeys): re-seeding one day must cost one day, not
+// the whole trip. Left on claude-opus-4-8 with NO `thinking` param, like the other three
+// narrative calls -- on that model omitting it runs without thinking, and adding it would
+// make this SLOWER, not faster (the adaptive-by-default trap is sonnet-5's, not this).
+async function generateTripsyDiaryDays(effectiveTrip, dayDrafts) {
+  const apiKey = await fetchAnthropicApiKeyFromDrive();
+  const schema = {
+    type: 'object',
+    properties: {
+      days: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            day_key: { type: 'string' },
+            heading: { type: 'string' },
+            text: { type: 'string' },
+          },
+          required: ['day_key', 'heading', 'text'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['days'],
+    additionalProperties: false,
+  };
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-4-8',
+      max_tokens: 8192,
+      output_config: { format: { type: 'json_schema', schema } },
+      messages: [{
+        role: 'user',
+        content: `Turn each day of this trip into a DIARY entry: a first-person-plural, PAST-TENSE account of that day, as if written afterwards by the traveler.
+
+Trip: ${JSON.stringify({ name: effectiveTrip.name, location: effectiveTrip.location, dateRange: formatTripDateRange(effectiveTrip.start, effectiveTrip.end) })}
+
+For each day you are given the schedule that was planned, and (where it exists) the itinerary write-up that was written BEFORE the trip in second-person future/imperative voice ("you will", "head to"). Rewrite that into what happened: "we", past tense.
+
+RULES
+- Past tense throughout. Never "you"; use "we" (or "I" where a single traveler is obvious).
+- Invent NO facts. Do not add weather, moods, conversations, meals or opinions that are not in the source. If the source says a table was booked for 8pm, the diary says the table was at 8pm -- not that the food was excellent.
+- Where the pre-trip write-up describes a place (its history, what it is known for), keep that description; it is still true. Just stop addressing the reader.
+- 2-4 short paragraphs per day, separated by a blank line. Plain prose only -- no markdown, no headings, no bullet lists.
+- \`heading\` is a short title for the day, 2-6 words, no date and no "Day N" (the page adds those).
+- This is a first draft the traveler will edit, so prefer a plain, factual account over flourish.
+
+DAYS
+${JSON.stringify(dayDrafts, null, 1)}`,
       }],
     }),
   });
@@ -25637,6 +25997,7 @@ async function renderTripsyEventsListImpl() {
         <div data-tripsy-trip-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${isOwner ? menuListButtonHtml(`data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}"`, '✏️', 'Edit Details') : ''}
           ${menuListButtonHtml(`data-tripsy-verify-travel data-key="${esc(trip.key)}"`, '✅', 'Verify Travel Details')}
+          ${menuListButtonHtml(`data-tripsy-trip-diary data-key="${esc(trip.key)}"`, '📖', 'Trip Diary')}
           ${menuListButtonHtml(`data-tripsy-hide-trip data-key="${esc(trip.key)}"`, '🙈', 'Hide Trip')}
           ${isOwner ? menuListButtonHtml(`data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete Trip') : ''}
         </div>
@@ -26101,6 +26462,12 @@ async function renderTripsyEventsListImpl() {
       closeAllTripsyTripPanels();
       const trip = (tripsyDecryptedTrips || []).find(t => t.key === btn.dataset.key);
       if (trip) await showTripsyVerifyTravelDialog(trip);
+    });
+  });
+  container.querySelectorAll("[data-tripsy-trip-diary]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      closeAllTripsyTripPanels();
+      await showTripsyTripDiary(btn.dataset.key);
     });
   });
   container.querySelectorAll("[data-tripsy-review-proposals]").forEach(btn => {

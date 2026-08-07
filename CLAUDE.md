@@ -905,6 +905,47 @@ would overwrite the glyph with the word.
   "missing." When the PDF's range is narrower than the trip's, the owner sees a blocking `alert()`
   stating exactly which dates were compared before the Update page renders.
 
+### Trip Diary (gear menu → 📖 Trip Diary; `showTripsyTripDiary`, `index.html` "Trip Diary page")
+
+The trip written up AFTERWARDS — past tense, one section per day, photos woven through the
+prose — as opposed to the itinerary, which is the plan. **Phase 1 is built: storage, the page,
+the deletable schedule block, past-tense seeding and free text editing. Photos (phases 3–4) are
+not.**
+
+- **Its own Drive file, `trip-diaries.json`** (`TRIP_DIARIES_DRIVE_FILENAME`), same folder and
+  sharing as the others, for the reason trips moved out too: `flight-log-data.json` is rewritten
+  in full on every unrelated save, and diary prose is the largest free text this app stores.
+  Shape `{schemaVersion, updatedAt, diaries:[{tripKey, updatedAt, days:[{dayKey, heading, text,
+  showSchedule, photos:[]}]}]}`. **A missing file is NORMAL** — nobody has written a diary yet —
+  so `fetchTripDiariesFromDrive` returns null rather than throwing, and `writeTripDiariesDoc`
+  creates it on the first save (`createDriveDataFile` now takes a filename, defaulting to the
+  main data file so its existing caller is unchanged). `saveTripDiaryToDrive` uses the same
+  head-revision guard as `persistTripsData`, but retries HERE: a diary is self-contained per
+  trip, so re-applying it onto a newer copy is always well-defined.
+- **Days come from `buildTripsyPrintDayData`**, so the diary's day boundaries are identical to
+  the itinerary's — earliest dated event rather than `trip.start` (which drifts), and multi-day
+  stays bucketed the same way. Day N via `tripsyDayNumberFromTripStart`.
+- **Seeding is past-tense rewriting, scoped, and never destructive.** `generateTripsyDiaryDays`
+  (`claude-opus-4-8`, no `thinking` — adding it on that model would be SLOWER) takes each day's
+  cached itinerary narrative plus its schedule and rewrites it as "we", past tense, with an
+  explicit no-inventing-facts rule since the app only knows what was *planned*. It only targets
+  days whose text is still EMPTY, and ignores any day it didn't ask about, so pressing the button
+  again can never overwrite writing. Scoped by day from the outset — the same lesson as
+  `summaryDayKeys`.
+- **The schedule block** (`tripsyDiaryScheduleLines`) lists that day's times/places above the
+  prose; `showSchedule` defaults to shown and only a stored `false` hides it, so a diary written
+  before the flag existed still shows one. Removing it is per day.
+- **Editing** is a plain textarea per day, saved on blur (not per keystroke), skipped when the
+  value is unchanged, and chained through one promise so two quick edits can't race the same
+  file. Viewers get read-only prose and no seeding button.
+- **Planned (phase 3+):** photos. Placement will ride INSIDE the text as `[photo N]` tokens so a
+  photo travels with the words it belongs to instead of being pinned to a paragraph index; a
+  per-day "See photos / Done" box fetches candidates from Places on demand (the cache's
+  `triedPhotoNames` records only what was already shown — usually one name — so alternates must
+  be fetched, not read); ✓ places, ✕ rejects and is remembered; each photo carries a caption,
+  a side (left/right/full) and a size, floated so text wraps around it, collapsing to full-width
+  blocks on narrow screens while the PDF always honours the float.
+
 ### Review / ambiguity resolution
 
 Parsed invoice legs that couldn't be fully/confidently parsed get `_warnings` and show up in the
