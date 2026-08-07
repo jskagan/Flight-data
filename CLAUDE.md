@@ -671,7 +671,10 @@ would overwrite the glyph with the word.
   silently blank it on the next save). Fixed rather than free text
   because the label is DERIVED: `tripsyCubeName` reads "colour + size" ("Blue Medium") and appends
   the brand ONLY when another cube shares that colour and size, so twins stay distinguishable while
-  everything else stays short — a "navy"/"Navy" typo would split one cube into two labels. Colour
+  everything else stays short. In such a group EVERY cube names its brand, not just some — a bare
+  one would read as the only Blue Medium there is — **except** when the whole group shares one
+  brand, where the brand distinguishes nothing and is just noise. A cube with no brand recorded has
+  nothing to append and shows the bare base — a "navy"/"Navy" typo would split one cube into two labels. Colour
   and size are required, brand optional (it only ever disambiguates). A cube with no photo yet falls
   back to a swatch of its own colour (`TRIPSY_CUBE_COLOR_CSS`; Zebra is a stripe pattern, since a
   flat grey would be indistinguishable from Gray), so it is still tellable apart in the grid.
