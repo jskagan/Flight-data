@@ -1275,6 +1275,12 @@
   @media (max-width: 700px) {
     .tripsy-diary-fig--right, .tripsy-diary-fig--left { float: none; width: 100%; margin: 14px 0; }
   }
+  /* ---- Favorites (Utilities) ---- */
+  .fav-city { margin-bottom: 22px; }
+  .fav-cityname { font-family: var(--mono); font-size: 13px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--amber); margin-bottom: 8px; }
+  .fav-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); margin-bottom: 8px; }
+  .fav-title { font-size: 14.5px; font-weight: 600; color: var(--text); }
+  .fav-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
   .tripsy-attire-generated-line { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
   .tripsy-attire-day-section { margin-bottom: 24px; }
   .tripsy-attire-day-section:last-child { margin-bottom: 0; }
@@ -1574,6 +1580,7 @@
       <button class="rail-item rail-subitem" data-view="utilitiesusers">Users</button>
       <button class="rail-item rail-subitem" data-view="utilitiestripsonly">Trips-Only Access</button>
       <button class="rail-item rail-subitem" data-view="utilitieswardrobe">Wardrobe</button>
+      <button class="rail-item rail-subitem" data-view="utilitiesfavorites">Favorites</button>
       <button class="rail-item rail-subitem" id="utilities-refresh-all-btn">Refresh All</button>
       <div class="rail-submenu-heading">P/S</div>
       <button class="rail-item rail-subitem rail-subitem-nested" data-view="utilitiesdeletepsreservations">Delete Reservations</button>
@@ -2666,6 +2673,41 @@ const Store = {
   // edit (see showTripsyAttireOverlay's own fingerprint check for the light-
   // touch "may be out of date" hint instead); a fresh generation just
   // replaces the old entry outright, same as here.
+  // ---- Favorites (starred events, grouped by city when shown) ----
+  listFavorites() {
+    return driveData.tripsyFavorites || [];
+  },
+  isFavorite(key) {
+    return (driveData.tripsyFavorites || []).some(f => f.key === key);
+  },
+  // Toggles and returns the new state, so a caller can repaint one star without
+  // re-reading the list. Adding stores a SNAPSHOT (title, city, trip) rather than a live
+  // reference -- the list should outlive the event being edited or deleted.
+  async toggleFavorite(fav) {
+    try {
+      if (!driveData.tripsyFavorites) driveData.tripsyFavorites = [];
+      const existing = driveData.tripsyFavorites.some(f => f.key === fav.key);
+      driveData.tripsyFavorites = existing
+        ? driveData.tripsyFavorites.filter(f => f.key !== fav.key)
+        : [...driveData.tripsyFavorites, { ...fav, addedAt: new Date().toISOString() }];
+      await persistDriveData();
+      return !existing;
+    } catch (e) {
+      console.error('Store.toggleFavorite failed:', e);
+      return Store.isFavorite(fav.key);
+    }
+  },
+  async removeFavorite(key) {
+    try {
+      if (!driveData.tripsyFavorites) return true;
+      driveData.tripsyFavorites = driveData.tripsyFavorites.filter(f => f.key !== key);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.removeFavorite failed:', e);
+      return false;
+    }
+  },
   async getTripsyAttireGuide(tripKey) {
     return (driveData.tripsyAttireGuides || []).find(g => g.tripKey === tripKey) || null;
   },
@@ -5156,7 +5198,7 @@ function setActiveNav(view, param) {
   document.getElementById("psreservations-submenu").classList.toggle("collapsed", !isPsReservationsView);
   document.getElementById("psreservations-caret").textContent = isPsReservationsView ? "▾" : "▸";
 
-  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiestripsonly" || view === "utilitieswardrobe" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiesparsingdocs" || view === "utilitiesitineraryphotos";
+  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiestripsonly" || view === "utilitieswardrobe" || view === "utilitiesfavorites" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiesparsingdocs" || view === "utilitiesitineraryphotos";
   document.getElementById("utilities-toggle").classList.toggle("active", isUtilitiesView);
   document.getElementById("utilities-submenu").classList.toggle("collapsed", !isUtilitiesView);
   document.getElementById("utilities-caret").textContent = isUtilitiesView ? "▾" : "▸";
@@ -5205,6 +5247,7 @@ async function navigate(view, param) {
     else if (view === "utilitiesparsingdocs") await renderUtilitiesParsingDocs();
     else if (view === "utilitiesitineraryphotos") await renderUtilitiesItineraryPhotos();
     else if (view === "utilitieswardrobe") await renderUtilitiesWardrobe();
+    else if (view === "utilitiesfavorites") await renderUtilitiesFavorites();
     else if (view === "passengers") await renderPassengerReport(param || "totals");
     else if (view === "travelview") await renderTravelView();
   } catch (e) {
@@ -7574,6 +7617,46 @@ function showWardrobeGarmentForm(existing, onSaved) {
 }
 
 // The Utilities → Wardrobe library PAGE (owner-only, manage mode).
+// Every starred event, GROUPED BY CITY -- the point of the list is "where should we eat
+// in London", across trips, rather than a per-trip bookmark. Cities are ordered by how
+// many favorites they hold (then alphabetically), so the places you actually return to
+// rise to the top. Owner-only, like every other driveData writer.
+async function renderUtilitiesFavorites() {
+  const main = document.getElementById('main');
+  const favs = Store.listFavorites();
+  const byCity = new Map();
+  for (const f of favs) {
+    const city = (f.city || 'Other').trim() || 'Other';
+    if (!byCity.has(city)) byCity.set(city, []);
+    byCity.get(city).push(f);
+  }
+  const cities = [...byCity.entries()]
+    .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  const rowHtml = f => `
+    <div class="fav-row">
+      <div style="flex:1; min-width:0;">
+        <div class="fav-title">${esc(f.title || 'Event')}</div>
+        <div class="fav-sub">${esc([f.address, f.tripName].filter(Boolean).join(' · '))}</div>
+      </div>
+      ${isOwner ? `<button class="btn" data-fav-remove="${esc(f.key)}" title="Remove from Favorites" style="border-color:var(--red); color:var(--red); font-size:12px; padding:4px 10px;">✕</button>` : ''}
+    </div>`;
+  main.innerHTML = `
+    <div class="page-title">Favorites</div>
+    ${favs.length ? cities.map(([city, list]) => `
+      <div class="fav-city">
+        <div class="fav-cityname">${esc(city)} <span style="color:var(--muted); font-weight:400;">· ${list.length}</span></div>
+        ${list.slice().sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''))).map(rowHtml).join('')}
+      </div>`).join('')
+      : `<div class="empty-state" style="margin-top:16px;">No favorites yet — tap the ☆ beside an event's time in Travel View to add one.</div>`}
+  `;
+  main.querySelectorAll('[data-fav-remove]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      await Store.removeFavorite(btn.getAttribute('data-fav-remove'));
+      await renderUtilitiesFavorites();
+    });
+  });
+}
 async function renderUtilitiesWardrobe() {
   if (!isOwner) { main.innerHTML = `<div class="page-title">Wardrobe</div><div class="empty-state">Owner only.</div>`; return; }
   const allGarments = await Store.listWardrobe();
@@ -11726,6 +11809,56 @@ async function persistTripsData() {
   tripsDataUpdatedAt = doc.updatedAt;
   const newRev = await updateDriveDataFile(tripsDataFileId, doc);
   tripsDataRevision = newRev || await fetchDriveHeadRevision(tripsDataFileId);
+}
+
+// ---- Favorites ----------------------------------------------------------------
+// Starred events, kept as a flat list in driveData and GROUPED BY CITY when shown, so
+// "where should we eat in London" is answerable across trips rather than per trip.
+// A favorite stores the title and city it had when starred, not a live reference: the
+// point is a personal list of places worth remembering, which should survive the trip's
+// events being edited, hidden or deleted years later.
+// Keyed `${tripKey}::${eventId}` so the star can be toggled back off from the same row.
+function tripsyFavoriteKey(tripKey, eventId) {
+  return `${tripKey}::${eventId}`;
+}
+// The city a starred event belongs to, from its own address where possible so a
+// multi-city trip files each place under the right one, falling back to the trip's own
+// location. Addresses here are free text from Tripsy, Places or a parsed email, so this
+// is deliberately forgiving: it trims a trailing country, drops any part carrying a
+// postcode, and takes the last thing standing.
+const TRIPSY_FAVORITE_COUNTRY_WORDS = /^(uk|usa|us|gb|united kingdom|united states|england|scotland|wales|ireland|france|italy|spain|germany|portugal|netherlands|switzerland|austria|canada|mexico|japan|australia)$/i;
+function tripsyFavoriteCityFor(ev, trip) {
+  const raw = (ev && ev.tripsyRaw) || {};
+  const address = String(raw.address || (ev && ev.location) || '').trim();
+  const stripCodes = part => String(part)
+    .replace(/\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/gi, '')   // UK postcode
+    .replace(/\b\d{5}(-\d{4})?\b/g, '')                        // US ZIP
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  if (address) {
+    // A transportation leg's "address" is a ROUTE, not a place -- this app's own data has
+    // "LAX → LHR" and "Browns Hotel → Edinburgh Waverley Station". File those under where
+    // the leg ARRIVES, which is the city you were actually in afterwards; without this
+    // each route string became its own one-item pseudo-city.
+    const leg = address.split(/\s*(?:→|->|—>)\s*/).filter(Boolean);
+    const target = leg.length > 1 ? leg[leg.length - 1] : address;
+    const parts = target.split(',').map(x => x.trim()).filter(Boolean);
+    // Walk from the END inward for the first part that reads like a place name. Three
+    // things get skipped on the way, each seen in this app's real data: a trailing
+    // country ("…, London, UK"), a part that is ONLY a postcode ("…, United Kingdom,
+    // E15 2PJ" — Tripsy puts it last on some records), and a bare state or region code
+    // left behind once a ZIP is stripped ("…, Austin, TX 78701" must file under Austin,
+    // not TX). None of them is skipped when it is the ONLY part, so a bare "London" —
+    // or even a bare "Scotland" — is taken at face value rather than falling through.
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (i > 0 && TRIPSY_FAVORITE_COUNTRY_WORDS.test(parts[i])) continue;
+      const cleaned = stripCodes(parts[i]);
+      if (!cleaned) continue;
+      if (i > 0 && /^[A-Za-z]{1,3}$/.test(cleaned)) continue;
+      return cleaned;
+    }
+  }
+  return String((trip && trip.location) || '').trim() || 'Other';
 }
 
 // ---- Trip Diary storage -------------------------------------------------------
@@ -29343,6 +29476,12 @@ function ensureTravelViewStyles() {
     .tv-trip-pick-dates { font-size:13px; color:var(--muted); }
     .tv-doc-item:active { opacity:0.6; }
     .tv-time { font-family:var(--mono); font-size:13px; font-weight:700; color:var(--amber); white-space:nowrap; }
+    .tv-timerow { display:flex; align-items:center; gap:6px; }
+    .tv-fav {
+      background:none; border:none; padding:0 2px; cursor:pointer; line-height:1;
+      font-size:16px; color:var(--muted); flex-shrink:0;
+    }
+    .tv-fav-on { color:var(--amber); }
     .tv-route { font-size:12px; color:var(--muted); line-height:1.5; white-space:nowrap; }
     .tv-note { font-size:12px; color:var(--muted); }
   `;
@@ -29741,6 +29880,14 @@ async function renderTravelView(chosenTripKey) {
     const evKey = (ev.tripsyRaw && ev.tripsyRaw.id != null) ? tripsyEventKey(ev.tripsyRaw) : null;
     const atts = evKey ? (attByEvent.get(evKey) || []) : [];
     const docBtn = atts.length ? `<button class="tv-docbtn" data-tv-doc="${esc(evKey)}" title="Attached document${atts.length > 1 ? 's' : ''}">📄</button>` : '';
+    // Star, left of the time: one tap files this place under its city in Favorites.
+    // Owner-only, since it writes to driveData -- a viewer has no write access, and a
+    // star that silently failed would be worse than no star.
+    const favKey = tripsyFavoriteKey(trip.key, ev.id);
+    const favOn = Store.isFavorite(favKey);
+    const favBtn = isOwner
+      ? `<button class="tv-fav${favOn ? ' tv-fav-on' : ''}" data-tv-fav="${esc(ev.id)}" aria-pressed="${favOn}" title="${favOn ? 'Remove from Favorites' : 'Add to Favorites'}">${favOn ? '★' : '☆'}</button>`
+      : '';
     // Attire-mode time-block background: this run's category colour (tinted via
     // CSS color-mix, applied only under .tv-attire-on), with the run's first/last
     // rows rounded so consecutive same-category rows read as one banded block.
@@ -29753,7 +29900,7 @@ async function renderTravelView(chosenTripKey) {
           <div class="tv-evtitle">${esc(title || 'Event')}</div>
           ${subtitle ? `<div class="tv-evsub">${esc(subtitle)}</div>` : ''}
         </div>
-        <div class="tv-right">${rightHtml}${docBtn}</div>
+        <div class="tv-right"><div class="tv-timerow">${favBtn}${rightHtml}</div>${docBtn}</div>
       </div>`;
   };
 
@@ -29879,6 +30026,32 @@ async function renderTravelView(chosenTripKey) {
     // Doc icon takes precedence over opening the event detail.
     const docBtn = e.target.closest('[data-tv-doc]');
     if (docBtn) { showTripsyTravelDocs(attByEvent.get(docBtn.dataset.tvDoc) || []); return; }
+    // So does the star -- it sits INSIDE the row, whose own tap opens the detail modal.
+    const favBtn = e.target.closest('[data-tv-fav]');
+    if (favBtn) {
+      e.stopPropagation();
+      const fev = eventById.get(favBtn.dataset.tvFav);
+      if (!fev) return;
+      const fraw = fev.tripsyRaw || {};
+      // Painted optimistically: starring is a one-tap gesture and should feel instant,
+      // and the write is corrected below if Drive disagrees.
+      const on = favBtn.classList.toggle('tv-fav-on');
+      favBtn.textContent = on ? '★' : '☆';
+      Store.toggleFavorite({
+        key: tripsyFavoriteKey(trip.key, fev.id),
+        title: (fraw.name || fev.summary || 'Event').replace(/ Check-(in|out)$/, ''),
+        city: tripsyFavoriteCityFor(fev, trip),
+        address: fraw.address || fev.location || '',
+        tripKey: trip.key,
+        tripName: trip.name || '',
+      }).then(actual => {
+        favBtn.classList.toggle('tv-fav-on', actual);
+        favBtn.textContent = actual ? '★' : '☆';
+        favBtn.setAttribute('aria-pressed', String(actual));
+        favBtn.title = actual ? 'Remove from Favorites' : 'Add to Favorites';
+      });
+      return;
+    }
     const row = e.target.closest('[data-tv-ev]');
     if (!row) return;
     const evId = row.dataset.tvEv;

@@ -905,6 +905,29 @@ would overwrite the glyph with the word.
   "missing." When the PDF's range is narrower than the trip's, the owner sees a blocking `alert()`
   stating exactly which dates were compared before the Update page renders.
 
+### Favorites (Travel View ☆ → Utilities → Favorites)
+
+Tapping the ☆ beside an event's time in Travel View files that place under its CITY in
+`driveData.tripsyFavorites` (`Store.listFavorites`/`isFavorite`/`toggleFavorite`/
+`removeFavorite`). Owner-only, since it writes to `driveData`; the star is simply absent for a
+viewer rather than failing silently. Keyed `${tripKey}::${eventId}` so the same row toggles it
+back off, and painted optimistically then corrected from the write's own result.
+
+- **A favorite is a SNAPSHOT** (title, city, address, trip), not a live reference to the event.
+  The point is a personal list of places worth returning to, which should outlive the trip's
+  events being edited, hidden or deleted years later.
+- **`tripsyFavoriteCityFor` derives the city per EVENT, not per trip** — a multi-city trip files
+  each place under the right one. Addresses here are free text (Tripsy, Places, parsed email), so
+  it walks the comma-parts from the END inward for the first that reads like a place name,
+  skipping: a trailing country, a part that is ONLY a postcode (`…, United Kingdom, E15 2PJ`
+  appears in this app's real data), and a bare state code left behind after a ZIP is stripped
+  (`…, Austin, TX 78701` must file under Austin). **None of those is skipped when it is the only
+  part**, so a bare "London" — or "Scotland" — is taken at face value. A transportation leg's
+  address is a ROUTE (`LAX → LHR`), so it files under where the leg ARRIVES; without that, every
+  route string became its own one-item pseudo-city.
+- The Utilities page groups by city, ordered by how many favorites each holds, then
+  alphabetically, so the places you return to rise to the top.
+
 ### Trip Diary (gear menu → 📖 Trip Diary; `showTripsyTripDiary`, `index.html` "Trip Diary page")
 
 The trip written up AFTERWARDS — past tense, one section per day, photos woven through the
