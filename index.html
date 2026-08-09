@@ -1281,6 +1281,17 @@
   .fav-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); margin-bottom: 8px; }
   .fav-title { font-size: 14.5px; font-weight: 600; color: var(--text); }
   .fav-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+  .fav-row { width: 100%; cursor: pointer; font-family: inherit; text-align: left; }
+  .fav-row:hover { border-color: var(--amber); }
+  .fav-detail { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 4px 14px; margin-bottom: 18px; }
+  .fav-detail-row { display: flex; gap: 14px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .fav-detail-row:last-child { border-bottom: none; }
+  .fav-detail-label { width: 90px; flex-shrink: 0; font-size: 12px; font-weight: 600; color: var(--muted); padding-top: 1px; }
+  .fav-detail-value { flex: 1; min-width: 0; font-size: 14px; color: var(--text); }
+  .fav-notes-head { font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--amber); margin-bottom: 8px; }
+  .fav-notes { width: 100%; min-height: 150px; font-size: 14.5px; line-height: 1.6; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font-family: inherit; resize: vertical; }
+  .fav-notes:focus { outline: none; border-color: var(--amber); }
+  .fav-notes-read { white-space: pre-wrap; }
   .tripsy-attire-generated-line { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
   .tripsy-attire-day-section { margin-bottom: 24px; }
   .tripsy-attire-day-section:last-child { margin-bottom: 0; }
@@ -2695,6 +2706,19 @@ const Store = {
     } catch (e) {
       console.error('Store.toggleFavorite failed:', e);
       return Store.isFavorite(fav.key);
+    }
+  },
+  // Notes are typed by the owner on the favorite's own page and belong to the FAVORITE,
+  // not the event -- the event may be edited or deleted long after.
+  async saveFavoriteNotes(key, notes) {
+    try {
+      if (!driveData.tripsyFavorites) return false;
+      driveData.tripsyFavorites = driveData.tripsyFavorites.map(f => f.key === key ? { ...f, notes } : f);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.saveFavoriteNotes failed:', e);
+      return false;
     }
   },
   async removeFavorite(key) {
@@ -7621,9 +7645,54 @@ function showWardrobeGarmentForm(existing, onSaved) {
 // in London", across trips, rather than a per-trip bookmark. Cities are ordered by how
 // many favorites they hold (then alphabetically), so the places you actually return to
 // rise to the top. Owner-only, like every other driveData writer.
+let tripsyFavoriteOpenKey = null; // which favorite's own page is showing, if any
 async function renderUtilitiesFavorites() {
   const main = document.getElementById('main');
   const favs = Store.listFavorites();
+  // ---- one favorite's own page: its details, plus notes the owner types ----
+  if (tripsyFavoriteOpenKey) {
+    const f = favs.find(x => x.key === tripsyFavoriteOpenKey);
+    if (!f) { tripsyFavoriteOpenKey = null; return renderUtilitiesFavorites(); }
+    const row = (label, value) => value
+      ? `<div class="fav-detail-row"><div class="fav-detail-label">${esc(label)}</div><div class="fav-detail-value">${esc(value)}</div></div>`
+      : '';
+    main.innerHTML = `
+      <button type="button" data-fav-back style="background:none; border:none; color:var(--muted); font-size:13px; cursor:pointer; padding:4px 0; margin-bottom:6px;">‹ Favorites</button>
+      <div class="page-title">${esc(f.title || 'Favorite')}</div>
+      <div class="fav-detail">
+        ${row('City', f.city)}
+        ${row('Address', f.address)}
+        ${row('Visited', tripsyFavoriteDateLabel(f.date))}
+        ${row('Trip', f.tripName)}
+        ${row('Saved', f.addedAt ? new Date(f.addedAt).toLocaleDateString() : '')}
+      </div>
+      <div class="fav-notes-head">Notes ${isOwner ? '<span style="color:var(--muted); font-weight:400; font-size:12px;">— saved when you tap away</span>' : ''}</div>
+      ${isOwner
+        ? `<textarea class="fav-notes" data-fav-notes placeholder="What you'd want to remember — what to order, who to ask for, when to book…">${esc(f.notes || '')}</textarea>`
+        : `<div class="fav-notes fav-notes-read">${esc(f.notes || 'No notes.')}</div>`}
+      <div style="margin-top:14px;">
+        ${isOwner ? `<button class="btn" data-fav-remove="${esc(f.key)}" style="border-color:var(--red); color:var(--red);">Remove from Favorites</button>` : ''}
+      </div>`;
+    main.querySelector('[data-fav-back]').addEventListener('click', () => {
+      tripsyFavoriteOpenKey = null;
+      renderUtilitiesFavorites();
+    });
+    const notesEl = main.querySelector('[data-fav-notes]');
+    // Saved on blur, like the diary: one write per finished thought, not per keystroke.
+    if (notesEl) notesEl.addEventListener('blur', async () => {
+      if ((f.notes || '') === notesEl.value) return;
+      await Store.saveFavoriteNotes(f.key, notesEl.value);
+    });
+    const rm = main.querySelector('[data-fav-remove]');
+    if (rm) rm.addEventListener('click', async () => {
+      rm.disabled = true;
+      await Store.removeFavorite(f.key);
+      tripsyFavoriteOpenKey = null;
+      renderUtilitiesFavorites();
+    });
+    return;
+  }
+  // ---- the list, grouped by city ----
   const byCity = new Map();
   for (const f of favs) {
     const city = (f.city || 'Other').trim() || 'Other';
@@ -7633,29 +7702,37 @@ async function renderUtilitiesFavorites() {
   const cities = [...byCity.entries()]
     .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
   const rowHtml = f => `
-    <div class="fav-row">
-      <div style="flex:1; min-width:0;">
+    <button class="fav-row" data-fav-open="${esc(f.key)}">
+      <div style="flex:1; min-width:0; text-align:left;">
         <div class="fav-title">${esc(f.title || 'Event')}</div>
-        <div class="fav-sub">${esc([f.address, f.tripName].filter(Boolean).join(' · '))}</div>
+        <div class="fav-sub">${esc([tripsyFavoriteDateLabel(f.date), f.tripName].filter(Boolean).join(' · '))}</div>
       </div>
-      ${isOwner ? `<button class="btn" data-fav-remove="${esc(f.key)}" title="Remove from Favorites" style="border-color:var(--red); color:var(--red); font-size:12px; padding:4px 10px;">✕</button>` : ''}
-    </div>`;
+      ${f.notes ? '<span title="Has notes" style="color:var(--muted);">📝</span>' : ''}
+      <span style="color:var(--muted); flex-shrink:0;">›</span>
+    </button>`;
   main.innerHTML = `
     <div class="page-title">Favorites</div>
     ${favs.length ? cities.map(([city, list]) => `
       <div class="fav-city">
         <div class="fav-cityname">${esc(city)} <span style="color:var(--muted); font-weight:400;">· ${list.length}</span></div>
-        ${list.slice().sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''))).map(rowHtml).join('')}
+        ${list.slice().sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))
+            || String(a.title || '').localeCompare(String(b.title || ''))).map(rowHtml).join('')}
       </div>`).join('')
       : `<div class="empty-state" style="margin-top:16px;">No favorites yet — tap the ☆ beside an event's time in Travel View to add one.</div>`}
   `;
-  main.querySelectorAll('[data-fav-remove]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      await Store.removeFavorite(btn.getAttribute('data-fav-remove'));
-      await renderUtilitiesFavorites();
+  main.querySelectorAll('[data-fav-open]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      tripsyFavoriteOpenKey = btn.getAttribute('data-fav-open');
+      renderUtilitiesFavorites();
     });
   });
+}
+// "Sat, 8 August 2026" from a YYYY-MM-DD day key. Read through tripPartsToUtcDate so the
+// day is never shifted by the viewer's own timezone (the same trap the itinerary avoids).
+function tripsyFavoriteDateLabel(dayKey) {
+  if (!dayKey || !/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) return '';
+  return tripPartsToUtcDate({ year: +dayKey.slice(0, 4), month: +dayKey.slice(5, 7), day: +dayKey.slice(8, 10) })
+    .toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 async function renderUtilitiesWardrobe() {
   if (!isOwner) { main.innerHTML = `<div class="page-title">Wardrobe</div><div class="empty-state">Owner only.</div>`; return; }
@@ -11826,39 +11903,52 @@ function tripsyFavoriteKey(tripKey, eventId) {
 // location. Addresses here are free text from Tripsy, Places or a parsed email, so this
 // is deliberately forgiving: it trims a trailing country, drops any part carrying a
 // postcode, and takes the last thing standing.
-const TRIPSY_FAVORITE_COUNTRY_WORDS = /^(uk|usa|us|gb|united kingdom|united states|england|scotland|wales|ireland|france|italy|spain|germany|portugal|netherlands|switzerland|austria|canada|mexico|japan|australia)$/i;
-function tripsyFavoriteCityFor(ev, trip) {
+// The CITY a favorite files under -- always a city, never a venue or a station. The
+// address is run through tripsyPrimaryCityFromAddress, the same extractor the weather
+// pipeline already uses (city-states, "New York, NY", postcode-stripping and all), rather
+// than a second hand-rolled parser that would drift from it.
+// Two things it can't answer on its own, both common in this app's real data:
+//   - a venue-named address with no comma ("Soho Farmhouse", "Edinburgh International
+//     Festival") isolates no city segment, and
+//   - a transportation leg's address is a ROUTE ("LAX → LHR"), whose arrival side is an
+//     airport code, not a city.
+// Both fall back to `fallbackCity` -- where you were SLEEPING that night, which is the
+// honest answer to "what city was this in" -- and finally to the trip's own location.
+function tripsyFavoriteCityFor(ev, trip, fallbackCity) {
   const raw = (ev && ev.tripsyRaw) || {};
-  const address = String(raw.address || (ev && ev.location) || '').trim();
-  const stripCodes = part => String(part)
-    .replace(/\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/gi, '')   // UK postcode
-    .replace(/\b\d{5}(-\d{4})?\b/g, '')                        // US ZIP
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-  if (address) {
-    // A transportation leg's "address" is a ROUTE, not a place -- this app's own data has
-    // "LAX → LHR" and "Browns Hotel → Edinburgh Waverley Station". File those under where
-    // the leg ARRIVES, which is the city you were actually in afterwards; without this
-    // each route string became its own one-item pseudo-city.
-    const leg = address.split(/\s*(?:→|->|—>)\s*/).filter(Boolean);
-    const target = leg.length > 1 ? leg[leg.length - 1] : address;
-    const parts = target.split(',').map(x => x.trim()).filter(Boolean);
-    // Walk from the END inward for the first part that reads like a place name. Three
-    // things get skipped on the way, each seen in this app's real data: a trailing
-    // country ("…, London, UK"), a part that is ONLY a postcode ("…, United Kingdom,
-    // E15 2PJ" — Tripsy puts it last on some records), and a bare state or region code
-    // left behind once a ZIP is stripped ("…, Austin, TX 78701" must file under Austin,
-    // not TX). None of them is skipped when it is the ONLY part, so a bare "London" —
-    // or even a bare "Scotland" — is taken at face value rather than falling through.
-    for (let i = parts.length - 1; i >= 0; i--) {
-      if (i > 0 && TRIPSY_FAVORITE_COUNTRY_WORDS.test(parts[i])) continue;
-      const cleaned = stripCodes(parts[i]);
-      if (!cleaned) continue;
-      if (i > 0 && /^[A-Za-z]{1,3}$/.test(cleaned)) continue;
-      return cleaned;
-    }
+  let address = String(raw.address || (ev && ev.location) || '').trim();
+  const leg = address.split(/\s*(?:→|->|—>)\s*/).filter(Boolean);
+  if (leg.length > 1) address = leg[leg.length - 1];
+  if (address.includes(',')) {
+    const city = tripsyPrimaryCityFromAddress(address);
+    // Same sanity bounds tripsyWeatherTargetsByDay applies: a long, wordy result is a
+    // street or a venue that happened to survive, not a city.
+    if (city && city.length <= 22 && city.split(/\s+/).length <= 4) return city;
   }
-  return String((trip && trip.location) || '').trim() || 'Other';
+  return String(fallbackCity || (trip && trip.location) || '').trim() || 'Other';
+}
+// Where the traveler was sleeping at a given moment -- the lodging event covering it.
+// Same idea as tripsyWeatherTargetsByDay's "primary city = where you sleep that night".
+// When nothing covers it, the NEAREST stay in time is used instead: the trip's opening and
+// closing travel legs sit outside every lodging span, and "the city you were heading to"
+// beats filing an outbound flight under "Other".
+function tripsyLodgingCityAt(trip, whenIso) {
+  const t = +new Date(whenIso);
+  if (isNaN(t)) return '';
+  let nearest = null;
+  let nearestGap = Infinity;
+  for (const ev of ((trip && trip.events) || [])) {
+    const raw = ev.tripsyRaw || {};
+    if (raw.resource !== 'hosting') continue;
+    const start = +new Date(ev.start), end = +new Date(ev.end);
+    if (isNaN(start)) continue;
+    const city = tripsyPrimaryCityFromAddress(raw.address || '');
+    if (!city) continue;
+    if (!isNaN(end) && t >= start && t <= end) return city;
+    const gap = t < start ? start - t : t - (isNaN(end) ? start : end);
+    if (gap < nearestGap) { nearestGap = gap; nearest = city; }
+  }
+  return nearest || '';
 }
 
 // ---- Trip Diary storage -------------------------------------------------------
@@ -30040,8 +30130,9 @@ async function renderTravelView(chosenTripKey) {
       Store.toggleFavorite({
         key: tripsyFavoriteKey(trip.key, fev.id),
         title: (fraw.name || fev.summary || 'Event').replace(/ Check-(in|out)$/, ''),
-        city: tripsyFavoriteCityFor(fev, trip),
+        city: tripsyFavoriteCityFor(fev, trip, tripsyLodgingCityAt(trip, fev.start)),
         address: fraw.address || fev.location || '',
+        date: tripsyDayKey(fev.start) || '',
         tripKey: trip.key,
         tripName: trip.name || '',
       }).then(actual => {

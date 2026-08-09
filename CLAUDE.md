@@ -916,15 +916,24 @@ back off, and painted optimistically then corrected from the write's own result.
 - **A favorite is a SNAPSHOT** (title, city, address, trip), not a live reference to the event.
   The point is a personal list of places worth returning to, which should outlive the trip's
   events being edited, hidden or deleted years later.
-- **`tripsyFavoriteCityFor` derives the city per EVENT, not per trip** — a multi-city trip files
-  each place under the right one. Addresses here are free text (Tripsy, Places, parsed email), so
-  it walks the comma-parts from the END inward for the first that reads like a place name,
-  skipping: a trailing country, a part that is ONLY a postcode (`…, United Kingdom, E15 2PJ`
-  appears in this app's real data), and a bare state code left behind after a ZIP is stripped
-  (`…, Austin, TX 78701` must file under Austin). **None of those is skipped when it is the only
-  part**, so a bare "London" — or "Scotland" — is taken at face value. A transportation leg's
-  address is a ROUTE (`LAX → LHR`), so it files under where the leg ARRIVES; without that, every
-  route string became its own one-item pseudo-city.
+- **`tripsyFavoriteCityFor` always yields a CITY, never a venue or a station.** The address goes
+  through `tripsyPrimaryCityFromAddress` — the same extractor the weather pipeline uses
+  (city-states, "New York, NY", postcode-stripping) — rather than a second parser that would
+  drift from it, with that function's own sanity bounds (≤22 chars, ≤4 words) applied to the
+  result. Two shapes it can't answer, both common in the real data, fall back to
+  **`tripsyLodgingCityAt`** — where you were sleeping then: a comma-less **venue name** ("Soho
+  Farmhouse") isolates no city segment, and a transportation leg's address is a **route**
+  ("LAX → LHR") whose arrival side is an airport code. Outside every lodging span — the trip's
+  opening and closing travel legs — the NEAREST stay in time is used, so an outbound flight files
+  under the city it was heading to instead of "Other". Measured on a real 63-event trip, this
+  turned 14 junk buckets (venue names, route strings, "Other") into five real cities.
+- Each favorite records the **visit date** and **trip name** alongside the place, shown on its
+  row (most recent visit first within a city) and on its own page.
+- **Selecting a favorite opens its own page**: city, address, visit date, trip and when it was
+  saved, plus a **notes box** the owner types into (saved on blur, like the diary; a viewer sees
+  the notes read-only). Notes belong to the FAVORITE, not the event, which may be edited or
+  deleted long after. A favorite removed while its page is open falls back to the list rather
+  than stranding it.
 - The Utilities page groups by city, ordered by how many favorites each holds, then
   alphabetically, so the places you return to rise to the top.
 
