@@ -346,6 +346,16 @@ step 4; git history has it if ever needed.
   trip has no dated events. The range's *end* is derived the same way from
   `tripsyItineraryEndDayKey(trip)` (the last day any visible dated event falls on), so a stale
   `end_date` can't add a trailing empty day either.
+- **The Daily Dress Guide opens on today and dims past days too**, by the same rule and the
+  same `tripsyTravelViewTodayKey` call (`dgTodayKey`, marking `data-tripsy-dg-today` and
+  `.tripsy-attire-day-past`). One difference that matters: the guide is a modal with its own
+  overflow, so the scroll targets the OVERLAY and measures against its box, not the window.
+  Every day section is addressable (`data-tripsy-dg-day`), so **the 👔 glyph beside "Day N" on a
+  My Trips day header opens the guide at THAT date** (flashing the day bar once on arrival —
+  once, not per retry pass, which would blink). The glyph renders only when the trip actually has
+  a saved guide, since otherwise it would open an empty page. Note `tripsyAttireDayBarHtml` is a
+  deliberate copy of the My Trips day header and does NOT get the glyph. Destination priority:
+  an explicit `scrollToEventId` (the jump back from My Trips) beats a day, which beats today.
 - **My Trips opens an in-progress trip on TODAY, and grays out the days already over.**
   One `tripsyTravelViewTodayKey` call per trip drives both, so the jump and the dimming can
   never disagree about which day is today — and it is the TRIP's local today, not the device's,

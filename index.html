@@ -1323,6 +1323,10 @@
      kept well above invisible so the past is still readable at a glance. It lifts on
      hover, so going back to check something you did is a hover away, not a mode. */
   .tripsy-day-past { opacity: 0.45; transition: opacity 0.15s ease; }
+  /* The Daily Dress Guide's own past-day dimming -- same rule, its own class because its
+     day sections are .tripsy-attire-day-section, not the My Trips day block. */
+  .tripsy-attire-day-past { opacity: 0.45; transition: opacity 0.15s ease; }
+  .tripsy-attire-day-past:hover, .tripsy-attire-day-past:focus-within { opacity: 1; }
   .tripsy-day-past:hover, .tripsy-day-past:focus-within { opacity: 1; }
   .tripsy-attire-generated-line { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
   .tripsy-attire-day-section { margin-bottom: 24px; }
@@ -23222,6 +23226,15 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
   const outfitEventIds = new Set();
   if (tripOutfits) (tripOutfits.blocks || []).forEach(b => { if (b.garmentIds && b.garmentIds.length) (b.eventIds || []).forEach(id => outfitEventIds.add(id)); });
   const filterOn = tripsyDressGuideFilter.size > 0;
+  // Same treatment as My Trips: on a trip in progress, days already over are dimmed and
+  // the page opens on today. Today is the TRIP's local today (tripsyTravelViewTodayKey),
+  // not the device's -- the guide's days carry literal local-time digits with no offset,
+  // so a device clock that hasn't caught up would gray out the day being dressed for.
+  const dgDayKeys = (guide.days || []).map(d => d.dayKey).filter(Boolean);
+  const dgTrip = (tripsyDecryptedTrips || []).find(t => t.key === guide.tripKey) || null;
+  const dgTodayKey = dgTrip
+    ? tripsyTravelViewTodayKey(dgTrip, dgDayKeys[0] || null, dgDayKeys[dgDayKeys.length - 1] || null)
+    : null;
   const dailyDressGuideHtml = (guide.days || []).map(day => {
     const events = (day.events || []).map(ev => ({ ...ev, dayKey: day.dayKey }));
     if (!events.length) return '';
@@ -23266,8 +23279,9 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
     const laundryHtml = laundryReason !== undefined
       ? `<div class="tripsy-attire-laundry-note"><div class="tripsy-attire-laundry-date">${esc(tripsyDayHeaderLabel(day.dayKey))}</div><div class="tripsy-attire-laundry-main"><span style="font-size:30px; line-height:1; flex-shrink:0;">🧺</span><span>Best day for laundry${laundryReason ? ` — ${esc(laundryReason)}` : ''}</span></div></div>`
       : '';
+    const dgPast = dgTodayKey && day.dayKey < dgTodayKey;
     return `
-      <div class="tripsy-attire-day-section">
+      <div class="tripsy-attire-day-section${dgPast ? ' tripsy-attire-day-past' : ''}" data-tripsy-dg-day="${esc(day.dayKey)}"${day.dayKey === dgTodayKey ? ' data-tripsy-dg-today' : ''}>
         ${tripsyAttireDayBarHtml(day.dayKey, weatherTargetsByDay, tripStartDayKey)}
         ${laundryHtml}
         ${rows}
@@ -23419,7 +23433,7 @@ function getOrCreateTripsyDressGuideOverlay() {
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.style.display = 'none'; });
   return overlay;
 }
-async function showTripsyDailyDressGuide(tripKey, scrollToEventId) {
+async function showTripsyDailyDressGuide(tripKey, scrollToEventId, scrollToDayKey) {
   const guide = await Store.getTripsyAttireGuide(tripKey);
   if (!guide) return;
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
@@ -23475,7 +23489,51 @@ async function showTripsyDailyDressGuide(tripKey, scrollToEventId) {
     }
   };
   renderTripsyDressGuideInto(content, guide, renderOpts);
+  // A specific event was asked for (the jump back from My Trips) -- that destination
+  // wins over the open-on-today default.
   if (scrollToEventId) tripsyAttireScrollToEventRow(scrollToEventId);
+  else if (scrollToDayKey) tripsyDressGuideScrollToDay(scrollToDayKey);
+  else tripsyDressGuideScrollToToday();
+}
+// Opens the guide on today when the trip is in progress. The target is marked during
+// render by the same tripsyTravelViewTodayKey pass that dims past days, so the jump and
+// the graying can never disagree. Unlike My Trips, the scroller here is the OVERLAY, not
+// the window -- the guide is a modal with its own overflow -- so the offset is measured
+// against the overlay's own box.
+// Opens the guide at one specific day -- the 👔 glyph on a My Trips day header. Flashes
+// the day bar on arrival, the same amber cue tripsyAttireScrollToEventRow uses, so it is
+// obvious which day you landed on when several look alike.
+function tripsyDressGuideScrollToDay(dayKey) {
+  tripsyDressGuideScrollToTarget(`[data-tripsy-dg-day="${CSS.escape(dayKey)}"]`, true);
+}
+function tripsyDressGuideScrollToToday() {
+  tripsyDressGuideScrollToTarget('[data-tripsy-dg-today]', false);
+}
+function tripsyDressGuideScrollToTarget(selector, flash) {
+  const overlay = document.getElementById('tripsy-attire-dressguide-overlay');
+  if (!overlay) return;
+  let flashed = false;
+  const scrollToIt = () => {
+    const el = overlay.querySelector(selector);
+    if (!el) return; // no day is today -- the trip isn't running, so leave it at the top
+    const y = overlay.scrollTop + el.getBoundingClientRect().top - overlay.getBoundingClientRect().top - 8;
+    overlay.scrollTo({ top: Math.max(0, y), behavior: 'auto' });
+    // Flash once, not on every retry pass -- the passes exist to correct the position as
+    // the page settles, and re-flashing would just blink.
+    if (flash && !flashed) {
+      flashed = true;
+      const bar = el.firstElementChild || el;
+      const prev = bar.style.boxShadow;
+      bar.style.transition = 'box-shadow 0.2s ease';
+      bar.style.boxShadow = '0 0 0 2px var(--amber)';
+      setTimeout(() => { bar.style.boxShadow = prev; }, 1500);
+    }
+  };
+  // Re-run: the day bars' weather chips arrive after first paint and change the height
+  // above the target, so a single early scroll lands short -- the same lesson My Trips'
+  // and Travel View's open-on-today both learned.
+  requestAnimationFrame(() => requestAnimationFrame(scrollToIt));
+  [120, 350, 800].forEach(ms => setTimeout(scrollToIt, ms));
 }
 
 function getOrCreateTripsyUpdateOverlay() {
@@ -26659,7 +26717,14 @@ async function renderTripsyEventsListImpl() {
       const wxHtml = wxRec ? tripsyWeatherChipHtml(wxRec, wxArr[0].city, wxArr[0].country, dayKey, `color:var(--text); font-weight:600; font-size:12px; letter-spacing:0;${wxBox}`) : '';
       // data-tt-trip/data-tt-day are the scroll anchors the Verify Travel
       // Details report jumps to (tripsyGoToTripDay).
-      return `<div data-tt-trip="${esc(trip.key)}" data-tt-day="${esc(dayKey)}" style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}</span>${wxHtml}${dayNumHtml}</div>`;
+      // 👔 to the right of "Day N": opens the Daily Dress Guide at THIS date. Rendered
+      // only when the trip has a saved attire guide -- otherwise it would open an empty
+      // page, which is worse than no button. Read synchronously from driveData, like the
+      // rest of this header.
+      const dgGlyphHtml = (driveData.tripsyAttireGuides || []).some(g => g.tripKey === trip.key)
+        ? `<button type="button" data-tripsy-day-attire="${esc(dayKey)}" data-trip-key="${esc(trip.key)}" title="Daily Dress Guide for this day" style="background:none; border:none; cursor:pointer; font-size:14px; line-height:1; padding:0 0 0 2px;">&#128084;</button>`
+        : '';
+      return `<div data-tt-trip="${esc(trip.key)}" data-tt-day="${esc(dayKey)}" style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}</span>${wxHtml}<span style="display:inline-flex; align-items:center; gap:6px;">${dayNumHtml}${dgGlyphHtml}</span></div>`;
     };
     // A day already over is DIMMED, not hidden: the events stay readable, they just stop
     // competing with what is still ahead. "Today" is the trip's own local today
@@ -27294,6 +27359,13 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
+  container.querySelectorAll("[data-tripsy-day-attire]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      // The day header sits inside the timeline, whose own clicks do other things.
+      e.stopPropagation();
+      showTripsyDailyDressGuide(btn.dataset.tripKey, null, btn.getAttribute('data-tripsy-day-attire'));
+    });
+  });
   container.querySelectorAll("[data-tripsy-verify-travel]").forEach(btn => {
     btn.addEventListener("click", async () => {
       closeAllTripsyTripPanels();
