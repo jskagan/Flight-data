@@ -346,6 +346,19 @@ step 4; git history has it if ever needed.
   trip has no dated events. The range's *end* is derived the same way from
   `tripsyItineraryEndDayKey(trip)` (the last day any visible dated event falls on), so a stale
   `end_date` can't add a trailing empty day either.
+- **My Trips opens an in-progress trip on TODAY, and grays out the days already over.**
+  One `tripsyTravelViewTodayKey` call per trip drives both, so the jump and the dimming can
+  never disagree about which day is today — and it is the TRIP's local today, not the device's,
+  for the reason in the "today" corollary above. Each day's header+rows are wrapped in a
+  `.tripsy-day-block`; a day before today also gets `.tripsy-day-past` (opacity 0.45, lifting on
+  hover — dimmed, never hidden), and today itself is marked `data-tripsy-today-day` for
+  `tripsyScrollMyTripsToToday` to find. That scroll fires **once per visit**
+  (`resetTripsyMyTripsTodayScroll` on navigate), so a background sync's re-render can't yank you
+  back while you're reading; it scrolls to an ABSOLUTE position and re-runs on rAF + 120/350/800ms,
+  since trip cards grow as photos and weather chips arrive — the same lesson Travel View's
+  open-on-today took several passes to learn. No trip in progress means no marked day, and the
+  page simply opens where it was. The wrapper carries only a class, so the timeline connectors
+  (which measure rows, not their parents) are unaffected.
 - **Collapse/expand per trip card** is a personal display preference stored in `localStorage`
   (`isTripsyTripCollapsed`/`setTripsyTripCollapsed`, `index.html:6313` area) — deliberately *not*
   in `driveData`, since view-only users have no Drive write access to persist anything into the
@@ -1001,7 +1014,17 @@ not.**
   its own pass, because `tripsyWardrobeLoadPhotos` only matches `.tw-photo` nodes.
 - **Editing assumes a wide screen** (the owner's stated workflow), so float widths are fixed to
   the print measure. The narrow-screen collapse to full-width blocks is for READING only.
-- **Still to come (phase 4):** the book/PDF export itself.
+- **The printed book (phase 4, built).** A **Print / PDF** button in the diary header runs
+  `buildTripsyDiaryPrintHtml` → the existing `#tripsy-print-root` + `triggerTripsyPrint` path, the
+  same one the itinerary uses. It renders from the SAME token model as book mode, so what was
+  edited is literally what prints rather than a second renderer that could drift. Photos are real
+  `<img>` elements, not CSS backgrounds, because `triggerTripsyPrint` waits on `<img>` decode
+  before snapshotting — a background prints as an empty box. Each Drive file is resolved once up
+  front, shared across days. Only days with text become chapters; a cover page carries the trip
+  name and dates; each day starts a new page; `break-inside: avoid` on the figure keeps a caption
+  with its photo across a page break. A dangling token (photo removed) and a photo with no Drive
+  file both render as nothing rather than a broken figure. Printing blurs the focused paragraph
+  first — the snapshot is synchronous, so an unserialized edit would otherwise print stale.
 
 ### Review / ambiguity resolution
 
