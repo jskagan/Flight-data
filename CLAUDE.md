@@ -381,6 +381,26 @@ step 4; git history has it if ever needed.
   open-on-today took several passes to learn. No trip in progress means no marked day, and the
   page simply opens where it was. The wrapper carries only a class, so the timeline connectors
   (which measure rows, not their parents) are unaffected.
+- **Past trips render under collapsed YEAR sections, below the current/upcoming cards** (built
+  for the 154-trip historical backfill — flat, they'd stack a wall of 2011 above the trip you're
+  actually on and pay 150 cards' HTML besides). A trip is "past" once its last day (falling back
+  to its first; a trip with no dates is never judged past) is before the device's today; pending
+  "create a new trip" placeholders always stay in the current section. A collapsed year is ONE
+  header row ("2011 · 12 trips") and builds none of its trips' cards; expanding renders them
+  through the exact same `tripCardHtml` (the old per-trip closure, now a named function) as
+  everything else. State is the in-memory `tripsyExpandedYears` Set, cleared per fresh visit like
+  the per-trip collapse reset — and a year containing any EXPANDED trip renders open regardless,
+  which is what keeps `tripsyAttireGoToEvent`/`tripsyGoToTripDay` (both expand their target trip
+  then re-render) working with no knowledge of years; closing a year therefore also re-collapses
+  its trips, or that rule would bounce it straight open.
+- **Regression tests live in `tools/tests/`** (`node tools/tests/run_all.js` — 33 suites,
+  ~750 assertions, exit 0 = all green). They only READ `index.html` (extracting functions by
+  name and asserting on behavior and on source patterns), so they don't violate the single-file
+  rule. Some suites are GENERATORS that write a sibling `*_run.js` (gitignored) holding the
+  executable assertions — the runner executes both halves. Run them before any push that touches
+  Tripsy/attire/packing logic, and add a suite alongside any new feature; fixtures must stay
+  SYNTHETIC (the offline suite once read the owner's real trip file — never commit personal data
+  here, this repo is public).
 - **Collapse/expand per trip card** is a personal display preference stored in `localStorage`
   (`isTripsyTripCollapsed`/`setTripsyTripCollapsed`, `index.html:6313` area) — deliberately *not*
   in `driveData`, since view-only users have no Drive write access to persist anything into the

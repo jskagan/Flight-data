@@ -7704,12 +7704,15 @@ function tripsyWardrobeGroupedHtml(garments, opts = {}) {
 
 // Lazily load each card's photo (driveFileId -> object URL) into its .tw-photo.
 async function tripsyWardrobeLoadPhotos(container) {
-  for (const node of container.querySelectorAll('.tw-photo[data-tw-photo]')) {
+  // Concurrent, not sequential: awaiting each download in turn meant photo 20
+  // on a packing screen only started after 19 had finished. Failures stay
+  // per-node (the glyph fallback), so one bad file can't blank the rest.
+  await Promise.all([...container.querySelectorAll('.tw-photo[data-tw-photo]')].map(async node => {
     const id = node.getAttribute('data-tw-photo');
-    if (!id) continue;
+    if (!id) return;
     try { node.style.backgroundImage = `url("${await tripsyPlacePhotoDisplayUrl(id)}")`; node.textContent = ''; }
     catch (e) { node.textContent = '👕'; }
-  }
+  }));
 }
 
 // Add/Edit garment form (modal). `existing` is a garment object or null (add).
@@ -12201,6 +12204,14 @@ function getTripLastActivityTime(trip) {
 // hiding/showing another one doesn't re-collapse it. resetAllTripsyTripsCollapsed
 // below is what actually enforces "every fresh visit starts all-collapsed",
 // by clearing those stored choices at the top of each page load.
+// Which PAST-trip year sections are open. In-memory and cleared on each fresh
+// visit (renderTripsyTrips), same lifetime as the per-trip collapse reset -- a
+// year left open can't quietly bury the current trips on the next visit. A year
+// also renders open whenever it CONTAINS an expanded trip, which is what keeps
+// the jump-into-a-trip paths (tripsyAttireGoToEvent, tripsyGoToTripDay -- both
+// expand their target then re-render) working with no knowledge of years.
+const tripsyExpandedYears = new Set();
+
 function isTripsyTripCollapsed(tripKey) {
   try {
     return localStorage.getItem(TRIPSY_COLLAPSE_STORAGE_PREFIX + tripKey) !== '0';
@@ -17259,13 +17270,18 @@ const tripsyPhotoObjectUrlCache = new Map();
 // (see uploadBlobToDrive) and hands back an object URL -- cheap, and never
 // touches driveData itself, unlike the old inline-data-URL approach this
 // replaced.
-async function tripsyPlacePhotoDisplayUrl(driveFileId) {
+function tripsyPlacePhotoDisplayUrl(driveFileId) {
+  // Memoizes the PROMISE, not the resolved URL: caching only the result let two
+  // overlapping renders of the same screen download the same photo twice (both
+  // missed the cache before either had finished). A rejection evicts itself so
+  // a transient failure isn't remembered forever -- same pattern as
+  // tripsyOutfitPhotoCache.
   const memo = tripsyPhotoObjectUrlCache.get(driveFileId);
   if (memo) return memo;
-  const blob = await downloadDriveFileBlob(driveFileId);
-  const url = URL.createObjectURL(blob);
-  tripsyPhotoObjectUrlCache.set(driveFileId, url);
-  return url;
+  const p = downloadDriveFileBlob(driveFileId).then(blob => URL.createObjectURL(blob));
+  p.catch(() => { if (tripsyPhotoObjectUrlCache.get(driveFileId) === p) tripsyPhotoObjectUrlCache.delete(driveFileId); });
+  tripsyPhotoObjectUrlCache.set(driveFileId, p);
+  return p;
 }
 
 // Google Places' photo "name" (a reference token, not a real image id) is
@@ -26889,7 +26905,7 @@ async function renderTripsyEventsListImpl() {
   }
   tripsyEnsureWeatherChipHandler();
 
-  container.innerHTML = [...trips, ...pendingCreateTripPlaceholders].map(trip => {
+  const tripCardHtml = trip => {
     const isPendingCreateTrip = !!trip._isPendingCreateTrip;
     const pendingDeleteTrip = pendingChanges.find(c => c.type === 'delete_trip' && c.tripKey === trip.key);
     const pendingCreates = pendingChanges.filter(c => c.type === 'create_event' && c.tripKey === trip.key);
@@ -27528,7 +27544,47 @@ async function renderTripsyEventsListImpl() {
         ${timelineHtml}
       </div>
     `;
-  }).join("");
+  };
+
+  // ---- Current/upcoming trips as full cards; PAST trips under year sections ----
+  // A trip is "past" once its last day (falling back to its first, for a trip
+  // with no end) is before the device's today. With the historical backfill the
+  // file holds 150+ finished trips -- rendered flat they'd stack a wall of 2011
+  // above the trip you're actually on, and pay 150 cards' HTML besides. A
+  // collapsed year renders ONE header row and none of its trips' cards; only
+  // expanding it builds them, through the exact same tripCardHtml as everything
+  // else. Placeholder cards for pending "create a new trip" always stay in the
+  // current section -- they're awaiting action regardless of their dates.
+  const todayK = tripsyTodayDayKey();
+  const isPastTrip = t => {
+    const endK = tripsyDayKey(t.end) || tripsyDayKey(t.start);
+    return !!endK && endK < todayK;
+  };
+  const currentTrips = trips.filter(t => !isPastTrip(t));
+  const pastByYear = new Map(); // '2011' -> [trips, file order]
+  for (const t of trips) {
+    if (!isPastTrip(t)) continue;
+    const y = (tripsyDayKey(t.start) || tripsyDayKey(t.end)).slice(0, 4);
+    if (!pastByYear.has(y)) pastByYear.set(y, []);
+    pastByYear.get(y).push(t);
+  }
+  const pastYears = [...pastByYear.keys()].sort().reverse(); // newest first
+  const pastSectionsHtml = pastYears.map(y => {
+    const yearTrips = pastByYear.get(y);
+    // Open if toggled open, OR if any trip inside is expanded (the jump paths).
+    const open = tripsyExpandedYears.has(y) || yearTrips.some(t => !isTripsyTripCollapsed(t.key));
+    return `
+      <div class="card" style="margin-bottom:${open ? 10 : 8}px; cursor:pointer; padding:10px 16px;" data-tripsy-year-toggle="${esc(y)}">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:12px; color:var(--muted);">${open ? '▾' : '▸'}</span>
+          <span style="font-family:var(--mono); font-size:16px; font-weight:700; color:var(--amber);">${esc(y)}</span>
+          <span style="font-size:12px; color:var(--muted);">${yearTrips.length} trip${yearTrips.length === 1 ? '' : 's'}</span>
+        </div>
+      </div>
+      ${open ? yearTrips.map(tripCardHtml).join('') : ''}`;
+  }).join('');
+  container.innerHTML = [...currentTrips, ...pendingCreateTripPlaceholders].map(tripCardHtml).join('')
+    + (pastYears.length ? `<div style="margin:18px 0 8px; font-size:12px; letter-spacing:1px; text-transform:uppercase; color:var(--muted);">Past Trips</div>${pastSectionsHtml}` : '');
 
   positionTripsyTimelineConnectors();
   // Click-outside-to-collapse for open event detail panels. Wired once on
@@ -27561,6 +27617,21 @@ async function renderTripsyEventsListImpl() {
     el.addEventListener("click", e => {
       if (e.target.closest('button, a, [data-tripsy-add-item-menu], [data-tripsy-attachments-menu], [data-tripsy-document-menu], [data-tripsy-itinerary-menu], [data-tripsy-generate-panel], [data-tripsy-trip-menu], [data-tripsy-sort-menu]')) return;
       toggleTripsyCollapse(el.dataset.tripsyHeaderToggle);
+    });
+  });
+  container.querySelectorAll('[data-tripsy-year-toggle]').forEach(el => {
+    el.addEventListener('click', () => {
+      const y = el.dataset.tripsyYearToggle;
+      if (tripsyExpandedYears.has(y) || (pastByYear.get(y) || []).some(t => !isTripsyTripCollapsed(t.key))) {
+        // Closing a year also re-collapses the trips inside it -- an expanded
+        // trip left behind would force the section straight back open (that
+        // forcing is deliberate, it's what the jump-into-a-trip paths rely on).
+        tripsyExpandedYears.delete(y);
+        (pastByYear.get(y) || []).forEach(t => setTripsyTripCollapsed(t.key, true));
+      } else {
+        tripsyExpandedYears.add(y);
+      }
+      renderTripsyEventsList();
     });
   });
 
@@ -29757,6 +29828,7 @@ async function renderTripsyParseReview() {
 
 async function renderTripsyTrips() {
   resetAllTripsyTripsCollapsed();
+  tripsyExpandedYears.clear(); // past-year sections close again on a fresh visit
   resetTripsyMyTripsTodayScroll(); // a fresh visit re-arms the open-on-today jump
   const homeIconInner = TRIPIT_HOME_ICON_B64
     ? `<img src="data:image/png;base64,${TRIPIT_HOME_ICON_B64}" style="max-width:80px; max-height:56px; width:auto; height:auto; display:block;" alt="Home">`
