@@ -1339,6 +1339,17 @@
   /* "Not Dirty" on a garment card: quiet, since the card's own tap (into the bag) is the
      main action and this is the exception. */
   .tripsy-laundry-notdirty { margin-top: 6px; font-size: 11px; padding: 3px 8px; width: 100%; }
+  /* Dirty garments NOT worn again this trip: their own box below the main grid, tinted
+     a cool slate so it reads as a different bucket from the wash-these list above (the
+     app's ambers all mean "act on this"; these are optional). */
+  .tripsy-laundry-notneeded {
+    margin-top: 16px; padding: 12px 14px; border-radius: 10px;
+    background: rgba(96, 135, 175, 0.14); border: 1px solid rgba(96, 135, 175, 0.4);
+  }
+  .tripsy-laundry-notneeded-head {
+    font-size: 13px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;
+    color: #7FA8CC; margin-bottom: 4px;
+  }
   /* The Laundry Bag card, under the dirty-clothes grid on the laundry screen. */
   /* "You run out of X today" -- red, and deliberately louder than the orange laundry
      suggestion it replaces: that one was advice, this is a consequence. */
@@ -9640,8 +9651,28 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
   // bagful and not everything you own.
   const washes = Store.listTripsyLaundry(tripKey)
     .filter(r => r.washedAt && (r.person || 'him') === person && r.dayKey && r.dayKey <= dayKey);
+  // '::nn' is the "Not Needed for Trip" card's key suffix (see pushSplit) -- a wash
+  // that bagged copies under either key still resets this garment's clock.
   const lastWashFor = key => washes.reduce((best, r) =>
-    ((r.bag || {})[key] && (!best || r.dayKey > best)) ? r.dayKey : best, null);
+    (((r.bag || {})[key] || (r.bag || {})[key + '::nn']) && (!best || r.dayKey > best)) ? r.dayKey : best, null);
+  // One garment can genuinely straddle the two sections: with 3 shirts dirty and only
+  // 2 more shirt-days on the schedule, washing 2 matters and the third is optional.
+  // Dirty copies are fungible, so the split is COMPUTED: future wearings need
+  // ceil(futureWears/limit) copies, still-clean copies cover that first, and only the
+  // shortfall of dirty copies goes in the top section. The bottom card gets its own
+  // '::nn'-suffixed key so the bag can hold each card's copies separately; creditKey
+  // stays the BASE key on both, since washes and Not Dirty credits are per GARMENT
+  // (the wear-count model is aggregate, not per copy). totalDirty rides along so the
+  // Not Dirty credit math can target the garment's whole pile, whichever card is
+  // pressed.
+  const pushSplit = (list, base, { dirty, qty, limit, worn, futureWears }) => {
+    const cleanCopies = Math.max(0, qty - dirty);
+    const neededCopies = (limit > 0 && isFinite(limit)) ? Math.ceil(futureWears / limit) : 0;
+    const dirtyNeeded = Math.max(0, Math.min(dirty, neededCopies - cleanCopies));
+    const shared = { ...base, creditKey: base.key, worn, limit, totalDirty: dirty };
+    if (dirtyNeeded > 0) list.push({ ...shared, count: dirtyNeeded, neededAgain: true });
+    if (dirty - dirtyNeeded > 0) list.push({ ...shared, key: base.key + '::nn', count: dirty - dirtyNeeded, neededAgain: false });
+  };
   // Wearings the owner has forgiven ("Not Dirty"), counted only for the stretch that
   // matters: after the last wash of that garment, and up to the day being viewed.
   const credits = Store.listLaundryNotDirty(tripKey)
@@ -9657,18 +9688,15 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
     const since = lastWashFor('g:' + id);
     const worn = Math.max(0, (days || []).filter(d => d.dayKey && d.dayKey <= dayKey && (!since || d.dayKey > since)).length
       - creditFor('g:' + id, since));
-    const neededAgain = (days || []).some(d => d.dayKey && d.dayKey > dayKey);
     // Only genuinely DIRTY copies -- one that has not had its full run of wearings yet is
     // still wearable, and putting it in the bag would be washing a clean garment.
-    const dirty = tripsyDirtyCopies(worn, tripsyWearsBeforeWash(g.name, null, g.group), qty);
-    if (!dirty || !neededAgain) continue;
-    out.push({ key: 'g:' + id, name: g.name || 'Garment', driveFileId: g.driveFileId || '',
-      typeKey: tripsyGarmentTypeKey(g.name || ''), group: g.group || '', count: dirty,
-      // worn + limit ride along so "Not Dirty" can size its credit to the OUTCOME.
-      // The dirty count is CAPPED at the copies packed, so a one-wear polo worn 4
-      // days shows one dirty copy carrying four wearings -- forgiving one wearing
-      // per press left floor(worn/limit) >= 1 and the card came straight back.
-      worn, limit: tripsyWearsBeforeWash(g.name, null, g.group) });
+    const limit = tripsyWearsBeforeWash(g.name, null, g.group);
+    const dirty = tripsyDirtyCopies(worn, limit, qty);
+    if (!dirty) continue;
+    const futureWears = (days || []).filter(d => d.dayKey && d.dayKey > dayKey).length;
+    pushSplit(out, { key: 'g:' + id, name: g.name || 'Garment', driveFileId: g.driveFileId || '',
+      typeKey: tripsyGarmentTypeKey(g.name || ''), group: g.group || '' },
+      { dirty, qty, limit, worn, futureWears });
   }
   // "No Picture" generic lines count too -- they are real clothes in the bag, they just
   // have no wardrobe record, so they show their type glyph.
@@ -9679,12 +9707,14 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
     const sinceX = lastWashFor('x:' + (x.name || ''));
     const worn = Math.max(0, (days || []).filter(d => d.dayKey && d.dayKey <= dayKey && (!sinceX || d.dayKey > sinceX)).length
       - creditFor('x:' + (x.name || ''), sinceX));
-    const neededAgain = (days || []).some(d => d.dayKey && d.dayKey > dayKey);
-    const dirtyX = tripsyDirtyCopies(worn, tripsyWearsBeforeWash(x.name, x.typeKey, ''), Math.max(1, x.qty || 1));
-    if (!dirtyX || !neededAgain) continue;
-    out.push({ key: 'x:' + (x.name || ''), name: x.name || 'Item', driveFileId: '',
-      typeKey: x.typeKey || tripsyGarmentTypeKey(x.name || ''), group: '',
-      count: dirtyX, worn, limit: tripsyWearsBeforeWash(x.name, x.typeKey, '') });
+    const limitX = tripsyWearsBeforeWash(x.name, x.typeKey, '');
+    const qtyX = Math.max(1, x.qty || 1);
+    const dirtyX = tripsyDirtyCopies(worn, limitX, qtyX);
+    if (!dirtyX) continue;
+    const futureWearsX = (days || []).filter(d => d.dayKey && d.dayKey > dayKey).length;
+    pushSplit(out, { key: 'x:' + (x.name || ''), name: x.name || 'Item', driveFileId: '',
+      typeKey: x.typeKey || tripsyGarmentTypeKey(x.name || ''), group: '' },
+      { dirty: dirtyX, qty: qtyX, limit: limitX, worn, futureWears: futureWearsX });
   }
   // Most-dirty first: the pile that actually decides whether you make it.
   out.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
@@ -9707,7 +9737,9 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   const dayKeys = ((guide && guide.days) || []).map(d => d.dayKey).filter(Boolean);
   const washedOn = (key, dayKey) => washes
     .filter(r => r.dayKey === dayKey)
-    .reduce((n, r) => n + ((r.bag || {})[key] || 0), 0);
+    // '::nn' = copies bagged from the "Not Needed for Trip" card; once washed they are
+    // clean stock like any other, so the projection must count them returning.
+    .reduce((n, r) => n + ((r.bag || {})[key] || 0) + ((r.bag || {})[key + '::nn'] || 0), 0);
   const note = (dayKey, name) => {
     if (!runOut.has(dayKey)) runOut.set(dayKey, []);
     if (!runOut.get(dayKey).includes(name)) runOut.get(dayKey).push(name);
@@ -9765,7 +9797,10 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
   const persistBag = () => Store.saveTripsyLaundryBag(tripKey, person, dayKey, Object.fromEntries(inBag));
 
   const render = () => {
-    const dirty = items.filter(it => remaining(it) > 0);
+    const dirty = items.filter(it => remaining(it) > 0 && it.neededAgain !== false);
+    // Dirty but finished with for the rest of the trip: their own section below, in a
+    // tinted box -- washing these is optional, so they must not pad out the main list.
+    const notNeeded = items.filter(it => remaining(it) > 0 && it.neededAgain === false);
     const bagged = items.filter(it => (inBag.get(it.key) || 0) > 0);
     const bagTotal = bagged.reduce((n, it) => n + inBag.get(it.key), 0);
     const cardHtml = it => `
@@ -9778,7 +9813,7 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
         </div>
       </div>`;
     body.innerHTML = `
-      <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">Wash these today and you should have enough clean clothes for the rest of the trip. Anything you have finished with for good is left out. Tap a garment to put it in the bag.</div>
+      <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">Wash these today and you should have enough clean clothes for the rest of the trip. Tap a garment to put it in the bag.</div>
       <div class="tripsy-laundry-bag">
         <div class="tripsy-laundry-bag-head">
           <span>🧺 Laundry Bag${bagTotal ? ` <span style="color:var(--muted); font-weight:400;">· ${bagTotal} item${bagTotal === 1 ? '' : 's'}</span>` : ''}</span>
@@ -9794,7 +9829,13 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
       </div>
       ${dirty.length
         ? `<div class="tw-grid">${dirty.map(cardHtml).join('')}</div>`
-        : `<div class="empty-state" style="margin-top:4px;">${items.length ? 'Everything dirty is in the bag.' : "Nothing needs washing today — either nothing has been worn yet, or what has been worn isn't needed again."}</div>`}`;
+        : `<div class="empty-state" style="margin-top:4px;">${items.some(it => it.neededAgain !== false) ? 'Everything dirty is in the bag.' : 'Nothing you still need on this trip needs washing.'}</div>`}
+      ${notNeeded.length ? `
+        <div class="tripsy-laundry-notneeded">
+          <div class="tripsy-laundry-notneeded-head">Not Needed for Trip</div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">Dirty, but not scheduled to be worn again this trip — washing these is optional.</div>
+          <div class="tw-grid">${notNeeded.map(cardHtml).join('')}</div>
+        </div>` : ''}`;
     tripsyWardrobeLoadPhotos(body);
   };
   render();
@@ -9843,12 +9884,14 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
       // three dirty shirts forgive 2.
       const marked = Math.min(n, left);
       const limit = (it.limit > 0 && isFinite(it.limit)) ? it.limit : 1;
-      const credit = Math.max(1, (it.worn || 0) - (it.count - marked) * limit - (limit - 1));
+      // totalDirty, not this card's count: one garment can render as two cards (needed /
+      // not-needed sections) and the credit targets the garment's WHOLE pile.
+      const credit = Math.max(1, (it.worn || 0) - ((it.totalDirty != null ? it.totalDirty : it.count) - marked) * limit - (limit - 1));
       // OPTIMISTIC: addLaundryNotDirty records the credit in memory synchronously before
       // its Drive write, so the screen is rebuilt at once and the write (a whole-file
       // PATCH plus a revision check -- most of a second) finishes behind it. Awaiting it
       // here made the card sit unchanged long enough to read as a dead button.
-      Store.addLaundryNotDirty(tripKey, person, dayKey, it.key, credit)
+      Store.addLaundryNotDirty(tripKey, person, dayKey, it.creditKey || it.key, credit)
         .then(ok => { if (!ok) toast('Not Dirty didn’t save — it may reappear on reload.', 'error'); });
       // Rebuilt rather than patched: the wear maths decides what is dirty now, not this
       // handler's idea of it.

@@ -46,33 +46,56 @@ wardrobe = [
   G('b', 'Grey trousers', 'him', ''),           // bottoms: ten wearings before a wash
   G('c', 'Finished-with jacket', 'him', 'photoC'),
   G('d', 'Her dress', 'her', 'photoD'),
+  G('e', 'Old shirt', 'him', ''),
 ];
 selection = [
-  { id: 'a', qty: 2 }, { id: 'b', qty: 1 }, { id: 'c', qty: 1 }, { id: 'd', qty: 1 },
+  { id: 'a', qty: 2 }, { id: 'b', qty: 1 }, { id: 'c', qty: 1 }, { id: 'd', qty: 1 }, { id: 'e', qty: 1 },
 ];
 wearByGarment = {
   a: ['2026-08-03', '2026-08-04', '2026-08-05', '2026-08-09'], // worn 3x by the 5th, needed again
   b: ['2026-08-04', '2026-08-10'],                             // worn once, needed again
   c: ['2026-08-02', '2026-08-03'],                             // done with -- never again
   d: ['2026-08-03', '2026-08-09'],                             // hers, not his
+  e: ['2026-08-02', '2026-08-03'],                             // one-wear top, done with -- dirty but finished
 };
 generics = [{ person: 'him', category: 'general', name: 'T-shirts', qty: 3, typeKey: 'tee' }];
 wearByLine = { 'T-shirts': ['2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06', '2026-08-12'] };
 
 const rows = await tripsyLaundryItemsForDay('T1', '2026-08-05', 'him');
+// One garment can now be TWO cards (needed / not-needed sections), so name-keyed
+// lookups need to say which -- and totals sum both.
+const top = (rs, n) => rs.find(r => r.name === n && r.neededAgain === true);
+const nn = (rs, n) => rs.find(r => r.name === n && r.neededAgain === false);
+const tot = (rs, n) => rs.filter(r => r.name === n).reduce((s, r) => s + r.count, 0);
 const byName = Object.fromEntries(rows.map(r => [r.name, r]));
-assert(!!byName['Blue shirt'], 'a worn-and-needed-again garment is listed');
-assert(byName['Blue shirt'].count === 2,
-  'its count is capped at the copies PACKED, not the days worn -> ' + byName['Blue shirt'].count);
+assert(!!top(rows, 'Blue shirt'), 'a worn-and-needed-again garment is listed on top');
+assert(tot(rows, 'Blue shirt') === 2,
+  'its total is capped at the copies PACKED, not the days worn -> ' + tot(rows, 'Blue shirt'));
+// 2 dirty shirts but only ONE more shirt-day on the schedule: the garment SPLITS --
+// one copy genuinely needs washing, the other is optional.
+assert(top(rows, 'Blue shirt').count === 1 && nn(rows, 'Blue shirt').count === 1,
+  'a straddling garment makes two cards, split by what the schedule still needs');
 assert(!byName['Grey trousers'],
   'trousers worn once are NOT dirty -- bottoms take ten wearings, so nothing to wash yet');
 assert(!byName['Finished-with jacket'],
-  'something never needed again is left out -- washing it cannot change whether you make it');
+  'a jacket is never dirty at all (outerwear is Infinity wears), needed again or not');
+// Dirty-but-finished garments are RETURNED now, flagged, for the "Not Needed for
+// Trip" section -- no longer silently dropped.
+assert(!!nn(rows, 'Old shirt') && !top(rows, 'Old shirt'),
+  'a dirty garment not worn again renders ONLY in the not-needed section');
+assert(!!top(rows, 'Blue shirt'), 'and a needed-again one has a top card');
 assert(!byName['Her dress'], "the other person's clothes are not in this list");
-assert(!!byName['T-shirts'] && byName['T-shirts'].count === 3,
-  'a "No Picture" generic line counts too, capped at its quantity -> ' + (byName['T-shirts'] || {}).count);
-assert(byName['Blue shirt'].driveFileId === 'photoA', 'a photographed garment carries its file');
-assert(byName['T-shirts'].driveFileId === '',
+assert(tot(rows, 'T-shirts') === 3,
+  'a "No Picture" generic line counts too, capped at its quantity -> ' + tot(rows, 'T-shirts'));
+// 3 dirty tees, 2 more tee-days -> wash 2, the third is optional.
+assert(top(rows, 'T-shirts').count === 2 && nn(rows, 'T-shirts').count === 1,
+  'generics split the same way');
+assert(nn(rows, 'T-shirts').key === top(rows, 'T-shirts').key + '::nn',
+  "the bottom card's key is the base key suffixed ::nn, so the bag holds them apart");
+assert(nn(rows, 'T-shirts').creditKey === top(rows, 'T-shirts').key,
+  'but both cards share one creditKey -- washes and credits are per GARMENT');
+assert(top(rows, 'Blue shirt').driveFileId === 'photoA', 'a photographed garment carries its file');
+assert(top(rows, 'T-shirts').driveFileId === '',
   'and an unphotographed one carries none, so the card falls back to a glyph');
 // Most-dirty first.
 assert(rows[0].count >= rows[rows.length - 1].count, 'the biggest pile is listed first');
@@ -82,7 +105,8 @@ const early = await tripsyLaundryItemsForDay('T1', '2026-08-01', 'him');
 assert(early.length === 0, 'before anything is worn, there is nothing to wash');
 // Last day: everything is finished with, so nothing needs washing.
 const late = await tripsyLaundryItemsForDay('T1', '2026-08-30', 'him');
-assert(late.length === 0, 'at the end of the trip, washing changes nothing');
+assert(late.length > 0 && late.every(r => r.neededAgain === false),
+  'at the end of the trip everything dirty is still shown, all in the optional section');
 // A selection entry whose garment record is gone must not crash or appear.
 // ---- a wash resets the dirty clock, per garment ----
 selection = [{ id: 'a', qty: 2 }, { id: 'b', qty: 1 }];
@@ -104,11 +128,11 @@ assert(future.find(r => r.name === 'Blue shirt'), 'a future wash does not make t
 // An UNWASHED bag (still being gathered) is not a wash.
 washes = [{ tripKey: 'T1', person: 'him', dayKey: '2026-08-04', washedAt: null, bag: { 'g:a': 2 } }];
 const gathering = await tripsyLaundryItemsForDay('T1', '2026-08-05', 'him');
-assert(gathering.find(r => r.name === 'Blue shirt').count === 2,
+assert(tot(gathering, 'Blue shirt') === 2,
   'a bag that has not been washed yet changes nothing');
 // The other person's wash is not yours.
 washes = [{ tripKey: 'T1', person: 'her', dayKey: '2026-08-04', washedAt: 'x', bag: { 'g:a': 2 } }];
-assert((await tripsyLaundryItemsForDay('T1', '2026-08-05', 'him')).find(r => r.name === 'Blue shirt').count === 2,
+assert(tot(await tripsyLaundryItemsForDay('T1', '2026-08-05', 'him'), 'Blue shirt') === 2,
   "the other person's wash does not clean yours");
 washes = [];
 
@@ -121,15 +145,15 @@ generics = []; washes = [];
 wearByGarment = { a: [D2(1), D2(2), D2(3), D2(9)], b: Array.from({ length: 10 }, (_, i) => D2(i + 1)).concat([D2(12)]) };
 let base = await tripsyLaundryItemsForDay('T1', D2(5), 'him');
 let bn = Object.fromEntries(base.map(r => [r.name, r]));
-assert(bn['Blue shirt'].count === 3, 'three wearings of a one-wear top = three dirty');
+assert(tot(base, 'Blue shirt') === 3, 'three wearings of a one-wear top = three dirty in total');
 assert(!bn['Grey trousers'], 'five wearings of a ten-wear bottom is not dirty yet');
 let tn = Object.fromEntries((await tripsyLaundryItemsForDay('T1', D2(10), 'him')).map(r => [r.name, r]));
 assert(tn['Grey trousers'] && tn['Grey trousers'].count === 1, 'ten wearings of a ten-wear bottom = one dirty');
 
 // One shirt forgiven -> two dirty.
 notDirty = [{ tripKey: 'T1', person: 'him', dayKey: D2(5), key: 'g:a', count: 1 }];
-bn = Object.fromEntries((await tripsyLaundryItemsForDay('T1', D2(5), 'him')).map(r => [r.name, r]));
-assert(bn['Blue shirt'].count === 2, 'forgiving one wearing clears one dirty top -> ' + bn['Blue shirt'].count);
+assert(tot(await tripsyLaundryItemsForDay('T1', D2(5), 'him'), 'Blue shirt') === 2,
+  'forgiving one wearing clears one dirty top');
 // Forgiving all of them takes it off the list entirely.
 notDirty = [{ tripKey: 'T1', person: 'him', dayKey: D2(5), key: 'g:a', count: 3 }];
 bn = Object.fromEntries((await tripsyLaundryItemsForDay('T1', D2(5), 'him')).map(r => [r.name, r]));
@@ -146,9 +170,8 @@ assert(!bn['Blue shirt'], 'an over-large credit is harmless');
 washes = [{ tripKey: 'T1', person: 'him', dayKey: D2(4), washedAt: 'x', bag: { 'g:a': 3 } }];
 notDirty = [{ tripKey: 'T1', person: 'him', dayKey: D2(2), key: 'g:a', count: 3 }];
 wearByGarment.a = [D2(1), D2(2), D2(5), D2(6), D2(9)];
-bn = Object.fromEntries((await tripsyLaundryItemsForDay('T1', D2(6), 'him')).map(r => [r.name, r]));
-assert(bn['Blue shirt'] && bn['Blue shirt'].count === 2,
-  'a pre-wash credit is spent and does not suppress later wearings -> ' + (bn['Blue shirt'] || {}).count);
+assert(tot(await tripsyLaundryItemsForDay('T1', D2(6), 'him'), 'Blue shirt') === 2,
+  'a pre-wash credit is spent and does not suppress later wearings');
 // The other person's credit is not yours.
 washes = []; notDirty = [{ tripKey: 'T1', person: 'her', dayKey: D2(5), key: 'g:a', count: 3 }];
 bn = Object.fromEntries((await tripsyLaundryItemsForDay('T1', D2(6), 'him')).map(r => [r.name, r]));

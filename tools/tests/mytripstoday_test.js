@@ -140,13 +140,25 @@ assert(/tw-photo-glyph/.test(lo) && /tripsyGarmentGlyph/.test(lo),
 assert(/data-tw-photo="\$\{esc\(it\.driveFileId\)\}"/.test(lo), 'and one with a photo shows it');
 assert(/tripsyWardrobeLoadPhotos\(body\)/.test(lo), 'photos are painted from Drive');
 assert(/if \(!ov\.contains\(body\)\) return;/.test(lo), 'closing it mid-computation does not then overwrite it');
-assert(/Nothing needs washing today/.test(lo), 'and an empty result explains itself');
+// (the old whole-screen "Nothing needs washing today" copy moved when the
+// Not-Needed section arrived -- the empty message now speaks only for the main list)
+assert(/Nothing you still need on this trip needs washing/.test(lo), 'an empty MAIN list explains itself');
+// The "Not Needed for Trip" section: dirty-but-finished garments, in their own
+// tinted box below the main grid, same card shape (so bag + Not Dirty work there).
+assert(/it\.neededAgain !== false/.test(lo) && /it\.neededAgain === false/.test(lo),
+  'the two sections split on the neededAgain flag');
+assert(/tripsy-laundry-notneeded"/.test(lo) && /Not Needed for Trip/.test(lo),
+  'the optional section is labeled and boxed');
+assert(/\$\{notNeeded\.map\(cardHtml\)\.join\(''\)\}/.test(lo),
+  'its cards go through the SAME cardHtml, so bagging and Not Dirty work there too');
+assert(/\.tripsy-laundry-notneeded \{[^}]*background: rgba\(96, 135, 175/.test(html),
+  'and the box carries its own background tint');
 
 // ---- the Laundry Bag ----
 assert(/const remaining = it => it\.count - \(inBag\.get\(it\.key\) \|\| 0\)/.test(lo),
   'what is still dirty is the count MINUS what is already in the bag');
-assert(/const dirty = items\.filter\(it => remaining\(it\) > 0\)/.test(lo),
-  'a garment fully in the bag drops off the grid');
+assert(/const dirty = items\.filter\(it => remaining\(it\) > 0 && it\.neededAgain !== false\)/.test(lo),
+  'a garment fully in the bag drops off the grid (the main grid is needed-again only now)');
 assert(/remaining\(it\) > 1 \?/.test(lo), 'and a partly-bagged one shows its reduced count');
 assert(/Laundry Bag/.test(lo), 'the bag has its own card');
 assert(/inBag\.get\(it\.key\) > 1 \? ` <b[^>]*>×\$\{inBag\.get\(it\.key\)\}/.test(lo),
@@ -177,13 +189,13 @@ assert(!/await Store\.washTripsyLaundryBag/.test(lo), 'Wash Now does not block t
 assert(!/await Store\.addLaundryNotDirty/.test(lo), 'nor does Not Dirty');
 assert(/washTripsyLaundryBag\(tripKey, person, dayKey\)\s*\n?\s*\.then\(ok => \{ if \(!ok\) toast\(/.test(lo),
   'a failed wash write still says so, from the background');
-assert(/addLaundryNotDirty\(tripKey, person, dayKey, it\.key, credit\)\s*\n?\s*\.then\(ok => \{ if \(!ok\) toast\(/.test(lo),
-  'and so does a failed Not Dirty write');
+assert(/addLaundryNotDirty\(tripKey, person, dayKey, it\.creditKey \|\| it\.key, credit\)\s*\n?\s*\.then\(ok => \{ if \(!ok\) toast\(/.test(lo),
+  'and so does a failed Not Dirty write -- recorded under the GARMENT key, whichever card');
 // The credit is sized to the OUTCOME. The dirty count is capped at the copies
 // packed, so one dirty copy can carry MANY wearings -- a flat one-wearing credit
 // left a one-wear polo worn 4 days on the list press after press.
-assert(/const credit = Math\.max\(1, \(it\.worn \|\| 0\) - \(it\.count - marked\) \* limit - \(limit - 1\)\)/.test(lo),
-  'Not Dirty forgives down to remaining-copies x limit, plus one-more-wearing headroom');
+assert(/const credit = Math\.max\(1, \(it\.worn \|\| 0\) - \(\(it\.totalDirty != null \? it\.totalDirty : it\.count\) - marked\) \* limit - \(limit - 1\)\)/.test(lo),
+  'Not Dirty forgives against the garment TOTAL, not one card\'s slice of it');
 {
   const creditFor = (worn, count, marked, limit) => Math.max(1, worn - (count - marked) * limit - (limit - 1));
   assert(creditFor(10, 1, 1, 10) === 1, 'ten-wear trousers at 10 wearings: forgive exactly one');
@@ -191,10 +203,21 @@ assert(/const credit = Math\.max\(1, \(it\.worn \|\| 0\) - \(it\.count - marked\
   assert(creditFor(3, 3, 2, 1) === 2, 'two of three dirty shirts: forgive two');
   assert(creditFor(20, 2, 1, 10) === 1, 'one of two dirty ten-wear pairs: forgive one, the other stays due');
 }
-// items carry what the credit math needs, from BOTH loops (real garments and generics)
+// both loops route through the ONE splitter, which carries worn/limit/totalDirty
 const lifd = extractFn('tripsyLaundryItemsForDay');
-assert((lifd.match(/worn, limit: tripsyWearsBeforeWash\(/g) || []).length === 2,
-  'both item shapes carry worn + limit for the handler');
+assert((lifd.match(/pushSplit\(out, \{ key: '[gx]:'/g) || []).length === 2,
+  'both item shapes go through pushSplit');
+{
+  // The split arithmetic itself: future wearings need ceil(future/limit) copies,
+  // clean copies cover that first, only the shortfall of dirty copies is "needed".
+  const needed = (dirty, qty, limit, future) =>
+    Math.max(0, Math.min(dirty, Math.ceil(future / limit) - Math.max(0, qty - dirty)));
+  assert(needed(3, 3, 1, 2) === 2, '3 dirty shirts, 2 shirt-days left: wash 2, third optional');
+  assert(needed(2, 3, 1, 2) === 1, 'with one still clean, it covers a day first');
+  assert(needed(1, 2, 10, 4) === 0, 'a clean ten-wear pair covers 4 days alone -- dirty one optional');
+  assert(needed(2, 2, 1, 9) === 2, 'more days than copies: everything dirty is needed');
+  assert(needed(1, 1, 1, 0) === 0, 'nothing scheduled again: nothing needed');
+}
 // The shared count dialog must sit ABOVE the laundry overlay (which raises itself
 // to ...120): it opened BEHIND it once, invisibly, with the caller awaiting forever.
 const qd = extractFn('tripsyWardrobeChoosePackedCount');

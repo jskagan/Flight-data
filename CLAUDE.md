@@ -619,9 +619,19 @@ step 4; git history has it if ever needed.
   open the outfit modal behind the laundry screen). It follows the day's FIRST bar only — laundry
   is a property of the day, not of every outfit change within it — and is owner-only. Every
   instruction bar therefore stays a compact `inline-flex` pill; the old stretch-the-bar
-  `--wide` variant is gone. It opens `showTripsyLaundryDay` → `tripsyLaundryItemsForDay`, which lists
-  what is **dirty on that day AND needed again afterwards**: washing something you have finished
-  with cannot change whether you make it to the end, so those are deliberately left out. Wear days
+  `--wide` variant is gone. It opens `showTripsyLaundryDay` → `tripsyLaundryItemsForDay`. The main
+  grid lists what is **dirty on that day AND needed again afterwards**; garments dirty but NOT worn
+  again this trip are returned too, flagged `neededAgain: false`, rendering below the grid in their
+  own slate-tinted **"Not Needed for Trip"** box (washing them can't change whether you make it to
+  the end, so they must not pad the main list — but they go through the same `cardHtml`, so bagging
+  and Not Dirty work there too). **One garment can straddle both sections as TWO cards** (3 shirts
+  dirty, 2 shirt-days left → wash 2, third optional): dirty copies are fungible, so `pushSplit`
+  computes the split — future wearings need `ceil(futureWears/limit)` copies, still-clean copies
+  cover that first, only the shortfall of dirty copies goes on top. The bottom card's key is the
+  base key suffixed `::nn` so the bag holds each card's copies separately — `lastWashFor` and the
+  run-out projection's `washedOn` both read `bag[key] || bag[key+'::nn']` — while `creditKey` stays
+  the base key on both cards and the Not Dirty credit math targets `totalDirty` (the garment's
+  whole pile), since washes and credits are per GARMENT in the aggregate wear-count model. Wear days
   come from the existing `tripsyWardrobeWearDays` (and `…FromLines` for "No Picture" generics, so
   they count too). A garment is listed only once genuinely DIRTY — worn its full run of wearings —
   via `TRIPSY_WEARS_BEFORE_WASH` / `tripsyWearsBeforeWash` / `tripsyDirtyCopies`. **Those numbers
