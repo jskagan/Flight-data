@@ -9744,15 +9744,26 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
     if (!runOut.has(dayKey)) runOut.set(dayKey, []);
     if (!runOut.get(dayKey).includes(name)) runOut.get(dayKey).push(name);
   };
-  const walk = (key, name, qty, wornDays) => {
+  // WEAR-LIMIT AWARE: a garment isn't dirty after one wearing unless its own limit is 1
+  // (tripsyWearsBeforeWash). A tie/tailoring (Infinity -- restyled, never laundered) or a
+  // ten-wear pair of trousers must not be projected as "used up" on the first wear, or
+  // this flags a run-out day for something that can never actually run out.
+  // wearDebt is "wear-units owed since the last return" -- floor(wearDebt / limit) is how
+  // many copies are currently dirty. A wash of n copies pays down n*limit units, CAPPED AT
+  // ZERO rather than going negative, so an over-large wash can't manufacture extra credit
+  // (mirrors the old per-copy model's `Math.min(washedOn, dirty)`) and a partial wash (n
+  // less than what's dirty) only pays down what it actually cleaned -- it must NOT reset
+  // the whole counter, or washing one of five shirts would wrongly launder all five.
+  const walk = (key, name, qty, wornDays, limit) => {
+    if (!(limit > 0) || !isFinite(limit)) return; // can never go dirty -- can never run out
     const worn = new Set(wornDays);
-    let clean = qty;
-    let dirty = 0;
+    let wearDebt = 0;
     for (const dayKey of dayKeys) {
-      const back = Math.min(washedOn(key, dayKey), dirty);
-      clean += back; dirty -= back;
+      const washedQty = washedOn(key, dayKey);
+      if (washedQty > 0) wearDebt = Math.max(0, wearDebt - washedQty * limit);
       if (!worn.has(dayKey)) continue;
-      if (clean > 0) { clean -= 1; dirty += 1; continue; }
+      const dirtyNow = Math.min(qty, Math.floor(wearDebt / limit));
+      if (qty - dirtyNow > 0) { wearDebt += 1; continue; }
       note(dayKey, name);
       return; // the FIRST day it runs short is the one worth flagging
     }
@@ -9764,12 +9775,14 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
     const g = byId.get(id);
     if (!g || (g.person || 'him') !== person) continue;
     const { days } = await tripsyWardrobeWearDays(tripKey, id, person);
-    walk('g:' + id, g.name || 'Garment', qty, (days || []).map(d => d.dayKey).filter(Boolean));
+    walk('g:' + id, g.name || 'Garment', qty, (days || []).map(d => d.dayKey).filter(Boolean),
+      tripsyWearsBeforeWash(g.name, null, g.group));
   }
   for (const x of (genericRaw || [])) {
     if ((x.person || 'him') !== person) continue;
     const { days } = tripsyWardrobeWearDaysFromLines(guide, person, [{ category: x.category, line: x.name }], x.name || '');
-    walk('x:' + (x.name || ''), x.name || 'Item', Math.max(1, x.qty || 1), (days || []).map(d => d.dayKey).filter(Boolean));
+    walk('x:' + (x.name || ''), x.name || 'Item', Math.max(1, x.qty || 1), (days || []).map(d => d.dayKey).filter(Boolean),
+      tripsyWearsBeforeWash(x.name, x.typeKey, ''));
   }
   return { runOut, hasWash: true };
 }

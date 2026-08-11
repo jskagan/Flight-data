@@ -26,6 +26,10 @@ const Store = {
 const tripsyNormalizeTripSelection = sel => sel;
 const tripsyWardrobeWearDays = async (t, id) => ({ days: (wearByGarment[id] || []).map(d => ({ dayKey: d })) });
 const tripsyWardrobeWearDaysFromLines = (g, p, lines) => ({ days: (wearByLine[lines[0].line] || []).map(d => ({ dayKey: d })) });
+// Real wear limits by name, defaulting to 1 (a plain shirt) so every EXISTING
+// assertion below -- all written against one-wear garments -- is unaffected.
+let limitByName = {};
+const tripsyWearsBeforeWash = (name) => (limitByName[name] !== undefined ? limitByName[name] : 1);
 ${extractFn('tripsyLaundryRunOutByDay')}
 
 const D = n => '2026-08-' + String(n).padStart(2, '0');
@@ -100,4 +104,55 @@ washes = [{ tripKey: 'T1', person: 'him', dayKey: D(2), washedAt: 'x', bag: { 'x
 r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
 assert(r.runOut.get(D(3)) && r.runOut.get(D(3)).includes('T-shirts'),
   'a generic line runs out too -> ' + JSON.stringify([...r.runOut]));
+
+// ---- THE BUG JUST REPORTED: a garment with a real wear limit above 1 must not be
+// projected as "used up" after a single wearing. Before this fix, walk() ignored the
+// limit entirely and treated every wearing as making a copy dirty -- so a tie
+// (Infinity, restyled rather than laundered) was wrongly flagged as running out.
+limitByName = { 'Silk tie': Infinity };
+wardrobe = [{ id: 'a', name: 'Silk tie', person: 'him' }];
+selection = [{ id: 'a', qty: 1 }];
+generics = []; // clear the previous test's leftover "T-shirts" line -- it would
+                // otherwise still be walked (at the default 1-wear limit) and pollute runOut
+wearByGarment = { a: [D(1), D(2), D(3), D(4), D(5), D(6), D(7)] };
+washes = [{ tripKey: 'T1', person: 'him', dayKey: D(4), washedAt: 'x', bag: {} }]; // some OTHER wash, just to turn projection on
+r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
+assert(r.runOut.size === 0, 'a tie worn every day never runs out -- it is restyled, not laundered');
+
+// A ten-wear pair of trousers similarly must not be flagged after wear #2.
+limitByName = { 'Grey trousers': 10 };
+wardrobe = [{ id: 'a', name: 'Grey trousers', person: 'him' }];
+selection = [{ id: 'a', qty: 1 }];
+wearByGarment = { a: [D(1), D(2)] };
+r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
+assert(r.runOut.size === 0, 'two wearings of a ten-wear garment is nowhere near dirty');
+
+// But it DOES still run out once genuinely worn past its limit, unwashed: a limit-3
+// garment worn 4 STRAIGHT days (with a wash recorded elsewhere just to arm the
+// projection) comes up short on the 4th wearing -- 3 is fine, a 4th needs a clean copy
+// that does not exist yet.
+limitByName = { 'Grey trousers': 3 };
+wardrobe = [{ id: 'a', name: 'Grey trousers', person: 'him' }];
+selection = [{ id: 'a', qty: 1 }];
+generics = [];
+wearByGarment = { a: [D(1), D(2), D(3), D(4)] };
+washes = [{ tripKey: 'T1', person: 'him', dayKey: D(9), washedAt: 'x', bag: {} }]; // arms the projection without touching this key
+r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
+assert(r.runOut.get(D(4)), 'a 3-wear-limit garment worn 4 straight days runs out on the 4th -> ' + JSON.stringify([...r.runOut]));
+
+// A wash genuinely pushes that day back out, by exactly the copies it actually
+// returned -- not by resetting the whole counter (which would let washing ONE of
+// several dirty copies wrongly launder them all).
+washes = [{ tripKey: 'T1', person: 'him', dayKey: D(3), washedAt: 'x', bag: { 'g:a': 1 } }];
+wearByGarment = { a: [D(1), D(2), D(3), D(4), D(5), D(6)] };
+r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
+assert(r.runOut.get(D(6)) && !r.runOut.get(D(4)) && !r.runOut.get(D(5)),
+  'a wash mid-run pushes the run-out day out (day 4 -> day 6), never resetting further than what it actually cleaned -> ' + JSON.stringify([...r.runOut]));
+
+// An over-large wash on a multi-wear garment still cannot conjure more relief than
+// what was genuinely dirty -- same guard as the limit-1 case above, now with limit>1.
+washes = [{ tripKey: 'T1', person: 'him', dayKey: D(1), washedAt: 'x', bag: { 'g:a': 99 } }];
+wearByGarment = { a: [D(1), D(2), D(3), D(4)] };
+r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
+assert(r.runOut.get(D(4)), 'an over-large wash before anything is dirty changes nothing -- still runs out on wearing 4');
 `);

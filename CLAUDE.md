@@ -694,7 +694,16 @@ step 4; git history has it if ever needed.
   `tripsyLaundryRunOutByDay` walks each garment's clean stock forward day by day — a wash that day
   returns dirty copies to the clean pile first (wash in the morning, wear in the evening), then
   each wear consumes one — and flags the FIRST day a garment is needed with nothing clean left.
-  A wash only returns what was actually dirty, so washing one of two shirts cannot conjure a third,
+  **`walk()` is wear-limit aware, keyed on `wearDebt` (wear-units owed since the last return):**
+  `floor(wearDebt / limit)` is how many copies are currently dirty, so a tie or a suit
+  (`Infinity` — restyled or dry-cleaned, never laundered) can NEVER run out, and a ten-wear pair
+  of trousers isn't projected as used up after two wearings — it was, until 2026-08-11, when a
+  bug flagged EVERY garment as if its limit were 1, so ties came up "out of clean ties" after a
+  couple of wearings. A wash of *n* copies pays down `n × limit` units, capped at zero rather than
+  going negative (an over-large wash can't manufacture credit), and — this is the part that broke
+  the naive fix — a **partial** wash must only pay down what it actually cleaned, never reset the
+  whole counter, or washing one of five dirty shirts would wrongly launder all five. A wash only
+  returns what was actually dirty, so washing one of two shirts cannot conjure a third,
   and each garment is flagged on its FIRST short day only, never again. Garments that come up
   short on the same day get **one bar each**, not one merged line — each is its own problem to
   solve, and a day carrying three bars means three different things ran out at once. It returns
