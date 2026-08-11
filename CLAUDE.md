@@ -580,20 +580,25 @@ step 4; git history has it if ever needed.
   block-dress-level-propagation model — see the `displayCategory` note under the manual-override
   bullet below; before it, the receptions kept their own Cocktail tier and this drill-down showed
   only the Concert.)
-- **"Do Laundry Today"** sits in each day's own "Start the day in…" instruction bar (first
-  event only — laundry is a property of the day, not of every outfit change within it; owner-only,
-  and present on BOTH shapes of that bar, the plain one and the outfit-linked one, whose tap
-  target it must `stopPropagation` past). That bar became `inline-flex` to hold it while still
-  hugging its content. It opens `showTripsyLaundryDay` → `tripsyLaundryItemsForDay`, which lists
+- **"Do Laundry Today"** sits on its own flush-right row (`.tripsy-dg-laundry-row`) directly
+  BELOW each day's "Start the day in…" instruction bar — outside it, not in it: that bar states
+  what to wear, and on an outfit-linked day the whole bar is a tap target for the outfit, which a
+  nested button had to fight (the handler's `stopPropagation` is kept anyway, so a bubble can't
+  open the outfit modal behind the laundry screen). It follows the day's FIRST bar only — laundry
+  is a property of the day, not of every outfit change within it — and is owner-only. Every
+  instruction bar therefore stays a compact `inline-flex` pill; the old stretch-the-bar
+  `--wide` variant is gone. It opens `showTripsyLaundryDay` → `tripsyLaundryItemsForDay`, which lists
   what is **dirty on that day AND needed again afterwards**: washing something you have finished
   with cannot change whether you make it to the end, so those are deliberately left out. Wear days
   come from the existing `tripsyWardrobeWearDays` (and `…FromLines` for "No Picture" generics, so
   they count too). A garment is listed only once genuinely DIRTY — worn its full run of wearings —
   via `TRIPSY_WEARS_BEFORE_WASH` / `tripsyWearsBeforeWash` / `tripsyDirtyCopies`. **Those numbers
-  are the same ones the packing prompt sizes quantities with** (tops 1, bottoms 10, ties 2, a dress
-  6); if the two disagreed, the app would tell you to pack for one cadence and wash on another.
+  are the same ones the packing prompt sizes quantities with** (tops 1, bottoms 10, a dress 6);
+  if the two disagreed, the app would tell you to pack for one cadence and wash on another.
   `Infinity` means it never goes in a wash bag on the trip — tailoring is dry-cleaned and re-worn
-  freely, and shoes/belts/cufflinks/sunglasses are not laundry at all. An unrecognised garment
+  freely, **ties are restyled rather than laundered** (the prompt's "re-worn twice" rule is about
+  swapping to a different tie for variety, not about washing one), and shoes/belts/cufflinks/
+  sunglasses are not laundry at all. An unrecognised garment
   falls back on its packing GROUP rather than a magic number. Dirty copies =
   `floor(wearings / limit)`, **capped at the copies packed** — you cannot have four dirty shirts
   when three went in the bag — and the count shows under the card only when it is more than one. Cards use the garment photo, falling back to its type glyph. Sorted
@@ -614,6 +619,20 @@ step 4; git history has it if ever needed.
   own. A wash dated later than the day being viewed doesn't clean it, an unwashed bag counts for
   nothing, and the other person's wash is not yours. After washing, the screen is rebuilt from the
   recomputed truth rather than patched in place.
+  **"Not Dirty" forgives WEARINGS, not the garment.** Each card carries a second button
+  (`data-laundry-clean`, which must `stopPropagation` past the card's own add-to-bag tap) recording
+  a credit in `driveData.tripsyLaundryNotDirty` (`Store.listLaundryNotDirty`/`addLaundryNotDirty`,
+  one dated record per trip+person+day+garment+count). `tripsyLaundryItemsForDay` subtracts those
+  credits from the wear count, so a one-wear shirt drops off the list outright while a ten-wear pair
+  of trousers is simply good for one more wearing — which is what the owner means by "not dirty"
+  for a garment that was never a single-wear item. Credits are scoped exactly like the wear count
+  itself: same person, dated on or before the day being viewed, and only those AFTER that garment's
+  last wash — a wash resets the clock, so a credit granted before it must not keep suppressing
+  wearings that happened since. `worn` is floored at 0, so an over-large credit is harmless rather
+  than negative. A card holding several dirty copies asks how many via the same
+  `tripsyWardrobeChoosePackedCount` dialog the bag uses (reworded "How many are not dirty?"), and
+  the count is clamped to what is actually on the card. Like Wash Now, the screen is then closed and
+  reopened so the wear maths is recomputed rather than patched.
 - **Once a wash exists, the guide's orange "best day for laundry" bar is replaced by a red RUN-OUT
   bar.** The advice was a plan; from then on what matters is the consequence.
   `tripsyLaundryRunOutByDay` walks each garment's clean stock forward day by day — a wash that day

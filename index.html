@@ -1325,19 +1325,20 @@
   .tripsy-day-past { opacity: 0.45; transition: opacity 0.15s ease; }
   /* The Daily Dress Guide's own past-day dimming -- same rule, its own class because its
      day sections are .tripsy-attire-day-section, not the My Trips day block. */
-  /* "Do Laundry Today", inside the day's own "Start the day in …" bar. margin-left:auto
-     pushes it to the right of that bar; the bar is a flex row already. */
-  /* The day's first bar STRETCHES so its laundry button can sit at the far right of the
-     card; every other instruction bar keeps hugging its text as a compact pill. */
-  .tripsy-attire-dressguide-instruction--wide { display: flex; width: 100%; }
-  /* Coloured from the bar it sits in (amber on translucent amber) rather than the
-     light-paper palette .tripsy-update-btn carries elsewhere, so it reads as part of the
-     bar instead of a foreign control dropped into it. */
+  /* "Do Laundry Today" sits on its own row BELOW the day's "Start the day in …" bar,
+     not inside it -- that bar is an outfit instruction, and on an outfit-linked day the
+     whole bar is a tap target for the outfit, which a button nested in it has to fight. */
+  .tripsy-dg-laundry-row { display: flex; justify-content: flex-end; margin: 2px 0 6px; }
+  /* Still coloured from the bar it sits under (amber on translucent amber) rather than the
+     light-paper palette .tripsy-update-btn carries elsewhere, so the two read as a pair. */
   .tripsy-dg-laundry-btn {
-    margin-left: auto; flex-shrink: 0; font-size: 11.5px; padding: 4px 10px;
+    flex-shrink: 0; font-size: 11.5px; padding: 4px 10px;
     background: rgba(227,164,56,0.18); border: 1px solid var(--amber); color: var(--amber);
   }
   .tripsy-dg-laundry-btn:hover { background: rgba(227,164,56,0.3); }
+  /* "Not Dirty" on a garment card: quiet, since the card's own tap (into the bag) is the
+     main action and this is the exception. */
+  .tripsy-laundry-notdirty { margin-top: 6px; font-size: 11px; padding: 3px 8px; width: 100%; }
   /* The Laundry Bag card, under the dirty-clothes grid on the laundry screen. */
   /* "You run out of X today" -- red, and deliberately louder than the orange laundry
      suggestion it replaces: that one was advice, this is a consequence. */
@@ -2786,6 +2787,25 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.washTripsyLaundryBag failed:', e);
+      return false;
+    }
+  },
+  // "Not Dirty" credits: the owner overruling the wear count for a garment on a given day
+  // ("I only had that shirt on for an hour"). Stored dated, like washes, so a credit given
+  // BEFORE a wash doesn't go on suppressing wear counts after it -- the wash already
+  // cleaned everything, and an old credit would quietly under-report from then on.
+  listLaundryNotDirty(tripKey) {
+    return (driveData.tripsyLaundryNotDirty || []).filter(r => r.tripKey === tripKey);
+  },
+  async addLaundryNotDirty(tripKey, person, dayKey, key, count) {
+    try {
+      if (!count || count < 1) return false;
+      if (!driveData.tripsyLaundryNotDirty) driveData.tripsyLaundryNotDirty = [];
+      driveData.tripsyLaundryNotDirty.push({ tripKey, person, dayKey, key, count, at: new Date().toISOString() });
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.addLaundryNotDirty failed:', e);
       return false;
     }
   },
@@ -9491,14 +9511,17 @@ async function tripsyWardrobeWearDays(tripKey, garmentId, person) {
 // numbers the packing-list prompt sizes quantities with (see generateTripsyAttireCategories'
 // re-wear rules) -- if the two disagreed, the app would tell you to pack for one cadence
 // and wash on another.
-//   tops/shirts: ONE wearing.   bottoms: up to TEN.   ties: re-worn TWICE.   a dress: SIX.
+//   tops/shirts: ONE wearing.   bottoms: up to TEN.   a dress: SIX.
 // Infinity means it never goes in a wash bag on the trip: tailoring is dry-cleaned and
-// re-worn freely, and shoes/belts/cufflinks/sunglasses are not laundry at all.
+// re-worn freely, TIES are restyled rather than laundered (the packing prompt's "re-worn
+// twice" rule is about swapping to a different tie for variety, NOT about washing one),
+// and shoes/belts/cufflinks/sunglasses are not laundry at all.
 const TRIPSY_WEARS_BEFORE_WASH = {
   'dress-shirt': 1, shirt: 1, tee: 1, polo: 1, undershirt: 1,
   underwear: 1, socks: 1, 'dress-socks': 1,
   trousers: 10, jeans: 10, shorts: 10, skirt: 10,
-  swim: 3, tie: 2, dress: 6, sweater: 6,
+  swim: 3, dress: 6, sweater: 6,
+  tie: Infinity,
   suit: Infinity, tuxedo: Infinity, blazer: Infinity, jacket: Infinity,
   shoes: Infinity, belt: Infinity, cufflinks: Infinity, sunglasses: Infinity,
 };
@@ -9549,13 +9572,21 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
     .filter(r => r.washedAt && (r.person || 'him') === person && r.dayKey && r.dayKey <= dayKey);
   const lastWashFor = key => washes.reduce((best, r) =>
     ((r.bag || {})[key] && (!best || r.dayKey > best)) ? r.dayKey : best, null);
+  // Wearings the owner has forgiven ("Not Dirty"), counted only for the stretch that
+  // matters: after the last wash of that garment, and up to the day being viewed.
+  const credits = Store.listLaundryNotDirty(tripKey)
+    .filter(r => (r.person || 'him') === person && r.dayKey && r.dayKey <= dayKey);
+  const creditFor = (key, since) => credits
+    .filter(r => r.key === key && (!since || r.dayKey > since))
+    .reduce((n, r) => n + (r.count || 0), 0);
   const out = [];
   for (const [id, qty] of qtyById) {
     const g = byId.get(id);
     if (!g || !isPerson(g)) continue;
     const { days } = await tripsyWardrobeWearDays(tripKey, id, person);
     const since = lastWashFor('g:' + id);
-    const worn = (days || []).filter(d => d.dayKey && d.dayKey <= dayKey && (!since || d.dayKey > since)).length;
+    const worn = Math.max(0, (days || []).filter(d => d.dayKey && d.dayKey <= dayKey && (!since || d.dayKey > since)).length
+      - creditFor('g:' + id, since));
     const neededAgain = (days || []).some(d => d.dayKey && d.dayKey > dayKey);
     // Only genuinely DIRTY copies -- one that has not had its full run of wearings yet is
     // still wearable, and putting it in the bag would be washing a clean garment.
@@ -9571,7 +9602,8 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
     const lines = [{ category: x.category, line: x.name }];
     const { days } = tripsyWardrobeWearDaysFromLines(guide, person, lines, x.name || '');
     const sinceX = lastWashFor('x:' + (x.name || ''));
-    const worn = (days || []).filter(d => d.dayKey && d.dayKey <= dayKey && (!sinceX || d.dayKey > sinceX)).length;
+    const worn = Math.max(0, (days || []).filter(d => d.dayKey && d.dayKey <= dayKey && (!sinceX || d.dayKey > sinceX)).length
+      - creditFor('x:' + (x.name || ''), sinceX));
     const neededAgain = (days || []).some(d => d.dayKey && d.dayKey > dayKey);
     const dirtyX = tripsyDirtyCopies(worn, tripsyWearsBeforeWash(x.name, x.typeKey, ''), Math.max(1, x.qty || 1));
     if (!dirtyX || !neededAgain) continue;
@@ -9667,6 +9699,7 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
         <div class="tw-info">
           <div class="tw-name">${esc(it.name)}</div>
           ${remaining(it) > 1 ? `<div class="tw-meta" style="color:var(--amber); font-weight:700;">${remaining(it)} to wash</div>` : ''}
+          <button class="btn tripsy-laundry-notdirty" data-laundry-clean="${esc(it.key)}" title="I'd wear this again without washing it">Not Dirty</button>
         </div>
       </div>`;
     body.innerHTML = `
@@ -9708,6 +9741,31 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
     }
     const back = e.target.closest('[data-laundry-unpick]');
     if (back) { inBag.delete(back.getAttribute('data-laundry-unpick')); render(); persistBag(); return; }
+    const clean = e.target.closest('[data-laundry-clean]');
+    if (clean) {
+      // The card itself is a tap target (it puts the garment in the bag), so this must
+      // not fall through to it.
+      e.stopPropagation();
+      const it = items.find(x => x.key === clean.getAttribute('data-laundry-clean'));
+      if (!it) return;
+      const left = remaining(it);
+      let n = 1;
+      if (left > 1) {
+        n = await tripsyWardrobeChoosePackedCount(it.name, left, 1, { title: 'How many are not dirty?', subtitle: 'on the list' });
+        if (n == null || n <= 0) return;
+      }
+      // One forgiven WEARING per copy: for a one-wear top that makes the copy clean, and
+      // for a ten-wear garment that has just come due it buys exactly one more wearing --
+      // which is the same statement, expressed in the units the wear count already uses.
+      const ok = await Store.addLaundryNotDirty(tripKey, person, dayKey, it.key, Math.min(n, left));
+      if (!ok) { toast('Could not record that — try again.', 'error'); return; }
+      // Rebuilt rather than patched: the wear maths decides what is dirty now, not this
+      // handler's idea of it.
+      ov.style.display = 'none';
+      ov.onclick = null;
+      showTripsyLaundryDay(tripKey, dayKey, person);
+      return;
+    }
     const pick = e.target.closest('[data-laundry-pick]');
     if (!pick) return;
     const it = items.find(x => x.key === pick.getAttribute('data-laundry-pick'));
@@ -23567,16 +23625,17 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
           ? `⇄ Change to ${tripsyAttireBadgeHtml(disp)} before ${ev.startTime ? esc(ev.startTime) : 'this event'} — ${esc(ev.name || '')}`
           : null);
       const hasOutfit = outfitEventIds.has(ev.id);
-      // The day's FIRST instruction box ("Start the day in …") also carries the laundry
-      // button, in the same bar. Later "⇄ Change to" markers don't -- laundry is a
-      // property of the day, not of every outfit change within it.
-      const laundryBtn = (i === 0 && isOwner)
-        ? `<button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn" data-tripsy-laundry-day="${esc(day.dayKey)}">Do Laundry Today</button>`
+      // The laundry button belongs to the DAY, so it follows the day's first instruction
+      // bar ("Start the day in …") on its own row rather than sitting inside it -- that
+      // bar states what to wear, and on an outfit-linked day the entire bar is a tap
+      // target for the outfit. Later "⇄ Change to" markers get no button: laundry is not
+      // a property of every outfit change within the day.
+      const laundryRow = (i === 0 && isOwner)
+        ? `<div class="tripsy-dg-laundry-row"><button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn" data-tripsy-laundry-day="${esc(day.dayKey)}">Do Laundry Today</button></div>`
         : '';
-      const barWideClass = laundryBtn ? ' tripsy-attire-dressguide-instruction--wide' : '';
-      const leadIn = leadInText == null ? '' : (hasOutfit
-        ? `<div class="tripsy-attire-dressguide-instruction tripsy-attire-dressguide-instruction--outfit${barWideClass}" role="button" tabindex="0" data-tripsy-outfit-block="${esc(ev.id)}" title="Tap to see the outfit for this block">${leadInText}<span class="tripsy-attire-outfit-cue">👔 See outfit</span>${laundryBtn}</div>`
-        : `<div class="tripsy-attire-dressguide-instruction${barWideClass}">${leadInText}${laundryBtn}</div>`);
+      const leadIn = (leadInText == null ? '' : (hasOutfit
+        ? `<div class="tripsy-attire-dressguide-instruction tripsy-attire-dressguide-instruction--outfit" role="button" tabindex="0" data-tripsy-outfit-block="${esc(ev.id)}" title="Tap to see the outfit for this block">${leadInText}<span class="tripsy-attire-outfit-cue">👔 See outfit</span></div>`
+        : `<div class="tripsy-attire-dressguide-instruction">${leadInText}</div>`)) + laundryRow;
       const timeRange = ev.startTime && ev.endTime ? `${ev.startTime} – ${ev.endTime}` : (ev.startTime || '');
       // Show this person's garments for the tier right under the lead-in that
       // announces it (start-of-day or a ⇄ change), not on every event mid-block.
@@ -23643,8 +23702,9 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
   });
   content.querySelectorAll('[data-tripsy-laundry-day]').forEach(el => {
     el.addEventListener('click', e => {
-      // The instruction box it sits in is itself a tap target when the block has a
-      // composed outfit, so this must not fall through to it.
+      // Kept from when this button lived INSIDE the outfit bar: it sits on its own row
+      // now, so nothing above it is a tap target, but a stray bubble here would open the
+      // outfit modal behind the laundry screen.
       e.stopPropagation();
       showTripsyLaundryDay(guide.tripKey, el.getAttribute('data-tripsy-laundry-day'), person);
     });
