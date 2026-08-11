@@ -9730,7 +9730,12 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   const runOut = new Map();
   const washes = Store.listTripsyLaundry(tripKey)
     .filter(r => r.washedAt && (r.person || 'him') === person && r.dayKey);
-  if (!washes.length) return { runOut, hasWash: false };
+  // A "Not Dirty" press is real inventory information too -- it should switch on the
+  // consequence view exactly like a real wash does, or an owner who only ever presses
+  // Not Dirty (never Wash Now) would be stuck seeing the orange advisory forever.
+  const notDirty = Store.listLaundryNotDirty(tripKey)
+    .filter(r => (r.person || 'him') === person && r.dayKey);
+  if (!washes.length && !notDirty.length) return { runOut, hasWash: false };
   const [garments, selectedRaw, genericRaw] = await Promise.all([
     Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey),
   ]);
@@ -9740,6 +9745,15 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
     // '::nn' = copies bagged from the "Not Needed for Trip" card; once washed they are
     // clean stock like any other, so the projection must count them returning.
     .reduce((n, r) => n + ((r.bag || {})[key] || 0) + ((r.bag || {})[key + '::nn'] || 0), 0);
+  // THE BUG JUST REPORTED: "Not Dirty" forgives wearings on the day-by-day wash list
+  // (tripsyLaundryItemsForDay's creditFor), but this SEPARATE forward projection never
+  // consulted the credit at all -- so a garment marked Not Dirty today still projected
+  // as unavailable in the future. Credits are already sized in WEARING units (see the
+  // Not Dirty handler's own comment), so they pay down wearDebt directly, unlike a wash
+  // (in copies) which must first be scaled by the limit.
+  const creditedOn = (key, dayKey) => notDirty
+    .filter(r => r.dayKey === dayKey && (r.key === key || r.key === key + '::nn'))
+    .reduce((n, r) => n + (r.count || 0), 0);
   const note = (dayKey, name) => {
     if (!runOut.has(dayKey)) runOut.set(dayKey, []);
     if (!runOut.get(dayKey).includes(name)) runOut.get(dayKey).push(name);
@@ -9760,7 +9774,8 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
     let wearDebt = 0;
     for (const dayKey of dayKeys) {
       const washedQty = washedOn(key, dayKey);
-      if (washedQty > 0) wearDebt = Math.max(0, wearDebt - washedQty * limit);
+      const credited = creditedOn(key, dayKey);
+      if (washedQty > 0 || credited > 0) wearDebt = Math.max(0, wearDebt - washedQty * limit - credited);
       if (!worn.has(dayKey)) continue;
       const dirtyNow = Math.min(qty, Math.floor(wearDebt / limit));
       if (qty - dirtyNow > 0) { wearDebt += 1; continue; }

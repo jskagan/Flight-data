@@ -16,12 +16,13 @@ function extractFn(name) {
 }
 fs.writeFileSync('runout_run.js', `
 const assert=(c,m)=>{console.log((c?'ok   ':'FAIL ')+m); if(!c) process.exitCode=1;};
-let wardrobe = [], selection = [], generics = [], washes = [], wearByGarment = {}, wearByLine = {};
+let wardrobe = [], selection = [], generics = [], washes = [], notDirty = [], wearByGarment = {}, wearByLine = {};
 const Store = {
   listWardrobe: async () => wardrobe,
   getTripWardrobe: async () => selection,
   getTripGenericGarments: async () => generics,
   listTripsyLaundry: () => washes,
+  listLaundryNotDirty: () => notDirty,
 };
 const tripsyNormalizeTripSelection = sel => sel;
 const tripsyWardrobeWearDays = async (t, id) => ({ days: (wearByGarment[id] || []).map(d => ({ dayKey: d })) });
@@ -80,6 +81,32 @@ wardrobe = [{ id: 'a', name: 'Blue shirt', person: 'her' }];
 washes = [{ tripKey: 'T1', person: 'him', dayKey: D(3), washedAt: 'x', bag: { 'g:a': 2 } }];
 r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
 assert(r.runOut.size === 0, "her garments are not projected on his page");
+wardrobe = []; washes = [];
+
+// ---- THE BUG JUST REPORTED: "Not Dirty" forgives wearings on the day-by-day wash
+// list, but this SEPARATE forward projection never consulted it -- so a garment
+// marked Not Dirty still projected as running out in the future. A real trip hit
+// this on Undershirts: 5 packed, worn 5 times by day 5 with no wash ever touching
+// them, but 3 were marked Not Dirty on day 5 -- which should push the run-out day
+// out, not leave it exactly where it was.
+wardrobe = [{ id: 'a', name: 'Blue shirt', person: 'him' }];
+selection = [{ id: 'a', qty: 5 }];
+wearByGarment = { a: [D(1), D(2), D(3), D(4), D(5)] };
+notDirty = [{ tripKey: 'T1', person: 'him', dayKey: D(5), key: 'g:a', count: 3 }];
+r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
+assert(r.runOut.size === 0, 'a Not Dirty credit averts a run-out day exactly like a wash would');
+// A credit dated AFTER the run-out day cannot retroactively fix a day already past.
+notDirty = [{ tripKey: 'T1', person: 'him', dayKey: D(6), key: 'g:a', count: 3 }];
+selection = [{ id: 'a', qty: 4 }]; // one fewer copy so it runs dry on day 5 without help
+r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
+assert(r.runOut.get(D(5)), 'a credit recorded on a LATER day does not reach back and fix an earlier one -> ' + JSON.stringify([...r.runOut]));
+// A Not-Dirty-only session (no real wash at all) still switches on the projection --
+// the credit is real inventory information, just like a wash is.
+washes = [];
+notDirty = [{ tripKey: 'T1', person: 'him', dayKey: D(1), key: 'g:a', count: 1 }];
+r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
+assert(r.hasWash === true, 'a Not Dirty credit alone switches on the run-out projection, same as a real wash');
+selection = [{ id: 'a', qty: 5 }]; notDirty = [];
 
 // ---- several garments running short on the SAME day are separate entries ----
 wardrobe = [

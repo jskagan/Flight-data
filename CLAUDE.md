@@ -702,7 +702,17 @@ step 4; git history has it if ever needed.
   couple of wearings. A wash of *n* copies pays down `n × limit` units, capped at zero rather than
   going negative (an over-large wash can't manufacture credit), and — this is the part that broke
   the naive fix — a **partial** wash must only pay down what it actually cleaned, never reset the
-  whole counter, or washing one of five dirty shirts would wrongly launder all five. A wash only
+  whole counter, or washing one of five dirty shirts would wrongly launder all five.
+  **A "Not Dirty" credit pays down `wearDebt` too, directly (it's already in wearing units, unlike
+  a wash which is in copies and must be scaled by the limit first)** — this was a SEPARATE bug from
+  the wear-limit one above, found the same day: `tripsyLaundryItemsForDay`'s day-by-day wash list
+  already applied Not Dirty credits (`creditFor`), but this forward projection never consulted
+  `driveData.tripsyLaundryNotDirty` at all, so a garment marked Not Dirty today still projected as
+  unavailable in the future — confirmed on a real trip's Undershirts (5 packed, 3 marked Not Dirty,
+  still flagged as running out days later). The initial `hasWash` gate now also opens on a Not
+  Dirty credit alone, with no real wash ever recorded — the credit is real inventory information
+  just like a wash is, so a Not-Dirty-only session shouldn't stay stuck on the orange advisory
+  forever waiting for a Wash Now that never comes. A wash only
   returns what was actually dirty, so washing one of two shirts cannot conjure a third,
   and each garment is flagged on its FIRST short day only, never again. Garments that come up
   short on the same day get **one bar each**, not one merged line — each is its own problem to
