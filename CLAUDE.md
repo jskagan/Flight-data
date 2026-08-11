@@ -588,9 +588,15 @@ step 4; git history has it if ever needed.
   what is **dirty on that day AND needed again afterwards**: washing something you have finished
   with cannot change whether you make it to the end, so those are deliberately left out. Wear days
   come from the existing `tripsyWardrobeWearDays` (and `…FromLines` for "No Picture" generics, so
-  they count too); a garment's count is days-worn-so-far **capped at the copies packed** — you
-  cannot have four dirty shirts when three went in the bag — and is shown under the card only when
-  it is more than one. Cards use the garment photo, falling back to its type glyph. Sorted
+  they count too). A garment is listed only once genuinely DIRTY — worn its full run of wearings —
+  via `TRIPSY_WEARS_BEFORE_WASH` / `tripsyWearsBeforeWash` / `tripsyDirtyCopies`. **Those numbers
+  are the same ones the packing prompt sizes quantities with** (tops 1, bottoms 10, ties 2, a dress
+  6); if the two disagreed, the app would tell you to pack for one cadence and wash on another.
+  `Infinity` means it never goes in a wash bag on the trip — tailoring is dry-cleaned and re-worn
+  freely, and shoes/belts/cufflinks/sunglasses are not laundry at all. An unrecognised garment
+  falls back on its packing GROUP rather than a magic number. Dirty copies =
+  `floor(wearings / limit)`, **capped at the copies packed** — you cannot have four dirty shirts
+  when three went in the bag — and the count shows under the card only when it is more than one. Cards use the garment photo, falling back to its type glyph. Sorted
   biggest-pile first.
   **Tapping a garment puts it in the LAUNDRY BAG** — a card under the grid listing what you have
   gathered, each entry naming the garment and, when more than one, `×N`. One dirty copy goes
