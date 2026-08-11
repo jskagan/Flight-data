@@ -580,6 +580,46 @@ step 4; git history has it if ever needed.
   block-dress-level-propagation model — see the `displayCategory` note under the manual-override
   bullet below; before it, the receptions kept their own Cocktail tier and this drill-down showed
   only the Concert.)
+- **"Do Laundry Today"** sits in each day's own "Start the day in…" instruction bar (first
+  event only — laundry is a property of the day, not of every outfit change within it; owner-only,
+  and present on BOTH shapes of that bar, the plain one and the outfit-linked one, whose tap
+  target it must `stopPropagation` past). That bar became `inline-flex` to hold it while still
+  hugging its content. It opens `showTripsyLaundryDay` → `tripsyLaundryItemsForDay`, which lists
+  what is **dirty on that day AND needed again afterwards**: washing something you have finished
+  with cannot change whether you make it to the end, so those are deliberately left out. Wear days
+  come from the existing `tripsyWardrobeWearDays` (and `…FromLines` for "No Picture" generics, so
+  they count too); a garment's count is days-worn-so-far **capped at the copies packed** — you
+  cannot have four dirty shirts when three went in the bag — and is shown under the card only when
+  it is more than one. Cards use the garment photo, falling back to its type glyph. Sorted
+  biggest-pile first.
+  **Tapping a garment puts it in the LAUNDRY BAG** — a card under the grid listing what you have
+  gathered, each entry naming the garment and, when more than one, `×N`. One dirty copy goes
+  straight in; several ask how many, so two of three shirts can go and the third stays on the
+  list with its count reduced. A garment fully in the bag drops off the grid, and every bag entry
+  has a ✕ to put it back. The count dialog is the packing one (`tripsyWardrobeChoosePackedCount`)
+  with its wording parameterised — omit the options and it asks "How many packed?" exactly as
+  before. The card sits ABOVE the grid: it is the thing you are filling, and the grid is what you
+  are filling it from.
+  **The bag persists** in `driveData.tripsyLaundry` (one record per trip+person+day; an emptied
+  bag is deleted rather than stored empty), so gathering can span a session or a device. **Wash
+  Now** stamps that record's `washedAt`, and a washed record is what makes those garments clean
+  again: `tripsyLaundryItemsForDay` counts a garment's wears only since the **last wash that
+  INCLUDED it** — per garment, not globally, since a wash is one bagful and not everything you
+  own. A wash dated later than the day being viewed doesn't clean it, an unwashed bag counts for
+  nothing, and the other person's wash is not yours. After washing, the screen is rebuilt from the
+  recomputed truth rather than patched in place.
+- **Once a wash exists, the guide's orange "best day for laundry" bar is replaced by a red RUN-OUT
+  bar.** The advice was a plan; from then on what matters is the consequence.
+  `tripsyLaundryRunOutByDay` walks each garment's clean stock forward day by day — a wash that day
+  returns dirty copies to the clean pile first (wash in the morning, wear in the evening), then
+  each wear consumes one — and flags the FIRST day a garment is needed with nothing clean left.
+  A wash only returns what was actually dirty, so washing one of two shirts cannot conjure a third,
+  and each garment is flagged on its FIRST short day only, never again. Garments that come up
+  short on the same day get **one bar each**, not one merged line — each is its own problem to
+  solve, and a day carrying three bars means three different things ran out at once. It returns
+  `{runOut, hasWash:false}` before any wash, which is what keeps the orange bar until then.
+  Computed ONCE per opening (it walks every garment's wear days) and threaded through re-renders on
+  `renderOpts`, exactly like the weather bar; a failure there is caught so the guide still renders.
 - **The Daily Dress Guide has a multi-select dress-code filter** (`Filter` in its toolbar;
   `tripsyDressGuideFilter`, a Set, empty = show everything). The dropdown
   (`tripsyDressGuideOpenFilterMenu`, same `positionTripsyFixedMenu` shell as every other Tripsy
