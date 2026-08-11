@@ -632,7 +632,16 @@ step 4; git history has it if ever needed.
   than negative. A card holding several dirty copies asks how many via the same
   `tripsyWardrobeChoosePackedCount` dialog the bag uses (reworded "How many are not dirty?"), and
   the count is clamped to what is actually on the card. Like Wash Now, the screen is then closed and
-  reopened so the wear maths is recomputed rather than patched.
+  reopened so the wear maths is recomputed rather than patched — and BOTH are optimistic: the
+  in-memory mutation in `addLaundryNotDirty`/`washTripsyLaundryBag` happens synchronously before
+  their Drive write, so neither handler awaits the write before rebuilding (awaiting it left the
+  card frozen for the length of a whole-file PATCH, reading as a dead button); a background failure
+  surfaces as a toast. Two related traps live in the shared count dialog
+  (`tripsyWardrobeChoosePackedCount`): it must pin its overlay z-index ABOVE every caller
+  (`2147483200` — the laundry screen raises itself past the base `.tw-modal` layer, and the dialog
+  once opened invisibly BEHIND it with the caller awaiting an answer that could never come), and its
+  option markup is named `optionsHtml` because a `const opts` there shadowed the `opts` options
+  parameter and silently discarded every caller's custom title/subtitle wording.
 - **Once a wash exists, the guide's orange "best day for laundry" bar is replaced by a red RUN-OUT
   bar.** The advice was a plan; from then on what matters is the consequence.
   `tripsyLaundryRunOutByDay` walks each garment's clean stock forward day by day — a wash that day

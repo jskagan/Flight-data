@@ -9073,13 +9073,20 @@ function tripsyWardrobeChoosePackedCount(garmentName, total, current = 0, opts =
   return new Promise(resolve => {
     let ov = document.getElementById('tw-packed-qty-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tw-packed-qty-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    // Above EVERY caller, not just the base .tw-modal layer (2147483000): the laundry
+    // screen raises itself to ...120 to clear the dress guide, and this dialog opened
+    // BEHIND it there -- invisible, with the caller awaiting an answer that could never
+    // come. One fixed value beats per-caller bookkeeping.
+    ov.style.zIndex = '2147483200';
     const cur = Math.max(0, Math.min(total, current));
-    const opts = Array.from({ length: total + 1 }, (_, i) => `<option value="${i}"${i === cur ? ' selected' : ''}>${i}</option>`).join('');
+    // NOT named `opts`: that shadowed the options parameter, silently discarding every
+    // caller's custom title/subtitle wording.
+    const optionsHtml = Array.from({ length: total + 1 }, (_, i) => `<option value="${i}"${i === cur ? ' selected' : ''}>${i}</option>`).join('');
     ov.innerHTML = `
       <div class="tw-modal-paper" style="max-width:360px; text-align:center;">
         <h2 style="margin:0 0 6px; font-size:17px;">${esc(opts.title || 'How many packed?')}</h2>
         <div style="font-size:13px; color:var(--muted); margin-bottom:14px;">${esc(garmentName || 'garment')} — ${total} ${esc(opts.subtitle || 'selected')}</div>
-        <select id="tw-packed-qty-select" class="btn" style="font-size:15px; padding:8px 14px; min-width:90px; text-align:center;">${opts}</select>
+        <select id="tw-packed-qty-select" class="btn" style="font-size:15px; padding:8px 14px; min-width:90px; text-align:center;">${optionsHtml}</select>
         <div style="margin-top:16px; display:flex; gap:10px; justify-content:center;">
           <button class="btn" data-packed-cancel>Cancel</button>
           <button class="btn primary" data-packed-ok>OK</button>
@@ -9731,8 +9738,12 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
       // tripsyLaundryItemsForDay stops counting those garments' wears from this day back.
       // The screen is then rebuilt from scratch rather than patched, so what it shows is
       // the recomputed truth and not this function's idea of it.
-      const ok = await Store.washTripsyLaundryBag(tripKey, person, dayKey);
-      if (!ok) { toast('Could not record the wash — try again.', 'error'); return; }
+      // OPTIMISTIC, same as Not Dirty below: washedAt is stamped in memory synchronously
+      // before the Drive write, so rebuild at once and let the write land behind it.
+      // (The button only renders with a non-empty bag, so the sync empty-bag false can't
+      // be what a rejection here means.)
+      Store.washTripsyLaundryBag(tripKey, person, dayKey)
+        .then(ok => { if (!ok) toast('The wash didn’t save — it may reappear on reload.', 'error'); });
       toast('Washed — those clothes are clean again.');
       ov.style.display = 'none';
       ov.onclick = null;
@@ -9757,8 +9768,12 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
       // One forgiven WEARING per copy: for a one-wear top that makes the copy clean, and
       // for a ten-wear garment that has just come due it buys exactly one more wearing --
       // which is the same statement, expressed in the units the wear count already uses.
-      const ok = await Store.addLaundryNotDirty(tripKey, person, dayKey, it.key, Math.min(n, left));
-      if (!ok) { toast('Could not record that — try again.', 'error'); return; }
+      // OPTIMISTIC: addLaundryNotDirty records the credit in memory synchronously before
+      // its Drive write, so the screen is rebuilt at once and the write (a whole-file
+      // PATCH plus a revision check -- most of a second) finishes behind it. Awaiting it
+      // here made the card sit unchanged long enough to read as a dead button.
+      Store.addLaundryNotDirty(tripKey, person, dayKey, it.key, Math.min(n, left))
+        .then(ok => { if (!ok) toast('Not Dirty didn’t save — it may reappear on reload.', 'error'); });
       // Rebuilt rather than patched: the wear maths decides what is dirty now, not this
       // handler's idea of it.
       ov.style.display = 'none';
