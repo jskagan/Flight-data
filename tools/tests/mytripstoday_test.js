@@ -177,8 +177,24 @@ assert(!/await Store\.washTripsyLaundryBag/.test(lo), 'Wash Now does not block t
 assert(!/await Store\.addLaundryNotDirty/.test(lo), 'nor does Not Dirty');
 assert(/washTripsyLaundryBag\(tripKey, person, dayKey\)\s*\n?\s*\.then\(ok => \{ if \(!ok\) toast\(/.test(lo),
   'a failed wash write still says so, from the background');
-assert(/addLaundryNotDirty\(tripKey, person, dayKey, it\.key, Math\.min\(n, left\)\)\s*\n?\s*\.then\(ok => \{ if \(!ok\) toast\(/.test(lo),
+assert(/addLaundryNotDirty\(tripKey, person, dayKey, it\.key, credit\)\s*\n?\s*\.then\(ok => \{ if \(!ok\) toast\(/.test(lo),
   'and so does a failed Not Dirty write');
+// The credit is sized to the OUTCOME. The dirty count is capped at the copies
+// packed, so one dirty copy can carry MANY wearings -- a flat one-wearing credit
+// left a one-wear polo worn 4 days on the list press after press.
+assert(/const credit = Math\.max\(1, \(it\.worn \|\| 0\) - \(it\.count - marked\) \* limit - \(limit - 1\)\)/.test(lo),
+  'Not Dirty forgives down to remaining-copies x limit, plus one-more-wearing headroom');
+{
+  const creditFor = (worn, count, marked, limit) => Math.max(1, worn - (count - marked) * limit - (limit - 1));
+  assert(creditFor(10, 1, 1, 10) === 1, 'ten-wear trousers at 10 wearings: forgive exactly one');
+  assert(creditFor(4, 1, 1, 1) === 4, 'one-wear polo worn 4 days (capped to 1 copy): forgive all four');
+  assert(creditFor(3, 3, 2, 1) === 2, 'two of three dirty shirts: forgive two');
+  assert(creditFor(20, 2, 1, 10) === 1, 'one of two dirty ten-wear pairs: forgive one, the other stays due');
+}
+// items carry what the credit math needs, from BOTH loops (real garments and generics)
+const lifd = extractFn('tripsyLaundryItemsForDay');
+assert((lifd.match(/worn, limit: tripsyWearsBeforeWash\(/g) || []).length === 2,
+  'both item shapes carry worn + limit for the handler');
 // The shared count dialog must sit ABOVE the laundry overlay (which raises itself
 // to ...120): it opened BEHIND it once, invisibly, with the caller awaiting forever.
 const qd = extractFn('tripsyWardrobeChoosePackedCount');

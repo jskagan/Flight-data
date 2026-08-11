@@ -657,7 +657,12 @@ step 4; git history has it if ever needed.
   one dated record per trip+person+day+garment+count). `tripsyLaundryItemsForDay` subtracts those
   credits from the wear count, so a one-wear shirt drops off the list outright while a ten-wear pair
   of trousers is simply good for one more wearing — which is what the owner means by "not dirty"
-  for a garment that was never a single-wear item. Credits are scoped exactly like the wear count
+  for a garment that was never a single-wear item. **The credit is sized to the OUTCOME, not one
+  wearing per press**: because the dirty count is capped at the copies packed, one dirty copy can
+  carry many wearings (a one-wear polo worn 4 days = one card, four wearings), and a flat
+  one-wearing credit left that card on the list press after press. The handler forgives down to
+  `(copies still dirty) × limit + (limit − 1)` — the trailing `limit − 1` is the one-more-wearing
+  headroom — using the `worn`/`limit` values each list item now carries. Credits are scoped exactly like the wear count
   itself: same person, dated on or before the day being viewed, and only those AFTER that garment's
   last wash — a wash resets the clock, so a credit granted before it must not keep suppressing
   wearings that happened since. `worn` is floored at 0, so an over-large credit is harmless rather

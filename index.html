@@ -9663,7 +9663,12 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
     const dirty = tripsyDirtyCopies(worn, tripsyWearsBeforeWash(g.name, null, g.group), qty);
     if (!dirty || !neededAgain) continue;
     out.push({ key: 'g:' + id, name: g.name || 'Garment', driveFileId: g.driveFileId || '',
-      typeKey: tripsyGarmentTypeKey(g.name || ''), group: g.group || '', count: dirty });
+      typeKey: tripsyGarmentTypeKey(g.name || ''), group: g.group || '', count: dirty,
+      // worn + limit ride along so "Not Dirty" can size its credit to the OUTCOME.
+      // The dirty count is CAPPED at the copies packed, so a one-wear polo worn 4
+      // days shows one dirty copy carrying four wearings -- forgiving one wearing
+      // per press left floor(worn/limit) >= 1 and the card came straight back.
+      worn, limit: tripsyWearsBeforeWash(g.name, null, g.group) });
   }
   // "No Picture" generic lines count too -- they are real clothes in the bag, they just
   // have no wardrobe record, so they show their type glyph.
@@ -9679,7 +9684,7 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
     if (!dirtyX || !neededAgain) continue;
     out.push({ key: 'x:' + (x.name || ''), name: x.name || 'Item', driveFileId: '',
       typeKey: x.typeKey || tripsyGarmentTypeKey(x.name || ''), group: '',
-      count: dirtyX });
+      count: dirtyX, worn, limit: tripsyWearsBeforeWash(x.name, x.typeKey, '') });
   }
   // Most-dirty first: the pile that actually decides whether you make it.
   out.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
@@ -9828,14 +9833,22 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
         n = await tripsyWardrobeChoosePackedCount(it.name, left, 1, { title: 'How many are not dirty?', subtitle: 'on the list' });
         if (n == null || n <= 0) return;
       }
-      // One forgiven WEARING per copy: for a one-wear top that makes the copy clean, and
-      // for a ten-wear garment that has just come due it buys exactly one more wearing --
-      // which is the same statement, expressed in the units the wear count already uses.
+      // The credit is sized to the OUTCOME, not one-wearing-per-press: forgive down to
+      // "(copies still dirty) full runs plus (limit - 1)" -- that trailing limit-1 is
+      // the owner's "good for one more wearing". Because the dirty count is CAPPED at
+      // the copies packed, a one-wear polo worn 4 days shows ONE dirty copy carrying
+      // FOUR wearings; a flat one-wearing credit left it >= the limit and the card came
+      // straight back press after press. Worked examples: ten-wear trousers at worn=10
+      // forgive 1 (one more wearing, then due again); that polo forgives all 4; two of
+      // three dirty shirts forgive 2.
+      const marked = Math.min(n, left);
+      const limit = (it.limit > 0 && isFinite(it.limit)) ? it.limit : 1;
+      const credit = Math.max(1, (it.worn || 0) - (it.count - marked) * limit - (limit - 1));
       // OPTIMISTIC: addLaundryNotDirty records the credit in memory synchronously before
       // its Drive write, so the screen is rebuilt at once and the write (a whole-file
       // PATCH plus a revision check -- most of a second) finishes behind it. Awaiting it
       // here made the card sit unchanged long enough to read as a dead button.
-      Store.addLaundryNotDirty(tripKey, person, dayKey, it.key, Math.min(n, left))
+      Store.addLaundryNotDirty(tripKey, person, dayKey, it.key, credit)
         .then(ok => { if (!ok) toast('Not Dirty didn’t save — it may reappear on reload.', 'error'); });
       // Rebuilt rather than patched: the wear maths decides what is dirty now, not this
       // handler's idea of it.
