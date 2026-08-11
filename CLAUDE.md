@@ -83,6 +83,18 @@ below.
 
 All reads/writes go through the `Store` object (`index.html:1285`), which mutates
 `driveData` in memory and then calls `persistDriveData()` to PATCH the whole file back to Drive.
+
+**Because every save re-uploads the WHOLE file, stale bytes cost every write on every device** —
+`pruneDriveDataInMemory(trips)` (right above `persistDriveData`) keeps it lean, run owner-only in
+two passes: trip-blind at sign-in, and trip-aware once `ensureTripsyDecrypted` has real trips
+(never against an empty or offline-cached trips list, which would wipe caches wholesale). It
+deliberately does NOT persist — the next write that happens anyway carries it. What it prunes
+(measured 2026-08-11: 649KB → 509KB): the readerless `trips` + `tripsyKnownFlights` relics; the
+`body` of any intake email already stamped `parsedAt` (the id stays — it's the scan's dedup key,
+and the cloud routine only parses entries WITHOUT `parsedAt`); `triedPhotoNames` capped to the
+last 20 (one entry had grown to 103 tokens); weather cache entries >14 days past; and narrative
+rows whose trip no longer exists. If a new cache key is ever added to `driveData`, decide its
+prune rule here at the same time.
 There is no server — auth and API calls happen entirely client-side via Google Identity Services
 (OAuth token client) and the Drive/Gmail REST APIs.
 

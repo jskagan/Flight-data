@@ -2312,6 +2312,66 @@ async function reconcileTripsyOfflineDocs() {
   }
 }
 
+// Prunes driveData IN MEMORY of bytes nothing will ever read again, so they stop
+// riding along on every whole-file PATCH (measured 2026-08-11: ~140KB of a 649KB
+// file). Owner-only by its callers (a viewer never persists, so pruning their copy
+// would do nothing but lie about what's stored). Deliberately does NOT persist:
+// the next write that happens anyway carries it, and a session with no writes
+// simply prunes again next open. `trips` is the loaded trips-data array when
+// available, null when not -- the trip-scoped rules only run when it's real,
+// since judging "this trip no longer exists" against nothing would wipe caches
+// for every trip.
+function pruneDriveDataInMemory(trips) {
+  try {
+    if (!driveData) return;
+    // Keys with ZERO readers left in the app: `trips` is a pre-migration relic
+    // (trip data lives in trips-data.json), `tripsyKnownFlights` fed the retired
+    // flight-change reconciliation.
+    delete driveData.trips;
+    delete driveData.tripsyKnownFlights;
+    // A parsed intake email's BODY is dead weight: the cloud routine only parses
+    // entries without parsedAt, and the app matches drained proposals by id.
+    // The entry itself stays -- its id is the scan's dedup key.
+    for (const e of (driveData.tripsyEmailIntake || [])) {
+      if (e && e.parsedAt && e.body) delete e.body;
+    }
+    // triedPhotoNames is the "photos already shown for this place" memory; the
+    // picker only needs the recent past, and one real entry had grown to 103
+    // tokens (~400 bytes each). The CURRENT photoName is always re-added on
+    // save, so capping can't orphan it.
+    for (const v of Object.values(driveData.tripsyPlacePhotoCache || {})) {
+      if (v && Array.isArray(v.triedPhotoNames) && v.triedPhotoNames.length > 20) {
+        v.triedPhotoNames = v.triedPhotoNames.slice(-20);
+      }
+    }
+    // Weather for dates well past: chips for long-gone days refetch fail-soft if
+    // ever wanted again. Keys are 'lat,lon::YYYY-MM-DD'.
+    const cutoff = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+    for (const key of ['tripsyWeatherCache', 'tripsyWeatherHourly']) {
+      const cache = driveData[key];
+      if (!cache) continue;
+      for (const k of Object.keys(cache)) {
+        const day = (k.split('::')[1] || '');
+        if (/^\d{4}-\d{2}-\d{2}$/.test(day) && day < cutoff) delete cache[k];
+      }
+    }
+    // Narrative rows for a trip that no longer exists -- only judged against a
+    // REAL, non-offline trips load (a stale offline cache could be missing a
+    // trip another device just created).
+    if (Array.isArray(trips) && trips.length && !tripsyTripsAreOffline) {
+      const keys = new Set(trips.map(t => t.key));
+      const cache = driveData.tripsyNarrativeCache;
+      if (cache) {
+        for (const k of Object.keys(cache)) {
+          if (!keys.has(k.split('::')[0])) delete cache[k];
+        }
+      }
+    }
+  } catch (e) {
+    console.error('pruneDriveDataInMemory failed (non-fatal):', e);
+  }
+}
+
 async function persistDriveData(opts = {}) {
   if (!driveFileId) {
     driveFileId = await createDriveDataFile(driveData);
@@ -29773,6 +29833,9 @@ async function ensureTripsyDecrypted() {
   if (tripsyDecryptedTrips) return tripsyDecryptedTrips;
   try {
     tripsyDecryptedTrips = await fetchTripsDataFromDrive();
+    // Second prune pass, now that the trip-scoped rules have real trips to
+    // judge against (the sign-in pass ran with null). In-memory, owner-only.
+    if (isOwner) pruneDriveDataInMemory(tripsyDecryptedTrips);
     return tripsyDecryptedTrips;
   } catch (e) {
     console.error('trips-data.json load failed:', e);
@@ -31565,6 +31628,12 @@ async function completeSignIn() {
       if (driveData.syncTimestamps) delete driveData.syncTimestamps.tripit;
       try { await persistDriveData(); } catch (e) { console.error('Legacy TripIt field cleanup failed (non-fatal):', e); }
     }
+
+    // Self-maintaining prune: every save PATCHes this WHOLE file back to Drive,
+    // so every stale byte here is re-uploaded on every write, on every device.
+    // In-memory only -- whichever write happens next carries it, so this adds
+    // no write of its own (and no race with the startup background syncs).
+    if (isOwner) pruneDriveDataInMemory(null);
 
     stage = 'setting up the menu';
     // A trips-only viewer is a normal read-only viewer whose nav is scoped to
