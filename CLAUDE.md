@@ -688,7 +688,14 @@ step 4; git history has it if ever needed.
   (`2147483200` — the laundry screen raises itself past the base `.tw-modal` layer, and the dialog
   once opened invisibly BEHIND it with the caller awaiting an answer that could never come), and its
   option markup is named `optionsHtml` because a `const opts` there shadowed the `opts` options
-  parameter and silently discarded every caller's custom title/subtitle wording.
+  parameter and silently discarded every caller's custom title/subtitle wording. The SAME trap hit
+  the outfit modal's **Swap** button (`tripsyOutfitSwapPicker`'s `#tw-swap-overlay`): with no
+  explicit z-index it sat at the base `.tw-modal` layer while the outfit modal that opens it
+  (`#tw-outfit-overlay`) sits at `2147483080`, so Swap opened the picker invisibly behind it —
+  pressing the button did nothing, because there was nothing left to tap. Now pinned to
+  `2147483090`, explicitly above the one caller that ever opens it. Any new small blocking picker
+  opened from an already-elevated screen needs this same explicit z-index above its caller — the
+  base `.tw-modal` layer is only correct for a picker opened from the ordinary page background.
 - **Once a wash exists, the guide's orange "best day for laundry" bar is replaced by a red RUN-OUT
   bar.** The advice was a plan; from then on what matters is the consequence.
   `tripsyLaundryRunOutByDay` walks each garment's clean stock forward day by day — a wash that day
