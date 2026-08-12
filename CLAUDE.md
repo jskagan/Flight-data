@@ -1059,6 +1059,20 @@ would overwrite the glyph with the word.
   wear: the flight-worn **top** is used up and must not be assigned to any block before the first
   wash day, while its bottoms/shoes have spent one of their many wears and stay freely available
   (jeans/trousers are ~20 wears, not the ~10 the prompt used to say).
+  **A flight-worn line's need (always 1) cannot be double-filled by a real garment AND a generic
+  at once.** Ordinary lines deliberately allow over-selecting a bit past need
+  (`tripsyWardrobePlaceholderCap` = need+2, a buffer for a lost/replaced item), so a blanket
+  real+generic exclusivity rule would break that. But a flight-worn role only ever represents ONE
+  physical garment worn on the plane, and each side is independently wear-tracked — found on a real
+  trip 2026-08-11: a real garment (a Henley) picked for "Top — wearing on the flight" coexisted with
+  a leftover generic placeholder for the identical line, so the laundry engine tracked it as needing
+  two separate one-wear tops, and both projected running out on the same day for what was really one
+  physical shortage. Picking a real garment for a `flightWorn: true` line now clears any generic on
+  that exact line (same tier/name/person), and adding a generic clears any real picks on it —
+  whichever the owner does last wins, matching "this is the one thing I'm wearing on the flight."
+  Two entry points needed the guard: Plan Packing List (`tripsyWardrobePackForTrip`) and the
+  category drill-down's own pack panel (`showTripsyAttireCategoryEvents`) — both let the owner pick
+  a garment or add a generic against a line.
 - **A partial-itinerary PDF only compares the days it actually covers**: `compareTripsyItineraryPdf`
   determines the PDF's own date range from its day headings (`pdf_date_range`, part of the schema) —
   which can be narrower than the trip's real date range, e.g. a supplement covering just the middle
