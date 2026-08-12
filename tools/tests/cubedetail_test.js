@@ -54,8 +54,11 @@ ${extractConst('TRIPSY_CUBE_COLOR_CSS')}
 ${extractConst('TRIPSY_UNCUBED_TYPES')}
 ${extractConst('TRIPSY_GARMENT_TYPE_GLYPH')}
 ${extractConst('TRIPSY_ATTIRE_GROUP_GLYPH')}
+${extractConst('TRIPSY_CUBE_NONE')}
+${extractConst('TRIPSY_CUBE_FLIGHT_WORN')}
 ${['tripsyGarmentTypeKey','tripsyGarmentSkipsCube','tripsyGarmentGlyph','tripsyCubeById',
-   'tripsyCubeName','tripsyCubesSorted','tripsyCubeTileHtml','showTripsyCubeContents'].map(extractFn).join('\n')}
+   'tripsyCubeName','tripsyCubesSorted','tripsyCubeTileHtml','tripsyCubeSlotLabel','tripsyCubeSlotGlyph',
+   'showTripsyCubeContents'].map(extractFn).join('\n')}
 
 const assert=(c,m)=>{console.log((c?'ok   ':'FAIL ')+m); if(!c) process.exitCode=1;};
 

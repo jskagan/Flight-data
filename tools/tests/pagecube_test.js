@@ -34,7 +34,9 @@ ${extractConst('TRIPSY_CUBE_SIZES')}
 ${extractConst('TRIPSY_CUBE_COLORS')}
 ${extractConst('TRIPSY_CUBE_COLOR_CSS')}
 ${extractConst('TRIPSY_UNCUBED_TYPES')}
-${['tripsyGarmentTypeKey','tripsyGarmentSkipsCube','tripsyCubeById','tripsyCubeName','tripsyCubeTileHtml'].map(extractFn).join('\n')}
+${extractConst('TRIPSY_CUBE_NONE')}
+${extractConst('TRIPSY_CUBE_FLIGHT_WORN')}
+${['tripsyGarmentTypeKey','tripsyGarmentSkipsCube','tripsyCubeById','tripsyCubeName','tripsyCubeTileHtml','tripsyCubeSlotLabel','tripsyCubeSlotGlyph'].map(extractFn).join('\n')}
 const assert=(c,m)=>{console.log((c?'ok   ':'FAIL ')+m); if(!c) process.exitCode=1;};
 driveData.tripsyPackingCubes = [
   { id: 'c1', color: 'Yellow', size: 'Medium', brand: '', driveFileId: 'photoYellow' },

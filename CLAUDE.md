@@ -1004,6 +1004,26 @@ would overwrite the glyph with the word.
   entries read from the cube's side, not a second store that could drift. Deleting a cube keeps its
   contents packed and only forgets the location; it scrubs the id from `driveData` AND from the
   open page's own copies, or the next persist would write the dangling id straight back.
+  **The picker offers two explicit non-cube choices alongside the real cube grid: "No cube" and
+  "Wear on flight."** Before this, the only way to mark a copy packed at all was picking a real
+  cube — there was no way to say "yes it's packed, just not zipped into any particular cube" (a
+  belt, say) or "it's not packed at all, I'm wearing it on the plane." Both are plain non-cube-id
+  strings (`TRIPSY_CUBE_NONE` / `TRIPSY_CUBE_FLIGHT_WORN`) rendered as two extra tiles the exact
+  same shape as a cube tile, using the SAME `data-tw-pick-cube` attribute a real cube uses — so the
+  existing pick handler assigns them with no new wiring, and `tripsyCubeById` naturally resolves
+  either to `null` (never found in the cube list), same as a deleted cube. The key property: both
+  are TRUTHY, unlike the pre-existing `''` (which stays reserved for "never decided yet" or a
+  since-deleted cube's now-dangling reference), so `applyCubes`' `filled =
+  picked.filter(Boolean)` counts either one toward `packed` — picking "No cube" or "Wear on flight"
+  really does mark that copy packed, where leaving a slot untouched still does not. Every place a
+  cube id gets turned into a label/picture reads through one shared pair of helpers,
+  `tripsyCubeSlotLabel`/`tripsyCubeSlotGlyph` (`tripsyCubeLabel` now just delegates to the first),
+  so the two sentinels render correctly everywhere a cube location is shown: the picker's own
+  per-copy row, `showTripsyGarmentCubeInfo`'s tap-a-photo dialog, the Packing Status page's
+  per-card chip (`cubeLineHtml`) and page-level cube banner, and the Cubes page — which gives each
+  sentinel its OWN named block (`specialBlock`, reusing `contents.get(id)` exactly like the
+  existing "Cube not set" orphan block does for `''`) rather than lumping a deliberate choice in
+  with genuinely-undecided copies.
 - **Allocation is per LINE, not per tier.** A pick is keyed `id::tier::line` (the line's NAME, not
   its index — indices shift whenever the guide is regenerated, which is also why skip keys use
   names), persisted in `driveData.tripsyTripWardrobe`. `availableFor` subtracts copies allocated to

@@ -33,7 +33,9 @@ let driveData = { tripsyPackingCubes: [] };
 ${extractConst('TRIPSY_CUBE_SIZES')}
 ${extractConst('TRIPSY_CUBE_COLORS')}
 ${extractConst('TRIPSY_CUBE_COLOR_CSS')}
-${['tripsyCubeById','tripsyCubeName','tripsyCubeTileHtml'].map(extractFn).join('\n')}
+${extractConst('TRIPSY_CUBE_NONE')}
+${extractConst('TRIPSY_CUBE_FLIGHT_WORN')}
+${['tripsyCubeById','tripsyCubeName','tripsyCubeTileHtml','tripsyCubeSlotLabel','tripsyCubeSlotGlyph'].map(extractFn).join('\n')}
 ${m[0].replace(/^    /gm, '')}
 const assert=(c,mm)=>{console.log((c?'ok   ':'FAIL ')+mm); if(!c) process.exitCode=1;};
 

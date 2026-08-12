@@ -13,9 +13,16 @@ function extractFn(name) {
     else if (html[j] === '}') { depth--; if (!depth) return html.slice(start, j + 1); }
   }
 }
+function extractConst(name) {
+  const start = html.indexOf(`const ${name} = `);
+  const end = html.indexOf(';\n', start) + 1;
+  return html.slice(start, end);
+}
 fs.writeFileSync('cubename_run.js', `
 let driveData = { tripsyPackingCubes: [] };
-${['tripsyCubeById','tripsyCubeName','tripsyCubeLabel'].map(extractFn).join('\n')}
+${extractConst('TRIPSY_CUBE_NONE')}
+${extractConst('TRIPSY_CUBE_FLIGHT_WORN')}
+${['tripsyCubeById','tripsyCubeName','tripsyCubeLabel','tripsyCubeSlotLabel'].map(extractFn).join('\n')}
 const assert=(c,m)=>{console.log((c?'ok   ':'FAIL ')+m); if(!c) process.exitCode=1;};
 const set = (...cubes) => { driveData.tripsyPackingCubes = cubes; };
 const name = id => tripsyCubeLabel(id);

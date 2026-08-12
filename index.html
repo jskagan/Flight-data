@@ -8262,8 +8262,33 @@ function tripsyCubeName(cube) {
   return distinctBrands.size > 1 ? `${base} (${cube.brand})` : base;
 }
 function tripsyCubeLabel(id) {
-  const cube = tripsyCubeById(id);
+  return tripsyCubeSlotLabel(id);
+}
+// Besides a real cube, a copy's location can be one of two explicit, non-cube states,
+// offered by the SAME picker as the cube grid: TRIPSY_CUBE_NONE ("No cube" -- packed,
+// just not zipped into any particular cube) and TRIPSY_CUBE_FLIGHT_WORN ("Wear on
+// flight" -- not packed at all, worn instead). Both are plain non-cube-id strings, so
+// tripsyCubeById naturally returns null for them (never found in the cube list) exactly
+// like a deleted cube does -- and both are TRUTHY, unlike the pre-existing '' (which
+// stays reserved for "never decided yet" or a since-deleted cube), so picking either one
+// still counts toward `packed` the same way a real cube pick does (applyCubes' own
+// `filled = picked.filter(Boolean)`, unchanged).
+const TRIPSY_CUBE_NONE = '__cube_none__';
+const TRIPSY_CUBE_FLIGHT_WORN = '__cube_flight_worn__';
+function tripsyCubeSlotLabel(cid) {
+  if (cid === TRIPSY_CUBE_FLIGHT_WORN) return 'Wearing on the flight';
+  if (cid === TRIPSY_CUBE_NONE) return 'No cube';
+  const cube = tripsyCubeById(cid);
   return cube ? tripsyCubeName(cube) : '';
+}
+// The glyph shown in place of a cube picture wherever a slot has no real cube -- the
+// plain suitcase for a genuinely-unset/deleted-cube slot, and a distinct icon for each
+// deliberate non-cube choice so "No cube" and "Wear on flight" read differently from
+// "you forgot to assign this" at a glance.
+function tripsyCubeSlotGlyph(cid) {
+  if (cid === TRIPSY_CUBE_FLIGHT_WORN) return '&#9992;&#65039;';
+  if (cid === TRIPSY_CUBE_NONE) return '&#128092;';
+  return '&#129523;';
 }
 // Garments that never go into a packing cube. Mostly the ones that HANG rather than
 // fold -- a suit, a tuxedo, a blazer, a jacket, a raincoat, a dress or a gown travels on
@@ -9387,6 +9412,20 @@ function showTripsyCubePicker(garmentName, copies) {
           ${tripsyCubeTileHtml(c, { selected: working[activeCopy] === c.id })}
           <span style="font-size:11px; color:var(--text); line-height:1.25; text-align:center; word-break:break-word;">${esc(tripsyCubeName(c))}</span>
         </button>`).join('');
+      // Two explicit non-cube choices, offered alongside the cube grid itself (not as a
+      // separate step) so picking one is exactly as quick as picking a real cube --
+      // same tile shape, same selected-border treatment, same click handler (data-tw-
+      // pick-cube), since TRIPSY_CUBE_NONE/TRIPSY_CUBE_FLIGHT_WORN are just non-cube-id
+      // strings the existing pick handler already assigns verbatim.
+      const specialCards = [
+        { id: TRIPSY_CUBE_NONE, label: 'No cube' },
+        { id: TRIPSY_CUBE_FLIGHT_WORN, label: 'Wear on flight' },
+      ].map(s => `
+        <button data-tw-pick-cube="${s.id}" style="background:none; border:none; padding:0; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:4px; width:82px;">
+          <div style="width:74px; height:74px; border-radius:10px; background:var(--panel-2); display:flex; align-items:center; justify-content:center; font-size:26px;
+            border:${working[activeCopy] === s.id ? '3px solid var(--amber)' : '1px solid var(--line)'};">${tripsyCubeSlotGlyph(s.id)}</div>
+          <span style="font-size:11px; color:var(--text); line-height:1.25; text-align:center; word-break:break-word;">${esc(s.label)}</span>
+        </button>`).join('');
       ov.innerHTML = `
         <div class="tw-modal-paper" style="max-width:460px;">
           <h2 style="margin:0 0 4px; font-size:17px;">Which cube?</h2>
@@ -9396,6 +9435,7 @@ function showTripsyCubePicker(garmentName, copies) {
           ${working.length > 1 ? `<div style="font-size:12px; color:var(--muted); margin-bottom:6px;">Pick a copy, then tap its cube.</div>` : ''}
           ${copyRows}
           <div style="display:flex; flex-wrap:wrap; gap:12px;">
+            ${specialCards}
             ${cubeCards}
             <button data-tw-new-cube style="background:none; border:none; padding:0; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:4px; width:82px;">
               <div style="width:74px; height:74px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:26px; color:var(--muted);">+</div>
@@ -10157,15 +10197,16 @@ async function showTripsyGarmentCubeInfo(tripKey, garmentId) {
         counts.set(cid, counts.get(cid) + 1);
       }
       body = `<div style="display:flex; flex-wrap:wrap; gap:16px; justify-content:center;">${order.map(cid => {
-        const cube = cid ? tripsyCubeById(cid) : null;
+        const cube = tripsyCubeById(cid);
         const n = counts.get(cid);
+        const special = cid === TRIPSY_CUBE_NONE || cid === TRIPSY_CUBE_FLIGHT_WORN;
         const pic = cube
           ? tripsyCubeTileHtml(cube, { size: 96 })
-          : `<div style="width:96px; height:96px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:34px; color:var(--muted); flex-shrink:0;">&#129523;</div>`;
-        const label = (cube ? tripsyCubeName(cube) : '') || 'Cube not set';
+          : `<div style="width:96px; height:96px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:34px; color:var(--muted); flex-shrink:0;">${tripsyCubeSlotGlyph(cid)}</div>`;
+        const label = tripsyCubeSlotLabel(cid) || 'Cube not set';
         return `<div style="display:flex; flex-direction:column; gap:6px; align-items:center; width:96px;">
           ${pic}
-          <div style="font-size:12.5px; font-weight:600; color:${cube ? 'var(--text)' : 'var(--amber)'}; text-align:center; line-height:1.3;">${esc(label)}</div>
+          <div style="font-size:12.5px; font-weight:600; color:${(cube || special) ? 'var(--text)' : 'var(--amber)'}; text-align:center; line-height:1.3;">${esc(label)}</div>
           ${cubeIds.length > 1 ? `<div style="font-size:11.5px; color:var(--muted);">${n} item${n === 1 ? '' : 's'}</div>` : ''}
         </div>`;
       }).join('')}</div>`;
@@ -11268,8 +11309,8 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
       const chip = (inner, label, n) => `<span style="display:inline-flex; align-items:center; gap:5px; min-width:0; max-width:100%;">${inner}<span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(label)}${n > 1 ? ` x${n}` : ''}</span></span>`;
       const parts = [...counts].map(([cid, n]) => {
         const cube = tripsyCubeById(cid);
-        const label = (cube ? tripsyCubeName(cube) : '') || 'cube not set';
-        const pic = cube ? tripsyCubeTileHtml(cube, { size: 26 }) : '<span>&#129523;</span>';
+        const label = tripsyCubeSlotLabel(cid) || 'cube not set';
+        const pic = cube ? tripsyCubeTileHtml(cube, { size: 26 }) : `<span>${tripsyCubeSlotGlyph(cid)}</span>`;
         return chip(pic, label, n);
       });
       if (unknown > 0) parts.push(chip('<span>&#129523;</span>', 'cube not set', unknown));
@@ -11303,15 +11344,16 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const pageCubesHtml = !pageCubeIds.length ? '' : `
       <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-start; margin-bottom:14px;">
         ${pageCubeIds.map(cid => {
-          const cube = cid ? tripsyCubeById(cid) : null;
+          const cube = tripsyCubeById(cid);
+          const special = cid === TRIPSY_CUBE_NONE || cid === TRIPSY_CUBE_FLIGHT_WORN;
           const n = pageCubeCounts.get(cid);
           const pic = cube
             ? tripsyCubeTileHtml(cube, { size: 96 })
-            : `<div style="width:96px; height:96px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:34px; color:var(--muted); flex-shrink:0;">&#129523;</div>`;
-          const label = (cube ? tripsyCubeName(cube) : '') || 'Cube not set';
+            : `<div style="width:96px; height:96px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:34px; color:var(--muted); flex-shrink:0;">${tripsyCubeSlotGlyph(cid)}</div>`;
+          const label = tripsyCubeSlotLabel(cid) || 'Cube not set';
           return `<div style="display:flex; flex-direction:column; gap:6px; align-items:center; width:96px;">
             ${pic}
-            <div style="font-size:12.5px; font-weight:600; color:${cube ? 'var(--text)' : 'var(--amber)'}; text-align:center; line-height:1.3;">${esc(label)}</div>
+            <div style="font-size:12.5px; font-weight:600; color:${(cube || special) ? 'var(--text)' : 'var(--amber)'}; text-align:center; line-height:1.3;">${esc(label)}</div>
             <div style="font-size:11.5px; color:var(--muted);">${n} item${n === 1 ? '' : 's'}</div>
           </div>`;
         }).join('')}
@@ -11508,9 +11550,9 @@ function showTripsyCubeContents(getState, onChanged) {
     // use, so a photo here looks like the same garment there; tripsyWardrobeLoadPhotos
     // fills each .tw-photo from Drive after the markup lands.
     if (view.mode === 'cube') {
-      const cube = view.id ? tripsyCubeById(view.id) : null;
+      const cube = tripsyCubeById(view.id);
       const items = itemsIn(view.id);
-      const title = cube ? tripsyCubeName(cube) : 'Cube not set';
+      const title = cube ? tripsyCubeName(cube) : (tripsyCubeSlotLabel(view.id) || 'Cube not set');
       const cards = items.map(it => `
         <div class="tw-card">
           <div class="tw-photo${it.driveFileId ? '' : ' tw-photo-glyph'}"${it.driveFileId ? ` data-tw-photo="${esc(it.driveFileId)}"` : ''}>${it.driveFileId ? '' : tripsyGarmentGlyph(it.typeKey, it.group, it.name)}</div>
@@ -11551,6 +11593,24 @@ function showTripsyCubeContents(getState, onChanged) {
           ${listFor(c.id)}
         </div>
       </div>`).join('');
+    // Two explicit non-cube blocks, same shape as the orphan block below, for the
+    // "No cube"/"Wear on flight" picks made from the cube picker -- each is a real,
+    // deliberate choice, so it gets its own named row rather than being lumped in
+    // with genuinely-undecided copies.
+    const specialBlock = (id, label, glyph) => {
+      const bucket = contents.get(id);
+      if (!bucket || !bucket.size) return '';
+      return `
+      <div style="display:flex; gap:12px; align-items:flex-start; padding:10px 0; border-bottom:1px solid var(--line);">
+        <div data-tw-open-cube="${id}" style="width:64px; height:64px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:26px; color:var(--muted); flex-shrink:0; cursor:pointer;">${glyph}</div>
+        <div style="flex:1; min-width:0;">
+          <div data-tw-open-cube="${id}" style="font-weight:700; font-size:14px; margin-bottom:4px; color:var(--text); cursor:pointer; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px;">${esc(label)}</div>
+          ${listFor(id)}
+        </div>
+      </div>`;
+    };
+    const noCubeBlock = specialBlock(TRIPSY_CUBE_NONE, 'No cube', tripsyCubeSlotGlyph(TRIPSY_CUBE_NONE));
+    const flightWornBlock = specialBlock(TRIPSY_CUBE_FLIGHT_WORN, 'Wearing on the flight', tripsyCubeSlotGlyph(TRIPSY_CUBE_FLIGHT_WORN));
     // Copies that are packed but whose cube is unknown, shown as their own block so they
     // are visible and fixable rather than quietly missing from every cube.
     const orphan = contents.get('');
@@ -11562,6 +11622,7 @@ function showTripsyCubeContents(getState, onChanged) {
           ${listFor('')}
         </div>
       </div>` : '';
+    const extraBlocks = noCubeBlock + flightWornBlock + orphanBlock;
     ov.innerHTML = `
       <div class="tw-modal-paper" style="max-width:520px;">
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px;">
@@ -11571,7 +11632,7 @@ function showTripsyCubeContents(getState, onChanged) {
             <button class="tripsy-close-x" data-tw-cubes-close aria-label="Close" title="Close">&#10005;</button>
           </div>
         </div>
-        ${cubes.length || orphanBlock ? (cubeBlocks + orphanBlock) : `<div class="empty-state" style="margin-top:12px;">No cubes yet — add one, or create one while packing a garment.</div>`}
+        ${cubes.length || extraBlocks ? (cubeBlocks + extraBlocks) : `<div class="empty-state" style="margin-top:12px;">No cubes yet — add one, or create one while packing a garment.</div>`}
       </div>`;
     tripsyPaintCubePhotos(ov);
   };
