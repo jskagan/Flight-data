@@ -380,7 +380,13 @@ step 4; git history has it if ever needed.
   since trip cards grow as photos and weather chips arrive — the same lesson Travel View's
   open-on-today took several passes to learn. No trip in progress means no marked day, and the
   page simply opens where it was. The wrapper carries only a class, so the timeline connectors
-  (which measure rows, not their parents) are unaffected.
+  (which measure rows, not their parents) are unaffected by the wrapper's opacity — **but the
+  connecting line itself still needs its own dimming**, or it stays full-bright running through
+  grayed-out rows. `positionTripsyTimelineConnectors` builds the line from many small per-gap
+  segments (siblings of `.tripsy-day-block`, not descendants), so each segment independently gets
+  `.tripsy-tl-connector--past` when BOTH the dots it connects sit inside a `.tripsy-day-past` block
+  — a boundary segment (the last past row into today's first) stays full-bright on purpose, marking
+  where "now" begins rather than fading out one row early.
 - **Past trips render under collapsed YEAR sections, below the current/upcoming cards** (built
   for the 154-trip historical backfill — flat, they'd stack a wall of 2011 above the trip you're
   actually on and pay 150 cards' HTML besides). A trip is "past" once its last day (falling back
@@ -991,11 +997,22 @@ would overwrite the glyph with the word.
   filters by His/Hers, Type (`TRIPSY_ATTIRE_PACKING_GROUPS` — the same vocabulary the "+ Add Line"
   dialog's own Type field already uses), and Dress Level (only tiers with real need lines for the
   selected person — unlike Add Line, which targets any tier freely since it invents a new line, this
-  one attaches a REAL garment to an EXISTING one, so an empty tier would be a dead end). Every result
-  shown is pre-filtered through `tripsyWardrobeGarmentFillsLine` against that tier's lines, so it's
-  guaranteed to fit something — Add can never fail with "no matching line." Resolves `{garmentId,
-  tier}`, and the CALLER (`tripsyWardrobePackForTrip`) re-runs that same fit-test to pick the specific
-  line, then writes through the ordinary `sel`/`persistChosen` path — no parallel selection mechanism.
+  one attaches a REAL garment to an EXISTING one, so an empty tier would be a dead end).
+  **Results are matched on the garment's OWN tier tags** (`(g.tiers||[]).includes(tier)`, General
+  matching everything), **not on whether the tier currently has an active need line for it** — the
+  first version matched against `tripsyWardrobeGarmentFillsLine`, which silently hid whole categories
+  of real, ownable garments: `tripsyWardrobeNeedByTier` deliberately DROPS a tier's blazer+trousers
+  lines once a packed suit already covers it (a suit packed for Formal also dresses Cocktail nights),
+  so with the line gone, no cocktail suit could ever match the old filter even though the owner might
+  want a DIFFERENT one. Add Garment is a browse tool ("what do I own for Cocktail"), not a
+  what's-still-missing tool, so it must not share that filter. Resolves `{garmentId, tier}`, and the
+  CALLER (`tripsyWardrobePackForTrip`) still tries `tripsyWardrobeGarmentFillsLine` against the tier's
+  ACTIVE lines first (the ordinary case) — but when a search result has no active line to attach to
+  (exactly the dropped-line case above), it falls back to a stable, TYPE-derived line name
+  (`TRIPSY_GARMENT_TYPE_LABEL[gType]`, e.g. a suit always resolves to "Suits", the same name a guide
+  would have used directly) rather than failing outright, and the success toast explains that this
+  piece won't show as a separate packing need since something else already covers the occasion. Either
+  path writes through the ordinary `sel`/`persistChosen` mechanism — no parallel selection model.
   Picking the other person's garment switches the page to show them, so the addition is visible
   immediately. `tripsyWardrobeChooseQty` (asked when more than one copy is available) now pins its
   own z-index above the Add Garment dialog specifically — it used to rely on plain DOM append order,

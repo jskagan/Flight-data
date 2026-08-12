@@ -441,6 +441,12 @@
      rendered dots via JS rather than hardcoded here. */
   .tripsy-tl-trip { position:relative; }
   .tripsy-tl-connector { position:absolute; width:3px; background:rgba(255,255,255,0.85); z-index:0; display:none; }
+  /* A segment strictly between two PAST-day rows (see .tripsy-day-past): the row
+     opacity dimming doesn't reach these, since connector segments are appended as
+     siblings of .tripsy-day-block, not descendants (positionTripsyTimelineConnectors
+     measures actual row positions, not the wrapper), so without this the line stayed
+     full-bright while the events it ran through were grayed out. */
+  .tripsy-tl-connector--past { background:rgba(255,255,255,0.32); }
   /* On phones, cap the Tripsy dropdown menus/panels to the viewport width so their
      inline min-widths can't run off-screen (they're position:fixed; JS handles the
      vertical fit + internal scroll -- see positionTripsyFixedMenu). */
@@ -10294,11 +10300,19 @@ function tripsyWardrobeAddGarmentDialog(guide, garments, initialPerson) {
     const render = () => {
       const tiers = tiersForPerson(person);
       if (!tiers.includes(tier)) tier = tiers[0] || '';
-      const linesForTier = tier ? (tripsyWardrobeNeedByTier(guide, person)[tier] || []) : [];
-      const results = linesForTier.length
+      // Matched on the GARMENT'S OWN tier tags, not on whether that tier currently has
+      // an active need line for it. THE BUG THIS FIXES: a tier's need for a whole
+      // CATEGORY of garment can be zeroed out by something already selected elsewhere
+      // -- e.g. a suit packed for Formal also dresses Cocktail nights, per
+      // tripsyWardrobeNeedByTier's own rule, so Cocktail's blazer+trousers lines drop
+      // entirely. The search must still show every OTHER cocktail suit the owner owns;
+      // it's a browse tool, not a "what's still missing" tool. Same rule for every
+      // type, not suits specifically: General matches everything, same convention the
+      // Pack-for-tier screens already use for that tier.
+      const results = tier
         ? garments.filter(g => (g.person || 'him') === person
             && (!type || tripsyAttirePackingGroupOf(g) === type)
-            && linesForTier.some(ln => tripsyWardrobeGarmentFillsLine(g, ln, linesForTier)))
+            && (tier === TRIPSY_WARDROBE_GENERAL_TIER || (g.tiers || []).includes(tier)))
         : [];
       ov.innerHTML = `
         <div class="tw-modal-paper tw-wide">
@@ -10788,8 +10802,21 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     if (!g) return;
     const targetPerson = g.person || 'him';
     const linesForTier = tripsyWardrobeNeedByTier(guide, targetPerson)[picked.tier] || [];
-    const matchLine = linesForTier.find(ln => tripsyWardrobeGarmentFillsLine(g, ln, linesForTier));
-    if (!matchLine) { toast('Could not find a matching line for that garment.', 'error'); return; }
+    let matchLine = linesForTier.find(ln => tripsyWardrobeGarmentFillsLine(g, ln, linesForTier));
+    // No ACTIVE line for it -- not missing, DROPPED: this tier's need for this whole
+    // category may already be covered by something selected elsewhere (the suit/
+    // blazer/trousers rule above is the only thing that ever drops a line this way).
+    // The search still offered the garment on purpose (see its own comment), so Add
+    // must still work -- fall back to a stable, TYPE-derived line name instead of
+    // failing, the same name every garment of this type would use if the tier's own
+    // guide had asked for it directly.
+    let usedFallbackLine = false;
+    if (!matchLine) {
+      const gType = tripsyGarmentTypeKey(g.name || '');
+      const fallbackName = TRIPSY_GARMENT_TYPE_LABEL[gType] || TRIPSY_ATTIRE_PACKING_GROUP_LABEL[tripsyAttirePackingGroupOf(g)] || 'Other';
+      matchLine = { name: fallbackName, need: 1 };
+      usedFallbackLine = true;
+    }
     const key = selKey(g.id, picked.tier, matchLine.name);
     const avail = tripsyWardrobeGarmentIsPlaceholder(g)
       ? tripsyWardrobePlaceholderCap(matchLine.need)
@@ -10810,7 +10837,9 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     }
     view = { mode: 'list' };
     render();
-    toast(`Added “${g.name}” to your packing list.`, 'success');
+    toast(usedFallbackLine
+      ? `Added “${g.name}” — another packed piece already covers this dress code, so it won't show as a separate need, but it's now available to outfits.`
+      : `Added “${g.name}” to your packing list.`, 'success');
   };
   const addLineBtn = ov.querySelector('#tw-select-addline');
   if (addLineBtn) addLineBtn.onclick = async () => {
@@ -26767,7 +26796,11 @@ function positionTripsyTimelineConnectors() {
     for (let i = 0; i < dots.length - 1; i++) {
       if (isDotExpanded(dots[i]) || isDotExpanded(dots[i + 1])) continue;
       const segment = document.createElement('div');
-      segment.className = 'tripsy-tl-connector';
+      // Dimmed only when BOTH ends sit in a past day -- the segment spanning INTO
+      // today (last past row -> today's first row) stays full-bright, marking where
+      // "now" begins rather than fading out one row early.
+      const bothPast = dots[i].closest('.tripsy-day-past') && dots[i + 1].closest('.tripsy-day-past');
+      segment.className = bothPast ? 'tripsy-tl-connector tripsy-tl-connector--past' : 'tripsy-tl-connector';
       segment.style.display = 'block';
       segment.style.top = `${dotCenterY(dots[i])}px`;
       segment.style.height = `${dotCenterY(dots[i + 1]) - dotCenterY(dots[i])}px`;
