@@ -75,6 +75,10 @@ assert(tripsyOutfitBlockLiveTier(guideFixture, { eventIds: [], category: 'casual
     const tripsyNormalizeTripSelection = sel => sel;
     const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';
     const wornElsewhere = new Set((blockGarmentIds || []).filter(id => id !== currentGarmentId));
+    // Same-day availability (a separate, later addition) isn't exercised by this
+    // fixture set -- covered by its own test file. An empty set here is "nothing else
+    // worn that day", i.e. a no-op against these fixtures.
+    const wornSameDay = new Set();
     let candidates;
     // eval's own `const` would shadow this outer binding rather than assign to it
     // (a `const`/`let` inside a direct eval is scoped to the eval call itself, even

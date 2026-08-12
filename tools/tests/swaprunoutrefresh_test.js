@@ -37,18 +37,20 @@ const swapBlock = modal.slice(modal.indexOf("btn.onclick = async () => {"), moda
 assert(/if \(!ok\) \{ toast\('Could not save the change\.', 'error'\); return; \}/.test(swapBlock),
   'a failed save returns before reaching onSwapped');
 
-// ---- the Daily Dress Guide's outfit-block click handler wires onSwapped ----
+// ---- the Daily Dress Guide's outfit-block click handler wires the shared refresh
+// callback (refreshLaundryInfo -- also reused by the laundry-day trigger, see
+// laundryrefresh_test.js, since a wash/Not Dirty needs the identical refresh) ----
 const guideRender = extractFn('renderTripsyDressGuideInto');
-assert(/const onSwapped = async \(\) => \{/.test(guideRender), 'the guide defines an onSwapped callback per outfit-block trigger');
+assert(/const refreshLaundryInfo = async \(\) => \{/.test(guideRender), 'the guide defines one shared refresh callback');
 assert(/renderOpts\.laundryInfo = await tripsyLaundryRunOutByDay\(guide\.tripKey, person, guide\);/.test(guideRender),
-  'onSwapped recomputes the run-out projection fresh, not reusing the stale cached one');
-assert(/if \(renderOpts\.rerender\) renderOpts\.rerender\(\);/.test(guideRender), 'and re-renders the guide behind the outfit modal');
-assert(/showTripsyOutfitModal\(guide\.tripKey, el\.dataset\.tripsyOutfitBlock, person, \{ onSwapped \}\);/.test(guideRender),
-  'the callback is actually threaded into the showTripsyOutfitModal call opened from this guide');
+  'it recomputes the run-out projection fresh, not reusing the stale cached one');
+assert(/if \(renderOpts\.rerender\) renderOpts\.rerender\(\);/.test(guideRender), 'and re-renders the guide behind whichever screen changed something');
+assert(/showTripsyOutfitModal\(guide\.tripKey, el\.dataset\.tripsyOutfitBlock, person, \{ onSwapped: refreshLaundryInfo \}\);/.test(guideRender),
+  'the callback is actually threaded into the showTripsyOutfitModal call opened from this guide, as onSwapped');
 
 // ---- other callers of showTripsyOutfitModal are unaffected: no onSwapped means the
 // old behavior (just close/repaint the modal itself), so nothing else needed updating ----
 const otherCallSites = [...html.matchAll(/showTripsyOutfitModal\([^)]*\)/g)].map(m => m[0]);
-assert(otherCallSites.some(c => /\{ onSwapped \}/.test(c)), 'sanity: exactly the guide\'s call site passes onSwapped');
+assert(otherCallSites.some(c => /onSwapped: refreshLaundryInfo/.test(c)), 'sanity: exactly the guide\'s call site passes onSwapped');
 const withoutOnSwapped = otherCallSites.filter(c => !/onSwapped/.test(c));
 assert(withoutOnSwapped.length >= 3, 'other callers (Wear Days, My Trips event detail, Travel View) still call it with no onSwapped, unaffected -> ' + withoutOnSwapped.length);

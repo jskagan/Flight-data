@@ -25,7 +25,7 @@ const consts = ['TRIPSY_ATTIRE_CATEGORY_ORDER', 'TRIPSY_ATTIRE_CATEGORY_LABEL', 
   'TRIPSY_ATTIRE_CAMEL_KEY', 'TRIPSY_WARDROBE_GENERAL_TIER', 'TRIPSY_FLIGHT_WORN_SUFFIX', 'TRIPSY_FLIGHT_WORN_ROLE_LABEL', 'TRIPSY_ATTIRE_PACKING_GROUPS',
   ].map(extractConst).join('\n');
 const fns = ['tripsyGarmentTypeKey', 'tripsyAttirePackingGroupOf', 'tripsyAttireIsExcludedPackingItem',
-  'tripsyAttireDisplayCategory', 'tripsyWardrobeFirstFlightBlockTier', 'tripsyWardrobeFlightWornClaimer',
+  'tripsyAttireDisplayCategory', 'tripsyWardrobeFlightDepartureEvent', 'tripsyWardrobeFirstFlightBlockTier', 'tripsyWardrobeFlightWornClaimer',
   'tripsyWardrobeLineIsFlightWorn', 'tripsyWardrobePackedNeedLines', 'tripsyWardrobeNeedByTier'].map(extractFn).join('\n');
 
 const item = (name, quantity, category, group) => ({ name, quantity, category, group });

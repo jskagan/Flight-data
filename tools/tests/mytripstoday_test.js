@@ -121,8 +121,8 @@ assert(!/dressguide-instruction--wide/.test(html),
 // handler on the way up, so the guard stays.
 const lw = html.slice(html.indexOf("[data-tripsy-laundry-day]"), html.indexOf("[data-tripsy-laundry-day]") + 520);
 assert(/e\.stopPropagation\(\)/.test(lw), 'tapping it does not open a block outfit behind it');
-assert(/showTripsyLaundryDay\(guide\.tripKey, el\.getAttribute\('data-tripsy-laundry-day'\), person\)/.test(lw),
-  'and it opens that day for the person being shown');
+assert(/showTripsyLaundryDay\(guide\.tripKey, el\.getAttribute\('data-tripsy-laundry-day'\), person, \{ onChanged: refreshLaundryInfo \}\)/.test(lw),
+  'and it opens that day for the person being shown, wired to refresh the guide\'s run-out bar on a wash/Not Dirty');
 assert(/\.tripsy-attire-dressguide-instruction \{[^}]*display: inline-flex/.test(html),
   'every instruction bar hugs its text as a compact pill again');
 const rowCss = (html.match(/\.tripsy-dg-laundry-row \{[^}]*\}/) || [''])[0];
@@ -225,8 +225,8 @@ assert(/zIndex = '2147483200'/.test(qd), 'the count dialog outranks every caller
 assert(!/const opts = Array\.from/.test(qd) && /optionsHtml/.test(qd),
   'and its option markup no longer shadows the opts parameter that carries custom wording');
 assert(/opts\.title \|\| 'How many packed\?'/.test(qd), 'so a custom title actually renders');
-assert(/showTripsyLaundryDay\(tripKey, dayKey, person\);/.test(lo),
-  'and the screen is rebuilt from the recomputed truth, not patched in place');
+assert((lo.match(/showTripsyLaundryDay\(tripKey, dayKey, person, opts\);/g) || []).length === 2,
+  'and the screen is rebuilt from the recomputed truth, not patched in place, on both Wash Now and Not Dirty');
 // Order: the bag card comes BEFORE the garment grid.
 assert(lo.indexOf('tripsy-laundry-bag') < lo.indexOf('dirty.map(cardHtml)'),
   'the Laundry Bag card renders above the grid');

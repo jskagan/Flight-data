@@ -716,6 +716,15 @@ step 4; git history has it if ever needed.
   always offered alongside the candidate grid) instead of a garment id, splicing the piece out of
   `block.garmentIds` with no replacement — e.g. a tie that's merely optional now that the event
   reads Cocktail rather than Black Tie, where a substitute isn't the point, dropping it is.
+  **Swap only offers a garment that's actually FREE that day.** Besides `wornElsewhere` (already
+  worn in THIS block), it now excludes anything already assigned to a DIFFERENT block on the SAME
+  day — offering it would mean the same physical piece worn in two outfits at once. A garment worn
+  on some OTHER day of the trip is unaffected and still offered, since reusing a piece across the
+  trip is the ordinary case, not a conflict. `tripsyOutfitSwapPicker` fetches this person's
+  `Store.getTripsyTripOutfits` and unions every OTHER block's (`b !== block`) `garmentIds` where
+  `b.dayKey === block.dayKey` into `wornSameDay`, added to the same exclusion check as
+  `wornElsewhere`. A block missing `dayKey` (defensive, for incomplete guide data) skips the check
+  entirely rather than excluding everything.
   **On the 3 mix-and-match tiers (`casual`/`smart_casual`/`athletic`), Swap's same-type-bucket check
   loosens to a same-packing-GROUP check instead.** The narrow `tripsyGarmentTypeBucket` (polo vs.
   shirt vs. tee are three different buckets) is right for the 4 itemized tiers — a dress-shirt slot
@@ -777,6 +786,18 @@ step 4; git history has it if ever needed.
   other caller of `showTripsyOutfitModal` (Wear Days, My Trips' event detail panel, Travel View)
   passes no `onSwapped`, so they're unaffected — this is additive, not a behavior change to Swap
   itself.
+  **Wash Now and Not Dirty had the identical caching bug** (found from the owner reporting a
+  garment still flagged unavailable on a later day after they'd washed it): `showTripsyLaundryDay`
+  only ever rebuilt ITSELF after either action, never told the guide behind it to refresh, so a wash
+  recorded mid-visit left the run-out bar showing an already-resolved warning until the guide was
+  closed and reopened. Both fixes share one callback — `renderTripsyDressGuideInto` defines
+  `refreshLaundryInfo` once and passes it as `showTripsyOutfitModal`'s `onSwapped` for the outfit-
+  block trigger AND as `showTripsyLaundryDay`'s new `opts.onChanged` for the laundry-day trigger, so
+  a swap, a wash, or a Not Dirty press all refresh the same way. `showTripsyLaundryDay` takes an
+  `opts` param (default `{}`, so its two other pre-existing callers are unaffected) and fires
+  `opts.onChanged` right after each action, before rebuilding itself — and forwards `opts` (not a
+  fresh literal) when it rebuilds itself, so a second wash on the same visit still carries the
+  callback without re-stating it.
 - **The Daily Dress Guide has a multi-select dress-code filter** (`Filter` in its toolbar;
   `tripsyDressGuideFilter`, a Set, empty = show everything). The dropdown
   (`tripsyDressGuideOpenFilterMenu`, same `positionTripsyFixedMenu` shell as every other Tripsy
@@ -1184,6 +1205,21 @@ would overwrite the glyph with the word.
   wear: the flight-worn **top** is used up and must not be assigned to any block before the first
   wash day, while its bottoms/shoes have spent one of their many wears and stay freely available
   (jeans/trousers are ~20 wears, not the ~10 the prompt used to say).
+  **A garment allocated to a flight-worn line is worn exactly ONCE — on the departure flight — not
+  "whenever that tier is worn."** `tripsyWardrobeWearDaysFromLines` (feeding both the Wear Days
+  screen and `tripsyLaundryRunOutByDay`) previously had no special case for these lines: since a
+  flight-worn line still carries a real dress-code category (whatever tier the flight itself is),
+  it fell through to the ordinary TIER rule — "worn whenever you're dressed at that level" — which
+  returned every occasion of that tier across the WHOLE TRIP as a wear day for one physical
+  garment. With a top's 1-wearing-before-dirty limit, that bogus multi-day count tripped the
+  run-out warning almost immediately, naming a day the garment was never actually worn (found via
+  the owner asking why the app said a shirt was dirty on a day well into the trip). Fixed with
+  `tripsyWardrobeFlightDepartureEvent(guide)` — the trip's departing-flight event, factored out of
+  `tripsyWardrobeFirstFlightBlockTier` so the two can't disagree about which event that is — which
+  `tripsyWardrobeWearDaysFromLines` now checks FIRST (via `tripsyWardrobeLineIsFlightWorn(e.line)`),
+  resolving to that one event with basis `'flight'` instead of falling through to the tier rule. An
+  ordinary (non-flight-worn) line in the same tier is unaffected — it's genuinely worn at every
+  occasion of that tier, which is exactly what the tier rule is for.
   **A flight-worn line's need (always 1) cannot be double-filled by a real garment AND a generic
   at once.** Ordinary lines deliberately allow over-selecting a bit past need
   (`tripsyWardrobePlaceholderCap` = need+2, a buffer for a lost/replaced item), so a blanket

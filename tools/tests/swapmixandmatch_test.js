@@ -46,7 +46,7 @@ assert(/isMixAndMatch \? \(TRIPSY_ATTIRE_PACKING_GROUP_LABEL\[currentGroup\] \|\
   'the modal\'s typeLabel also reflects the group name on a mix-and-match tier, not a misleadingly narrow type label');
 
 // ---- executed: the exact candidate-building expression, against fixtures ----
-{
+(async () => {
   const exprStart = pickerSrc.indexOf('const isMixAndMatch');
   const exprEnd = pickerSrc.indexOf(');', pickerSrc.indexOf('const candidates = [...new Set')) + 2;
   const blockSrc = pickerSrc.slice(exprStart, exprEnd);
@@ -56,7 +56,7 @@ assert(/isMixAndMatch \? \(TRIPSY_ATTIRE_PACKING_GROUP_LABEL\[currentGroup\] \|\
   const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
   const TRIPSY_ATTIRE_PACKING_GROUP_LABEL = { tops: 'Tops', footwear: 'Footwear' };
 
-  const run = (wardrobe, currentGarmentId, person, liveTier, blockGarmentIds) => {
+  const run = async (wardrobe, currentGarmentId, person, liveTier, blockGarmentIds) => {
     const byId = new Map(wardrobe.map(g => [g.id, g]));
     const current = byId.get(currentGarmentId);
     const tripsyGarmentTypeBucket = g => ({ key: g.__type || ('group:' + (g.group || 'accessories')), label: g.__type || g.group });
@@ -67,17 +67,25 @@ assert(/isMixAndMatch \? \(TRIPSY_ATTIRE_PACKING_GROUP_LABEL\[currentGroup\] \|\
     const garments = wardrobe;
     const selectedRaw = wardrobe.map(g => ({ id: g.id, qty: 1 }));
     const block = { garmentIds: blockGarmentIds };
-    let candidates, isMixAndMatch, currentGroup, bucketKey, typeLabel, wornElsewhere;
+    // No same-day availability fixture here -- that's covered by its own test file
+    // (swapavailability_test.js). This harness only needs the picker's real
+    // Store.getTripsyTripOutfits call to resolve to "no other blocks" so the
+    // type/group-matching logic under test is unaffected by it.
+    const Store = { getTripsyTripOutfits: async () => null };
+    const tripKey = 'T';
+    let candidates, isMixAndMatch, currentGroup, bucketKey, typeLabel, wornElsewhere, outfitsForDay, wornSameDay;
     // Direct-eval const/let is scoped to the eval call itself -- strip declaration
     // keywords so the block assigns into these outer bindings instead.
-    eval(blockSrc
+    await eval(`(async () => { ${blockSrc
       .replace('const isMixAndMatch', 'isMixAndMatch')
       .replace('const bucketKey', 'bucketKey')
       .replace('const currentGroup', 'currentGroup')
       .replace('const typeLabel', 'typeLabel')
       .replace('const tierLabel', 'let tierLabel')
       .replace('const wornElsewhere', 'wornElsewhere')
-      .replace('const candidates', 'candidates'));
+      .replace('const outfitsForDay', 'outfitsForDay')
+      .replace('const wornSameDay', 'wornSameDay')
+      .replace('const candidates', 'candidates')} })()`);
     return candidates.map(g => g.id);
   };
 
@@ -95,7 +103,7 @@ assert(/isMixAndMatch \? \(TRIPSY_ATTIRE_PACKING_GROUP_LABEL\[currentGroup\] \|\
     { id: 'cocktail-shirt', name: 'Dress Shirt', person: 'him', group: 'tops', __type: 'shirt', tiers: ['cocktail'] },
   ];
 
-  let got = run(wardrobe, 'current-polo', 'him', 'casual', ['current-polo']);
+  let got = await run(wardrobe, 'current-polo', 'him', 'casual', ['current-polo']);
   assert(got.includes('polo'), 'THE FIX: another polo (same type) is still offered');
   assert(got.includes('shirt'), 'THE FIX: a casual SHIRT is now offered when swapping a polo -- was hidden before this fix');
   assert(got.includes('tee'), 'THE FIX: a casual TEE is now offered too -- same real-data bug (5 tees hidden)');
@@ -113,13 +121,13 @@ assert(/isMixAndMatch \? \(TRIPSY_ATTIRE_PACKING_GROUP_LABEL\[currentGroup\] \|\
     { id: 'other-shirt', name: 'Other Dress Shirt', person: 'him', group: 'tops', __type: 'shirt', tiers: ['cocktail'] },
     { id: 'tie', name: 'Tie', person: 'him', group: 'accessories', __type: 'tie', tiers: ['cocktail'] },
   ];
-  got = run(itemized, 'cur-shirt', 'him', 'cocktail', ['cur-shirt']);
+  got = await run(itemized, 'cur-shirt', 'him', 'cocktail', ['cur-shirt']);
   assert(got.includes('other-shirt'), 'itemized tier: another dress shirt is offered');
   assert(!got.includes('tie'), 'itemized tier: narrow type-bucket matching is preserved -- a tie never offers as a shirt substitute');
 
   // No live tier at all (guide unavailable): falls back to same-bucket-only, the
   // pre-existing behavior for that case -- unaffected by this fix.
-  got = run(wardrobe, 'current-polo', 'him', null, ['current-polo']);
+  got = await run(wardrobe, 'current-polo', 'him', null, ['current-polo']);
   assert(got.includes('polo') && !got.includes('shirt') && !got.includes('tee'),
     'no live tier -> falls back to narrow same-type-bucket matching, unchanged by this fix');
-}
+})();

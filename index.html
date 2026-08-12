@@ -8701,15 +8701,23 @@ function tripsyAttireQuantityMinusOne(quantity) {
   });
   return { text: out, zero };
 }
-function tripsyWardrobeFirstFlightBlockTier(guide) {
+// The trip's departing flight event, if the trip starts with one (the first day with
+// any events, whose first event is a Flight) -- shared by tripsyWardrobeFirstFlightBlockTier
+// below and by the flight-worn wear-days rule (tripsyWardrobeWearDaysFromLines), so the
+// two can never disagree about which event that departing flight actually is.
+function tripsyWardrobeFlightDepartureEvent(guide) {
   for (const day of ((guide && guide.days) || [])) {
     const events = (day && day.events) || [];
     if (!events.length) continue;
     const first = events[0];
     const isFlight = first && first.resource === 'transportation' && /^\s*flight\b/i.test(String(first.name || ''));
-    return isFlight ? (first.displayCategory || first.category || '') : '';
+    return isFlight ? { ...first, dayKey: day.dayKey } : null;
   }
-  return '';
+  return null;
+}
+function tripsyWardrobeFirstFlightBlockTier(guide) {
+  const ev = tripsyWardrobeFlightDepartureEvent(guide);
+  return ev ? (ev.displayCategory || ev.category || '') : '';
 }
 // True when THIS person's Plan Packing List is satisfied across every DRESS-CODE
 // tier -- each recommended need line covered by selected wardrobe garments +
@@ -9575,6 +9583,18 @@ function tripsyWardrobeWearDaysFromLines(guide, person, lines, nameHint) {
   const evs = [];
   let basis = 'line';
   for (const e of lines) {
+    // 1. A flight-worn companion line ("Top — wearing on the flight") represents
+    // exactly ONE wearing: the departing flight. It still carries a real dress-code
+    // category (whatever the flight's own tier is), so without this check it fell
+    // through to rule 3 below and was treated as "worn at every event of that tier,
+    // all trip" -- which very quickly tripped the 1-wearing "dirty" limit for a top,
+    // showing a run-out warning for a garment that had really only been worn once.
+    if (tripsyWardrobeLineIsFlightWorn(e.line)) {
+      const dep = tripsyWardrobeFlightDepartureEvent(guide);
+      if (dep) evs.push(dep);
+      basis = 'flight';
+      continue;
+    }
     // 2. The guide often links a packing item to the exact events it is for.
     const item = items.find(it => it && it.name === e.line);
     const linked = ((item && item.eventIds) || []).map(id => evById.get(id)).filter(Boolean);
@@ -9860,7 +9880,7 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   return { runOut, hasWash: true };
 }
 
-async function showTripsyLaundryDay(tripKey, dayKey, person) {
+async function showTripsyLaundryDay(tripKey, dayKey, person, opts = {}) {
   let ov = document.getElementById('tripsy-laundry-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-laundry-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
   ov.style.zIndex = '2147483120'; // above the dress guide it opens from
@@ -9942,7 +9962,12 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
       toast('Washed — those clothes are clean again.');
       ov.style.display = 'none';
       ov.onclick = null;
-      showTripsyLaundryDay(tripKey, dayKey, person);
+      // Tell whatever opened this screen (the Daily Dress Guide's run-out bar is
+      // computed once per opening and cached) that a wash just happened -- or the bar
+      // kept showing a garment as run-out on a later day even after it was washed
+      // clean, since this screen only ever rebuilt itself, never the guide behind it.
+      if (opts.onChanged) opts.onChanged();
+      showTripsyLaundryDay(tripKey, dayKey, person, opts);
       return;
     }
     const back = e.target.closest('[data-laundry-unpick]');
@@ -9983,7 +10008,10 @@ async function showTripsyLaundryDay(tripKey, dayKey, person) {
       // handler's idea of it.
       ov.style.display = 'none';
       ov.onclick = null;
-      showTripsyLaundryDay(tripKey, dayKey, person);
+      // Same reason as Wash Now above: the guide behind this screen has its own stale
+      // cached run-out projection and must be told to refresh.
+      if (opts.onChanged) opts.onChanged();
+      showTripsyLaundryDay(tripKey, dayKey, person, opts);
       return;
     }
     const pick = e.target.closest('[data-laundry-pick]');
@@ -10283,13 +10311,26 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
     : 'garment';
   const tierLabel = liveTier ? (TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier] || liveTier) : '';
   const wornElsewhere = new Set((block.garmentIds || []).filter(id => id !== currentGarmentId));
+  // A candidate must actually be FREE that day: already worn in THIS block (wornElsewhere,
+  // above) or in a DIFFERENT block on the SAME day is the same physical garment being asked
+  // to be in two outfits at once. A garment worn on some OTHER day is fine -- that's the
+  // ordinary case of reusing a piece across the trip, which Swap must not rule out.
+  const outfitsForDay = await Store.getTripsyTripOutfits(tripKey, person);
+  const wornSameDay = new Set();
+  if (outfitsForDay && block.dayKey) {
+    for (const b of (outfitsForDay.blocks || [])) {
+      if (b === block || b.dayKey !== block.dayKey) continue;
+      for (const id of (b.garmentIds || [])) wornSameDay.add(id);
+    }
+  }
   // Only offer this person's selected garments as swap candidates (deduped by id --
   // a garment allocated to several categories is one garment here).
   const candidates = [...new Set(tripsyNormalizeTripSelection(selectedRaw).map(e => e.id))]
     .map(id => byId.get(id))
     // Underwear/socks are packable (and so selectable) but are never part of a composed
     // OUTFIT, so they're excluded here and in tripsyComposeTripOutfits' own `chosen`.
-    .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g) && g.id !== currentGarmentId && !wornElsewhere.has(g.id)
+    .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g) && g.id !== currentGarmentId
+      && !wornElsewhere.has(g.id) && !wornSameDay.has(g.id)
       && (isMixAndMatch
             ? (!currentGroup || tripsyAttirePackingGroupOf(g) === currentGroup)
             : (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey))
@@ -24283,26 +24324,27 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
     if (fm) fm.style.display = 'none';
     if (renderOpts && renderOpts.rerender) renderOpts.rerender();
   });
+  // Shared by both triggers below: anything that can change which garment is short on
+  // clean copies (a swap, a wash, a Not Dirty press) must recompute the run-out bar
+  // (renderOpts.laundryInfo, computed once at opening) and re-render the guide behind
+  // whichever screen made the change -- or it keeps naming a garment/day that's no
+  // longer actually a problem.
+  const refreshLaundryInfo = async () => {
+    try { renderOpts.laundryInfo = await tripsyLaundryRunOutByDay(guide.tripKey, person, guide); }
+    catch (e) { console.error('Laundry run-out projection failed:', e); }
+    if (renderOpts.rerender) renderOpts.rerender();
+  };
   content.querySelectorAll('[data-tripsy-laundry-day]').forEach(el => {
     el.addEventListener('click', e => {
       // Kept from when this button lived INSIDE the outfit bar: it sits on its own row
       // now, so nothing above it is a tap target, but a stray bubble here would open the
       // outfit modal behind the laundry screen.
       e.stopPropagation();
-      showTripsyLaundryDay(guide.tripKey, el.getAttribute('data-tripsy-laundry-day'), person);
+      showTripsyLaundryDay(guide.tripKey, el.getAttribute('data-tripsy-laundry-day'), person, { onChanged: refreshLaundryInfo });
     });
   });
   content.querySelectorAll('[data-tripsy-outfit-block]').forEach(el => {
-    // onSwapped: a swap made from here can change which garment is short on clean
-    // copies, so the run-out bar (renderOpts.laundryInfo, computed once at opening)
-    // must be recomputed and the guide behind the outfit modal re-rendered -- or a
-    // swapped-away garment keeps being named as the one that ran out.
-    const onSwapped = async () => {
-      try { renderOpts.laundryInfo = await tripsyLaundryRunOutByDay(guide.tripKey, person, guide); }
-      catch (e) { console.error('Laundry run-out projection failed:', e); }
-      if (renderOpts.rerender) renderOpts.rerender();
-    };
-    const open = () => showTripsyOutfitModal(guide.tripKey, el.dataset.tripsyOutfitBlock, person, { onSwapped });
+    const open = () => showTripsyOutfitModal(guide.tripKey, el.dataset.tripsyOutfitBlock, person, { onSwapped: refreshLaundryInfo });
     el.addEventListener('click', open);
     el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
   });
