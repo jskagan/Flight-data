@@ -10154,6 +10154,12 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
       }
       const ok = await Store.saveTripsyTripOutfits(outfits);
       if (!ok) { toast('Could not save the change.', 'error'); return; }
+      // Tell whatever opened this modal that a swap actually happened -- the Daily
+      // Dress Guide's run-out bar is computed ONCE per opening and cached in its own
+      // renderOpts, so without this callback it kept naming a garment that had
+      // already been swapped away: swapping never touched that cache or re-rendered
+      // the guide behind this modal.
+      if (opts.onSwapped) opts.onSwapped();
       showTripsyOutfitModal(tripKey, eventId, person, opts);
     };
   });
@@ -24287,7 +24293,16 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
     });
   });
   content.querySelectorAll('[data-tripsy-outfit-block]').forEach(el => {
-    const open = () => showTripsyOutfitModal(guide.tripKey, el.dataset.tripsyOutfitBlock, person);
+    // onSwapped: a swap made from here can change which garment is short on clean
+    // copies, so the run-out bar (renderOpts.laundryInfo, computed once at opening)
+    // must be recomputed and the guide behind the outfit modal re-rendered -- or a
+    // swapped-away garment keeps being named as the one that ran out.
+    const onSwapped = async () => {
+      try { renderOpts.laundryInfo = await tripsyLaundryRunOutByDay(guide.tripKey, person, guide); }
+      catch (e) { console.error('Laundry run-out projection failed:', e); }
+      if (renderOpts.rerender) renderOpts.rerender();
+    };
+    const open = () => showTripsyOutfitModal(guide.tripKey, el.dataset.tripsyOutfitBlock, person, { onSwapped });
     el.addEventListener('click', open);
     el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
   });

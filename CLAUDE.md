@@ -768,6 +768,15 @@ step 4; git history has it if ever needed.
   `{runOut, hasWash:false}` before any wash, which is what keeps the orange bar until then.
   Computed ONCE per opening (it walks every garment's wear days) and threaded through re-renders on
   `renderOpts`, exactly like the weather bar; a failure there is caught so the guide still renders.
+  **A Swap made from the guide's own "👔 See outfit" cue recomputes and re-renders this**, or the
+  bar kept naming a garment already swapped away — swapping only ever saved the outfit and
+  repainted the outfit modal itself, never touched `renderOpts.laundryInfo` or told the guide behind
+  it to redraw. `showTripsyOutfitModal` now takes an `opts.onSwapped` callback, fired right after a
+  successful swap save (before the modal repaints itself); the guide's outfit-block click handler
+  passes one that awaits a fresh `tripsyLaundryRunOutByDay` and calls `renderOpts.rerender()`. Every
+  other caller of `showTripsyOutfitModal` (Wear Days, My Trips' event detail panel, Travel View)
+  passes no `onSwapped`, so they're unaffected — this is additive, not a behavior change to Swap
+  itself.
 - **The Daily Dress Guide has a multi-select dress-code filter** (`Filter` in its toolbar;
   `tripsyDressGuideFilter`, a Set, empty = show everything). The dropdown
   (`tripsyDressGuideOpenFilterMenu`, same `positionTripsyFixedMenu` shell as every other Tripsy
