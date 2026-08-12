@@ -8025,6 +8025,7 @@ function getOrCreateWardrobeSelectOverlay() {
       </div>
       <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px; margin-bottom:8px; flex-wrap:wrap;">
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <button class="btn" id="tw-select-addgarment">Add Garment</button>
           <button class="btn" id="tw-select-addline">+ Add Line</button>
           <button class="btn" id="tw-select-incomplete">Show Incomplete</button>
           <button class="btn" id="tw-select-status">Packing Status</button>
@@ -9123,6 +9124,10 @@ function tripsyWardrobeChooseQty(max, garmentName, verb = 'pack', needed = null)
     if (!ov) { ov = document.createElement('div'); ov.id = 'tw-qty-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
     // `needed` (when provided) shows how many MORE this dress-code line still wants.
     const neededTxt = (needed != null) ? ` · <span style="color:var(--amber); font-weight:700;">${needed} more needed</span>` : '';
+    // Explicit, not just the base .tw-modal layer: it's now also opened from the "+ Add
+    // Garment" dialog (2147483100), which would otherwise render this invisibly behind
+    // it -- same trap as tripsyWardrobeChoosePackedCount hit earlier.
+    ov.style.zIndex = '2147483110';
     ov.innerHTML = `
       <div class="tw-modal-paper" style="max-width:380px; text-align:center;">
         <h2 style="margin:0 0 6px; font-size:17px;">How many to ${esc(verb)}?</h2>
@@ -10256,6 +10261,88 @@ async function tripsyWardrobeAddLineDialog(tripKey, person, existingNames) {
     nameEl.focus();
   });
 }
+// Plan Packing List's "Add Garment" button: a general search across the WHOLE
+// wardrobe (not scoped to whichever line the owner happens to be looking at) --
+// His/Hers, Type (the same TRIPSY_ATTIRE_PACKING_GROUPS domain the "+ Add Line"
+// dialog above already uses, for one consistent vocabulary), and Dress Level narrow
+// a photo grid to garments that would actually FILL some need line at that dress
+// level (tripsyWardrobeGarmentFillsLine, the exact same fit-test the per-line garment
+// page uses) -- so every result shown is genuinely addable, never a dead end.
+// Resolves {garmentId, tier} on Add, or null on Close/backdrop-click; the CALLER
+// (tripsyWardrobePackForTrip) resolves WHICH LINE within that tier and does the
+// actual selection write, exactly like the swap picker separates "which garment"
+// from "what happens with it".
+function tripsyWardrobeAddGarmentDialog(guide, garments, initialPerson) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tw-addgarment-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-addgarment-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100'; // above the Plan Packing List page (base .tw-modal) it opens from
+    let person = initialPerson === 'her' ? 'her' : 'him';
+    let type = '';
+    let tier = '';
+    const close = v => { ov.style.display = 'none'; resolve(v); };
+    // Only tiers with real need lines for the CURRENTLY selected person -- unlike the
+    // "+ Add Line" dialog (which targets any tier freely, since it invents a new line),
+    // this one attaches a REAL garment to an EXISTING line, so an empty tier would just
+    // be a dead end here.
+    const tiersForPerson = p => {
+      const nl = tripsyWardrobeNeedByTier(guide, p);
+      const t = TRIPSY_ATTIRE_CATEGORY_ORDER.filter(x => (nl[x] || []).length > 0);
+      if ((nl[TRIPSY_WARDROBE_GENERAL_TIER] || []).length > 0) t.push(TRIPSY_WARDROBE_GENERAL_TIER);
+      return t;
+    };
+    const render = () => {
+      const tiers = tiersForPerson(person);
+      if (!tiers.includes(tier)) tier = tiers[0] || '';
+      const linesForTier = tier ? (tripsyWardrobeNeedByTier(guide, person)[tier] || []) : [];
+      const results = linesForTier.length
+        ? garments.filter(g => (g.person || 'him') === person
+            && (!type || tripsyAttirePackingGroupOf(g) === type)
+            && linesForTier.some(ln => tripsyWardrobeGarmentFillsLine(g, ln, linesForTier)))
+        : [];
+      ov.innerHTML = `
+        <div class="tw-modal-paper tw-wide">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:4px;">
+            <h2 style="margin:0; font-size:17px;">Add Garment</h2>
+            <button class="btn" data-tw-addgarment-close>Close</button>
+          </div>
+          <div style="color:var(--muted); font-size:12.5px; margin-bottom:14px;">Search your wardrobe and add a piece straight to the packing list.</div>
+          <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; margin-bottom:16px;">
+            <div><div style="font-size:12px; color:var(--muted); margin-bottom:4px;">Who</div>${tripsyPersonToggleHtml(person)}</div>
+            <div><div style="font-size:12px; color:var(--muted); margin-bottom:4px;">Type</div>
+              <select id="tw-addgarment-type" class="btn">
+                <option value="">Any</option>
+                ${TRIPSY_ATTIRE_PACKING_GROUPS.map(g => `<option value="${esc(g)}"${g === type ? ' selected' : ''}>${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[g] || g)}</option>`).join('')}
+              </select></div>
+            <div><div style="font-size:12px; color:var(--muted); margin-bottom:4px;">Dress Level</div>
+              <select id="tw-addgarment-tier" class="btn">
+                ${tiers.length ? tiers.map(t => `<option value="${esc(t)}"${t === tier ? ' selected' : ''}>${esc(t === TRIPSY_WARDROBE_GENERAL_TIER ? 'General' : (TRIPSY_ATTIRE_CATEGORY_LABEL[t] || t))}</option>`).join('') : `<option value="">No dress codes yet</option>`}
+              </select></div>
+          </div>
+          ${results.length
+            ? `<div class="tw-grid">${results.map(g => `
+                <div class="tw-card">
+                  <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : tripsyGarmentGlyph(tripsyGarmentTypeKey(g.name), g.group, g.name)}</div>
+                  <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}</div><div class="tw-meta">${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[tripsyAttirePackingGroupOf(g)] || '')}${g.color ? ` · ${esc(g.color)}` : ''}</div></div>
+                  <div class="tw-actions"><button class="btn" data-tw-addgarment-pick="${esc(g.id)}">Add</button></div>
+                </div>`).join('')}</div>`
+            : `<div style="color:var(--muted); padding:8px 0 4px;">${tiers.length ? 'No matching garments for this search.' : 'Generate an attire guide for this trip first.'}</div>`}
+        </div>`;
+      ov.querySelector('[data-tw-addgarment-close]').onclick = () => close(null);
+      wireTripsyPersonToggle(ov.querySelector('.tw-person-toggle'), p => { person = p; render(); });
+      ov.querySelector('#tw-addgarment-type').onchange = e => { type = e.target.value; render(); };
+      const tierSel = ov.querySelector('#tw-addgarment-tier');
+      if (tierSel) tierSel.onchange = e => { tier = e.target.value; render(); };
+      ov.querySelectorAll('[data-tw-addgarment-pick]').forEach(btn => {
+        btn.onclick = () => close({ garmentId: btn.getAttribute('data-tw-addgarment-pick'), tier });
+      });
+      tripsyWardrobeLoadPhotos(ov);
+    };
+    ov.onclick = e => { if (e.target === ov) close(null); };
+    ov.style.display = 'flex';
+    render();
+  });
+}
 async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him', onClose = null, initialLine = null) {
   const ov = getOrCreateWardrobeSelectOverlay();
   const bodyEl = ov.querySelector('#tw-select-body');
@@ -10272,7 +10359,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   // rather than closed over, so the render functions can call this before the button
   // consts further down have been initialised.
   const setListOnlyButtons = show => {
-    for (const id of ['#tw-select-addline', '#tw-select-incomplete']) {
+    for (const id of ['#tw-select-addgarment', '#tw-select-addline', '#tw-select-incomplete']) {
       const b = ov.querySelector(id);
       if (b) b.style.display = show ? 'inline-block' : 'none';
     }
@@ -10689,6 +10776,42 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   // "+ Add Line" -- a need line the guide never asked for. Stored outside the guide, so
   // it survives a Refresh; needByTier merges it back in, which is why one save is enough
   // to make it appear on both packing screens.
+  // "Add Garment" -- search the whole wardrobe by person/type/dress level and attach
+  // a real garment straight to whichever line it fits, without first navigating into
+  // that line's own garment page. The dialog only ever offers garments that fit SOME
+  // line at the chosen dress level, so a match is guaranteed once one is picked.
+  const addGarmentBtn = ov.querySelector('#tw-select-addgarment');
+  if (addGarmentBtn) addGarmentBtn.onclick = async () => {
+    const picked = await tripsyWardrobeAddGarmentDialog(guide, garments, person);
+    if (!picked) return;
+    const g = garmentById.get(picked.garmentId);
+    if (!g) return;
+    const targetPerson = g.person || 'him';
+    const linesForTier = tripsyWardrobeNeedByTier(guide, targetPerson)[picked.tier] || [];
+    const matchLine = linesForTier.find(ln => tripsyWardrobeGarmentFillsLine(g, ln, linesForTier));
+    if (!matchLine) { toast('Could not find a matching line for that garment.', 'error'); return; }
+    const key = selKey(g.id, picked.tier, matchLine.name);
+    const avail = tripsyWardrobeGarmentIsPlaceholder(g)
+      ? tripsyWardrobePlaceholderCap(matchLine.need)
+      : availableFor(g, picked.tier, matchLine.name);
+    if (avail <= 0) { toast('No more copies of this garment are available to add.', 'error'); return; }
+    let qty = 1;
+    if (avail > 1) { const n = await tripsyWardrobeChooseQty(avail, g.name, 'pack'); if (!n) return; qty = n; }
+    sel.set(key, qty);
+    persistChosen();
+    // A garment belonging to the OTHER person switches the page to show them, so the
+    // just-added piece is visible immediately rather than added invisibly off-screen.
+    if (targetPerson !== person) {
+      person = targetPerson;
+      needLines = tripsyWardrobeNeedByTier(guide, person);
+      tiers = computeTiers();
+      renderPersonToggle();
+      planWasComplete = tripsyPlanPackingIsComplete(guide, tripKey, person); // re-baseline for the new person
+    }
+    view = { mode: 'list' };
+    render();
+    toast(`Added “${g.name}” to your packing list.`, 'success');
+  };
   const addLineBtn = ov.querySelector('#tw-select-addline');
   if (addLineBtn) addLineBtn.onclick = async () => {
     const namesByTier = {};
@@ -14057,7 +14180,10 @@ function tripsyExternalUrl(value) {
     return '';
   }
 }
-function renderTripsyViewPanel(panel, raw, eventSummary, onEdit) {
+// `tripKey` is optional (defaults to null) so the Travel View event-detail overlay,
+// which calls this without one, is unaffected -- the Outfit button below only renders
+// when a tripKey is actually supplied, i.e. from the My Trips timeline.
+function renderTripsyViewPanel(panel, raw, eventSummary, onEdit, tripKey = null) {
   const { groupOrder, byGroup } = tripsyFieldGroups(raw.resource);
   const displayValue = f => {
     const val = raw[f.key];
@@ -14093,16 +14219,28 @@ function renderTripsyViewPanel(panel, raw, eventSummary, onEdit) {
     `;
   };
   const sections = groupOrder.map(sectionHtml).filter(Boolean).join('');
+  // The guide/outfit id space is "<resource>-<id>" (hyphen) -- different from this
+  // raw event's own "<resource>:<id>" (colon) key everywhere else in My Trips (see
+  // tripsyEventKey/tripsyAttireGoToEvent's reverse conversion). Built straight from
+  // raw.resource/raw.id rather than re-deriving from a key string.
+  const attireEventId = (tripKey && raw && raw.resource && raw.id != null) ? `${raw.resource}-${raw.id}` : null;
   panel.innerHTML = `
     <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
       ${sections || `<div style="font-size:13px; color:var(--muted);">No details available.</div>`}
       <div style="display:flex; gap:10px; align-items:center;">
         ${onEdit ? `<button class="btn primary" data-tripsy-view-edit style="font-size:13px; padding:8px 18px;">Edit</button>` : ''}
         <button class="btn" data-tripsy-view-close style="font-size:13px; padding:8px 18px;">Close</button>
+        ${attireEventId ? `<button class="btn" data-tripsy-view-outfit style="margin-left:auto; font-size:13px; padding:8px 18px;">Outfit</button>` : ''}
       </div>
     </div>
   `;
   if (onEdit) panel.querySelector("[data-tripsy-view-edit]").addEventListener("click", onEdit);
+  // Same outfit view the Daily Dress Guide's "👔 See outfit" cue opens, for whichever
+  // person is currently selected there (tripsyDressGuidePerson) -- available to every
+  // viewer, same as the rest of this read-only panel, not owner-gated.
+  if (attireEventId) panel.querySelector("[data-tripsy-view-outfit]").addEventListener("click", () => {
+    showTripsyOutfitModal(tripKey, attireEventId, tripsyDressGuidePerson);
+  });
   panel.querySelector("[data-tripsy-view-close]").addEventListener("click", () => {
     panel.style.display = "none";
     panel.innerHTML = "";
@@ -28374,7 +28512,7 @@ async function renderTripsyEventsListImpl() {
         panel.dataset.mode = "edit";
         setTripsyEditIconActive(key, true);
       } : null;
-      renderTripsyViewPanel(panel, effectiveRaw, display.summary, onEdit);
+      renderTripsyViewPanel(panel, effectiveRaw, display.summary, onEdit, found.tripKey);
       panel.dataset.mode = "view";
       panel.style.display = "block";
       setTripsyEditIconActive(key, false);

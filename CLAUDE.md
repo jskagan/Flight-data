@@ -785,6 +785,17 @@ step 4; git history has it if ever needed.
   it to appear instead of assuming a fixed delay is enough. A too-short fixed wait here looks exactly
   like "click bounces straight back to Attire," but is a render-timing race, not the row genuinely
   missing — this bit a real trip with enough events that a small mocked test never would.
+- **The detail panel also opens straight into that event's outfit**, the opposite direction of the
+  jump above: an **Outfit** button sits bottom-right of the Edit/Close row (`margin-left:auto` in
+  the same flex row, not a separate row), calling the SAME `showTripsyOutfitModal` the Daily Dress
+  Guide's "👔 See outfit" cue opens, for whichever person is currently selected there
+  (`tripsyDressGuidePerson`) — available to every viewer, same as the rest of this read-only panel.
+  Built straight from `raw.resource`/`raw.id` into the guide's own `<resource>-<id>` hyphen id space
+  (the reverse of the jump above's colon conversion), not by string-transforming a key. `renderTripsyViewPanel`
+  takes `tripKey` as an optional 5th param, defaulting to `null`, specifically so the OTHER caller —
+  Travel View's own event-detail overlay (`showTripsyTravelEventDetail`), which shares this same
+  render function — stays unaffected: no tripKey passed there, so no Outfit button renders, and
+  `showTripsyOutfitModal`'s own graceful "No outfit yet" state covers an event with none composed.
 - **Block dress-level propagation (`displayCategory`)**: adjacent events with no time to change
   between them form one "time-block" and are all worn as — and displayed as — the block's DRESSIEST
   tier. `computeTripsyAttireBlocks` is the single grouping for this: it splits each day into runs at
@@ -975,6 +986,20 @@ would overwrite the glyph with the word.
   impossible to deselect. That function also re-homes swim picks (see below).
   `tripsyWardrobeAssignGarments` honours an explicit `item.line`, falling back to its own matching
   when absent, which is what lets all five call sites share it.
+- **"Add Garment" on Plan Packing List searches the whole wardrobe** rather than requiring the owner
+  to first navigate into a specific line's own garment page. Its dialog (`tripsyWardrobeAddGarmentDialog`)
+  filters by His/Hers, Type (`TRIPSY_ATTIRE_PACKING_GROUPS` — the same vocabulary the "+ Add Line"
+  dialog's own Type field already uses), and Dress Level (only tiers with real need lines for the
+  selected person — unlike Add Line, which targets any tier freely since it invents a new line, this
+  one attaches a REAL garment to an EXISTING one, so an empty tier would be a dead end). Every result
+  shown is pre-filtered through `tripsyWardrobeGarmentFillsLine` against that tier's lines, so it's
+  guaranteed to fit something — Add can never fail with "no matching line." Resolves `{garmentId,
+  tier}`, and the CALLER (`tripsyWardrobePackForTrip`) re-runs that same fit-test to pick the specific
+  line, then writes through the ordinary `sel`/`persistChosen` path — no parallel selection mechanism.
+  Picking the other person's garment switches the page to show them, so the addition is visible
+  immediately. `tripsyWardrobeChooseQty` (asked when more than one copy is available) now pins its
+  own z-index above the Add Garment dialog specifically — it used to rely on plain DOM append order,
+  which broke the moment a caller other than the base page height opened it first.
 - **A packed suit covers a tier's blazer + trousers — including one packed for another tier.** A
   tier whose need is "blazer (or informal suit) + trousers" (e.g. Cocktail) DROPS both lines once
   any selected suit is wearable at that tier, judged by the garment's own `tiers` — so a suit going
