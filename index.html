@@ -10038,8 +10038,9 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
   const label = TRIPSY_ATTIRE_CATEGORY_LABEL[block.category] || block.category || '';
   // "May be out of date" if this block's dress level or the packing selection changed since compose.
   let stale = false;
+  let guide = null; // hoisted out of the try below -- Swap needs it too, for the LIVE tier
   try {
-    const guide = await Store.getTripsyAttireGuide(tripKey);
+    guide = await Store.getTripsyAttireGuide(tripKey);
     const sel = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey));
     // Per-block: stale only if THIS block's dress level moved, or the packed garments
     // changed. Events added next to it at the same level (or deleted) don't touch it.
@@ -10079,27 +10080,59 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
   if (isOwner) ov.querySelectorAll('[data-tw-outfit-swap]').forEach(btn => {
     btn.onclick = async () => {
       const currentId = btn.dataset.twOutfitSwap;
-      const chosenId = await tripsyOutfitSwapPicker(tripKey, block, currentId, person);
-      if (!chosenId || chosenId === currentId) return;
+      // The LIVE tier, not block.category (the tier this outfit was COMPOSED against)
+      // -- an event's dress code can be hand-overridden after composing, and Swap must
+      // offer substitutes for what the owner is dressing for NOW.
+      const liveTier = tripsyOutfitBlockLiveTier(guide, block);
+      const chosen = await tripsyOutfitSwapPicker(tripKey, block, currentId, person, liveTier);
+      if (!chosen) return; // cancelled
       const i = (block.garmentIds || []).indexOf(currentId);
-      if (i >= 0) block.garmentIds[i] = chosenId;
+      if (i < 0) return;
+      if (chosen === TRIPSY_OUTFIT_SWAP_REMOVE) {
+        block.garmentIds.splice(i, 1); // e.g. a tie that's merely optional at Cocktail
+      } else {
+        if (chosen === currentId) return;
+        block.garmentIds[i] = chosen;
+      }
       const ok = await Store.saveTripsyTripOutfits(outfits);
-      if (!ok) { toast('Could not save the swap.', 'error'); return; }
+      if (!ok) { toast('Could not save the change.', 'error'); return; }
       showTripsyOutfitModal(tripKey, eventId, person, opts);
     };
   });
   tripsyWardrobeLoadPhotos(ov);
 }
 
+// The block's CURRENT dress tier, read LIVE from the guide -- not block.category, the
+// tier this outfit was composed against, which drifts the moment an event's dress code
+// is hand-overridden afterward (tripsyAttireOverrideCategory). Same catByEvent lookup
+// tripsyOutfitBlockTierMoved uses to detect that drift; this returns the actual value
+// instead of a boolean. Falls back to block.category when the guide isn't available.
+function tripsyOutfitBlockLiveTier(guide, block) {
+  const catByEvent = new Map();
+  for (const day of ((guide && guide.days) || [])) {
+    for (const ev of (day.events || [])) catByEvent.set(ev.id, tripsyAttireDisplayCategory(ev));
+  }
+  for (const id of ((block && block.eventIds) || [])) {
+    const cat = catByEvent.get(id);
+    if (cat !== undefined) return cat;
+  }
+  return block && block.category;
+}
+// Sentinel Swap can resolve with instead of a garment id, meaning "take this piece out
+// of the outfit, no replacement" -- e.g. a tie that's merely optional at Cocktail
+// rather than required. Garment ids are real UUIDs, so this can't collide with one.
+const TRIPSY_OUTFIT_SWAP_REMOVE = '__REMOVE__';
+
 // Same-type swap picker for one outfit slot: a small modal grid of the trip's PACKED
 // garments whose type bucket matches the slot's, minus pieces already worn in this
-// block. Resolves the chosen garment id, or null on cancel / no alternatives.
-async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person = 'him') {
+// block. Resolves the chosen garment id, TRIPSY_OUTFIT_SWAP_REMOVE, or null on cancel.
+async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person = 'him', liveTier = null) {
   const [garments, selectedRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
   const byId = new Map(garments.map(g => [g.id, g]));
   const current = byId.get(currentGarmentId);
   const bucketKey = current ? tripsyGarmentTypeBucket(current).key : null;
   const typeLabel = current ? tripsyGarmentTypeBucket(current).label : 'garment';
+  const tierLabel = liveTier ? (TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier] || liveTier) : '';
   const wornElsewhere = new Set((block.garmentIds || []).filter(id => id !== currentGarmentId));
   // Only offer this person's selected garments as swap candidates (deduped by id --
   // a garment allocated to several categories is one garment here).
@@ -10107,7 +10140,13 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
     .map(id => byId.get(id))
     // Underwear/socks are packable (and so selectable) but are never part of a composed
     // OUTFIT, so they're excluded here and in tripsyComposeTripOutfits' own `chosen`.
-    .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g) && g.id !== currentGarmentId && !wornElsewhere.has(g.id) && (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey));
+    .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g) && g.id !== currentGarmentId && !wornElsewhere.has(g.id) && (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey)
+      // Scoped to the block's LIVE dress code: the whole point of re-opening Swap
+      // after changing an event's dress code is to see substitutes for the NEW tier,
+      // not every same-type garment regardless of formality. Same (g.tiers||[])
+      // convention the Pack-for-tier screens already use -- an untagged garment
+      // (empty tiers) is excluded here exactly like it is there, not let through.
+      && (!liveTier || (g.tiers || []).includes(liveTier)));
   return new Promise(resolve => {
     let ov = document.getElementById('tw-swap-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tw-swap-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -10118,9 +10157,12 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
     const done = val => { ov.style.display = 'none'; resolve(val); };
     ov.innerHTML = `
       <div class="tw-modal-paper tw-wide">
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
-          <h2 style="margin:0; font-size:17px;">Swap ${esc(typeLabel)}</h2>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:4px;">
+          <h2 style="margin:0; font-size:17px;">Swap ${esc(typeLabel)}${tierLabel ? ` for ${esc(tierLabel)}` : ''}</h2>
           <button class="btn" data-tw-swap-cancel>Cancel</button>
+        </div>
+        <div style="display:flex; justify-content:flex-end; margin-bottom:10px;">
+          <button class="btn" data-tw-swap-remove style="color:var(--red, #c0392b); border-color:var(--red, #c0392b);" title="Take this piece out of the outfit with no replacement -- e.g. a tie that's optional here">Remove from outfit</button>
         </div>
         ${candidates.length
           ? `<div class="tw-grid">${candidates.map(g => `
@@ -10128,10 +10170,11 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
                 <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : '👕'}</div>
                 <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}</div><div class="tw-meta">${esc(tripsyGarmentTypeBucket(g).label)}${g.color ? ` · ${esc(g.color)}` : ''}</div></div>
               </div>`).join('')}</div>`
-          : `<div style="color:var(--muted); padding:8px 0 4px;">No other ${esc(typeLabel.toLowerCase())} packed for this trip — use Plan Packing List to add one.</div>`}
+          : `<div style="color:var(--muted); padding:8px 0 4px;">No other ${esc(typeLabel.toLowerCase())}${tierLabel ? ` for ${esc(tierLabel)}` : ''} packed for this trip — use Plan Packing List to add one, or remove this item instead.</div>`}
       </div>`;
     ov.style.display = 'flex';
     ov.querySelector('[data-tw-swap-cancel]').onclick = () => done(null);
+    ov.querySelector('[data-tw-swap-remove]').onclick = () => done(TRIPSY_OUTFIT_SWAP_REMOVE);
     ov.onclick = e => {
       if (e.target === ov) { done(null); return; }
       const pick = e.target.closest('[data-tw-swap-pick]');

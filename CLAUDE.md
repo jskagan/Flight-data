@@ -696,6 +696,20 @@ step 4; git history has it if ever needed.
   `2147483090`, explicitly above the one caller that ever opens it. Any new small blocking picker
   opened from an already-elevated screen needs this same explicit z-index above its caller — the
   base `.tw-modal` layer is only correct for a picker opened from the ordinary page background.
+  **Swap is scoped to the block's LIVE dress code, not the tier it was composed against, and can
+  remove a piece outright.** `tripsyOutfitBlockLiveTier(guide, block)` reads each of the block's
+  events' CURRENT `tripsyAttireDisplayCategory` (same lookup `tripsyOutfitBlockTierMoved` already
+  did to detect drift, just returning the value instead of a boolean) — because an event's dress
+  code can be hand-overridden after an outfit was composed, and the whole point of reopening Swap
+  after doing that is to see substitutes for the NEW tier, not every same-type garment regardless
+  of formality. `tripsyOutfitSwapPicker`'s candidate filter adds `(g.tiers||[]).includes(liveTier)`
+  on top of the existing same-type-bucket check — same convention the Pack-for-tier screens already
+  use, so an untagged garment (empty `tiers`) is excluded here exactly like it is there. Falls back
+  to the pre-fix same-bucket-only behavior when no live tier is available (guide fetch failed).
+  Swap can also resolve with `TRIPSY_OUTFIT_SWAP_REMOVE` (its own **Remove from outfit** button,
+  always offered alongside the candidate grid) instead of a garment id, splicing the piece out of
+  `block.garmentIds` with no replacement — e.g. a tie that's merely optional now that the event
+  reads Cocktail rather than Black Tie, where a substitute isn't the point, dropping it is.
 - **Once a wash exists, the guide's orange "best day for laundry" bar is replaced by a red RUN-OUT
   bar.** The advice was a plan; from then on what matters is the consequence.
   `tripsyLaundryRunOutByDay` walks each garment's clean stock forward day by day — a wash that day
