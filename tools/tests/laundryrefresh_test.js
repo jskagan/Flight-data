@@ -50,7 +50,7 @@ assert(/if \(opts\.onChanged\) opts\.onChanged\(\);/.test(notDirtyBlock), 'THE F
 const guideRender = extractFn('renderTripsyDressGuideInto');
 assert(/const refreshLaundryInfo = async \(\) => \{/.test(guideRender),
   'one shared callback recomputes the run-out projection and re-renders the guide');
-assert(/showTripsyLaundryDay\(guide\.tripKey, el\.getAttribute\('data-tripsy-laundry-day'\), person, \{ onChanged: refreshLaundryInfo \}\);/.test(guideRender),
+assert(/showTripsyLaundryDay\(guide\.tripKey, dayKey, person, \{ onChanged: refreshLaundryInfo \}\);/.test(guideRender),
   'the laundry-day trigger passes it as onChanged');
 assert(/showTripsyOutfitModal\(guide\.tripKey, el\.dataset\.tripsyOutfitBlock, person, \{ onSwapped: refreshLaundryInfo \}\);/.test(guideRender),
   'and the outfit-block trigger passes the exact same callback as onSwapped -- one function, both fixes');

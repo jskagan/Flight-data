@@ -738,6 +738,19 @@ step 4; git history has it if ever needed.
   modal's heading switches the same way, so a mix-and-match swap reads "Tops" rather than a
   misleadingly narrow "Polo". No live tier at all (guide unavailable) still falls back to the
   pre-existing same-bucket-only behavior, unchanged.
+- **Once a day has a confirmed wash, its button reads "Washed Today" instead of "Do Laundry
+  Today"** and opens a read-only list of what went in, rather than reopening the dirty-items screen
+  (there's nothing left to gather; Wash Now already happened). `renderTripsyDressGuideInto` computes
+  `washedDayKeys` — every dayKey with a `driveData.tripsyLaundry` record carrying `washedAt` for the
+  currently-shown person — synchronously from already-loaded `driveData` (`Store.listTripsyLaundry`
+  is not async), and each day's button carries that state as `data-tripsy-laundry-washed` so the
+  click handler can branch without a second lookup. The read-only view (`showTripsyWashedDay`)
+  reuses the same overlay node as `showTripsyLaundryDay` (they're never open at once) and merges a
+  garment's base-key and `::nn`-suffixed bag entries back into one line — the "needed again" vs.
+  "not needed" split only mattered while deciding what to wash, not once it's done. A wash recorded
+  from an already-open guide flips the button immediately via the same `refreshLaundryInfo` callback
+  the run-out-bar fix above already threads through `showTripsyLaundryDay`'s `opts.onChanged`, since
+  that re-render recomputes `washedDayKeys` fresh too.
 - **Tapping a garment's photo in the outfit view shows where it's actually packed**
   (`showTripsyGarmentCubeInfo`) — read-only, so every viewer gets it, not just the owner (unlike
   Swap, sitting right next to it in the same card). Reuses `tripsyCubesForEntry` exactly as Packing

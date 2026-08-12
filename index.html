@@ -10032,6 +10032,49 @@ async function showTripsyLaundryDay(tripKey, dayKey, person, opts = {}) {
   };
 }
 
+// A day's Daily Dress Guide button reads "Washed Today" once Wash Now has actually been
+// pressed for it (see washedDayKeys in renderTripsyDressGuideInto) -- tapping it then
+// shows this READ-ONLY list of what went in, rather than reopening the dirty-items
+// screen (there's nothing left to gather; the wash already happened). Reuses the same
+// overlay node as showTripsyLaundryDay since the two are never open at once.
+async function showTripsyWashedDay(tripKey, dayKey, person) {
+  let ov = document.getElementById('tripsy-laundry-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-laundry-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483120';
+  const heading = `Washed — ${tripsyDayHeaderLabel(dayKey)}`;
+  const record = (driveData.tripsyLaundry || [])
+    .find(r => r.tripKey === tripKey && (r.person || 'him') === person && r.dayKey === dayKey && r.washedAt);
+  const garments = await Store.listWardrobe();
+  const garmentById = new Map(garments.map(g => [g.id, g]));
+  // The bag's '::nn' suffix (the "Not Needed for Trip" card) only mattered while
+  // deciding what to wash -- once it's actually washed, both halves of one garment
+  // are the same result, so they're merged back to one line here.
+  const counts = new Map();
+  for (const [key, n] of Object.entries((record && record.bag) || {})) {
+    const base = key.endsWith('::nn') ? key.slice(0, -4) : key;
+    counts.set(base, (counts.get(base) || 0) + (n || 0));
+  }
+  const nameFor = key => {
+    if (key.startsWith('g:')) return (garmentById.get(key.slice(2)) || {}).name || 'Garment';
+    if (key.startsWith('x:')) return key.slice(2) || 'Item';
+    return key;
+  };
+  const items = [...counts.entries()].map(([key, count]) => ({ name: nameFor(key), count })).filter(it => it.count > 0);
+  ov.innerHTML = `
+    <div class="tw-modal-paper tw-wide">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
+        <h2 style="margin:0; font-size:18px; min-width:0; overflow:hidden; text-overflow:ellipsis;">${esc(heading)}</h2>
+        <button class="tripsy-close-x" data-laundry-close aria-label="Close" title="Close">&#10005;</button>
+      </div>
+      ${items.length
+        ? `<div style="font-size:14.5px; color:var(--text); line-height:1.9;">${items.map(it =>
+            `<div>${esc(it.name)}${it.count > 1 ? ` <span style="color:var(--muted);">×${it.count}</span>` : ''}</div>`).join('')}</div>`
+        : `<div style="padding:12px 0; color:var(--muted);">Nothing recorded for this wash.</div>`}
+    </div>`;
+  ov.style.display = 'flex';
+  ov.onclick = e => { if (e.target === ov || e.target.closest('[data-laundry-close]')) { ov.style.display = 'none'; ov.onclick = null; } };
+}
+
 async function showTripsyWearDaysOverlay(tripKey, garment, person) {
   let ov = document.getElementById('tw-weardays-overlay');
   if (!ov) {
@@ -24202,6 +24245,13 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
   }
   const laundryByDay = new Map((guide.laundryDays || []).map(l => [l.dayKey, l.reason]));
   const laundryInfo = (renderOpts && renderOpts.laundryInfo) || { runOut: new Map(), hasWash: false };
+  // Days that already have a confirmed wash (Wash Now pressed, not just gathered into
+  // the bag) -- the day's button reads "Washed Today" instead of "Do Laundry Today" and
+  // opens a read-only list of what was washed, rather than the dirty-items screen.
+  const washedDayKeys = new Set(
+    Store.listTripsyLaundry(guide.tripKey)
+      .filter(r => r.washedAt && (r.person || 'him') === tripsyDressGuidePerson)
+      .map(r => r.dayKey));
   // Per-person garment hint under each dress-code lead-in: the pieces this person
   // (His default / Hers) wears at that tier, from Claude's own personGuidance --
   // names only, since the quantities there are trip totals, not per-block.
@@ -24254,8 +24304,9 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
       // bar states what to wear, and on an outfit-linked day the entire bar is a tap
       // target for the outfit. Later "⇄ Change to" markers get no button: laundry is not
       // a property of every outfit change within the day.
+      const washedToday = washedDayKeys.has(day.dayKey);
       const laundryRow = (i === 0 && isOwner)
-        ? `<div class="tripsy-dg-laundry-row"><button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn" data-tripsy-laundry-day="${esc(day.dayKey)}">Do Laundry Today</button></div>`
+        ? `<div class="tripsy-dg-laundry-row"><button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn" data-tripsy-laundry-day="${esc(day.dayKey)}" data-tripsy-laundry-washed="${washedToday ? '1' : ''}">${washedToday ? 'Washed Today' : 'Do Laundry Today'}</button></div>`
         : '';
       const leadIn = (leadInText == null ? '' : (hasOutfit
         ? `<div class="tripsy-attire-dressguide-instruction tripsy-attire-dressguide-instruction--outfit" role="button" tabindex="0" data-tripsy-outfit-block="${esc(ev.id)}" title="Tap to see the outfit for this block">${leadInText}<span class="tripsy-attire-outfit-cue">👔 See outfit</span></div>`
@@ -24340,7 +24391,11 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
       // now, so nothing above it is a tap target, but a stray bubble here would open the
       // outfit modal behind the laundry screen.
       e.stopPropagation();
-      showTripsyLaundryDay(guide.tripKey, el.getAttribute('data-tripsy-laundry-day'), person, { onChanged: refreshLaundryInfo });
+      const dayKey = el.getAttribute('data-tripsy-laundry-day');
+      // Already washed today -- a read-only look at what went in, not the dirty-items
+      // screen (there's nothing left to gather; Wash Now already happened).
+      if (el.getAttribute('data-tripsy-laundry-washed') === '1') { showTripsyWashedDay(guide.tripKey, dayKey, person); return; }
+      showTripsyLaundryDay(guide.tripKey, dayKey, person, { onChanged: refreshLaundryInfo });
     });
   });
   content.querySelectorAll('[data-tripsy-outfit-block]').forEach(el => {

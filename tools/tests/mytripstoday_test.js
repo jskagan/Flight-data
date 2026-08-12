@@ -119,9 +119,9 @@ assert(!/dressguide-instruction--wide/.test(html),
   'so the stretch-the-bar variant is gone with it');
 // Nothing above it is a tap target now, but a bubble would still reach the outfit bar's
 // handler on the way up, so the guard stays.
-const lw = html.slice(html.indexOf("[data-tripsy-laundry-day]"), html.indexOf("[data-tripsy-laundry-day]") + 520);
+const lw = html.slice(html.indexOf("[data-tripsy-laundry-day]"), html.indexOf("[data-tripsy-laundry-day]") + 800);
 assert(/e\.stopPropagation\(\)/.test(lw), 'tapping it does not open a block outfit behind it');
-assert(/showTripsyLaundryDay\(guide\.tripKey, el\.getAttribute\('data-tripsy-laundry-day'\), person, \{ onChanged: refreshLaundryInfo \}\)/.test(lw),
+assert(/showTripsyLaundryDay\(guide\.tripKey, dayKey, person, \{ onChanged: refreshLaundryInfo \}\)/.test(lw),
   'and it opens that day for the person being shown, wired to refresh the guide\'s run-out bar on a wash/Not Dirty');
 assert(/\.tripsy-attire-dressguide-instruction \{[^}]*display: inline-flex/.test(html),
   'every instruction bar hugs its text as a compact pill again');
