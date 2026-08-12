@@ -716,6 +716,19 @@ step 4; git history has it if ever needed.
   always offered alongside the candidate grid) instead of a garment id, splicing the piece out of
   `block.garmentIds` with no replacement — e.g. a tie that's merely optional now that the event
   reads Cocktail rather than Black Tie, where a substitute isn't the point, dropping it is.
+  **On the 3 mix-and-match tiers (`casual`/`smart_casual`/`athletic`), Swap's same-type-bucket check
+  loosens to a same-packing-GROUP check instead.** The narrow `tripsyGarmentTypeBucket` (polo vs.
+  shirt vs. tee are three different buckets) is right for the 4 itemized tiers — a dress-shirt slot
+  must never offer a tie — but wrong for mix-and-match, where `tripsyWardrobeNeedByTier` already
+  treats any top as interchangeable for that tier's need lines; Swap disagreeing with its own need
+  lines is what caused "not all available casual tops appear" (confirmed against the owner's real
+  wardrobe: casual tops alone span typeKeys polo/shirt/tee/jacket, so swapping a polo only ever
+  offered other polos). `isMixAndMatch = liveTier && !TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(liveTier)`
+  picks the check; `currentGroup` (`tripsyAttirePackingGroupOf`) is computed alongside the existing
+  `bucketKey` and the candidate filter branches on `isMixAndMatch`. The typeLabel shown in the
+  modal's heading switches the same way, so a mix-and-match swap reads "Tops" rather than a
+  misleadingly narrow "Polo". No live tier at all (guide unavailable) still falls back to the
+  pre-existing same-bucket-only behavior, unchanged.
 - **Tapping a garment's photo in the outfit view shows where it's actually packed**
   (`showTripsyGarmentCubeInfo`) — read-only, so every viewer gets it, not just the owner (unlike
   Swap, sitting right next to it in the same card). Reuses `tripsyCubesForEntry` exactly as Packing

@@ -63,11 +63,15 @@ assert(tripsyOutfitBlockLiveTier(guideFixture, { eventIds: [], category: 'casual
   assert(candidatesExpr.includes('liveTier') && candidatesExpr.includes('g.tiers'),
     'sanity: extracted the tier-aware candidate expression, not a stale copy');
 
+  const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
   const run = (wardrobe, selectedRaw, currentGarmentId, person, liveTier, blockGarmentIds) => {
     const byId = new Map(wardrobe.map(g => [g.id, g]));
     const current = byId.get(currentGarmentId);
     const tripsyGarmentTypeBucket = g => ({ key: g.__type || ('group:' + (g.group || 'accessories')) });
+    const tripsyAttirePackingGroupOf = g => g.group || 'accessories';
+    const isMixAndMatch = liveTier && !TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(liveTier);
     const bucketKey = current ? tripsyGarmentTypeBucket(current).key : null;
+    const currentGroup = current ? tripsyAttirePackingGroupOf(current) : null;
     const tripsyNormalizeTripSelection = sel => sel;
     const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';
     const wornElsewhere = new Set((blockGarmentIds || []).filter(id => id !== currentGarmentId));

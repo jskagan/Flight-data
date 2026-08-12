@@ -10213,8 +10213,20 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
   const [garments, selectedRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
   const byId = new Map(garments.map(g => [g.id, g]));
   const current = byId.get(currentGarmentId);
+  // The 3 MIX-AND-MATCH tiers (athletic/casual/smart_casual) treat any garment of the
+  // same packing GROUP as interchangeable -- a polo, a tee and a casual shirt are all
+  // just "tops" there (same convention tripsyWardrobeNeedByTier already uses, collapsing
+  // those tiers' lines to untyped group lines). The 4 ITEMIZED tiers care about the
+  // SPECIFIC type (a dress shirt slot must not offer a tie). Bucketing by the narrow
+  // TYPE unconditionally -- the original behavior -- silently hid every other casual top
+  // whose typeKey happened to differ (polo vs. shirt vs. tee are three different
+  // typeKeys), even though the tier treats them as the same thing.
+  const isMixAndMatch = liveTier && !TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(liveTier);
   const bucketKey = current ? tripsyGarmentTypeBucket(current).key : null;
-  const typeLabel = current ? tripsyGarmentTypeBucket(current).label : 'garment';
+  const currentGroup = current ? tripsyAttirePackingGroupOf(current) : null;
+  const typeLabel = current
+    ? (isMixAndMatch ? (TRIPSY_ATTIRE_PACKING_GROUP_LABEL[currentGroup] || currentGroup) : tripsyGarmentTypeBucket(current).label)
+    : 'garment';
   const tierLabel = liveTier ? (TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier] || liveTier) : '';
   const wornElsewhere = new Set((block.garmentIds || []).filter(id => id !== currentGarmentId));
   // Only offer this person's selected garments as swap candidates (deduped by id --
@@ -10223,7 +10235,10 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
     .map(id => byId.get(id))
     // Underwear/socks are packable (and so selectable) but are never part of a composed
     // OUTFIT, so they're excluded here and in tripsyComposeTripOutfits' own `chosen`.
-    .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g) && g.id !== currentGarmentId && !wornElsewhere.has(g.id) && (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey)
+    .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g) && g.id !== currentGarmentId && !wornElsewhere.has(g.id)
+      && (isMixAndMatch
+            ? (!currentGroup || tripsyAttirePackingGroupOf(g) === currentGroup)
+            : (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey))
       // Scoped to the block's LIVE dress code: the whole point of re-opening Swap
       // after changing an event's dress code is to see substitutes for the NEW tier,
       // not every same-type garment regardless of formality. Same (g.tiers||[])
