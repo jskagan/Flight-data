@@ -1121,6 +1121,18 @@ would overwrite the glyph with the word.
   same ordering traps and must agree with it** (it read "bathing suit" as `dress_wear` for the same
   reason). When changing either, re-type every name in the live data against the previous
   implementation and diff — that catches what reasoning about the regex does not.
+- **`light-jacket` is split out of the general `jacket` bucket** for a packable travel jacket, as
+  opposed to a heavy coat/raincoat/parka — matched by `tripsyGarmentTypeKey` BEFORE the general
+  jacket rule ("light jacket", "travel(er) jacket" — Loro Piana's own product name for this kind of
+  piece — or "packable jacket"), so the owner's real "Rust Loro Piana Traveler Jacket" reclassifies
+  with no data edit, purely from its existing name. The split exists for one behavioral reason:
+  `light-jacket` is deliberately left OUT of `TRIPSY_UNCUBED_TYPES` — unlike a heavy `jacket`, which
+  hangs, a light one folds small and packs in a cube like any ordinary garment (including the "No
+  cube"/"Wear on flight" picker options above). Registered everywhere `jacket` is:
+  `TRIPSY_GARMENT_TYPE_LABEL`/`_ORDER`/`_GLYPH` and `TRIPSY_WARDROBE_FILTER_ORDER`. Not added to
+  `TRIPSY_WEARS_BEFORE_WASH` (its per-type wash-cadence map) since the type has no entry there
+  either and both fall back to the same `outerwear` group answer (`Infinity` — never washed on a
+  trip), so no explicit entry was needed for correct behavior.
 - **A trip that STARTS with a flight wears its first outfit rather than packing it.** The outfit for
   that first time block is on your body when you leave, so it's deducted from every packing analysis:
   one top, one bottom and one pair of shoes at the block's own tier, plus the underwear and socks
