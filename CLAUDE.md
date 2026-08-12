@@ -716,6 +716,14 @@ step 4; git history has it if ever needed.
   always offered alongside the candidate grid) instead of a garment id, splicing the piece out of
   `block.garmentIds` with no replacement — e.g. a tie that's merely optional now that the event
   reads Cocktail rather than Black Tie, where a substitute isn't the point, dropping it is.
+- **Tapping a garment's photo in the outfit view shows where it's actually packed**
+  (`showTripsyGarmentCubeInfo`) — read-only, so every viewer gets it, not just the owner (unlike
+  Swap, sitting right next to it in the same card). Reuses `tripsyCubesForEntry` exactly as Packing
+  Status does, summed across every selection entry for that ONE garment id in the trip — allocation
+  is per LINE, so a single owned copy can be split across several lines, each with its own cube
+  assignment, and all of them need combining to answer "where is this." An uncubed type (a tie,
+  anything that hangs) explains WHY instead of showing a misleading "cube not set", and a garment
+  not yet marked packed for this trip says so plainly rather than opening an empty dialog.
 - **Once a wash exists, the guide's orange "best day for laundry" bar is replaced by a red RUN-OUT
   bar.** The advice was a plan; from then on what matters is the consequence.
   `tripsyLaundryRunOutByDay` walks each garment's clean stock forward day by day — a wash that day

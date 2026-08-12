@@ -10060,7 +10060,7 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
   } catch (e) { /* staleness is best-effort */ }
   const cardHtml = cards.length ? cards.map(g => `
     <div class="tw-card" data-tw-id="${esc(g.id)}">
-      <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : '👕'}</div>
+      <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}" data-tw-outfit-photo="${esc(g.id)}" style="cursor:pointer;" title="Where is this packed?">${g.driveFileId ? '' : '👕'}</div>
       <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}</div><div class="tw-meta">${esc(tripsyGarmentTypeBucket(g).label)}${g.color ? ` · ${esc(g.color)}` : ''}</div></div>
       ${isOwner ? `<div class="tw-actions"><button class="btn" data-tw-outfit-swap="${esc(g.id)}">Swap</button></div>` : ''}
     </div>`).join('') : `<div style="color:var(--muted); padding:12px 0;">No garments were assigned to this block.</div>`;
@@ -10110,7 +10110,79 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
       showTripsyOutfitModal(tripKey, eventId, person, opts);
     };
   });
+  // Tapping a garment's photo shows where it's packed -- read-only, so every viewer
+  // gets this, not just the owner (unlike Swap, right next to it in the same card).
+  ov.querySelectorAll('[data-tw-outfit-photo]').forEach(el => {
+    el.addEventListener('click', () => showTripsyGarmentCubeInfo(tripKey, el.getAttribute('data-tw-outfit-photo')));
+  });
   tripsyWardrobeLoadPhotos(ov);
+}
+
+// Tapping a garment's photo in the outfit view: where is it actually packed? Reuses
+// the exact same cube-lookup Packing Status already uses (tripsyCubesForEntry, one
+// entry's `cubes` array per its own packed count), summed across every selection
+// entry for this ONE garment id in the trip -- allocation is per LINE, so a single
+// owned copy can be split across several lines, each with its own cube assignment.
+// Read-only, so every viewer gets it, not just the owner.
+async function showTripsyGarmentCubeInfo(tripKey, garmentId) {
+  const [garments, selectedRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
+  const g = garments.find(x => x.id === garmentId);
+  if (!g) return;
+  let ov = document.getElementById('tw-garmentcube-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tw-garmentcube-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483085'; // above the outfit modal (2147483080) it opens from
+  let body;
+  if (tripsyGarmentSkipsCube(g.name)) {
+    // Hangs, or packed loose/in a case -- never in a cube at all, so say WHY rather
+    // than showing a "cube not set" that would read as an oversight instead of by design.
+    const note = TRIPSY_UNCUBED_NOTE[tripsyGarmentTypeKey(g.name)] || TRIPSY_UNCUBED_NOTE_HANGS;
+    body = `<div style="padding:8px 0;"><div style="font-size:34px; margin-bottom:8px;">${note.glyph}</div><div style="color:var(--muted); font-size:13.5px;">${esc(g.name)} is ${esc(note.text)}.</div></div>`;
+  } else {
+    const entries = tripsyNormalizeTripSelection(selectedRaw).filter(e => e.id === garmentId);
+    const cubeIds = [];
+    for (const e of entries) {
+      const packed = Math.min(e.qty, e.packed || 0);
+      for (const cid of tripsyCubesForEntry(e, packed)) cubeIds.push(cid || '');
+    }
+    if (!cubeIds.length) {
+      body = `<div style="padding:8px 0; color:var(--muted); font-size:13.5px;">${esc(g.name)} isn't marked packed for this trip yet.</div>`;
+    } else {
+      // Grouped by cube (an unset one groups under '' too), same shape as Packing
+      // Status' own page-level cube banner -- one tile per distinct cube, with a count
+      // only when there's more than one to distinguish.
+      const counts = new Map();
+      const order = [];
+      for (const cid of cubeIds) {
+        if (!counts.has(cid)) { counts.set(cid, 0); order.push(cid); }
+        counts.set(cid, counts.get(cid) + 1);
+      }
+      body = `<div style="display:flex; flex-wrap:wrap; gap:16px; justify-content:center;">${order.map(cid => {
+        const cube = cid ? tripsyCubeById(cid) : null;
+        const n = counts.get(cid);
+        const pic = cube
+          ? tripsyCubeTileHtml(cube, { size: 96 })
+          : `<div style="width:96px; height:96px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:34px; color:var(--muted); flex-shrink:0;">&#129523;</div>`;
+        const label = (cube ? tripsyCubeName(cube) : '') || 'Cube not set';
+        return `<div style="display:flex; flex-direction:column; gap:6px; align-items:center; width:96px;">
+          ${pic}
+          <div style="font-size:12.5px; font-weight:600; color:${cube ? 'var(--text)' : 'var(--amber)'}; text-align:center; line-height:1.3;">${esc(label)}</div>
+          ${cubeIds.length > 1 ? `<div style="font-size:11.5px; color:var(--muted);">${n} item${n === 1 ? '' : 's'}</div>` : ''}
+        </div>`;
+      }).join('')}</div>`;
+    }
+  }
+  ov.innerHTML = `
+    <div class="tw-modal-paper" style="max-width:420px; text-align:center;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
+        <h2 style="margin:0; font-size:17px; text-align:left;">${esc(g.name || 'Garment')}</h2>
+        <button class="tripsy-close-x" data-tw-garmentcube-close aria-label="Close" title="Close">&#10005;</button>
+      </div>
+      ${body}
+    </div>`;
+  ov.style.display = 'flex';
+  ov.querySelector('[data-tw-garmentcube-close]').onclick = () => { ov.style.display = 'none'; };
+  ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
+  tripsyPaintCubePhotos(ov);
 }
 
 // The block's CURRENT dress tier, read LIVE from the guide -- not block.category, the
