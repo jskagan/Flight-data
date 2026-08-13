@@ -811,6 +811,52 @@ step 4; git history has it if ever needed.
   `opts.onChanged` right after each action, before rebuilding itself — and forwards `opts` (not a
   fresh literal) when it rebuilds itself, so a second wash on the same visit still carries the
   callback without re-stating it.
+- **A wash triggers a check for whether outfit changes could avoid needing another one.**
+  `tripsyLaundryFindAdjustments(tripKey, person, guide)`, called from Wash Now (owner-only, since it
+  can write outfits) right after `refreshLaundryInfo`, mirrors `tripsyLaundryRunOutByDay`'s own
+  wear-limit walk — garment by garment, day by day — but instead of just flagging a short day,
+  tries to actually FIX it: is the garment even part of a COMPOSED outfit block that day (a
+  tier-fallback wear day has nothing to swap within, so it's left as a genuine run-out), and if so,
+  is there a substitute through the exact same `tripsyOutfitSwapCandidates` rule Swap itself uses —
+  so a proposal here is always something the owner could equally have picked by hand, never a new
+  kind of match the manual picker wouldn't also offer. **Nothing is applied silently** — the owner
+  chose "ask me first" when this was built — `tripsyLaundryAdjustmentsDialog` lists each proposed
+  swap (day, old garment → new garment) with Apply/Skip; Apply calls
+  `tripsyLaundryApplyAdjustments`, which mutates each proposal's `block.garmentIds` in place (the
+  same live-reference mutation a manual Swap pick makes) and saves once for every proposal
+  together, then `refreshLaundryInfo` runs again so the guide reflects the new state. One fix
+  attempt per garment per pass (the first short day only — later short days for the same garment
+  depend on whether this fix actually lands, so speculating further isn't worth the complexity), and
+  a candidate already used by an earlier proposal in the same pass isn't offered to a second one.
+  **`tripsyOutfitSwapCandidates` is factored out of `tripsyOutfitSwapPicker` for this reuse** — the
+  picker now just calls it and renders the result; behavior is unchanged, but the two callers (the
+  manual picker and this automatic finder) can now never drift apart on what counts as a valid
+  substitute.
+  **Wash/wear scheduling is explicitly optimized to maximize how much stays genuinely dirty by the
+  END of the trip, not to keep everything as clean as possible throughout** — the two are
+  different goals: a mid-trip wash costs real vacation time, while dirty laundry at the end just
+  gets washed at home regardless, so it's the outcome to prefer, not avoid. This principle now
+  drives two separate places, per the owner's explicit choice of scope (both, not one):
+  (1) **`tripsyLaundryFindAdjustments`'s candidate ranking** — when several substitutes are
+  usable, it picks the LEAST-worn-so-far one (`tripsyWardrobeWearDays` per candidate, sorted
+  ascending), spreading wear evenly across every owned garment of that type instead of reusing one
+  favorite. This is the same mechanism that also happens to avoid early run-outs: evening out wear
+  is what keeps any ONE garment from hitting its limit ahead of schedule and forcing a wash, while a
+  garment worn just once or twice by trip's end was arguably over-packed. (2) **The `laundry_days`
+  guidance prompt** (`generateTripsyAttireCategories`'s guidance call) now says so explicitly:
+  prefer FEWER, LATER washes over an evenly-spaced schedule, only suggest one when the trip would
+  otherwise genuinely run short of something clean — never just because a cycle has elapsed — and
+  the old "~every 9 days" cadence is now framed as a MAXIMUM to plan around, not a target to hit.
+- **Travel View's own "Best day for laundry" banner (attire mode, `tv-laundry-banner`) retires a
+  suggested day once it's actually been acted on**, instead of showing every entry in
+  `guide.laundryDays` for the whole trip regardless of real washing. Unlike the Daily Dress Guide's
+  run-out bar, Travel View has no per-garment laundry screen — it just mirrors Claude's suggested
+  wash day(s) directly (`tvAttireLaundry`, built once when attire mode loads). The rule: find the
+  LATEST actually-washed day across `Store.listTripsyLaundry(trip.key)` (either person — the
+  suggestions themselves are trip-level, not split by him/her), then skip any suggested day ON OR
+  BEFORE it when populating `tvAttireLaundry`. So washing once retires that suggestion (and any
+  earlier one) even if the wash didn't land on the exact suggested date, while a LATER suggestion —
+  still genuinely pending, further into the trip — keeps showing its banner.
 - **The Daily Dress Guide has a multi-select dress-code filter** (`Filter` in its toolbar;
   `tripsyDressGuideFilter`, a Set, empty = show everything). The dropdown
   (`tripsyDressGuideOpenFilterMenu`, same `positionTripsyFixedMenu` shell as every other Tripsy

@@ -34,58 +34,46 @@ function extractConst(name) {
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 const pickerSrc = extractFn('tripsyOutfitSwapPicker');
+const candidatesSrc = extractFn('tripsyOutfitSwapCandidates');
 
-// ---- source-pattern checks: the fix is present and wired ----
-assert(/const isMixAndMatch = liveTier && !TRIPSY_ATTIRE_ITEMIZED_CATEGORIES\.includes\(liveTier\);/.test(pickerSrc),
+// ---- source-pattern checks: the fix is present and wired (now in the shared
+// tripsyOutfitSwapCandidates helper, which the picker calls) ----
+assert(/const isMixAndMatch = liveTier && !TRIPSY_ATTIRE_ITEMIZED_CATEGORIES\.includes\(liveTier\);/.test(candidatesSrc),
   'a mix-and-match tier is any live tier NOT in the itemized list');
-assert(/const currentGroup = current \? tripsyAttirePackingGroupOf\(current\) : null;/.test(pickerSrc),
+assert(/const currentGroup = current \? tripsyAttirePackingGroupOf\(current\) : null;/.test(candidatesSrc),
   'the current garment\'s packing GROUP is computed alongside its type bucket');
-assert(/isMixAndMatch\s*\n\s*\? \(!currentGroup \|\| tripsyAttirePackingGroupOf\(g\) === currentGroup\)\s*\n\s*: \(!bucketKey \|\| tripsyGarmentTypeBucket\(g\)\.key === bucketKey\)/.test(pickerSrc),
+assert(/isMixAndMatch\s*\n\s*\? \(!currentGroup \|\| tripsyAttirePackingGroupOf\(g\) === currentGroup\)\s*\n\s*: \(!bucketKey \|\| tripsyGarmentTypeBucket\(g\)\.key === bucketKey\)/.test(candidatesSrc),
   'the candidate filter branches: group match for mix-and-match tiers, narrow type-bucket match otherwise');
 assert(/isMixAndMatch \? \(TRIPSY_ATTIRE_PACKING_GROUP_LABEL\[currentGroup\] \|\| currentGroup\) : tripsyGarmentTypeBucket\(current\)\.label/.test(pickerSrc),
   'the modal\'s typeLabel also reflects the group name on a mix-and-match tier, not a misleadingly narrow type label');
+assert(/const \{ candidates, current, isMixAndMatch, currentGroup \} =\s*\n\s*await tripsyOutfitSwapCandidates\(tripKey, block, currentGarmentId, person, liveTier\);/.test(pickerSrc),
+  'the picker itself just calls the shared helper for its candidate list');
 
-// ---- executed: the exact candidate-building expression, against fixtures ----
+// ---- executed: the real tripsyOutfitSwapCandidates function, against fixtures ----
 (async () => {
-  const exprStart = pickerSrc.indexOf('const isMixAndMatch');
-  const exprEnd = pickerSrc.indexOf(');', pickerSrc.indexOf('const candidates = [...new Set')) + 2;
-  const blockSrc = pickerSrc.slice(exprStart, exprEnd);
-  assert(blockSrc.includes('isMixAndMatch') && blockSrc.includes('currentGroup'),
-    'sanity: extracted the group-aware candidate-building block, not a stale copy');
-
   const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
-  const TRIPSY_ATTIRE_PACKING_GROUP_LABEL = { tops: 'Tops', footwear: 'Footwear' };
+  const tripsyGarmentTypeBucket = g => ({ key: g.__type || ('group:' + (g.group || 'accessories')), label: g.__type || g.group });
+  const tripsyAttirePackingGroupOf = g => g.group || 'accessories';
+  const tripsyNormalizeTripSelection = sel => sel;
+  const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';
+  // No same-day availability fixture here -- that's covered by its own test file
+  // (swapavailability_test.js). This harness only needs Store.getTripsyTripOutfits to
+  // resolve to "no other blocks" so the type/group-matching logic under test is
+  // unaffected by it. listWardrobe/getTripWardrobe are the two Promise.all calls inside
+  // the real function.
+  let wardrobeFixture = [];
+  const Store = {
+    getTripsyTripOutfits: async () => null,
+    listWardrobe: async () => wardrobeFixture,
+    getTripWardrobe: async () => wardrobeFixture.map(g => ({ id: g.id, qty: 1 })),
+  };
+  eval(candidatesSrc.replace(/^async function tripsyOutfitSwapCandidates/, 'var tripsyOutfitSwapCandidates = async function'));
+  assert(typeof tripsyOutfitSwapCandidates === 'function', 'sanity: the shared helper was extracted and evaluates cleanly');
 
   const run = async (wardrobe, currentGarmentId, person, liveTier, blockGarmentIds) => {
-    const byId = new Map(wardrobe.map(g => [g.id, g]));
-    const current = byId.get(currentGarmentId);
-    const tripsyGarmentTypeBucket = g => ({ key: g.__type || ('group:' + (g.group || 'accessories')), label: g.__type || g.group });
-    const tripsyAttirePackingGroupOf = g => g.group || 'accessories';
-    const TRIPSY_ATTIRE_CATEGORY_LABEL = { casual: 'Casual', cocktail: 'Cocktail' };
-    const tripsyNormalizeTripSelection = sel => sel;
-    const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';
-    const garments = wardrobe;
-    const selectedRaw = wardrobe.map(g => ({ id: g.id, qty: 1 }));
+    wardrobeFixture = wardrobe;
     const block = { garmentIds: blockGarmentIds };
-    // No same-day availability fixture here -- that's covered by its own test file
-    // (swapavailability_test.js). This harness only needs the picker's real
-    // Store.getTripsyTripOutfits call to resolve to "no other blocks" so the
-    // type/group-matching logic under test is unaffected by it.
-    const Store = { getTripsyTripOutfits: async () => null };
-    const tripKey = 'T';
-    let candidates, isMixAndMatch, currentGroup, bucketKey, typeLabel, wornElsewhere, outfitsForDay, wornSameDay;
-    // Direct-eval const/let is scoped to the eval call itself -- strip declaration
-    // keywords so the block assigns into these outer bindings instead.
-    await eval(`(async () => { ${blockSrc
-      .replace('const isMixAndMatch', 'isMixAndMatch')
-      .replace('const bucketKey', 'bucketKey')
-      .replace('const currentGroup', 'currentGroup')
-      .replace('const typeLabel', 'typeLabel')
-      .replace('const tierLabel', 'let tierLabel')
-      .replace('const wornElsewhere', 'wornElsewhere')
-      .replace('const outfitsForDay', 'outfitsForDay')
-      .replace('const wornSameDay', 'wornSameDay')
-      .replace('const candidates', 'candidates')} })()`);
+    const { candidates } = await tripsyOutfitSwapCandidates('T', block, currentGarmentId, person, liveTier);
     return candidates.map(g => g.id);
   };
 

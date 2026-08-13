@@ -52,38 +52,32 @@ assert(tripsyOutfitBlockLiveTier(null, { eventIds: ['e1'], category: 'casual' })
 assert(tripsyOutfitBlockLiveTier(guideFixture, { eventIds: [], category: 'casual' }) === 'casual',
   'a block with no events falls back to block.category');
 
-// ---- tripsyOutfitSwapPicker's candidate list, extracted verbatim and executed ----
-// (Not the whole function -- that goes on to build real DOM. This is the exact
-// candidate-building expression it uses, byte for byte, run against fixtures.)
+// ---- tripsyOutfitSwapCandidates (the shared helper the picker now calls), executed
+// against fixtures ----
 {
-  const fnSrc = extractFn('tripsyOutfitSwapPicker');
-  const exprStart = fnSrc.indexOf('const candidates = [...new Set');
-  const exprEnd = fnSrc.indexOf(');', exprStart) + 2;
-  const candidatesExpr = fnSrc.slice(exprStart, exprEnd);
-  assert(candidatesExpr.includes('liveTier') && candidatesExpr.includes('g.tiers'),
-    'sanity: extracted the tier-aware candidate expression, not a stale copy');
+  const candidatesSrc = extractFn('tripsyOutfitSwapCandidates');
+  assert(candidatesSrc.includes('liveTier') && candidatesSrc.includes('g.tiers'),
+    'sanity: extracted the tier-aware helper, not a stale copy');
 
   const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
-  const run = (wardrobe, selectedRaw, currentGarmentId, person, liveTier, blockGarmentIds) => {
-    const byId = new Map(wardrobe.map(g => [g.id, g]));
-    const current = byId.get(currentGarmentId);
-    const tripsyGarmentTypeBucket = g => ({ key: g.__type || ('group:' + (g.group || 'accessories')) });
-    const tripsyAttirePackingGroupOf = g => g.group || 'accessories';
-    const isMixAndMatch = liveTier && !TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(liveTier);
-    const bucketKey = current ? tripsyGarmentTypeBucket(current).key : null;
-    const currentGroup = current ? tripsyAttirePackingGroupOf(current) : null;
-    const tripsyNormalizeTripSelection = sel => sel;
-    const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';
-    const wornElsewhere = new Set((blockGarmentIds || []).filter(id => id !== currentGarmentId));
+  const tripsyGarmentTypeBucket = g => ({ key: g.__type || ('group:' + (g.group || 'accessories')) });
+  const tripsyAttirePackingGroupOf = g => g.group || 'accessories';
+  const tripsyNormalizeTripSelection = sel => sel;
+  const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';
+  let wardrobeFixture = [];
+  const Store = {
     // Same-day availability (a separate, later addition) isn't exercised by this
-    // fixture set -- covered by its own test file. An empty set here is "nothing else
-    // worn that day", i.e. a no-op against these fixtures.
-    const wornSameDay = new Set();
-    let candidates;
-    // eval's own `const` would shadow this outer binding rather than assign to it
-    // (a `const`/`let` inside a direct eval is scoped to the eval call itself, even
-    // non-strict) -- strip the declaration keyword so it assigns instead.
-    eval(candidatesExpr.replace('const candidates = ', 'candidates = '));
+    // fixture set -- covered by its own test file. No other blocks is a no-op here.
+    getTripsyTripOutfits: async () => null,
+    listWardrobe: async () => wardrobeFixture,
+    getTripWardrobe: async () => wardrobeFixture.map(g => ({ id: g.id, qty: 1 })),
+  };
+  eval(candidatesSrc.replace(/^async function tripsyOutfitSwapCandidates/, 'var tripsyOutfitSwapCandidates = async function'));
+
+  const run = async (wardrobe, currentGarmentId, person, liveTier, blockGarmentIds) => {
+    wardrobeFixture = wardrobe;
+    const block = { garmentIds: blockGarmentIds };
+    const { candidates } = await tripsyOutfitSwapCandidates('T', block, currentGarmentId, person, liveTier);
     return candidates.map(g => g.id);
   };
 
@@ -95,26 +89,27 @@ assert(tripsyOutfitBlockLiveTier(guideFixture, { eventIds: [], category: 'casual
     { id: 'cocktail-shoes', name: 'Oxfords', person: 'him', group: 'footwear', __type: 'shoes', tiers: ['cocktail'] },
     { id: 'her-cocktail-shirt', name: 'Her Blouse', person: 'her', group: 'tops', __type: 'shirt', tiers: ['cocktail'] },
   ];
-  const selection = wardrobe.map(g => ({ id: g.id, qty: 1 }));
 
-  let got = run(wardrobe, selection, 'current-shirt', 'him', 'cocktail', ['current-shirt']);
-  assert(got.includes('cocktail-shirt'), 'a same-type garment tagged for the LIVE tier is offered');
-  assert(!got.includes('casual-polo'), 'a same-type garment NOT tagged for the live tier is excluded -- THE FEATURE JUST ADDED');
-  assert(!got.includes('untagged-shirt'), 'an untagged garment is excluded too, same convention as Pack-for-tier');
-  assert(!got.includes('cocktail-shoes'), 'a different type bucket is still excluded regardless of tier match');
-  assert(!got.includes('her-cocktail-shirt'), "the other person's garments are still excluded");
-  assert(!got.includes('current-shirt'), 'the currently-worn garment never offers itself');
+  (async () => {
+    let got = await run(wardrobe, 'current-shirt', 'him', 'cocktail', ['current-shirt']);
+    assert(got.includes('cocktail-shirt'), 'a same-type garment tagged for the LIVE tier is offered');
+    assert(!got.includes('casual-polo'), 'a same-type garment NOT tagged for the live tier is excluded -- THE FEATURE JUST ADDED');
+    assert(!got.includes('untagged-shirt'), 'an untagged garment is excluded too, same convention as Pack-for-tier');
+    assert(!got.includes('cocktail-shoes'), 'a different type bucket is still excluded regardless of tier match');
+    assert(!got.includes('her-cocktail-shirt'), "the other person's garments are still excluded");
+    assert(!got.includes('current-shirt'), 'the currently-worn garment never offers itself');
 
-  // With no live tier (guide unavailable), falls back to the OLD same-bucket-only
-  // behavior rather than showing nothing.
-  got = run(wardrobe, selection, 'current-shirt', 'him', null, ['current-shirt']);
-  assert(got.includes('cocktail-shirt') && got.includes('casual-polo') && got.includes('untagged-shirt'),
-    'no live tier -> falls back to same-bucket-only, the pre-fix behavior');
+    // With no live tier (guide unavailable), falls back to the OLD same-bucket-only
+    // behavior rather than showing nothing.
+    got = await run(wardrobe, 'current-shirt', 'him', null, ['current-shirt']);
+    assert(got.includes('cocktail-shirt') && got.includes('casual-polo') && got.includes('untagged-shirt'),
+      'no live tier -> falls back to same-bucket-only, the pre-fix behavior');
 
-  // Changing the tier changes the offer -- the whole point of the fix.
-  got = run(wardrobe, selection, 'current-shirt', 'him', 'casual', ['current-shirt']);
-  assert(got.includes('casual-polo') && !got.includes('cocktail-shirt'),
-    'switching the live tier to casual now offers the casual polo instead');
+    // Changing the tier changes the offer -- the whole point of the fix.
+    got = await run(wardrobe, 'current-shirt', 'him', 'casual', ['current-shirt']);
+    assert(got.includes('casual-polo') && !got.includes('cocktail-shirt'),
+      'switching the live tier to casual now offers the casual polo instead');
+  })();
 }
 
 // ---- the Remove button and updated copy, checked against the real source ----

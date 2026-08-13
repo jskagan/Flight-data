@@ -9880,6 +9880,128 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   return { runOut, hasWash: true };
 }
 
+// After a wash, check whether the trip STILL needs another one, and whether swapping a
+// garment into a different composed outfit could avoid it entirely -- one wearing moved
+// off the short garment and onto something with capacity to spare. Mirrors
+// tripsyLaundryRunOutByDay's own wear-limit walk (garment by garment, day by day) but,
+// instead of just flagging the day, looks for a real fix: the composed BLOCK on that day
+// (if the garment is even part of one -- a tier-fallback wear day has no block to swap
+// within, so it's left as a genuine run-out) and a substitute through the SAME
+// tripsyOutfitSwapCandidates rule Swap itself uses, so a proposal here is always
+// something the owner could equally have picked by hand. Nothing is applied here --
+// callers show the list via tripsyLaundryAdjustmentsDialog first (the owner asked to
+// approve outfit changes rather than have them made silently).
+async function tripsyLaundryFindAdjustments(tripKey, person, guide) {
+  const proposals = [];
+  const outfits = await Store.getTripsyTripOutfits(tripKey, person);
+  if (!outfits || !(outfits.blocks || []).length) return { proposals, outfits };
+  const washes = Store.listTripsyLaundry(tripKey).filter(r => r.washedAt && (r.person || 'him') === person && r.dayKey);
+  const notDirty = Store.listLaundryNotDirty(tripKey).filter(r => (r.person || 'him') === person && r.dayKey);
+  const [garments, selectedRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
+  const dayKeys = ((guide && guide.days) || []).map(d => d.dayKey).filter(Boolean);
+  const washedOn = (key, dayKey) => washes.filter(r => r.dayKey === dayKey)
+    .reduce((n, r) => n + ((r.bag || {})[key] || 0) + ((r.bag || {})[key + '::nn'] || 0), 0);
+  const creditedOn = (key, dayKey) => notDirty.filter(r => r.dayKey === dayKey && (r.key === key || r.key === key + '::nn'))
+    .reduce((n, r) => n + (r.count || 0), 0);
+  const byId = new Map((garments || []).map(g => [g.id, g]));
+  const qtyById = new Map();
+  for (const e of tripsyNormalizeTripSelection(selectedRaw)) qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
+  // A garment already picked as another proposal's replacement this pass is spoken for
+  // -- offering it again for a second short garment the same day would double-book it.
+  const claimed = new Set();
+  for (const [id, qty] of qtyById) {
+    const g = byId.get(id);
+    if (!g || (g.person || 'him') !== person) continue;
+    const limit = tripsyWearsBeforeWash(g.name, null, g.group);
+    if (!(limit > 0) || !isFinite(limit)) continue; // can never go dirty -- nothing to fix
+    const { days } = await tripsyWardrobeWearDays(tripKey, id, person);
+    const worn = new Set((days || []).map(d => d.dayKey).filter(Boolean));
+    let wearDebt = 0;
+    for (const dayKey of dayKeys) {
+      const washedQty = washedOn('g:' + id, dayKey);
+      const credited = creditedOn('g:' + id, dayKey);
+      if (washedQty > 0 || credited > 0) wearDebt = Math.max(0, wearDebt - washedQty * limit - credited);
+      if (!worn.has(dayKey)) continue;
+      const dirtyNow = Math.min(qty, Math.floor(wearDebt / limit));
+      if (qty - dirtyNow > 0) { wearDebt += 1; continue; }
+      // Short on this day. Only fixable if it's actually part of a composed outfit --
+      // a tier-fallback wear day has no specific block to swap within.
+      const block = (outfits.blocks || []).find(b => b.dayKey === dayKey && (b.garmentIds || []).includes(id));
+      if (block) {
+        const liveTier = tripsyOutfitBlockLiveTier(guide, block);
+        const { candidates } = await tripsyOutfitSwapCandidates(tripKey, block, id, person, liveTier);
+        const usableCandidates = candidates.filter(c => !claimed.has(c.id));
+        // Prefer the LEAST-worn-so-far candidate, spreading wear evenly across every
+        // owned garment of this type rather than concentrating it on a favorite few.
+        // The goal (per the owner) is to maximize how many garments end the trip
+        // genuinely used up, not to keep a lucky few pristine while others sit
+        // untouched -- and evening out the wear is also what keeps any ONE garment
+        // from running out early and forcing a mid-trip wash in the first place.
+        let usable = null;
+        if (usableCandidates.length) {
+          const withWear = await Promise.all(usableCandidates.map(async c => {
+            const { days: cDays } = await tripsyWardrobeWearDays(tripKey, c.id, person);
+            return { c, wornSoFar: (cDays || []).length };
+          }));
+          withWear.sort((a, b) => a.wornSoFar - b.wornSoFar);
+          usable = withWear[0].c;
+        }
+        if (usable) {
+          claimed.add(usable.id);
+          proposals.push({ dayKey, block, oldId: id, oldName: g.name || 'Garment', newId: usable.id, newName: usable.name || 'Garment' });
+        }
+      }
+      break; // one fix attempt per garment -- later short days depend on whether this one lands
+    }
+  }
+  return { proposals, outfits };
+}
+// Applies every proposal from tripsyLaundryFindAdjustments (already confirmed by the
+// owner) -- each is exactly the same mutation a manual Swap pick makes, just applied in
+// bulk. `outfits` must be the SAME object tripsyLaundryFindAdjustments returned, since
+// each proposal's `block` is a live reference into it.
+async function tripsyLaundryApplyAdjustments(outfits, proposals) {
+  for (const p of proposals) {
+    const i = (p.block.garmentIds || []).indexOf(p.oldId);
+    if (i >= 0) p.block.garmentIds[i] = p.newId;
+  }
+  return await Store.saveTripsyTripOutfits(outfits);
+}
+// Confirmation for tripsyLaundryFindAdjustments' proposals -- Apply makes every swap
+// listed, Skip makes none. Above the laundry-day screen (2147483120) that triggers this.
+function tripsyLaundryAdjustmentsDialog(proposals) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-laundry-adjust-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-laundry-adjust-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483130';
+    const rows = proposals.map(p => `
+      <div style="padding:8px 0; border-bottom:1px solid var(--line); font-size:13.5px;">
+        <div style="font-weight:700; margin-bottom:2px;">${esc(tripsyDayHeaderLabel(p.dayKey))}</div>
+        <div style="color:var(--muted);">${esc(p.oldName)} <span style="color:var(--text);">&#8594;</span> ${esc(p.newName)}</div>
+      </div>`).join('');
+    const many = proposals.length > 1;
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:440px;">
+        <h2 style="margin:0 0 8px; font-size:18px;">Avoid ${many ? 'more washing' : 'another wash day'}?</h2>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">
+          Swapping ${many ? 'these outfits' : 'this outfit'} would use what's already clean, so no extra wash
+          is needed${many ? ' for these days' : ' that day'}.
+        </div>
+        <div>${rows}</div>
+        <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:16px;">
+          <button class="btn" data-adjust-skip>Skip</button>
+          <button class="btn primary" data-adjust-apply>Apply</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; resolve(v); };
+    ov.onclick = e => {
+      if (e.target === ov || e.target.closest('[data-adjust-skip]')) { done(false); return; }
+      if (e.target.closest('[data-adjust-apply]')) done(true);
+    };
+  });
+}
+
 async function showTripsyLaundryDay(tripKey, dayKey, person, opts = {}) {
   let ov = document.getElementById('tripsy-laundry-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-laundry-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -9967,6 +10089,27 @@ async function showTripsyLaundryDay(tripKey, dayKey, person, opts = {}) {
       // kept showing a garment as run-out on a later day even after it was washed
       // clean, since this screen only ever rebuilt itself, never the guide behind it.
       if (opts.onChanged) opts.onChanged();
+      // After a wash, check whether the trip still needs another one, and whether
+      // swapping a garment into a different outfit could avoid it -- propose it rather
+      // than applying it silently, since it changes what the owner actually wears on a
+      // given day. Owner-only: writing outfits needs write access anyway. Best-effort
+      // and never blocks the wash itself finishing.
+      if (isOwner) {
+        (async () => {
+          try {
+            const guide = await Store.getTripsyAttireGuide(tripKey);
+            if (!guide) return;
+            const { proposals, outfits } = await tripsyLaundryFindAdjustments(tripKey, person, guide);
+            if (!proposals.length) return;
+            const accepted = await tripsyLaundryAdjustmentsDialog(proposals);
+            if (!accepted) return;
+            const ok = await tripsyLaundryApplyAdjustments(outfits, proposals);
+            if (!ok) { toast('Could not save the adjustment.', 'error'); return; }
+            toast(proposals.length > 1 ? 'Outfits adjusted — no extra wash needed for those days.' : 'Outfit adjusted — no extra wash needed that day.');
+            if (opts.onChanged) opts.onChanged();
+          } catch (err) { console.error('tripsyLaundryFindAdjustments failed:', err); }
+        })();
+      }
       showTripsyLaundryDay(tripKey, dayKey, person, opts);
       return;
     }
@@ -10334,7 +10477,11 @@ const TRIPSY_OUTFIT_SWAP_REMOVE = '__REMOVE__';
 // Same-type swap picker for one outfit slot: a small modal grid of the trip's PACKED
 // garments whose type bucket matches the slot's, minus pieces already worn in this
 // block. Resolves the chosen garment id, TRIPSY_OUTFIT_SWAP_REMOVE, or null on cancel.
-async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person = 'him', liveTier = null) {
+// The exact "what garments could take this one's place" rule -- shared by the manual
+// Swap picker below AND the automatic after-a-wash adjustment finder
+// (tripsyLaundryFindAdjustments), so the two can never disagree about what counts as a
+// valid substitute.
+async function tripsyOutfitSwapCandidates(tripKey, block, currentGarmentId, person, liveTier) {
   const [garments, selectedRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
   const byId = new Map(garments.map(g => [g.id, g]));
   const current = byId.get(currentGarmentId);
@@ -10349,10 +10496,6 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
   const isMixAndMatch = liveTier && !TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(liveTier);
   const bucketKey = current ? tripsyGarmentTypeBucket(current).key : null;
   const currentGroup = current ? tripsyAttirePackingGroupOf(current) : null;
-  const typeLabel = current
-    ? (isMixAndMatch ? (TRIPSY_ATTIRE_PACKING_GROUP_LABEL[currentGroup] || currentGroup) : tripsyGarmentTypeBucket(current).label)
-    : 'garment';
-  const tierLabel = liveTier ? (TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier] || liveTier) : '';
   const wornElsewhere = new Set((block.garmentIds || []).filter(id => id !== currentGarmentId));
   // A candidate must actually be FREE that day: already worn in THIS block (wornElsewhere,
   // above) or in a DIFFERENT block on the SAME day is the same physical garment being asked
@@ -10383,6 +10526,15 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
       // convention the Pack-for-tier screens already use -- an untagged garment
       // (empty tiers) is excluded here exactly like it is there, not let through.
       && (!liveTier || (g.tiers || []).includes(liveTier)));
+  return { candidates, current, isMixAndMatch, bucketKey, currentGroup };
+}
+async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person = 'him', liveTier = null) {
+  const { candidates, current, isMixAndMatch, currentGroup } =
+    await tripsyOutfitSwapCandidates(tripKey, block, currentGarmentId, person, liveTier);
+  const typeLabel = current
+    ? (isMixAndMatch ? (TRIPSY_ATTIRE_PACKING_GROUP_LABEL[currentGroup] || currentGroup) : tripsyGarmentTypeBucket(current).label)
+    : 'garment';
+  const tierLabel = liveTier ? (TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier] || liveTier) : '';
   return new Promise(resolve => {
     let ov = document.getElementById('tw-swap-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tw-swap-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -20890,7 +21042,7 @@ person_guidance is for ONE person only: ${personLabel}, attending every event ab
 LAUNDRY / WASH CYCLES -- this DIRECTLY lowers how many of each washable garment to pack, so apply it to every count below:
 - Laundry is done roughly ONCE EVERY 9 DAYS of travel: a trip up to ~9 days needs NO mid-trip wash; ~10-18 days = 1 wash; ~19-27 days = 2; and so on. Each wash RESETS the wear count of every washable garment (DRESS SHIRTS, casual/smart-casual tops & bottoms, underwear, socks, sleepwear, casual layers -- NOT dry-clean-only formalwear like suits, tuxedos, or gowns).
 - For COUNTING garments, though, size each washable garment for a ~10-DAY cycle -- a deliberate one-day buffer over the 9-day wash cadence, so you never run short: each covers ~10 days of wearings, NOT the whole trip. E.g. once-worn tops = ~10 days of wearings, so a 14-day trip needs ~7-8 tops (then washed and reworn), not 14; underwear/socks likewise cover one ~10-day cycle.
-- laundry_days: return one entry per recommended wash (an EMPTY array if the trip is short enough to need none). Choose the MOST EFFICIENT day for each -- a relaxed/rest day, or a multi-night hotel stay with laundry access, timed so clothes are clean again just before a stretch that needs them, spaced ~every 9 days. day_key MUST be copied verbatim from one of the event dates in the trip; reason is a short phrase (e.g. "two-night stay, downtime before the next leg").
+- laundry_days: return one entry per recommended wash (an EMPTY array if the trip is short enough to need none) -- and prefer FEWER, LATER washes over an evenly-spaced schedule. Dirty laundry at the END of the trip is completely fine (it gets washed at home regardless of how it looks by then), so only suggest a wash when the trip would otherwise genuinely run short of something clean to wear -- never just because a cycle has elapsed. Choose the MOST EFFICIENT day for each -- a relaxed/rest day, or a multi-night hotel stay with laundry access, timed so clothes are clean again just before a stretch that needs them; ~9 days is a MAXIMUM cadence to plan around, not a target to hit. day_key MUST be copied verbatim from one of the event dates in the trip; reason is a short phrase (e.g. "two-night stay, downtime before the next leg").
 
 Each person's essentials is a short flat list of packing essentials for THAT person specifically, driven by the weather, the events above, and their own outfits -- weather-driven items (a rain layer, a warm coat for an outdoor evening event) as well as clothing-type essentials (formal shoes, a specific garment, accessories). Not a full packing list, just the notable items -- a shared item like a rain jacket can appear in both lists if both people need one.
 
@@ -31269,7 +31421,19 @@ async function renderTravelView(chosenTripKey) {
         const c = tripsyAttireDisplayCategory(e);
         if (c && e.id) tvAttireCatByEvent.set(e.id, c);
       }));
-      (ag.laundryDays || []).forEach(l => { if (l && l.dayKey) tvAttireLaundry.set(l.dayKey, l.reason || ''); });
+      // Once a wash has actually happened, the nearest suggested wash day (and any
+      // earlier one) is stale advice -- the owner already did laundry, whether or not
+      // it landed on the exact suggested date. LATER suggestions, further into the
+      // trip, stay -- they're still genuinely pending. Either person's wash counts:
+      // laundryDays itself is a trip-level list, not split by him/her (see
+      // mergeGuidance in the attire generation code).
+      const washedDayKeys = Store.listTripsyLaundry(trip.key).filter(r => r.washedAt).map(r => r.dayKey);
+      const latestWashDayKey = washedDayKeys.length ? washedDayKeys.reduce((a, b) => (b > a ? b : a)) : null;
+      (ag.laundryDays || []).forEach(l => {
+        if (!l || !l.dayKey) return;
+        if (latestWashDayKey && l.dayKey <= latestWashDayKey) return; // already handled
+        tvAttireLaundry.set(l.dayKey, l.reason || '');
+      });
       tvHasAttire = tvAttireCatByEvent.size > 0 || tvAttireLaundry.size > 0;
     }
   } catch (e) { console.error('Travel View: attire guide load failed', e); }

@@ -24,45 +24,39 @@ function extractFn(name) {
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 const pickerSrc = extractFn('tripsyOutfitSwapPicker');
+const candidatesSrc = extractFn('tripsyOutfitSwapCandidates');
 
-// ---- source-pattern checks ----
-assert(/const outfitsForDay = await Store\.getTripsyTripOutfits\(tripKey, person\);/.test(pickerSrc),
+// ---- source-pattern checks (now in the shared tripsyOutfitSwapCandidates helper) ----
+assert(/const outfitsForDay = await Store\.getTripsyTripOutfits\(tripKey, person\);/.test(candidatesSrc),
   'fetches this person\'s composed outfits to see what else is worn that day');
-assert(/if \(b === block \|\| b\.dayKey !== block\.dayKey\) continue;/.test(pickerSrc),
+assert(/if \(b === block \|\| b\.dayKey !== block\.dayKey\) continue;/.test(candidatesSrc),
   'skips this exact block (already covered by wornElsewhere) and any block on a DIFFERENT day');
-assert(/!wornElsewhere\.has\(g\.id\) && !wornSameDay\.has\(g\.id\)/.test(pickerSrc),
+assert(/!wornElsewhere\.has\(g\.id\) && !wornSameDay\.has\(g\.id\)/.test(candidatesSrc),
   'the candidate filter excludes both same-block and same-day-elsewhere garments');
 
-// ---- executed: the exact candidate-building block, against fixtures ----
+// ---- executed: the real tripsyOutfitSwapCandidates function, against fixtures ----
 (async () => {
-  const exprStart = pickerSrc.indexOf('const outfitsForDay');
-  const exprEnd = pickerSrc.indexOf(');', pickerSrc.indexOf('const candidates = [...new Set')) + 2;
-  const blockSrc = pickerSrc.slice(exprStart, exprEnd);
-  assert(blockSrc.includes('wornSameDay') && blockSrc.includes('outfitsForDay'),
-    'sanity: extracted the same-day-availability-aware block, not a stale copy');
+  assert(candidatesSrc.includes('wornSameDay') && candidatesSrc.includes('outfitsForDay'),
+    'sanity: extracted the same-day-availability-aware helper, not a stale copy');
+
+  const tripsyGarmentTypeBucket = g => ({ key: g.__type || ('group:' + (g.group || 'accessories')) });
+  const tripsyAttirePackingGroupOf = g => g.group || 'accessories';
+  const tripsyNormalizeTripSelection = sel => sel;
+  const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';
+  const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
+  let wardrobeFixture = [];
+  let otherBlocksFixture = [];
+  const Store = {
+    getTripsyTripOutfits: async () => ({ blocks: otherBlocksFixture }),
+    listWardrobe: async () => wardrobeFixture,
+    getTripWardrobe: async () => wardrobeFixture.map(g => ({ id: g.id, qty: 1 })),
+  };
+  eval(candidatesSrc.replace(/^async function tripsyOutfitSwapCandidates/, 'var tripsyOutfitSwapCandidates = async function'));
 
   const run = async (wardrobe, currentGarmentId, block, otherBlocks) => {
-    const byId = new Map(wardrobe.map(g => [g.id, g]));
-    const current = byId.get(currentGarmentId);
-    const person = 'him';
-    const liveTier = null; // irrelevant to this feature -- no tier filtering in these fixtures
-    const tripsyGarmentTypeBucket = g => ({ key: g.__type || ('group:' + (g.group || 'accessories')) });
-    const tripsyAttirePackingGroupOf = g => g.group || 'accessories';
-    const isMixAndMatch = false;
-    const bucketKey = current ? tripsyGarmentTypeBucket(current).key : null;
-    const tripsyNormalizeTripSelection = sel => sel;
-    const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';
-    const selectedRaw = wardrobe.map(g => ({ id: g.id, qty: 1 }));
-    const tripKey = 'T';
-    const Store = { getTripsyTripOutfits: async () => ({ blocks: [block, ...otherBlocks] }) };
-    const wornElsewhere = new Set((block.garmentIds || []).filter(id => id !== currentGarmentId));
-    let candidates, outfitsForDay, wornSameDay;
-    // Direct-eval const/let is scoped to the eval call itself -- strip declaration
-    // keywords so the block assigns into these outer bindings instead.
-    await eval(`(async () => { ${blockSrc
-      .replace('const outfitsForDay', 'outfitsForDay')
-      .replace('const wornSameDay', 'wornSameDay')
-      .replace('const candidates', 'candidates')} })()`);
+    wardrobeFixture = wardrobe;
+    otherBlocksFixture = [block, ...otherBlocks];
+    const { candidates } = await tripsyOutfitSwapCandidates('T', block, currentGarmentId, 'him', null);
     return candidates.map(g => g.id);
   };
 
