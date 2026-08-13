@@ -13,6 +13,13 @@
 //    fixes (above) is ever reached. This is the FIRST thing that fails offline, so
 //    it's the one that actually matters most -- the earlier two fixes alone still left
 //    the report reproducing.
+// 3. THE FOLLOW-UP REPORT ("no WiFi or a weak signal"): both fixes above still gated
+//    on navigator.onLine, which only reports whether a network INTERFACE is active, not
+//    whether it actually works -- a weak/flaky signal reports onLine:true right up
+//    until every real request on it fails. Both failure-path callers now pass
+//    force:true, skipping that check entirely: the failure that got them there IS
+//    stronger evidence than what navigator.onLine claims. Only the ONE caller with no
+//    prior failure (initGoogleAuth's fresh sign-in gate) still checks it.
 const fs = require('fs');
 const html = fs.readFileSync(require('path').join(__dirname, '..', '..', 'index.html'), 'utf8');
 function extractFn(name) {
@@ -44,8 +51,9 @@ const signIn = extractFn('completeSignIn');
 const catchBlock = signIn.slice(signIn.lastIndexOf('} catch (e) {'));
 assert(/document\.getElementById\('signin-gate'\)\.style\.display = 'flex';/.test(catchBlock),
   'the sign-in gate is revealed on failure (pre-existing behavior, unaffected)');
-assert(/maybeOfferOfflineTravelView\(\);/.test(catchBlock),
-  'THE FIX: the offline fallback is now offered from this catch too, covering the fast-path failure');
+assert(/maybeOfferOfflineTravelView\(true\);/.test(catchBlock),
+  'THE FIX: the offline fallback is now offered from this catch too, covering the fast-path failure -- ' +
+  'force:true, since this catch running is itself the failure evidence');
 
 // ---- the THIRD, most important gap: Google Identity Services (an external script,
 // accounts.google.com/gsi/client) never loads at all with no network -- this is the
@@ -56,13 +64,27 @@ const waitBlock = html.slice(waitStart, html.indexOf('})();', waitStart) + 5);
 assert(waitBlock.includes('waitForGoogleIdentity'), 'sanity: found the GIS polling IIFE');
 assert(/Could not load Google Sign-In\. Check your connection and reload the page\./.test(waitBlock),
   'sanity: this is the "ran out of tries" branch (GIS never became available)');
-assert(/showSignInStatus\('Could not load Google Sign-In[^;]*;[\s\S]{0,700}maybeOfferOfflineTravelView\(\);/.test(waitBlock),
+assert(/showSignInStatus\('Could not load Google Sign-In[^;]*;[\s\S]{0,900}maybeOfferOfflineTravelView\(true\);/.test(waitBlock),
   'THE FIX: the offline fallback is now offered here too -- the gap that actually matters most, since ' +
-  'this fires before the other two call sites ever get a chance to run');
+  'this fires before the other two call sites ever get a chance to run, and with force:true');
 
 // ---- maybeOfferOfflineTravelView itself is idempotent, so calling it from three
 // different places can never double-render the offline button ----
 const offlineOffer = extractFn('maybeOfferOfflineTravelView');
+assert(/async function maybeOfferOfflineTravelView\(force = false\)/.test(offlineOffer),
+  'takes a force param, defaulting to false so the one non-failure caller is unaffected');
 assert(/if \(!gate \|\| document\.getElementById\('signin-offline-btn'\)\) return;/.test(offlineOffer),
   'a second/third call (this fix stacking on the earlier ones) is a safe no-op if the button already exists');
-assert(/if \(navigator\.onLine\) return;/.test(offlineOffer), 'and it only ever shows when the browser reports being offline');
+assert(/if \(!force && navigator\.onLine\) return;/.test(offlineOffer),
+  'THE WEAK-SIGNAL FIX: navigator.onLine is only checked when NOT forced -- a forced call (real failure ' +
+  'already happened) shows the offer regardless of what onLine claims');
+
+// ---- initGoogleAuth's own proactive call (no failure yet) is unaffected: still no
+// force arg, so it still respects navigator.onLine as before ----
+assert(/document\.getElementById\('signin-gate'\)\.style\.display = 'flex';\s*\n\s*maybeOfferOfflineTravelView\(\);\s*\n\}/.test(initAuth),
+  'the one caller with nothing to go on yet still passes no force, unlike the two failure-path callers');
+
+// ---- the wording no longer overclaims "you're offline" when we don't actually know
+// that -- a forced call could be a weak signal, not truly offline ----
+assert(/const headline = force \? "Couldn't reach the sign-in servers" : "You're offline";/.test(offlineOffer),
+  'a forced (failure-driven) call uses honest wording instead of asserting offline status navigator.onLine may contradict');

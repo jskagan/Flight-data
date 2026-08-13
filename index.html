@@ -32570,7 +32570,9 @@ async function completeSignIn() {
     // findDriveDataFile, ...) then fails, landing here with the error shown
     // but no way back into the cached schedule -- exactly the "stuck, no
     // offline Travel View" report. Offering it here too covers both paths.
-    maybeOfferOfflineTravelView();
+    // force:true -- this catch running IS the failure evidence; don't let a
+    // weak-signal navigator.onLine:true false positive suppress the offer.
+    maybeOfferOfflineTravelView(true);
   }
 }
 
@@ -32662,9 +32664,18 @@ function initGoogleAuth() {
 // When we're offline AND there's a cached copy, offer a read-only way in. Only
 // Travel View is reachable this way (My Trips edits and would need Drive), and
 // the view carries its own "not live / last refreshed" strip.
-async function maybeOfferOfflineTravelView() {
+// `force`: skip the navigator.onLine check. Set by callers that already have DIRECT
+// evidence sign-in just failed (completeSignIn's catch, the GIS load-timeout branch) --
+// stronger evidence than navigator.onLine, which only reports whether a network
+// INTERFACE is active, not whether it has a working connection. A weak/flaky signal
+// (the owner's report: "no WiFi or a weak signal") reports onLine:true right up until
+// every real request on it fails, which was exactly the case still getting stranded --
+// the failure plainly happened, but the plain onLine check ignored it. The one caller
+// with no prior failure (initGoogleAuth's fresh sign-in gate, nothing attempted yet)
+// still passes no `force`, so it correctly stays quiet while genuinely online.
+async function maybeOfferOfflineTravelView(force = false) {
   try {
-    if (navigator.onLine) return;
+    if (!force && navigator.onLine) return;
     const cached = await loadTripsyOfflineTrips();
     if (!cached) return;
     const gate = document.getElementById('signin-gate');
@@ -32672,9 +32683,14 @@ async function maybeOfferOfflineTravelView() {
     const when = formatSyncTimestamp(cached.cachedAt || cached.updatedAt) || 'earlier';
     const box = document.createElement('div');
     box.style.cssText = 'display:flex; flex-direction:column; align-items:center; gap:8px; margin-top:4px; padding:12px 16px; border:1px solid var(--amber); border-radius:10px; background:rgba(227,164,56,0.10); max-width:420px;';
+    // Wording matches how we actually know this: a REAL failure (force) doesn't claim
+    // "you're offline" outright, since navigator.onLine may genuinely say otherwise on
+    // a weak signal -- it names the connection as the likely cause without overstating it.
+    const headline = force ? "Couldn't reach the sign-in servers" : "You're offline";
+    const sub = force ? 'probably a weak or no connection —' : 'so';
     box.innerHTML = `
       <div style="font-size:13px; color:var(--text); text-align:center; line-height:1.5;">
-        📴 <b style="color:var(--amber);">You're offline</b>, so signing in isn't possible — but your saved schedule is on this device.
+        📴 <b style="color:var(--amber);">${headline}</b>, ${sub} signing in isn't possible right now — but your saved schedule is on this device.
         <br><span style="color:var(--muted);">Last refreshed ${esc(when)}.</span>
       </div>
       <button id="signin-offline-btn" class="btn" style="padding:10px 20px; font-size:14px;">Open Travel View (offline)</button>`;
@@ -32725,8 +32741,10 @@ if ('serviceWorker' in navigator) {
     // initGoogleAuth() or completeSignIn() ever run, meaning neither of their own
     // maybeOfferOfflineTravelView() calls is ever reached either. This is the FIRST
     // thing that fails offline, so it's the one that actually matters most in
-    // practice; offering it here too closes the last gap.
-    maybeOfferOfflineTravelView();
+    // practice; offering it here too closes the last gap. force:true for the same
+    // weak-signal reason as completeSignIn's catch -- 50 straight failed poll
+    // attempts is real evidence, whatever navigator.onLine happens to claim.
+    maybeOfferOfflineTravelView(true);
   }
 })();
 

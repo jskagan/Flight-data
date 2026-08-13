@@ -1476,9 +1476,20 @@ pieces:
   out and shows "Could not load Google Sign-In," but this fires BEFORE `initGoogleAuth()` or
   `completeSignIn()` ever run, so NEITHER of their fixes is ever reached. This is the FIRST thing
   that fails offline, so it's the one that matters most — a genuinely offline device usually never
-  gets as far as case (1) at all. All three call `maybeOfferOfflineTravelView()`, which is already
-  idempotent (`document.getElementById('signin-offline-btn')` guard) so they can never double-
-  render the button.
+  gets as far as case (1) at all.
+  **(3) A WEAK signal, not just no signal, needed its own fix too** (the follow-up report: "no WiFi
+  or a weak signal"): both (1) and (2) still gated on `navigator.onLine`, which only reports whether
+  a network INTERFACE is active, not whether it actually works — a flaky connection reports
+  `onLine: true` right up until every real request on it fails, silently suppressing the offer in
+  exactly the case it was needed. `maybeOfferOfflineTravelView(force = false)` now takes a `force`
+  flag: the two FAILURE-path callers ((1)'s catch, (2)'s poll-timeout) pass `force: true` and skip
+  the `navigator.onLine` check entirely, since the failure that got them there is stronger evidence
+  than whatever that property claims. The one PROACTIVE caller — `initGoogleAuth()`'s fresh sign-in
+  gate, called before anything has been attempted — still passes no `force`, so it correctly stays
+  quiet while genuinely online. The offered box's own wording follows suit: a forced call says
+  "Couldn't reach the sign-in servers" rather than asserting "You're offline," since `navigator.onLine`
+  may well disagree. All three still call the same idempotent function
+  (`document.getElementById('signin-offline-btn')` guard), so they can never double-render the button.
 
 `tripsyTripsAreOffline` marks that the in-memory trips came from cache. It drives Travel View's
 `.tv-offline` strip — **"Offline — this schedule is not live. Last refreshed &lt;when&gt;"**, rendered
