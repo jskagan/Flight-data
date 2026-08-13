@@ -1416,18 +1416,22 @@ pieces:
   offers "Open Travel View (offline)" whenever a cached copy exists (`maybeOfferOfflineTravelView`).
   It sets a minimal `driveData` so `Store` readers don't throw on null, and empties
   `tripsyPsReservations` (P/S cards live in `flight-log-data.json`, which isn't loaded offline).
-  **Must be offered from BOTH places sign-in can fail, not just the fresh-sign-in path.**
-  `initGoogleAuth()` has two branches: no remembered token → shows the sign-in gate and calls
+  **Must be offered from EVERY place sign-in can fail, not just the fresh-sign-in path — there are
+  three, and each needed its own fix as the same "stuck on a white screen" report kept recurring.**
+  (1) `initGoogleAuth()` has two branches: no remembered token → shows the sign-in gate and calls
   `maybeOfferOfflineTravelView()` directly; a remembered token → skips straight to
-  `completeSignIn()` (the "cached-token fast path"). With no signal, `completeSignIn()`'s own
-  network calls (`fetchSignedInUserEmail`, `findDriveDataFile`, ...) all fail and land in its catch
-  block, which reveals the sign-in gate with an error — but on ANY device that has ever signed in
-  before (i.e. almost every real device, since that's what "remembered" means), that catch was the
-  ONLY path reachable offline, and it never called `maybeOfferOfflineTravelView()` — stranding the
-  owner on an error screen with no way back into their already-cached schedule (reported as "stuck
-  on a white screen" instead of the promised offline Travel View). Fixed by calling
-  `maybeOfferOfflineTravelView()` from that catch too; the function is already idempotent
-  (`document.getElementById('signin-offline-btn')` guard) so the two call sites can never double-
+  `completeSignIn()` (the "cached-token fast path"), whose own network calls (`fetchSignedInUserEmail`,
+  `findDriveDataFile`, ...) all fail offline and land in ITS OWN catch block — which reveals the
+  sign-in gate with an error but, before the fix, never called `maybeOfferOfflineTravelView()`,
+  stranding any device that has ever signed in before (i.e. almost every real device). (2) THE
+  ACTUAL CULPRIT in practice, found only after (1) alone didn't resolve a real report: Google
+  Identity Services is an EXTERNAL script (`accounts.google.com/gsi/client`) that simply never
+  loads with no network at all — `waitForGoogleIdentity()`'s polling loop (50 tries × 100ms) times
+  out and shows "Could not load Google Sign-In," but this fires BEFORE `initGoogleAuth()` or
+  `completeSignIn()` ever run, so NEITHER of their fixes is ever reached. This is the FIRST thing
+  that fails offline, so it's the one that matters most — a genuinely offline device usually never
+  gets as far as case (1) at all. All three call `maybeOfferOfflineTravelView()`, which is already
+  idempotent (`document.getElementById('signin-offline-btn')` guard) so they can never double-
   render the button.
 
 `tripsyTripsAreOffline` marks that the in-memory trips came from cache. It drives Travel View's
