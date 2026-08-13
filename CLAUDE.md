@@ -1416,6 +1416,19 @@ pieces:
   offers "Open Travel View (offline)" whenever a cached copy exists (`maybeOfferOfflineTravelView`).
   It sets a minimal `driveData` so `Store` readers don't throw on null, and empties
   `tripsyPsReservations` (P/S cards live in `flight-log-data.json`, which isn't loaded offline).
+  **Must be offered from BOTH places sign-in can fail, not just the fresh-sign-in path.**
+  `initGoogleAuth()` has two branches: no remembered token → shows the sign-in gate and calls
+  `maybeOfferOfflineTravelView()` directly; a remembered token → skips straight to
+  `completeSignIn()` (the "cached-token fast path"). With no signal, `completeSignIn()`'s own
+  network calls (`fetchSignedInUserEmail`, `findDriveDataFile`, ...) all fail and land in its catch
+  block, which reveals the sign-in gate with an error — but on ANY device that has ever signed in
+  before (i.e. almost every real device, since that's what "remembered" means), that catch was the
+  ONLY path reachable offline, and it never called `maybeOfferOfflineTravelView()` — stranding the
+  owner on an error screen with no way back into their already-cached schedule (reported as "stuck
+  on a white screen" instead of the promised offline Travel View). Fixed by calling
+  `maybeOfferOfflineTravelView()` from that catch too; the function is already idempotent
+  (`document.getElementById('signin-offline-btn')` guard) so the two call sites can never double-
+  render the button.
 
 `tripsyTripsAreOffline` marks that the in-memory trips came from cache. It drives Travel View's
 `.tv-offline` strip — **"Offline — this schedule is not live. Last refreshed &lt;when&gt;"**, rendered
