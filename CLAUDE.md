@@ -350,6 +350,18 @@ step 4; git history has it if ever needed.
   than freezing on the last stage. The run publishes every stage through one `setStage` helper that
   writes the changes dialog's own line *and* that map, so the two can never disagree — and only
   when a day was actually checked, matching the badge rule.
+- **"Review changes" re-checks for changes and says so when it finds none, instead of silently
+  opening the menu.** The ▲/🧭 badges above are computed once per My Trips render, but the
+  itinerary menu-toggle's `beforeOpen` callback (`wireTripsyHeaderMenuToggle`,
+  `"[data-tripsy-itinerary-menu-toggle]"`) deliberately re-runs `tripsyItineraryChangedEvents`
+  itself when the owner picks "Review changes" from the confirm dialog, rather than trusting the
+  badge — another tab/device may have already regenerated in the meantime. Before this fix, an
+  empty re-check just fell through to `return true` (open the menu as usual) with zero feedback,
+  which read as the confirm dialog closing and nothing happening ("the box just disappears" —
+  reported 2026-08-14). It now toasts `Already up to date — nothing to review.` and clears this
+  trip's now-stale ▲ immediately, both the small `data-tripsy-itin-warning` span next to Edit and
+  the glyph badge (`tripsySetItineraryGlyphBadge(btn, '')`), rather than leaving a wrong badge to
+  self-correct on some future render.
 - **Itinerary/day views start from the earliest event, not the trip's `start_date`**: the day
   ranges, "Day N" numbering, and empty-day span all derive their first day from
   `tripsyItineraryStartDayKey(trip)` — the earliest day any visible, dated event falls on — rather
