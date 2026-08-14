@@ -9976,6 +9976,27 @@ async function tripsyLaundryApplyAdjustments(outfits, proposals) {
   }
   return await Store.saveTripsyTripOutfits(outfits);
 }
+// A manual Swap can push a garment's wear onto a LATER block that also uses it, leaving
+// that block short (the garment would already be dirty by then) -- "when I make a change
+// to an outfit that would make a later outfit unavailable ... automatically reconfigure."
+// Reuses the exact same finder Wash Now uses (tripsyLaundryFindAdjustments) so a fix here
+// is always something Swap itself would equally offer by hand, but applies it AUTOMATICALLY
+// with no confirmation -- unlike a wash (an irreversible real-world action worth confirming
+// before assuming), this is only ever picking a different already-eligible, already-packed
+// substitute for a block that hasn't happened yet, which is exactly what the owner asked to
+// have happen without being asked each time. Fails soft (never blocks the Swap that
+// triggered it) and returns how many blocks were adjusted, so the caller can say so.
+async function tripsyOutfitAutoAdjustAfterSwap(tripKey, person, guide) {
+  try {
+    const { proposals, outfits } = await tripsyLaundryFindAdjustments(tripKey, person, guide);
+    if (!proposals.length) return 0;
+    const ok = await tripsyLaundryApplyAdjustments(outfits, proposals);
+    return ok ? proposals.length : 0;
+  } catch (e) {
+    console.error('tripsyOutfitAutoAdjustAfterSwap failed (non-fatal):', e);
+    return 0;
+  }
+}
 // Confirmation for tripsyLaundryFindAdjustments' proposals -- Apply makes every swap
 // listed, Skip makes none. Above the laundry-day screen (2147483120) that triggers this.
 function tripsyLaundryAdjustmentsDialog(proposals) {
@@ -10377,6 +10398,16 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
       }
       const ok = await Store.saveTripsyTripOutfits(outfits);
       if (!ok) { toast('Could not save the change.', 'error'); return; }
+      // This swap can push extra wear onto whichever garment just went IN, which can
+      // leave a LATER block short of it -- check for that and fix it automatically
+      // (no confirmation; see tripsyOutfitAutoAdjustAfterSwap for why this differs from
+      // the Wash Now flow, which asks first).
+      const adjustedCount = await tripsyOutfitAutoAdjustAfterSwap(tripKey, person, guide);
+      if (adjustedCount) {
+        toast(adjustedCount > 1
+          ? `Also reconfigured ${adjustedCount} later outfits to keep everything clean.`
+          : 'Also reconfigured a later outfit to keep everything clean.');
+      }
       // Tell whatever opened this modal that a swap actually happened -- the Daily
       // Dress Guide's run-out bar is computed ONCE per opening and cached in its own
       // renderOpts, so without this callback it kept naming a garment that had

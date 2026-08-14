@@ -28,7 +28,7 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 
 // ---- showTripsyOutfitModal fires opts.onSwapped right after a successful swap save ----
 const modal = extractFn('showTripsyOutfitModal');
-assert(/const ok = await Store\.saveTripsyTripOutfits\(outfits\);\s*\n\s*if \(!ok\)[\s\S]{0,600}if \(opts\.onSwapped\) opts\.onSwapped\(\);/.test(modal),
+assert(/const ok = await Store\.saveTripsyTripOutfits\(outfits\);\s*\n\s*if \(!ok\)[\s\S]{0,1200}if \(opts\.onSwapped\) opts\.onSwapped\(\);/.test(modal),
   'onSwapped fires after the swap save succeeds, before the modal repaints itself');
 assert(/if \(opts\.onSwapped\) opts\.onSwapped\(\);\s*\n\s*showTripsyOutfitModal\(tripKey, eventId, person, opts\);/.test(modal),
   'the modal still repaints itself too -- onSwapped is additive, not a replacement');

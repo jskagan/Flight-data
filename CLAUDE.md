@@ -846,6 +846,20 @@ step 4; git history has it if ever needed.
   picker now just calls it and renders the result; behavior is unchanged, but the two callers (the
   manual picker and this automatic finder) can now never drift apart on what counts as a valid
   substitute.
+- **A manual Swap triggers the same finder too, but applies its fix AUTOMATICALLY with no
+  confirmation** — the owner's explicit ask: "when I make a change to an outfit that would make a
+  later outfit unavailable ... automatically reconfigure the remaining outfits," deliberately the
+  opposite UX choice from the Wash Now flow above. `tripsyOutfitAutoAdjustAfterSwap(tripKey, person,
+  guide)` runs right after a successful Swap save (in `showTripsyOutfitModal`'s swap handler): the
+  garment that just went IN can push extra wear onto a LATER block that also uses it, leaving that
+  block short by the day it's needed. It calls the exact same `tripsyLaundryFindAdjustments` Wash Now
+  uses — so a fix here is always something the owner could equally have picked by hand via Swap
+  itself — but skips `tripsyLaundryAdjustmentsDialog` entirely and calls
+  `tripsyLaundryApplyAdjustments` directly. The asymmetry is deliberate: a wash is an irreversible
+  real-world action worth confirming before assuming, while this is only ever swapping in an
+  already-eligible, already-packed substitute for a block that hasn't happened yet. Fails soft (a
+  problem here never blocks or undoes the swap that triggered it) and toasts how many later outfits
+  were reconfigured, if any.
   **Wash/wear scheduling is explicitly optimized to maximize how much stays genuinely dirty by the
   END of the trip, not to keep everything as clean as possible throughout** — the two are
   different goals: a mid-trip wash costs real vacation time, while dirty laundry at the end just
