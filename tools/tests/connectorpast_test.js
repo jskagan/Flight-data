@@ -1,7 +1,10 @@
 // The timeline connector (positionTripsyTimelineConnectors) draws its line as many
 // small per-gap segments appended as SIBLINGS of .tripsy-day-block, not descendants --
 // so a past day's opacity dimming never reached the line running through it. A segment
-// spanning two past-day rows now gets a lighter/dimmer white instead.
+// gets the lighter/dimmer white whenever it STARTS from a past-day row -- "I want the
+// line dim when it starts from a grayed out event" -- including the boundary segment
+// running from the last past row into today's first row (previously left full-bright
+// on purpose; the owner asked for it dimmed too).
 const fs = require('fs');
 const html = fs.readFileSync(require('path').join(__dirname, '..', '..', 'index.html'), 'utf8');
 function extractFn(name) {
@@ -29,19 +32,22 @@ const baseAlpha = parseFloat(baseBg.split(',')[3]);
 const pastAlpha = parseFloat(pastBg.split(',')[3]);
 assert(pastAlpha < baseAlpha, `the past variant is genuinely lighter -> base alpha ${baseAlpha}, past alpha ${pastAlpha}`);
 
-// ---- wiring: the class is applied per-segment based on BOTH endpoint dots ----
+// ---- wiring: the class is applied per-segment based on the STARTING dot only ----
 const fn = extractFn('positionTripsyTimelineConnectors');
-assert(/const bothPast = dots\[i\]\.closest\('\.tripsy-day-past'\) && dots\[i \+ 1\]\.closest\('\.tripsy-day-past'\);/.test(fn),
-  'checks both endpoints, not just one -- a boundary segment (past -> today) must stay bright');
-assert(/segment\.className = bothPast \? 'tripsy-tl-connector tripsy-tl-connector--past' : 'tripsy-tl-connector';/.test(fn),
-  'applies the modifier class only when both ends are past');
+assert(/const startsPast = !!dots\[i\]\.closest\('\.tripsy-day-past'\);/.test(fn),
+  'THE ASK: only the starting dot is checked -- a segment coming out of a past event dims ' +
+  'even if the row it runs into is not itself past (e.g. the boundary into today)');
+assert(/segment\.className = startsPast \? 'tripsy-tl-connector tripsy-tl-connector--past' : 'tripsy-tl-connector';/.test(fn),
+  'applies the modifier class whenever the segment starts past');
+assert(!/bothPast/.test(fn), 'the old both-ends check is gone, not just superseded');
 
 // ---- executed: the boolean logic itself, against a small fake DOM ----
 {
   const fakeDot = (past) => ({ closest: (sel) => (sel === '.tripsy-day-past' && past) ? {} : null });
-  const bothPast = (a, b) => !!(fakeDot(a).closest('.tripsy-day-past') && fakeDot(b).closest('.tripsy-day-past'));
-  assert(bothPast(true, true) === true, 'both rows past -> dimmed');
-  assert(bothPast(true, false) === false, 'past row connecting into today -> stays bright, marks the boundary');
-  assert(bothPast(false, true) === false, 'and the reverse order too');
-  assert(bothPast(false, false) === false, 'neither past -> ordinary bright line, unchanged from before');
+  const startsPast = (a) => !!fakeDot(a).closest('.tripsy-day-past');
+  assert(startsPast(true) === true, 'starting row past -> dimmed');
+  assert(startsPast(false) === false, 'starting row not past -> ordinary bright line, unchanged from before');
+  // THE ASK, explicitly: a segment running FROM a past row INTO today's first row
+  // (the boundary) now dims too -- it starts past, regardless of where it ends.
+  assert(startsPast(true) === true, 'boundary segment (past -> today) now dims, since it starts from a grayed-out event');
 }

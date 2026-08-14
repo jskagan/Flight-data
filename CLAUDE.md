@@ -396,9 +396,11 @@ step 4; git history has it if ever needed.
   connecting line itself still needs its own dimming**, or it stays full-bright running through
   grayed-out rows. `positionTripsyTimelineConnectors` builds the line from many small per-gap
   segments (siblings of `.tripsy-day-block`, not descendants), so each segment independently gets
-  `.tripsy-tl-connector--past` when BOTH the dots it connects sit inside a `.tripsy-day-past` block
-  — a boundary segment (the last past row into today's first) stays full-bright on purpose, marking
-  where "now" begins rather than fading out one row early.
+  `.tripsy-tl-connector--past` whenever the dot it STARTS FROM sits inside a `.tripsy-day-past`
+  block — including the boundary segment running from the last past row into today's first row
+  (per the owner's explicit ask: "I want the line dim when it starts from a grayed out event," 2026-08-14
+  — an earlier version required BOTH endpoints past specifically to keep that one boundary segment
+  bright as a "now begins here" marker, which read as the wrong half of the line staying lit).
 - **Past trips render under collapsed YEAR sections, below the current/upcoming cards** (built
   for the 154-trip historical backfill — flat, they'd stack a wall of 2011 above the trip you're
   actually on and pay 150 cards' HTML besides). A trip is "past" once its last day (falling back
@@ -1187,6 +1189,21 @@ would overwrite the glyph with the word.
   deleted events). A changed packing selection still flags via `selectionFingerprint`. This replaced
   a blunt `guide.eventFingerprint` comparison that fired on ANY event edit; `outfits.guideFingerprint`
   is still written but no longer consulted.
+- **A dress-code refresh now proactively offers to recompose outfits it just made stale**, instead
+  of leaving that discoverable only per-block. Refreshing the Attire Guide (dress-code
+  categorization) and composing Outfits (the actual garment picks per time-block) are two separate,
+  independently-triggered steps — refreshing the guide alone can move a block's tier (e.g. Casual →
+  Smart Casual) with no mention that any already-composed outfit for that block is now stale; the
+  success toast just said "dress codes updated." Reported 2026-08-14: an Athletic-only top stayed
+  assigned to a block the guide had already moved to Smart Casual, discovered only when the owner
+  happened to open that one outfit — "I regenerated outfits this morning" turned out to mean the
+  guide was refreshed, not the separate Outfits step, and the owner reasonably expected regenerating
+  to have fixed it rather than requiring a manual Swap. `runTripsyAttireGeneration` now checks, right
+  after a successful generate/refresh, both people's already-composed outfits via the same
+  `tripsyOutfitsNeedRecompose` the Outfits nav link and the outfit modal's own stale note already
+  use (so this can never disagree with them), and offers the identical Regenerate/Ignore confirm —
+  never a silent auto-recompose, since that's a real Claude call. Owner-only (recomposing writes);
+  skipped entirely for a person with no real composed outfit yet, since there's nothing to go stale.
 - **Garment photos for the compose prompt are cached in memory** (`tripsyOutfitPhotoCache`,
   `driveFileId` → `Promise<base64>`). A REGENERATE otherwise re-downloaded and re-resized every
   selected garment's picture from Drive, identical bytes to the run a minute before — dozens of

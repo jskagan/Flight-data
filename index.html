@@ -441,11 +441,11 @@
      rendered dots via JS rather than hardcoded here. */
   .tripsy-tl-trip { position:relative; }
   .tripsy-tl-connector { position:absolute; width:3px; background:rgba(255,255,255,0.85); z-index:0; display:none; }
-  /* A segment strictly between two PAST-day rows (see .tripsy-day-past): the row
-     opacity dimming doesn't reach these, since connector segments are appended as
-     siblings of .tripsy-day-block, not descendants (positionTripsyTimelineConnectors
-     measures actual row positions, not the wrapper), so without this the line stayed
-     full-bright while the events it ran through were grayed out. */
+  /* A segment starting FROM a past-day row (see .tripsy-day-past): the row opacity
+     dimming doesn't reach these, since connector segments are appended as siblings
+     of .tripsy-day-block, not descendants (positionTripsyTimelineConnectors measures
+     actual row positions, not the wrapper), so without this the line stayed
+     full-bright coming out of a grayed-out event. */
   .tripsy-tl-connector--past { background:rgba(255,255,255,0.32); }
   /* On phones, cap the Tripsy dropdown menus/panels to the viewport width so their
      inline min-widths can't run off-screen (they're position:fixed; JS handles the
@@ -24163,6 +24163,29 @@ async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
     toast(guide && guide.packingFrozen
       ? 'Attire guide refreshed — dress codes updated. Your packing list and counts were kept as-is because the trip has started.'
       : (isRefresh ? 'Attire guide refreshed.' : 'Attire guide generated.'), 'success');
+    // A dress-code refresh can move a block's tier out from under an already-composed
+    // outfit (e.g. a block re-categorized Casual -> Smart Casual) -- the success toast
+    // above says "dress codes updated" with no hint that outfits are now stale, and
+    // that staleness otherwise surfaces only per-block, the moment the owner happens to
+    // open that one outfit (showTripsyOutfitModal's own note) -- reported 2026-08-14:
+    // an athletic-only top stayed assigned to a block the guide had already moved to
+    // Smart Casual. Check right here, once per person who has real composed outfits,
+    // and offer the SAME batch Regenerate the Outfits nav link already offers, instead
+    // of leaving it to be found (and manually swapped, garment by garment) later.
+    if (isOwner) {
+      for (const p of ['him', 'her']) {
+        const existing = (driveData.tripsyTripOutfits || []).find(o => o.tripKey === tripKey && (o.person || 'him') === p);
+        if (!existing || !(existing.blocks || []).some(b => (b.garmentIds || []).length)) continue;
+        if (!(await tripsyOutfitsNeedRecompose(tripKey, p))) continue;
+        const regen = await tripsyConfirmDialog(
+          `${p === 'her' ? 'Her' : 'His'} outfits may be out of date after this refresh — a time-block's dress level changed since they were composed. Regenerate to match the current dress codes and packing plan?`,
+          { title: '⚠️ Outfits may be out of date', yes: 'Regenerate', no: 'Ignore' });
+        if (regen) {
+          const hideSpinner = tripsyShowOutfitComposingSpinner(p);
+          try { await runTripsyOutfitComposition(tripKey, p); } finally { hideSpinner(); }
+        }
+      }
+    }
   } catch (e) {
     console.error('Attire generation failed:', e);
     if (summaryLiveForTrip()) {
@@ -27215,11 +27238,11 @@ function positionTripsyTimelineConnectors() {
     for (let i = 0; i < dots.length - 1; i++) {
       if (isDotExpanded(dots[i]) || isDotExpanded(dots[i + 1])) continue;
       const segment = document.createElement('div');
-      // Dimmed only when BOTH ends sit in a past day -- the segment spanning INTO
-      // today (last past row -> today's first row) stays full-bright, marking where
-      // "now" begins rather than fading out one row early.
-      const bothPast = dots[i].closest('.tripsy-day-past') && dots[i + 1].closest('.tripsy-day-past');
-      segment.className = bothPast ? 'tripsy-tl-connector tripsy-tl-connector--past' : 'tripsy-tl-connector';
+      // Dimmed whenever it STARTS from a past-day row -- the line "coming out of"
+      // a grayed-out event should read grayed-out too, including the boundary
+      // segment running from the last past row into today's first row.
+      const startsPast = !!dots[i].closest('.tripsy-day-past');
+      segment.className = startsPast ? 'tripsy-tl-connector tripsy-tl-connector--past' : 'tripsy-tl-connector';
       segment.style.display = 'block';
       segment.style.top = `${dotCenterY(dots[i])}px`;
       segment.style.height = `${dotCenterY(dots[i + 1]) - dotCenterY(dots[i])}px`;
