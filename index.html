@@ -10227,12 +10227,18 @@ async function showTripsyWashedDay(tripKey, dayKey, person) {
     const base = key.endsWith('::nn') ? key.slice(0, -4) : key;
     counts.set(base, (counts.get(base) || 0) + (n || 0));
   }
-  const nameFor = key => {
-    if (key.startsWith('g:')) return (garmentById.get(key.slice(2)) || {}).name || 'Garment';
-    if (key.startsWith('x:')) return key.slice(2) || 'Item';
-    return key;
+  // A real wardrobe garment carries its own photo; a "No Picture" generic (an "x:"-keyed
+  // entry, never a wardrobe record) has none and falls back to the plain glyph, same as
+  // every other garment-card grid in the app.
+  const itemFor = key => {
+    if (key.startsWith('g:')) {
+      const g = garmentById.get(key.slice(2));
+      return { name: (g && g.name) || 'Garment', driveFileId: g && g.driveFileId };
+    }
+    if (key.startsWith('x:')) return { name: key.slice(2) || 'Item', driveFileId: null };
+    return { name: key, driveFileId: null };
   };
-  const items = [...counts.entries()].map(([key, count]) => ({ name: nameFor(key), count })).filter(it => it.count > 0);
+  const items = [...counts.entries()].map(([key, count]) => ({ ...itemFor(key), count })).filter(it => it.count > 0);
   ov.innerHTML = `
     <div class="tw-modal-paper tw-wide">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
@@ -10240,12 +10246,16 @@ async function showTripsyWashedDay(tripKey, dayKey, person) {
         <button class="tripsy-close-x" data-laundry-close aria-label="Close" title="Close">&#10005;</button>
       </div>
       ${items.length
-        ? `<div style="font-size:14.5px; color:var(--text); line-height:1.9;">${items.map(it =>
-            `<div>${esc(it.name)}${it.count > 1 ? ` <span style="color:var(--muted);">×${it.count}</span>` : ''}</div>`).join('')}</div>`
+        ? `<div class="tw-grid">${items.map(it => `
+            <div class="tw-card">
+              <div class="tw-photo" data-tw-photo="${esc(it.driveFileId || '')}">${it.driveFileId ? '' : '👕'}</div>
+              <div class="tw-info"><div class="tw-name">${esc(it.name)}</div>${it.count > 1 ? `<div class="tw-meta">×${it.count}</div>` : ''}</div>
+            </div>`).join('')}</div>`
         : `<div style="padding:12px 0; color:var(--muted);">Nothing recorded for this wash.</div>`}
     </div>`;
   ov.style.display = 'flex';
   ov.onclick = e => { if (e.target === ov || e.target.closest('[data-laundry-close]')) { ov.style.display = 'none'; ov.onclick = null; } };
+  tripsyWardrobeLoadPhotos(ov);
 }
 
 async function showTripsyWearDaysOverlay(tripKey, garment, person) {
@@ -24562,7 +24572,12 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
       // target for the outfit. Later "⇄ Change to" markers get no button: laundry is not
       // a property of every outfit change within the day.
       const washedToday = washedDayKeys.has(day.dayKey);
-      const laundryRow = (i === 0 && isOwner)
+      // A past, never-washed day has nothing left to do -- "Do Laundry Today" for a day
+      // that's already over reads as an instruction the owner can no longer act on. A
+      // washed day keeps its button (now/still reading "Washed Today") no matter how far
+      // past it is, since that's a record to look back at, not an instruction to follow.
+      const isPastDay = !!(dgTodayKey && day.dayKey < dgTodayKey);
+      const laundryRow = (i === 0 && isOwner && (washedToday || !isPastDay))
         ? `<div class="tripsy-dg-laundry-row"><button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn" data-tripsy-laundry-day="${esc(day.dayKey)}" data-tripsy-laundry-washed="${washedToday ? '1' : ''}">${washedToday ? 'Washed Today' : 'Do Laundry Today'}</button></div>`
         : '';
       const leadIn = (leadInText == null ? '' : (hasOutfit

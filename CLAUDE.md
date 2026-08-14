@@ -765,6 +765,14 @@ step 4; git history has it if ever needed.
   from an already-open guide flips the button immediately via the same `refreshLaundryInfo` callback
   the run-out-bar fix above already threads through `showTripsyLaundryDay`'s `opts.onChanged`, since
   that re-render recomputes `washedDayKeys` fresh too.
+  **A past, never-washed day shows no laundry button at all** (`isPastDay`, off
+  `tripsyTravelViewTodayKey` vs the day's own key) — "Do Laundry Today" for a day that's already over
+  reads as an instruction the owner can no longer act on. A washed day keeps its button regardless of
+  how far past it is, since that's a record worth looking back at, not an instruction to follow.
+  **`showTripsyWashedDay` shows the actual garment PHOTOS**, not a plain text list — the same
+  `tw-grid`/`tw-card`/`tw-photo` shape every other garment display in the app uses (the outfit view,
+  Packing Status, …), loaded through the same `tripsyWardrobeLoadPhotos`; a "No Picture" generic
+  (`x:`-keyed, no wardrobe record) falls back to the same 👕 glyph as everywhere else.
 - **Tapping a garment's photo in the outfit view shows where it's actually packed**
   (`showTripsyGarmentCubeInfo`) — read-only, so every viewer gets it, not just the owner (unlike
   Swap, sitting right next to it in the same card). Reuses `tripsyCubesForEntry` exactly as Packing
