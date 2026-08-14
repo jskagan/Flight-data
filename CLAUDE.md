@@ -773,6 +773,14 @@ step 4; git history has it if ever needed.
   assignment, and all of them need combining to answer "where is this." An uncubed type (a tie,
   anything that hangs) explains WHY instead of showing a misleading "cube not set", and a garment
   not yet marked packed for this trip says so plainly rather than opening an empty dialog.
+- **Each garment card in the outfit view also has a Wear Days button**, opening the same
+  `showTripsyWearDaysOverlay` the Plan Packing List/Packing Status pages use, scoped to that one
+  garment. Read-only, so every viewer gets it (same as the photo-lookup above), unlike Swap right
+  next to it. It CLOSES the outfit modal first rather than stacking Wear Days on top of it: both are
+  singleton overlay nodes, and Wear Days' own day rows can reopen this SAME outfit-modal node (to
+  view a different event's outfit) — a real cycle, where no fixed z-index ordering works for both
+  directions at once. Closing first sidesteps it entirely; Wear Days' own Close button returns to
+  nothing stacked underneath, same as closing it from anywhere else.
 - **Once a wash exists, the guide's orange "best day for laundry" bar is replaced by a red RUN-OUT
   bar.** The advice was a plan; from then on what matters is the consequence.
   `tripsyLaundryRunOutByDay` walks each garment's clean stock forward day by day — a wash that day
