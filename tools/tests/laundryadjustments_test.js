@@ -80,6 +80,7 @@ assert(/if \(opts\.onChanged\) opts\.onChanged\(\);/.test(washBlock.slice(washBl
 // covered by their own test files; this exercises the walk + block-lookup + proposal
 // logic that's unique to this function.)
 (async () => {
+  eval(extractFn('tripsyLaundryWearDebtStep').replace(/^function tripsyLaundryWearDebtStep/, 'var tripsyLaundryWearDebtStep = function'));
   eval(findSrc.replace(/^async function tripsyLaundryFindAdjustments/, 'var tripsyLaundryFindAdjustments = async function'));
 
   const guide = { days: [{ dayKey: 'd1' }, { dayKey: 'd2' }, { dayKey: 'd3' }] };

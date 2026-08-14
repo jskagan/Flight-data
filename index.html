@@ -2693,23 +2693,33 @@ const Store = {
       // one gets edited/deleted through anything OTHER than the Update page's
       // own actions (source: 'tripsy_update_page'), that page is now stale and
       // gets dropped. Deleting a trip drops every Update page for it, any
-      // source. This bookkeeping lives in flight-log-data.json, so it's a
-      // separate, best-effort write: the trip change itself already saved, and
-      // a stale-but-present Update page is a nuisance, not data loss.
+      // source. Deleting a single event ALSO mechanically strips it out of the
+      // Daily Dress Guide and any composed Outfits (driveData.tripsyAttireGuides /
+      // tripsyTripOutfits) -- unlike the Itinerary's own prose (handled separately via
+      // the ▲ badge and 'deleted' changeType, since fixing generated TEXT needs a
+      // Claude call), these are just structured event lists a deletion can update for
+      // free, so there's no reason to leave a ghost event sitting in either one until
+      // the next manual Refresh/Regenerate. Reported 2026-08-14: "when I delete an
+      // event from My Trips it should also be deleted from itinerary, daily dress,
+      // schedule, etc." This bookkeeping lives in flight-log-data.json, so it's a
+      // separate, best-effort write: the trip change itself already saved, and a
+      // stale-but-present cache entry is a nuisance, not data loss.
       try {
         const before = driveData.tripsyUpdatePages;
+        let touchedUpdatePages = false;
         if (before && before.length) {
           if (change.type === 'delete_trip') {
             driveData.tripsyUpdatePages = before.filter(p => p.tripKey !== change.tripKey);
           } else if ((change.type === 'edit_event' || change.type === 'delete_event') && change.source !== 'tripsy_update_page') {
             driveData.tripsyUpdatePages = before.filter(p => !(p.eventKeys || []).includes(change.eventKey));
           }
-          if (driveData.tripsyUpdatePages.length !== before.length) {
-            await persistDriveData({ silentConflict: true });
-          }
+          touchedUpdatePages = driveData.tripsyUpdatePages.length !== before.length;
         }
+        const touchedGuidesOrOutfits = change.type === 'delete_event'
+          && tripsyStripDeletedEventFromCaches(change.tripKey, change.eventKey.replace(':', '-'));
+        if (touchedUpdatePages || touchedGuidesOrOutfits) await persistDriveData({ silentConflict: true });
       } catch (e) {
-        console.error('Update-page invalidation write failed (non-fatal):', e);
+        console.error('Derived-cache cleanup write failed (non-fatal):', e);
       }
       return true;
     } catch (e) {
@@ -9807,12 +9817,46 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
   out.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   return out;
 }
+// One shared per-day step for the wear-limit walk both tripsyLaundryRunOutByDay and
+// tripsyLaundryFindAdjustments do, so a fix to the model can never land in one and not
+// the other. `wearDebt` is the debt entering the day; returns the debt leaving it plus
+// whether the day was a genuine shortage.
+//
+// A same-day wash's credit pays down PRE-EXISTING debt first (you wash in the morning,
+// wear in the evening -- the availability check below is computed against that reduced
+// debt, which is what makes "dirty from before, washed this morning, worn again tonight"
+// come out clean). Credit LEFT OVER after zeroing prior debt now also covers THIS SAME
+// DAY's own fresh wear, instead of being silently discarded -- reported 2026-08-14: a
+// shirt worn once, then washed the SAME day (bag: {'g:<id>': 1}, washedAt that same
+// dayKey), still showed up dirty on its next occasion days later. Root cause: the wash's
+// credit had zero PRIOR debt to pay down (nothing had been worn yet when the walk
+// processed that day's wash step), so `Math.max(0, 0 - credit)` threw the whole credit
+// away, and the SAME day's own wear then added a fresh, uncredited debt with no later
+// wash to clear it. "Worn, then washed later that day" is exactly as plausible a
+// same-day sequence as "washed, then worn" -- the fix lets leftover credit cover it.
+// Leftover credit is NOT banked across days (an over-large wash still can't manufacture
+// credit for a day it wasn't recorded on, mirroring the existing no-negative-banking
+// rule for prior debt).
+function tripsyLaundryWearDebtStep(wearDebt, { washedQty, credited, wornToday, qty, limit }) {
+  let leftoverCredit = 0;
+  if (washedQty > 0 || credited > 0) {
+    const totalCredit = washedQty * limit + credited;
+    const used = Math.min(wearDebt, totalCredit);
+    wearDebt -= used;
+    leftoverCredit = totalCredit - used;
+  }
+  if (!wornToday) return { wearDebt, short: false };
+  const dirtyNow = Math.min(qty, Math.floor(wearDebt / limit));
+  if (qty - dirtyNow > 0) {
+    if (leftoverCredit >= limit) return { wearDebt, short: false }; // same-day wash covers this wear too
+    return { wearDebt: wearDebt + 1, short: false };
+  }
+  return { wearDebt, short: true };
+}
 // Projects each garment's CLEAN stock forward across the trip and reports the first day
 // it runs out -- i.e. a day it is needed with nothing clean left. Only meaningful once a
 // wash has actually happened: before that, the guide's own "best day for laundry" advice
 // is what's on offer, and this would just restate the packing maths.
-// The walk is per day, in order: a wash that day returns dirty copies to the clean pile
-// first (you wash in the morning, wear in the evening), then each wear consumes one.
 async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   const runOut = new Map();
   const washes = Store.listTripsyLaundry(tripKey)
@@ -9848,26 +9892,19 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   // WEAR-LIMIT AWARE: a garment isn't dirty after one wearing unless its own limit is 1
   // (tripsyWearsBeforeWash). A tie/tailoring (Infinity -- restyled, never laundered) or a
   // ten-wear pair of trousers must not be projected as "used up" on the first wear, or
-  // this flags a run-out day for something that can never actually run out.
-  // wearDebt is "wear-units owed since the last return" -- floor(wearDebt / limit) is how
-  // many copies are currently dirty. A wash of n copies pays down n*limit units, CAPPED AT
-  // ZERO rather than going negative, so an over-large wash can't manufacture extra credit
-  // (mirrors the old per-copy model's `Math.min(washedOn, dirty)`) and a partial wash (n
-  // less than what's dirty) only pays down what it actually cleaned -- it must NOT reset
-  // the whole counter, or washing one of five shirts would wrongly launder all five.
+  // this flags a run-out day for something that can never actually run out. Per-day
+  // arithmetic lives in tripsyLaundryWearDebtStep, shared with tripsyLaundryFindAdjustments.
   const walk = (key, name, qty, wornDays, limit) => {
     if (!(limit > 0) || !isFinite(limit)) return; // can never go dirty -- can never run out
     const worn = new Set(wornDays);
     let wearDebt = 0;
     for (const dayKey of dayKeys) {
-      const washedQty = washedOn(key, dayKey);
-      const credited = creditedOn(key, dayKey);
-      if (washedQty > 0 || credited > 0) wearDebt = Math.max(0, wearDebt - washedQty * limit - credited);
-      if (!worn.has(dayKey)) continue;
-      const dirtyNow = Math.min(qty, Math.floor(wearDebt / limit));
-      if (qty - dirtyNow > 0) { wearDebt += 1; continue; }
-      note(dayKey, name);
-      return; // the FIRST day it runs short is the one worth flagging
+      const step = tripsyLaundryWearDebtStep(wearDebt, {
+        washedQty: washedOn(key, dayKey), credited: creditedOn(key, dayKey),
+        wornToday: worn.has(dayKey), qty, limit,
+      });
+      wearDebt = step.wearDebt;
+      if (step.short) { note(dayKey, name); return; } // the FIRST day it runs short is the one worth flagging
     }
   };
   const byId = new Map((garments || []).map(g => [g.id, g]));
@@ -9927,12 +9964,14 @@ async function tripsyLaundryFindAdjustments(tripKey, person, guide) {
     const worn = new Set((days || []).map(d => d.dayKey).filter(Boolean));
     let wearDebt = 0;
     for (const dayKey of dayKeys) {
-      const washedQty = washedOn('g:' + id, dayKey);
-      const credited = creditedOn('g:' + id, dayKey);
-      if (washedQty > 0 || credited > 0) wearDebt = Math.max(0, wearDebt - washedQty * limit - credited);
-      if (!worn.has(dayKey)) continue;
-      const dirtyNow = Math.min(qty, Math.floor(wearDebt / limit));
-      if (qty - dirtyNow > 0) { wearDebt += 1; continue; }
+      // Same per-day arithmetic as tripsyLaundryRunOutByDay -- see
+      // tripsyLaundryWearDebtStep for why a same-day wash also covers that day's wear.
+      const step = tripsyLaundryWearDebtStep(wearDebt, {
+        washedQty: washedOn('g:' + id, dayKey), credited: creditedOn('g:' + id, dayKey),
+        wornToday: worn.has(dayKey), qty, limit,
+      });
+      wearDebt = step.wearDebt;
+      if (!step.short) continue; // never short on a day this garment isn't even worn
       // Short on this day. Only fixable if it's actually part of a composed outfit --
       // a tier-fallback wear day has no specific block to swap within.
       const block = (outfits.blocks || []).find(b => b.dayKey === dayKey && (b.garmentIds || []).includes(id));
@@ -13319,6 +13358,50 @@ async function saveTripDiaryToDrive(diary) {
 // collide with an id that came from the migration export.
 function tripsyMintLocalId() {
   return Date.now() * 1000 + Math.floor(Math.random() * 1000);
+}
+// Mechanically strips a deleted event out of the two cached, already-generated
+// artifacts that reference individual events by id and DON'T need a Claude call to
+// stay correct (unlike the Itinerary's own prose, handled separately -- see the
+// 'deleted' changeType in tripsyItineraryChangedEvents): the Daily Dress Guide
+// (driveData.tripsyAttireGuides) and composed Outfits (driveData.tripsyTripOutfits).
+// `hyphenBase` is the event's id in the guide/outfits id space ("<resource>-<id>",
+// same conversion tripsyAttireGoToEvent already does the reverse of) -- matched
+// against that exact id OR any "-checkin"/"-checkout"/"-begin"/"-end" suffixed
+// variant, since a multi-day event (expandMultiDayTripsyEvents) can show up there as
+// TWO separate synthetic rows for the one underlying event being deleted. Mutates
+// driveData in place; returns whether anything actually changed, so the caller only
+// pays for a write when there was something to clean up.
+function tripsyStripDeletedEventFromCaches(tripKey, hyphenBase) {
+  let changed = false;
+  const matches = id => id === hyphenBase || (typeof id === 'string' && id.startsWith(hyphenBase + '-'));
+  for (const guide of (driveData.tripsyAttireGuides || [])) {
+    if (guide.tripKey !== tripKey) continue;
+    const beforeCount = (guide.days || []).reduce((n, d) => n + (d.events || []).length, 0);
+    guide.days = (guide.days || [])
+      .map(day => ({ ...day, events: (day.events || []).filter(ev => !matches(ev.id)) }))
+      .filter(day => day.events.length > 0);
+    const afterCount = guide.days.reduce((n, d) => n + d.events.length, 0);
+    if (afterCount !== beforeCount) {
+      changed = true;
+      const { blocks, counts } = computeTripsyAttireBlocks(guide.days);
+      guide.blocks = blocks;
+      guide.counts = counts;
+    }
+  }
+  for (const outfits of (driveData.tripsyTripOutfits || [])) {
+    if (outfits.tripKey !== tripKey) continue;
+    const beforeBlocks = (outfits.blocks || []).length;
+    const beforeIds = (outfits.blocks || []).reduce((n, b) => n + (b.eventIds || []).length, 0);
+    // A block that loses ALL its events (every one deleted) is dropped entirely --
+    // nothing left to dress; one that keeps at least one event just loses the
+    // dangling id, its remaining events and garments untouched.
+    outfits.blocks = (outfits.blocks || [])
+      .map(b => ({ ...b, eventIds: (b.eventIds || []).filter(id => !matches(id)) }))
+      .filter(b => b.eventIds.length > 0);
+    const afterIds = outfits.blocks.reduce((n, b) => n + b.eventIds.length, 0);
+    if (afterIds !== beforeIds || outfits.blocks.length !== beforeBlocks) changed = true;
+  }
+  return changed;
 }
 
 // Applies one plain-data change object -- the exact shape Store.queueTripsyChange
@@ -19645,12 +19728,17 @@ function tripsyItineraryBlurbFingerprint(ev) {
 function tripsyItineraryBaselineFromEvents(events) {
   const fp = {};
   const bfp = {};
+  // Lightweight display info (day + name only, not full content) so a LATER deletion
+  // can still be shown/grouped in the changes dialog after the real event is gone --
+  // see the 'deleted' changeType in tripsyItineraryChangedEvents below.
+  const meta = {};
   for (const ev of events) {
     const key = tripsyItineraryEventKey(ev);
     fp[key] = tripsyItineraryEventFingerprint(ev);
     bfp[key] = tripsyItineraryBlurbFingerprint(ev);
+    meta[key] = { dayKey: tripsyDayKey(ev.start) || null, summary: ev.summary || 'Event' };
   }
-  return { fp, bfp, recordedAt: new Date().toISOString() };
+  return { fp, bfp, meta, recordedAt: new Date().toISOString() };
 }
 // A single fingerprint over everything buildTripsyPrintHtml's output depends
 // on, so previewTripsyItinerary can reuse a cached build when it hasn't
@@ -19724,8 +19812,10 @@ async function tripsyItineraryChangedEvents(trip, narrativeCache, { allowBackfil
   }
   const events = await tripsyItineraryEventList(trip);
   const changed = [];
+  const currentKeys = new Set();
   for (const ev of events) {
     const key = tripsyItineraryEventKey(ev);
+    currentKeys.add(key);
     const fp = tripsyItineraryEventFingerprint(ev);
     if (!(key in baseline.fp)) changed.push({ ev, key, changeType: 'added', blurbStale: false });
     else if (baseline.fp[key] !== fp) {
@@ -19739,30 +19829,45 @@ async function tripsyItineraryChangedEvents(trip, narrativeCache, { allowBackfil
       changed.push({ ev, key, changeType: 'modified', blurbStale });
     }
   }
+  // A baseline key with no matching CURRENT event at all: the event was deleted (or
+  // hidden) since the itinerary was written. Previously never detected at all -- only
+  // added/modified events were checked, so deleting an event left the ▲ badge dark and
+  // the narrative silently going on describing something that no longer exists. `ev` is
+  // null here (the real event is gone); `meta` (added alongside `fp`/`bfp` above) is the
+  // only surviving record of which day/name it was, for the changes dialog to show. A
+  // baseline recorded before `meta` existed has none, so falls back to 'undated'/'Event'.
+  for (const key of Object.keys(baseline.fp)) {
+    if (currentKeys.has(key)) continue;
+    const m = (baseline.meta && baseline.meta[key]) || null;
+    changed.push({ ev: null, key, changeType: 'deleted', blurbStale: false, dayKey: m && m.dayKey, summary: m && m.summary });
+  }
   return changed;
 }
 // Dialog shown when the owner clicks itinerary "Edit" and there are added/
-// modified events: date-grouped, one row per changed event with a "Generate"
+// modified/deleted events: date-grouped, one row per changed event with a "Generate"
 // checkbox, and Continue. On Continue, each checked event's DAY is regenerated
 // (place write-ups come per-day -- same unit the first-run selection screen
 // uses) plus its photos, the baseline is reset (acknowledging every listed
-// event, checked or not), and the Edit/Preview overlay opens.
+// event, checked or not), and the Edit/Preview overlay opens. A 'deleted' entry has no
+// live `ev` (the real event is gone) -- it carries its own dayKey/summary instead,
+// captured in the baseline at the time it was still real (see tripsyItineraryChangedEvents).
 async function showTripsyItineraryChangesDialog(trip, changedEvents) {
+  const dayKeyFor = c => c.ev ? (tripsyDayKey(c.ev.start) || 'undated') : (c.dayKey || 'undated');
   const byDay = new Map();
   for (const c of changedEvents) {
-    const dayKey = tripsyDayKey(c.ev.start) || 'undated';
+    const dayKey = dayKeyFor(c);
     if (!byDay.has(dayKey)) byDay.set(dayKey, []);
     byDay.get(dayKey).push(c);
   }
   const orderedDayKeys = [...byDay.keys()].sort((a, b) => a === 'undated' ? 1 : b === 'undated' ? -1 : a.localeCompare(b));
   const rowHtml = c => {
-    const time = formatTripTime(c.ev.start);
-    const tag = c.changeType === 'added' ? 'New' : 'Modified';
-    const dayKey = tripsyDayKey(c.ev.start) || 'undated';
+    const time = c.ev ? formatTripTime(c.ev.start) : '';
+    const tag = c.changeType === 'added' ? 'New' : c.changeType === 'deleted' ? 'Deleted' : 'Modified';
+    const summary = c.ev ? (c.ev.summary || 'Event') : (c.summary || 'Event');
     return `
       <label style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:5px 0; cursor:pointer;">
-        <span style="font-size:13px; min-width:0;">${time ? `<span style="font-family:var(--mono); color:var(--amber); margin-right:6px;">${esc(time)}</span>` : ''}${esc(c.ev.summary || 'Event')}<span style="color:var(--muted); font-size:11px; margin-left:6px;">(${tag})</span></span>
-        <input type="checkbox" data-tripsy-itin-change data-day-key="${esc(dayKey)}" checked style="flex-shrink:0; width:16px; height:16px;">
+        <span style="font-size:13px; min-width:0;">${time ? `<span style="font-family:var(--mono); color:var(--amber); margin-right:6px;">${esc(time)}</span>` : ''}${esc(summary)}<span style="color:var(--muted); font-size:11px; margin-left:6px;">(${tag})</span></span>
+        <input type="checkbox" data-tripsy-itin-change data-day-key="${esc(dayKeyFor(c))}" checked style="flex-shrink:0; width:16px; height:16px;">
       </label>`;
   };
   const dayBlock = dayKey => `
@@ -19776,7 +19881,7 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
     <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; max-width:520px; width:100%; max-height:82vh; overflow-y:auto; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
       <div style="font-size:15px; font-weight:700; color:var(--text); margin-bottom:4px;">Itinerary changes</div>
       <div style="font-size:12px; color:var(--muted); margin-bottom:6px;">${esc(trip.name)}</div>
-      <div style="font-size:12px; color:var(--muted); margin-bottom:14px; line-height:1.45;">These events were added or changed since the itinerary was generated. Check <b>Generate</b> to (re)write content and fetch photos for them — same rules as when the itinerary was first created. Unchecked events are left as they are.</div>
+      <div style="font-size:12px; color:var(--muted); margin-bottom:14px; line-height:1.45;">These events were added, changed, or removed since the itinerary was generated. Check <b>Generate</b> to (re)write that day's content — a removed event is dropped from its day's write-up the same way, and photos are fetched for anything new — same rules as when the itinerary was first created. Unchecked events are left as they are.</div>
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 0 6px; border-bottom:1px solid var(--line); margin-bottom:8px;">
         <span style="font-size:11px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; color:var(--muted);">Event</span>
         <span style="font-size:11px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; color:var(--muted);">Generate</span>

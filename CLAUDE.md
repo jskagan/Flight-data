@@ -185,6 +185,36 @@ step 4; git history has it if ever needed.
   `driveData.tripsyPendingChanges` still exists in the data model but is permanently empty; the
   timeline's pending-overlay plumbing (`getEffectiveTripsyEvent`/`getEffectiveTripsyTrip`,
   `pendingCreates`, `cancelTripsyChange`) is retained but inert-on-empty by construction.
+- **Deleting an event also cleans it out of the derived caches that reference it by id, not just
+  the live trip.** Reported 2026-08-14: "when I delete an event it should also be deleted from
+  itinerary, daily dress, schedule, etc." — `applyTripsyChangeToTrips` only ever touched the live
+  `trips` array; the Daily Dress Guide (`driveData.tripsyAttireGuides`) and composed Outfits
+  (`driveData.tripsyTripOutfits`) are separate SNAPSHOTS that kept showing a deleted event until a
+  manual Refresh/Regenerate, and the Itinerary's own ▲ "out of date" badge only ever checked CURRENT
+  events for being new/modified — a pure deletion tripped no signal at all, so the generated
+  narrative prose silently kept describing something gone. Fixed three ways, split by whether fixing
+  it needs a Claude call: **(1)** `tripsyStripDeletedEventFromCaches(tripKey, hyphenBase)`, called
+  from `queueTripsyChange`'s existing best-effort post-save cleanup (same block that already
+  invalidates stale Update pages, now one combined write) whenever `change.type === 'delete_event'`
+  — mechanically strips the id from the guide's `days[].events[]` (recomputing
+  `blocks`/`counts` via `computeTripsyAttireBlocks`, dropping a day left with nothing on it) and from
+  any outfit block's `eventIds` (dropping a block that loses every one of its events). No Claude call
+  needed, these are just structured lists. Matches BOTH the exact hyphen id and any
+  `-checkin`/`-checkout`/`-begin`/`-end` suffixed variant, since a multi-day event
+  (`expandMultiDayTripsyEvents`) can appear as two separate synthetic rows there for one underlying
+  event. **(2)** `tripsyItineraryChangedEvents` now also walks `baseline.fp`'s own keys looking for
+  one with no matching CURRENT event, pushing a `changeType: 'deleted'` entry (`ev: null`, since the
+  real event is gone) — this drives the ▲ badge/Review-changes flow exactly like an add or edit,
+  where before a deletion was invisible to it entirely. **(3)** Since a deleted event has no live
+  data left to describe itself, `tripsyItineraryBaselineFromEvents` now also records a lightweight
+  `meta[key] = {dayKey, summary}` per event alongside its fingerprint, so `showTripsyItineraryChangesDialog`
+  can still group/label a deleted row (day-grouping and the row's own text both fall back to `c.dayKey`/
+  `c.summary` when `c.ev` is null) after the real event is gone; a baseline recorded before `meta`
+  existed degrades to an "Undated"/"Event" row rather than crashing. Checking a deleted row and
+  hitting Continue regenerates that day's write-up from LIVE events (which no longer include it) —
+  the same per-day regenerate path added/modified rows already use — and `tripsyRecordItineraryBaseline`
+  resets the baseline to current events afterward, which naturally drops the deleted key and clears
+  the flag on its own.
 - **Attachments, and doc/email parsing — always human-reviewed, never automatic**: the owner can
   attach a file (boarding pass, confirmation, full itinerary) to a trip or event
   (`renderTripsyAttachPanel`, `index.html:7777`; metadata in `driveData.tripsyAttachments`, actual
@@ -803,6 +833,22 @@ step 4; git history has it if ever needed.
   going negative (an over-large wash can't manufacture credit), and — this is the part that broke
   the naive fix — a **partial** wash must only pay down what it actually cleaned, never reset the
   whole counter, or washing one of five dirty shirts would wrongly launder all five.
+  **A wash dated the SAME DAY a garment was worn now covers that day's own wearing too, not just
+  debt from before.** Reported 2026-08-14: a shirt worn once, then washed the SAME day (an exact
+  1-owned/1-washed match — nothing dirty before that day), still showed up dirty on its next
+  occasion days later with no further wash in between. Root cause: the walk's wash-before-wear
+  order pays wash credit down against debt entering the day only; with zero prior debt (nothing
+  worn yet), `Math.max(0, 0 − credit)` threw the whole credit away, and that SAME day's own wear
+  then added fresh, uncredited debt with no later wash to clear it — "worn, then washed later that
+  day" is exactly as plausible a same-day sequence as "washed, then worn," and the walk only ever
+  gave credit for the second. Fixed by factoring the per-day step into
+  **`tripsyLaundryWearDebtStep(wearDebt, {washedQty, credited, wornToday, qty, limit})`**, shared by
+  both `tripsyLaundryRunOutByDay` and `tripsyLaundryFindAdjustments` (below) so the two can never
+  diverge on the model again: any credit left over after zeroing prior debt is now also let cover
+  that day's own fresh wear (`leftoverCredit >= limit` skips the `wearDebt += 1`) — but this leftover
+  is a per-day local, never banked across days, so an absurdly over-sized same-day wash still only
+  forgives that ONE day's wearing, not an unlimited reset (verified: a 99-copy same-day wash on a
+  1-owned garment pushes the run-out day later by exactly one wearing, never further).
   **A "Not Dirty" credit pays down `wearDebt` too, directly (it's already in wearing units, unlike
   a wash which is in copies and must be scaled by the limit first)** — this was a SEPARATE bug from
   the wear-limit one above, found the same day: `tripsyLaundryItemsForDay`'s day-by-day wash list

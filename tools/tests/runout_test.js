@@ -31,6 +31,7 @@ const tripsyWardrobeWearDaysFromLines = (g, p, lines) => ({ days: (wearByLine[li
 // assertion below -- all written against one-wear garments -- is unaffected.
 let limitByName = {};
 const tripsyWearsBeforeWash = (name) => (limitByName[name] !== undefined ? limitByName[name] : 1);
+${extractFn('tripsyLaundryWearDebtStep')}
 ${extractFn('tripsyLaundryRunOutByDay')}
 
 const D = n => '2026-08-' + String(n).padStart(2, '0');
@@ -176,10 +177,29 @@ r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
 assert(r.runOut.get(D(6)) && !r.runOut.get(D(4)) && !r.runOut.get(D(5)),
   'a wash mid-run pushes the run-out day out (day 4 -> day 6), never resetting further than what it actually cleaned -> ' + JSON.stringify([...r.runOut]));
 
-// An over-large wash on a multi-wear garment still cannot conjure more relief than
-// what was genuinely dirty -- same guard as the limit-1 case above, now with limit>1.
+// An over-large wash on the SAME DAY as its own first wearing now forgives THAT ONE
+// wearing (see tripsyLaundryWearDebtStep -- "worn, then washed later that day" is as
+// plausible as "washed, then worn"), pushing the run-out day out by exactly one
+// wearing -- but claiming to wash 99 copies of a garment worn only once so far still
+// cannot conjure MORE than that single day's relief; the trip still runs out, just one
+// wearing later than it would have with no wash at all.
 washes = [{ tripKey: 'T1', person: 'him', dayKey: D(1), washedAt: 'x', bag: { 'g:a': 99 } }];
-wearByGarment = { a: [D(1), D(2), D(3), D(4)] };
+wearByGarment = { a: [D(1), D(2), D(3), D(4), D(5)] };
 r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
-assert(r.runOut.get(D(4)), 'an over-large wash before anything is dirty changes nothing -- still runs out on wearing 4');
+assert(r.runOut.get(D(5)) && !r.runOut.get(D(4)),
+  'an over-large same-day wash forgives only its own day\\'s wearing, not a full reset -> ' + JSON.stringify([...r.runOut]));
+
+// THE REPORTED BUG, reproduced directly: a garment worn ONCE, washed the SAME day
+// (exactly the copy that was just worn -- qty 1, washed 1, nothing dirty before that
+// day), then worn again several days later with no wash in between. Before this fix,
+// the wash's credit had zero prior debt to pay down and was silently discarded, so the
+// later wearing came up short even though the garment was genuinely clean.
+limitByName = { 'Cream Linen Shirt': 1 };
+wardrobe = [{ id: 'a', name: 'Cream Linen Shirt', person: 'him' }];
+selection = [{ id: 'a', qty: 1 }];
+washes = [{ tripKey: 'T1', person: 'him', dayKey: D(1), washedAt: 'x', bag: { 'g:a': 1 } }];
+wearByGarment = { a: [D(1), D(6)] };
+r = await tripsyLaundryRunOutByDay('T1', 'him', guide);
+assert(r.runOut.size === 0,
+  'THE BUG: worn once then washed the same day is genuinely clean for its next wearing days later -> ' + JSON.stringify([...r.runOut]));
 `);
