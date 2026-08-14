@@ -25697,6 +25697,57 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
   const blocks = tripsyEnumerateAttireBlocks(guide);
   if (!blocks.length) throw new Error('This trip has no events to compose outfits for.');
 
+  // INCREMENTAL RECOMPOSE: a "Regenerate" used to re-dress EVERY block on the trip in
+  // one huge Claude call, even when only one block's dress code had moved -- on a long
+  // trip that's minutes of streaming for outfits that come back unchanged anyway
+  // (reported 2026-08-14: "Regenerating outfits takes a very long time for minor
+  // changes"). When existing outfits are usable, keep every still-covered block's
+  // outfit verbatim and only send the genuinely UNCOVERED blocks to Claude. "Covered"
+  // is the exact same greedy day+tier multiset match tripsyOutfitsUncoveredBlocks uses
+  // to decide staleness in the first place, so what gets re-dressed here is precisely
+  // what that check flagged. Only when the SELECTION is unchanged: a changed packing
+  // selection can strand kept outfits on garments no longer packed, so that case (and
+  // a first-ever compose) still re-dresses everything.
+  const selectionFp = tripsyOutfitSelectionFingerprint(selection);
+  const existing = await Store.getTripsyTripOutfits(tripKey, person);
+  const keptByIndex = new Map(); // current block index -> saved block whose outfit is kept
+  if (existing && (existing.blocks || []).length
+      && existing.selectionFingerprint && existing.selectionFingerprint.hash === selectionFp.hash) {
+    const unused = [...(existing.blocks || [])];
+    blocks.forEach((b, i) => {
+      const j = unused.findIndex(sb => sb.dayKey === b.dayKey && sb.category === b.category);
+      if (j >= 0) { keptByIndex.set(i, unused[j]); unused.splice(j, 1); }
+    });
+  }
+  const staleBlocks = blocks.filter((b, i) => !keptByIndex.has(i));
+  // A kept block's outfit is carried over but its eventIds/label are refreshed from the
+  // CURRENT block, so per-event outfit lookups (the 👔 glyph, the guide's "See outfit"
+  // cue) stay correct after events fold into or leave a block.
+  const keptOutBlock = (b, sb) => ({
+    dayKey: b.dayKey, category: b.category, eventIds: b.eventIds, label: b.label,
+    garmentIds: sb.garmentIds || [], note: sb.note || '', gaps: sb.gaps || [],
+  });
+  if (!staleBlocks.length) {
+    // Every current block is already dressed -- nothing for Claude to do at all. Still
+    // re-save (refreshed eventIds/labels + fingerprints) so the staleness checks clear.
+    const outfits = {
+      tripKey, person, generatedAt: new Date().toISOString(),
+      guideFingerprint: guide.eventFingerprint || null,
+      selectionFingerprint: selectionFp,
+      blocks: blocks.map((b, i) => keptOutBlock(b, keptByIndex.get(i))),
+    };
+    const ok = await Store.saveTripsyTripOutfits(outfits);
+    if (!ok) {
+      // Same preserved-result shape as the main path below, so the caller's Retry Save
+      // offer works here too (cheap as this path is, a retry beats a dead-end error).
+      const err = new Error('Could not save the composed outfits.');
+      err.tripsyComposedOutfits = outfits;
+      throw err;
+    }
+    console.log(`[outfit timing] ${person}: all ${blocks.length} blocks already dressed — no API call needed`);
+    return outfits;
+  }
+
   // Labeled garment images, then the schedule + rules as the final text block.
   // Tags/metadata are assigned synchronously first so ordering stays
   // deterministic, THEN every garment photo is downloaded+resized+encoded in
@@ -25749,17 +25800,29 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
     content.push({ type: 'text', text: it.meta });
     if (images[i]) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: images[i] } });
   });
-  const scheduleLines = blocks.map(b => {
+  const scheduleLineFor = b => {
     const label = TRIPSY_ATTIRE_CATEGORY_LABEL[b.category] || b.category || 'Casual';
     return `${b.blockId} | ${b.dayKey}${b.startTime ? ' ' + b.startTime : ''} | ${label} | ${b.label || '(no events named)'}`;
-  }).join('\n');
+  };
+  const scheduleLines = staleBlocks.map(scheduleLineFor).join('\n');
+  // A partial recompose must still honor the whole trip's rotation limits: the kept
+  // blocks' garments are already spoken for on their days, so they're listed as fixed
+  // context (by tag) rather than re-opened for dressing.
+  const tagById = new Map([...idByTag].map(([tag, id]) => [id, tag]));
+  const keptSection = keptByIndex.size ? `
+
+ALREADY-DRESSED BLOCKS — kept exactly as they are, do NOT re-dress or output these. Their garments' wear DOES count against the re-wear limits below when dressing the blocks above:
+${[...keptByIndex.entries()].map(([i, sb]) => {
+    const tags = (sb.garmentIds || []).map(id => tagById.get(id)).filter(Boolean);
+    return `${scheduleLineFor(blocks[i])} → ${tags.join(', ') || '(none)'}`;
+  }).join('\n')}` : '';
   const laundry = (guide.laundryDays || []).map(l => l.dayKey).join(', ') || 'none';
   const prompt = `You are a menswear stylist composing packing outfits from ONE traveler's selected garments — each shown above as a photo with a [G#] tag and metadata (name, color, type, the dress codes it works for, and how many they own).
 
 Selected garments: ${chosen.length}. Wash day(s) that RESET wear counts: ${laundry}.
 
 TIME-BLOCKS to dress — assign ONE coordinated outfit to each. Format is "BLOCK | date time | dress code | events":
-${scheduleLines}
+${scheduleLines}${keptSection}
 
 Rules:
 - Each outfit is a list of garment tags that COORDINATE by color and suit that block's dress code. Prefer a complete look: for suited tiers, a suit/blazer + shirt + trousers + shoes (+ a tie for formal/black-tie/most cocktail); for casual tiers, a top + bottom + shoes.
@@ -25769,7 +25832,7 @@ Rules:
 - Coordinate color sensibly (e.g. brown shoes/belt with blues and earth tones; black shoes with charcoal/grey; a tie that complements the shirt and jacket).
 - Add an OUTER LAYER (a jacket, coat, raincoat, or sweater from the selected outerwear) to a block when the weather or the setting calls for it — a chilly or outdoor block, rain, or to dress up a look — coordinating it with the rest. Reuse the same outer layer across many blocks freely; don't force one where it isn't needed.
 - If a block needs a garment TYPE that isn't in the selection (e.g. no dress shirt for a formal block, no shoes), still assign what you can and add a short gap string like "No dress shirt packed".
-- Use ONLY the [G#] tags shown. EVERY block above must appear exactly once in the output, even if you can only partially fill it.`;
+- Use ONLY the [G#] tags shown. EVERY block in the "TIME-BLOCKS to dress" list must appear exactly once in the output, even if you can only partially fill it — and NONE of the already-dressed blocks.`;
   content.push({ type: 'text', text: prompt });
 
   const schema = {
@@ -25793,29 +25856,35 @@ Rules:
   };
   const result = await tripsyAttireClaudeCall(apiKey, schema, content, 'outfit composition', { thinking: true, effort: 'medium' });
 
+  // Freshly-dressed blocks by id, then everything merged back into CURRENT block order
+  // -- kept blocks carried over verbatim, stale ones from this call's result. Only the
+  // stale set was in the prompt, so a stray block_id that isn't stale is ignored.
+  const staleIds = new Set(staleBlocks.map(b => b.blockId));
   const byBlockId = new Map(blocks.map(b => [b.blockId, b]));
-  const outBlocks = [];
+  const dressedById = new Map();
   for (const r of (result.blocks || [])) {
     const b = byBlockId.get(r.block_id);
-    if (!b) continue;
-    const garmentIds = (r.garment_tags || []).map(t => idByTag.get(t)).filter(Boolean);
-    outBlocks.push({
+    if (!b || !staleIds.has(b.blockId)) continue;
+    dressedById.set(b.blockId, {
       dayKey: b.dayKey,
       category: b.category,
       eventIds: b.eventIds,
       label: b.label,
-      garmentIds,
+      garmentIds: (r.garment_tags || []).map(t => idByTag.get(t)).filter(Boolean),
       note: String(r.note || '').trim(),
       gaps: (r.gaps || []).map(x => String(x || '').trim()).filter(Boolean),
     });
   }
-  if (!outBlocks.length) throw new Error('No outfits came back — try again.');
+  const outBlocks = blocks
+    .map((b, i) => keptByIndex.has(i) ? keptOutBlock(b, keptByIndex.get(i)) : dressedById.get(b.blockId))
+    .filter(Boolean);
+  if (!dressedById.size) throw new Error('No outfits came back — try again.');
   const outfits = {
     tripKey,
     person,
     generatedAt: new Date().toISOString(),
     guideFingerprint: guide.eventFingerprint || null,
-    selectionFingerprint: tripsyOutfitSelectionFingerprint(selection),
+    selectionFingerprint: selectionFp,
     blocks: outBlocks,
   };
   // The save itself gets its own bounded retry, on top of whatever
@@ -25843,7 +25912,8 @@ Rules:
   // Read alongside the "[attire timing] outfit composition" line the API call itself
   // logs: total minus that, minus the photo phase, is the Drive read/write around them.
   console.log(`[outfit timing] ${person}: ${Math.round(performance.now() - composeStart)}ms total`
-    + ` | ${chosen.length} garments, ${blocks.length} blocks`);
+    + ` | ${chosen.length} garments, ${blocks.length} blocks`
+    + (keptByIndex.size ? ` (partial: dressed ${staleBlocks.length}, kept ${keptByIndex.size})` : ''));
   return outfits;
 }
 // Runs Compose Outfits from the Attire toolbar button, then re-renders the guide so

@@ -1319,6 +1319,22 @@ would overwrite the glyph with the word.
   existing caller passes a real `no` string or omits it, so this is purely additive), and clicking
   outside such a dialog acknowledges it (resolves `true`) rather than declining, since there's
   nothing to decline.
+- **Recomposing outfits is INCREMENTAL — only genuinely uncovered blocks go to Claude.** Reported
+  2026-08-14: "Regenerating outfits takes a very long time for minor changes" — a Regenerate
+  re-dressed EVERY time-block in one huge call even when one block's tier had moved.
+  `composeTripsyOutfits` now, when saved outfits exist AND the packing selection is unchanged
+  (`selectionFingerprint` match — a changed selection could strand kept outfits on unpacked
+  garments, so that case still re-dresses everything, as does a first compose), matches saved
+  blocks to current blocks with the SAME greedy `dayKey|category` multiset rule
+  `tripsyOutfitsUncoveredBlocks` uses for staleness — so what gets re-dressed is precisely what
+  that check flagged. Covered blocks keep their outfit verbatim (eventIds/label refreshed from the
+  current block, so per-event lookups like the 👔 glyph stay right); only stale blocks appear in
+  the prompt's dress-these list, with the kept outfits included as fixed "ALREADY-DRESSED" context
+  lines (by tag) so the whole-trip re-wear/rotation limits still hold. Zero stale blocks skips the
+  API call entirely (just a refresh save, which also clears the staleness checks). Results merge
+  back in current-block order; a stray result for a non-stale block is ignored rather than
+  overwriting a kept outfit, and an empty result still fails loudly. The timing log gains a
+  `(partial: dressed N, kept M)` suffix so a slow run can be judged against what it actually did.
 - **Garment photos for the compose prompt are cached in memory** (`tripsyOutfitPhotoCache`,
   `driveFileId` → `Promise<base64>`). A REGENERATE otherwise re-downloaded and re-resized every
   selected garment's picture from Drive, identical bytes to the run a minute before — dozens of
