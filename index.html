@@ -9506,25 +9506,34 @@ function showTripsyCubePicker(garmentName, copies) {
 }
 // A styled Yes/No dialog resolving to a boolean. Clicking outside or No -> false.
 // Sits above the other tw-modals (outfit list etc.) via a very high z-index.
+// `no: null` renders a single-button ("OK"-style) acknowledgement dialog instead of a
+// real Yes/No choice -- for a message that must be READ rather than decided on, where a
+// toast's ~4s auto-dismiss is too fast (reported 2026-08-14: "a toast message just
+// appeared - couldn't read it in time" for an outfit-composition failure). Every
+// existing caller passes a real `no` string (or omits it, defaulting to 'No'), so this
+// is purely additive. Clicking outside a single-button dialog acknowledges it (resolves
+// true) rather than declining, since there is nothing to decline.
 function tripsyConfirmDialog(message, { title = '', yes = 'Yes', no = 'No' } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-confirm-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-confirm-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
     ov.style.zIndex = '2147483100';
+    const noButtonHtml = no !== null ? `<button class="btn" data-confirm-no>${esc(no)}</button>` : '';
     ov.innerHTML = `
       <div class="tw-modal-paper" style="max-width:420px; text-align:center;">
         ${title ? `<h2 style="margin:0 0 8px; font-size:19px;">${esc(title)}</h2>` : ''}
         <div style="font-size:14.5px; line-height:1.55; margin-bottom:20px; color:var(--text);">${esc(message)}</div>
         <div style="display:flex; gap:10px; justify-content:center;">
           <button class="btn primary" data-confirm-yes>${esc(yes)}</button>
-          <button class="btn" data-confirm-no>${esc(no)}</button>
+          ${noButtonHtml}
         </div>
       </div>`;
     ov.style.display = 'flex';
     const done = v => { ov.style.display = 'none'; resolve(v); };
     ov.querySelector('[data-confirm-yes]').onclick = () => done(true);
-    ov.querySelector('[data-confirm-no]').onclick = () => done(false);
-    ov.onclick = e => { if (e.target === ov) done(false); };
+    const noBtn = ov.querySelector('[data-confirm-no]');
+    if (noBtn) noBtn.onclick = () => done(false);
+    ov.onclick = e => { if (e.target === ov) done(no === null); };
   });
 }
 // Celebration when a person's Plan Packing List is completed: offer to compose
@@ -10468,6 +10477,28 @@ function tripsyOutfitBlockLiveTier(guide, block) {
     if (cat !== undefined) return cat;
   }
   return block && block.category;
+}
+// Which events already have a real composed outfit, and for which person(s) -- feeds
+// the 👔 glyph on each My Trips timeline row (only an event an outfit actually covers
+// gets one) and, when tapped, which person's outfit to open. Reads driveData directly
+// rather than going through Store.getTripsyTripOutfits (a synchronous lookup itself,
+// just async-flavored) since the My Trips card builder is not async. A block with an
+// empty garmentIds (composition came back with nothing, gaps only) doesn't count --
+// there's nothing to show for it.
+function tripsyOutfitEventPersonsMap(tripKey) {
+  const map = new Map();
+  for (const o of (driveData.tripsyTripOutfits || [])) {
+    if (o.tripKey !== tripKey) continue;
+    const person = o.person || 'him';
+    for (const b of (o.blocks || [])) {
+      if (!(b.garmentIds || []).length) continue;
+      for (const id of (b.eventIds || [])) {
+        if (!map.has(id)) map.set(id, new Set());
+        map.get(id).add(person);
+      }
+    }
+  }
+  return map;
 }
 // Sentinel Swap can resolve with instead of a garment id, meaning "take this piece out
 // of the outfit, no replacement" -- e.g. a tie that's merely optional at Cocktail
@@ -25616,8 +25647,28 @@ Rules:
     selectionFingerprint: tripsyOutfitSelectionFingerprint(selection),
     blocks: outBlocks,
   };
-  const ok = await Store.saveTripsyTripOutfits(outfits);
-  if (!ok) throw new Error('Could not save the composed outfits.');
+  // The save itself gets its own bounded retry, on top of whatever
+  // persistTripsyNarrativeCacheWithRetry already does internally for a REVISION
+  // CONFLICT specifically -- a plain transient failure (a network blip, a briefly
+  // backgrounded tab after the minute-plus Claude call above) is NOT a conflict, so
+  // that inner retry never kicks in and a single hiccup was throwing immediately.
+  // Reported 2026-08-14: "Could not save the composed outfits" with the compose
+  // itself having just succeeded. Retrying the SAVE alone (the outfits object is
+  // already built and idempotent to re-save) is cheap; re-running the whole
+  // composition is not.
+  let ok = await Store.saveTripsyTripOutfits(outfits);
+  for (let attempt = 0; !ok && attempt < 3; attempt++) {
+    await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+    ok = await Store.saveTripsyTripOutfits(outfits);
+  }
+  if (!ok) {
+    // Still preserve the composed result on the error -- callers can offer to retry
+    // JUST the save (Store.saveTripsyTripOutfits(e.tripsyComposedOutfits)) without
+    // paying for another Claude call, since the expensive part already succeeded.
+    const err = new Error('Could not save the composed outfits.');
+    err.tripsyComposedOutfits = outfits;
+    throw err;
+  }
   // Read alongside the "[attire timing] outfit composition" line the API call itself
   // logs: total minus that, minus the photo phase, is the Drive read/write around them.
   console.log(`[outfit timing] ${person}: ${Math.round(performance.now() - composeStart)}ms total`
@@ -25676,23 +25727,45 @@ function tripsyShowOutfitComposingSpinner(person) {
   ov.style.display = 'flex';
   return () => { ov.style.display = 'none'; };
 }
+// Shared by both the normal success path and a successful retry-save below, so the
+// overlay refresh + toast can't drift between the two.
+async function tripsyOutfitComposeSucceeded(tripKey) {
+  const overlay = getOrCreateTripsyAttireOverlay();
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  const guide = await Store.getTripsyAttireGuide(tripKey);
+  if (overlay.style.display !== 'none' && trip && guide) {
+    const { weatherTargetsByDay, tripStartDayKey } = await tripsyAttireLoadWeatherBar(trip, guide);
+    renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
+  }
+  toast('Outfits composed — tap "View Outfits" on the trip to see them.', 'success');
+}
 async function runTripsyOutfitComposition(tripKey, person = 'him') {
   // Triggered from the outfit list's per-person Compose/Recompose; toast covers the
   // wait, and My Trips is re-rendered afterward so the card's outfits item flips.
   toast(`Composing ${person === 'her' ? 'Hers' : 'His'} outfits — this can take a minute…`);
   try {
     await composeTripsyOutfits(tripKey, person);
-    const overlay = getOrCreateTripsyAttireOverlay();
-    const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
-    const guide = await Store.getTripsyAttireGuide(tripKey);
-    if (overlay.style.display !== 'none' && trip && guide) {
-      const { weatherTargetsByDay, tripStartDayKey } = await tripsyAttireLoadWeatherBar(trip, guide);
-      renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
-    }
-    toast('Outfits composed — tap "View Outfits" on the trip to see them.', 'success');
+    await tripsyOutfitComposeSucceeded(tripKey);
   } catch (e) {
     console.error('Outfit composition failed:', e);
-    toast(`Could not compose outfits — ${e.message || 'unknown error'}.`, 'error');
+    // The composition itself (the slow, costly Claude call) already succeeded here --
+    // only the save afterward failed, even after composeTripsyOutfits' own retries.
+    // Offer to retry JUST the save instead of silently discarding a minute of work.
+    if (e && e.tripsyComposedOutfits) {
+      const retry = await tripsyConfirmDialog(
+        `Outfits were composed but could not be saved (${e.message || 'unknown error'}). Retry saving them, or discard and start over?`,
+        { title: '⚠️ Could not save outfits', yes: 'Retry Save', no: 'Discard' });
+      if (retry) {
+        const ok = await Store.saveTripsyTripOutfits(e.tripsyComposedOutfits);
+        if (ok) { await tripsyOutfitComposeSucceeded(tripKey); return; }
+      }
+    }
+    // A blocking dialog, not the ordinary toast: reported 2026-08-14 ("a toast message
+    // just appeared - couldn't read it in time") right after hitting exactly this
+    // failure -- a composition error is worth reading in full (it names the real
+    // reason), not something to catch in the ~4s before a toast auto-dismisses.
+    await tripsyConfirmDialog(`Could not compose outfits — ${e.message || 'unknown error'}.`,
+      { title: '❌ Outfit composition failed', yes: 'OK', no: null });
   } finally {
     if (currentView === 'tripsytrips') renderTripsyEventsList();
   }
@@ -27708,6 +27781,9 @@ async function renderTripsyEventsListImpl() {
     }
 
     const collapsed = isTripsyTripCollapsed(trip.key);
+    // Which events already have a real composed outfit, and for which person(s) --
+    // drives the 👔 glyph on each timeline row below (tripsyOutfitEventPersonsMap).
+    const outfitEventPersons = tripsyOutfitEventPersonsMap(trip.key);
     // Overlay any queued pending edit/delete BEFORE the Check-in/Check-out
     // split, so a pending edit's changed start/end dates split correctly,
     // and both split halves (sharing one underlying hosting record) show
@@ -27859,14 +27935,27 @@ async function renderTripsyEventsListImpl() {
           </div>
         </div>
       ` : '';
-      const actionsHtml = !canEditDelete ? '' : isPendingDelete
-        ? `<div style="flex-shrink:0;"><button class="btn" data-tripsy-undo-delete-event data-change-id="${esc(ev._pendingDeleteId)}" style="font-size:11px; padding:3px 8px;">Undo</button></div>`
-        : `<div style="display:flex; gap:6px; flex-shrink:0;">
-            ${docIconHtml}
+      // 👔 only appears when a real composed outfit already covers this event (see
+      // tripsyOutfitEventPersonsMap) -- available to every viewer, same as the
+      // read-only Outfit button already inside the detail panel, not owner-gated like
+      // the icons below. Which person's outfit to open on tap: the currently-selected
+      // Daily Dress Guide person if THEY have one for this event, else whichever
+      // person actually does (both stashed in data-tripsy-outfit-persons for the
+      // click handler to choose from, since tripsyDressGuidePerson can change after
+      // this HTML is built).
+      const outfitPersons = outfitEventPersons.get(ev.id);
+      const outfitGlyphHtml = outfitPersons && outfitPersons.size
+        ? `<button class="btn" data-tripsy-outfit-glyph data-trip-key="${esc(trip.key)}" data-event-id="${esc(ev.id)}" data-persons="${esc([...outfitPersons].join(','))}" style="font-size:17px; padding:4px 10px;" title="View outfit">👔</button>`
+        : '';
+      const ownerIconsHtml = !canEditDelete ? '' : isPendingDelete
+        ? `<button class="btn" data-tripsy-undo-delete-event data-change-id="${esc(ev._pendingDeleteId)}" style="font-size:11px; padding:3px 8px;">Undo</button>`
+        : `${docIconHtml}
             <button class="btn" data-tripsy-edit-event data-key="${esc(eventKey)}" style="font-size:17px; padding:4px 10px;" title="Edit">✏️</button>
             <button class="btn" data-tripsy-attach-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" style="font-size:17px; padding:4px 10px;" title="Attach Doc">📎</button>
-            <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:17px; padding:4px 10px;" title="Delete">🗑️</button>
-          </div>`;
+            <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:17px; padding:4px 10px;" title="Delete">🗑️</button>`;
+      const actionsHtml = (outfitGlyphHtml || ownerIconsHtml)
+        ? `<div style="display:flex; gap:6px; flex-shrink:0;">${outfitGlyphHtml}${ownerIconsHtml}</div>`
+        : '';
       // Keyed by eventKey (not panelKey) so the Check-out half of a
       // Check-in/Check-out split -- which shares its panel container with
       // Check-in and so never gets its own panelKey -- still opens the
@@ -29231,6 +29320,24 @@ async function renderTripsyEventsListImpl() {
       panel.style.display = "block";
       panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
       positionTripsyTimelineConnectors();
+    });
+  });
+
+  // The 👔 timeline glyph: opens the SAME outfit modal the Daily Dress Guide's "See
+  // outfit" cue and the detail panel's Outfit button use. Available to every viewer
+  // (the glyph itself is only ever rendered when a real outfit exists, and Swap inside
+  // the modal is separately owner-gated). Prefers the currently-selected Daily Dress
+  // Guide person if THEY actually have an outfit for this event, else whichever person
+  // does -- read from data-persons at click time rather than baked into the button's
+  // handler, since tripsyDressGuidePerson can change after this row was rendered.
+  container.querySelectorAll("[data-tripsy-outfit-glyph]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const tripKey = btn.dataset.tripKey;
+      const eventId = btn.dataset.eventId;
+      const persons = (btn.dataset.persons || '').split(',').filter(Boolean);
+      const person = persons.includes(tripsyDressGuidePerson) ? tripsyDressGuidePerson : (persons[0] || 'him');
+      showTripsyOutfitModal(tripKey, eventId, person);
     });
   });
 

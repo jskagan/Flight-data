@@ -926,6 +926,19 @@ step 4; git history has it if ever needed.
   Travel View's own event-detail overlay (`showTripsyTravelEventDetail`), which shares this same
   render function — stays unaffected: no tripKey passed there, so no Outfit button renders, and
   `showTripsyOutfitModal`'s own graceful "No outfit yet" state covers an event with none composed.
+- **A 👔 glyph sits directly on the My Trips timeline row itself**, one tap away with no need to
+  open the detail panel first — unlike that panel's own Outfit button above, which always renders
+  and relies on `showTripsyOutfitModal`'s "No outfit yet" state for an uncomposed event, this glyph
+  is conditional: it renders ONLY when a real composed outfit (`garmentIds.length`, not an
+  empty/gaps-only block) already covers that event, via `tripsyOutfitEventPersonsMap(tripKey)` — a
+  synchronous read of `driveData.tripsyTripOutfits` (the card builder itself isn't async) into
+  `eventId -> Set(persons with an outfit covering it)`, computed once per trip card. Available to
+  every viewer, same as the detail-panel button — deliberately NOT folded into the adjacent
+  Edit/Attach/Delete icon row, which is owner-gated (`canEditDelete`) and would have hidden it from
+  viewers too. Tapping it opens the same `showTripsyOutfitModal`, choosing whichever person's outfit
+  to show from `data-persons` (both persons' coverage is stashed there, read at CLICK time rather
+  than baked in, since `tripsyDressGuidePerson` can change after the row was rendered): the
+  currently-selected Daily Dress Guide person if they have one for this event, else whoever does.
 - **Block dress-level propagation (`displayCategory`)**: adjacent events with no time to change
   between them form one "time-block" and are all worn as — and displayed as — the block's DRESSIEST
   tier. `computeTripsyAttireBlocks` is the single grouping for this: it splits each day into runs at
@@ -1204,6 +1217,32 @@ would overwrite the glyph with the word.
   use (so this can never disagree with them), and offers the identical Regenerate/Ignore confirm —
   never a silent auto-recompose, since that's a real Claude call. Owner-only (recomposing writes);
   skipped entirely for a person with no real composed outfit yet, since there's nothing to go stale.
+- **A failed outfit save is retried, and never throws away a completed composition.** Reported
+  2026-08-14, right after the fix above shipped: the owner accepted the Regenerate prompt and got
+  `Could not save the composed outfits` with no toast otherwise — confirmed against the real Drive
+  data that `generatedAt` genuinely never advanced, so the save itself, not just the picks, had
+  failed outright. Root cause: `persistTripsyNarrativeCacheWithRetry`'s own inner retry only fires
+  for a REVISION CONFLICT (`e.conflict`); a plain transient failure (a network blip, or a tab
+  briefly backgrounded after the minute-plus Claude call) isn't a conflict, so one hiccup threw
+  immediately with zero retries — discarding the whole expensive composition for nothing.
+  `composeTripsyOutfits` now retries the SAVE step itself, up to 3 more times with backoff,
+  regardless of error kind (the composed `outfits` object is cheap and idempotent to re-save). If
+  every retry still fails, the composed result is preserved on the thrown error
+  (`err.tripsyComposedOutfits`) rather than discarded; `runTripsyOutfitComposition`'s catch checks
+  for it and offers a `⚠️ Could not save outfits` — Retry Save / Discard confirm that re-saves the
+  SAME already-composed object on accept, instead of forcing the owner to redo the whole (slow,
+  costly) Claude call over what was really just a save-layer hiccup. A successful retry-save
+  finishes through the same `tripsyOutfitComposeSucceeded` helper the ordinary path uses, so the
+  two can't drift on what "done" looks like.
+  **Follow-up, same day**: "a toast message just appeared - couldn't read it in time" — the final
+  unrecovered-failure message (declined the retry, or the retry-save itself also failed) was still
+  a plain `toast()`, which auto-dismisses in ~4s; a composition failure names the real underlying
+  reason and is worth actually reading. Both that final message and the Retry Save offer above now
+  go through `tripsyConfirmDialog`, which stays on screen until dismissed. This needed a new mode on
+  that shared dialog: `no: null` renders a single "OK" button instead of a real Yes/No choice (every
+  existing caller passes a real `no` string or omits it, so this is purely additive), and clicking
+  outside such a dialog acknowledges it (resolves `true`) rather than declining, since there's
+  nothing to decline.
 - **Garment photos for the compose prompt are cached in memory** (`tripsyOutfitPhotoCache`,
   `driveFileId` → `Promise<base64>`). A REGENERATE otherwise re-downloaded and re-resized every
   selected garment's picture from Drive, identical bytes to the run a minute before — dozens of
