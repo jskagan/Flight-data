@@ -527,7 +527,24 @@ step 4; git history has it if ever needed.
   The last row is the open experiment: whether the thinness at `medium` was mere terseness (fixable
   by telling it not to compress) rather than lost reasoning. **If the Detailed List is thin, go back
   to `high`** — this list is what the owner actually packs from, so a missing line is a missing
-  garment, and correctness beats the clock. Judge it by opening the list, not by the timing log. Two calls, because
+  garment, and correctness beats the clock. Judge it by opening the list, not by the timing log.
+  **The guidance call is also SKIPPED outright when its inputs are unchanged** (reported
+  2026-08-14: "the app says it can take a minute, but it always takes much longer"): it sizes every
+  quantity off exactly two authoritative inputs — the per-tier occasion counts and the tier-tagged
+  time-blocks (tier + `spanHours` per block) — so `generateTripsyAttireGuide` fingerprints those
+  (`guide.guidanceFingerprint`, via the shared `runGuidancePhase` closure both generation branches
+  go through) and, on a match with a saved guide that has real `personGuidance` + `packingList`,
+  carries guidance/packingList/laundryDays over VERBATIM (verbatim matters: picks/skips key on tier
+  + line NAME, so re-minting the list would strand them) with no guidance call at all — a Refresh
+  after a retitle, a time move, or an added event that folds into an existing block at the same tier
+  drops from minutes to seconds. Deliberately NOT fingerprinted: event names/ids and weather — a
+  retitle or a forecast wobble must not cost two minutes; a moved tier, changed counts, or a changed
+  block span (it feeds the ≤4h re-wear rule) all invalidate. `packingFrozen` stays tied to the trip
+  having STARTED only; a pre-trip reuse freezes nothing, and a pre-fingerprint guide just re-runs
+  once and records it. The generation UI also reports honestly now: `generateTripsyAttireGuide`
+  takes an optional `onStage` callback, `runTripsyAttireGeneration` renders it as a live
+  `data-attire-stage` line in the overlay's loading state, and the old "can take a minute" toast
+  says "typically 2–3 minutes" for a full generation instead. Two calls, because
   on a large trip the single serial output stream WAS the generation wait: one call emits the
   per-event array (category / `alternate_category` / `continues_previous_event` — the per-event
   `note` field was retired in this split, it was stored but never rendered anywhere and cost about

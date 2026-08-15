@@ -24349,9 +24349,22 @@ async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
     // was already open when we started) still gets the fresh guide + timestamp in
     // place, instead of keeping the stale one until it's closed and reopened.
     summaryLiveForTrip = () => !!content && overlay.style.display !== 'none' && tripsyAttireOverlayTripKey === tripKey;
-    if (summaryLiveForTrip()) content.innerHTML = `<div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">Generating attire guide — this can take a minute or two for a longer trip…</div>`;
-    toast(isRefresh ? 'Refreshing the attire guide — this can take a minute…' : 'Generating the attire guide — this can take a minute…');
-    const guide = await generateTripsyAttireGuide(tripKey);
+    // The static "can take a minute" line under-promised (a full generate is
+    // typically 2+ minutes on a long trip) and, being static, read as hung -- the
+    // stage line below is live-updated by generateTripsyAttireGuide's onStage as
+    // each phase starts, so the wait is visibly progressing and honestly framed.
+    if (summaryLiveForTrip()) content.innerHTML = `
+      <div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">
+        <div>Generating attire guide — a full generation typically takes 2–3 minutes; a refresh with no packing changes is much faster.</div>
+        <div data-attire-stage style="margin-top:12px; font-size:13px; opacity:0.85;">Starting…</div>
+      </div>`;
+    toast(isRefresh ? 'Refreshing the attire guide…' : 'Generating the attire guide — typically 2–3 minutes…');
+    const onStage = text => {
+      if (!summaryLiveForTrip()) return;
+      const el = content.querySelector('[data-attire-stage]');
+      if (el) el.textContent = text;
+    };
+    const guide = await generateTripsyAttireGuide(tripKey, { onStage });
     const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
     if (summaryLiveForTrip() && trip) {
       const { weatherTargetsByDay, tripStartDayKey } = await tripsyAttireLoadWeatherBar(trip, guide);
@@ -25450,11 +25463,16 @@ async function tripsyAttireLoadWeatherBar(trip, guide) {
 // consistent with how blocks[].summary already snapshots event names too;
 // staleness is handled separately (see showTripsyAttireOverlay) rather than
 // by keeping this data perfectly live.
-async function generateTripsyAttireGuide(tripKey) {
+async function generateTripsyAttireGuide(tripKey, { onStage } = {}) {
   // Phase timings to the console alongside tripsyAttireClaudeCall's own -- a
   // slow generation isn't necessarily the Claude calls (weather geocoding
   // fans out per city, and the final Drive write can be large), so measure
   // rather than assume.
+  // `onStage(text)` (optional) reports the current phase for the caller's own
+  // progress line -- a multi-minute run with one static "this can take a
+  // minute" message read as hung (and as a broken promise; reported
+  // 2026-08-14: "it always takes much longer").
+  const stage = text => { try { if (onStage) onStage(text); } catch (e) { /* progress is best-effort */ } };
   const genStart = performance.now();
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) throw new Error('Trip not found.');
@@ -25512,6 +25530,37 @@ async function generateTripsyAttireGuide(tripKey) {
     && existing.eventFingerprint.count === fingerprint.count
     && priorById.size);
 
+  // THE SLOW HALF, SKIPPED WHEN ITS INPUTS ARE UNCHANGED. The guidance call (~100s+,
+  // the long pole of every generation -- see the latency table in CLAUDE.md) sizes
+  // every quantity off exactly two authoritative inputs: the per-tier occasion counts
+  // and the tier-tagged time-blocks (tier + span per block). If those match what the
+  // SAVED guide's guidance was generated from, re-running it reproduces substantively
+  // the same packing list -- so carry personGuidance/packingList/laundryDays over
+  // verbatim instead, same as the mid-trip preservePacking path already does. This is
+  // what makes a Refresh after a minor event edit (a retitle, a time move, an added
+  // event that folds into an existing block at the same tier) take seconds instead of
+  // minutes. Deliberately NOT in the fingerprint: event names/ids (a retitle must not
+  // cost two minutes; sizing is count/tier/span-driven and the counts line is marked
+  // authoritative in the prompt) and weather (it mildly informs essentials -- not
+  // worth a 2-minute regeneration every time the forecast wobbles a degree).
+  let guidanceFp = null;
+  let guidanceReused = false;
+  const runGuidancePhase = async (tieredBlocks, tierCounts) => {
+    guidanceFp = tripsyContentFingerprint({
+      tierCounts,
+      blocks: tieredBlocks.map(b => ({ date: b.date, tier: b.tier, spanHours: b.spanHours != null ? b.spanHours : null })),
+    });
+    if (preservePacking) return null;
+    if (existing && existing.personGuidance && existing.packingList && existing.guidanceFingerprint === guidanceFp) {
+      guidanceReused = true;
+      console.log('[attire timing] guidance inputs unchanged -- reusing saved packing guidance, no guidance call');
+      stage('Packing needs unchanged — keeping the saved packing list…');
+      return null;
+    }
+    stage('Writing the packing guidance — the slow step, typically 1–2 minutes…');
+    return await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { tieredBlocks, tierCounts, skipEvents: true });
+  };
+
   let result;
   if (eventsUnchanged) {
     // Reuse the finalized categories + overrides verbatim; no events call.
@@ -25534,7 +25583,7 @@ async function generateTripsyAttireGuide(tripKey) {
     const tierCounts = {};
     TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(cat => { const n = authCounts[TRIPSY_ATTIRE_CAMEL_KEY[cat]] || 0; if (n) tierCounts[cat] = n; });
     const tieredBlocks = tripsyAttireTieredTimeBlocks(days);
-    const guidance = preservePacking ? null : await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { tieredBlocks, tierCounts, skipEvents: true });
+    const guidance = await runGuidancePhase(tieredBlocks, tierCounts);
     result = { events: [], person_guidance: guidance ? guidance.person_guidance : existing.personGuidance, laundry_days: guidance ? (guidance.laundry_days || []) : [] };
   } else {
     // First generate, or the trip's events actually changed: categorize events
@@ -25545,6 +25594,7 @@ async function generateTripsyAttireGuide(tripKey) {
     // the event schedule's time-block counts, never the guidance call's own tier
     // guess (which, when run in parallel, could diverge on borderline events and
     // leave a tier's count with no matching garments).
+    stage('Categorizing events by dress code…');
     const eventsResult = await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { eventsOnly: true });
     const categoryById = new Map((eventsResult.events || []).map(e => [e.id, e]));
     for (const day of days) {
@@ -25577,8 +25627,8 @@ async function generateTripsyAttireGuide(tripKey) {
     const tierCounts = {};
     TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(cat => { const n = authCounts[TRIPSY_ATTIRE_CAMEL_KEY[cat]] || 0; if (n) tierCounts[cat] = n; });
     const tieredBlocks = tripsyAttireTieredTimeBlocks(days);
-    const guidance = preservePacking ? null : await generateTripsyAttireCategories(effectiveTrip, currentEventsForPrompt, weatherByDay, { tieredBlocks, tierCounts, skipEvents: true });
-    result = { events: eventsResult.events || [], person_guidance: guidance ? guidance.person_guidance : existing.personGuidance, laundry_days: guidance ? (guidance.laundry_days || []) : [] };
+    const guidance = await runGuidancePhase(tieredBlocks, tierCounts);
+    result = { events: eventsResult.events || [], person_guidance: guidance ? guidance.person_guidance : (existing && existing.personGuidance) || null, laundry_days: guidance ? (guidance.laundry_days || []) : [] };
   }
 
   const { blocks, counts } = computeTripsyAttireBlocks(days);
@@ -25642,16 +25692,23 @@ async function generateTripsyAttireGuide(tripKey) {
     tripKey,
     generatedAt: new Date().toISOString(),
     eventFingerprint: tripsyAttireFingerprint(currentEventsForPrompt),
+    // What the packing guidance was sized from (tier counts + tiered blocks) --
+    // lets the next Refresh skip the slow guidance call when these are unchanged
+    // (see runGuidancePhase above). Carried through a reuse, so the chain holds.
+    guidanceFingerprint: guidanceFp,
     days,
     blocks,
     counts,
-    laundryDays: preservePacking ? (existing.laundryDays || []) : laundryDays,
+    // Carried over verbatim when the guidance call was skipped -- either the trip
+    // has started (preservePacking) or the guidance inputs are unchanged
+    // (guidanceReused). Verbatim, not rebuilt: packing picks/skips are keyed by
+    // tier + line NAME, so re-minting the list would strand them.
+    laundryDays: (preservePacking || guidanceReused) ? (existing.laundryDays || []) : laundryDays,
     personGuidance: result.person_guidance || null,
-    // Carried over verbatim once the trip has started (see preservePacking) so
-    // every packing pick/skip -- keyed by tier + line NAME -- stays addressable.
-    packingList: preservePacking ? existing.packingList : { him: buildPackingList('him'), her: buildPackingList('her') },
+    packingList: (preservePacking || guidanceReused) ? existing.packingList : { him: buildPackingList('him'), her: buildPackingList('her') },
     packingFrozen: preservePacking || undefined,
   };
+  stage('Saving…');
   const saveStart = performance.now();
   const ok = await Store.saveTripsyAttireGuide(guide);
   console.log(`[attire timing] save to Drive: ${Math.round(performance.now() - saveStart)}ms`);
