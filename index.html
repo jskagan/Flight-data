@@ -32281,6 +32281,19 @@ async function renderTravelView(chosenTripKey) {
     // 1-indexed fractional slot of a cell within the visible strip (1 = leftmost).
     const slotOf = cell => (cell.offsetLeft - strip.scrollLeft) / strideOf(cell) + 1;
     const clampLeft = x => Math.max(0, Math.min(x, strip.scrollWidth - strip.clientWidth));
+    // One choke point for actually moving the strip. Instant positioning assigns
+    // scrollLeft DIRECTLY rather than Element.scrollTo({left, behavior:'auto'}) --
+    // the Claude iPad WebView's older WebKit has bitten this app before on missing
+    // modern APIs (see the polyfill block's comment), and a scrollTo(options) call
+    // that silently no-ops leaves the strip parked at the trip's first day with the
+    // last days cut off past the right edge (the strip ALWAYS overflows the 560px
+    // Travel View column on a 2+ week trip, and its scrollbar is hidden). Smooth
+    // scrolling still tries scrollTo(options) for the easing, falling back to the
+    // direct assignment if it throws.
+    const stripScrollTo = (left, smooth) => {
+      if (smooth) { try { strip.scrollTo({ left, behavior: 'smooth' }); return; } catch (e) { /* fall through */ } }
+      strip.scrollLeft = left;
+    };
     // During scroll: if the highlight drifts past the 3rd/6th slot, instantly pin
     // it to that edge slot so it never scrolls off-screen (no re-centring yet).
     const keepInDeadZone = () => {
@@ -32293,14 +32306,14 @@ async function renderTravelView(chosenTripKey) {
       target = clampLeft(target);
       // Smooth (not instant) so the calendar eases along as the events scroll,
       // rather than snapping a whole cell at once.
-      if (Math.abs(strip.scrollLeft - target) >= 1) strip.scrollTo({ left: target, behavior: 'smooth' });
+      if (Math.abs(strip.scrollLeft - target) >= 1) stripScrollTo(target, true);
     };
     // Smooth-scroll the selected date back toward the 4th/5th slot (3.5 cells in).
     const recenterCal = (smooth = true) => {
       const cell = cellFor(selectedDay); if (!cell) return;
       const target = clampLeft(cell.offsetLeft - 3.5 * strideOf(cell));
       if (Math.abs(strip.scrollLeft - target) < 1) return;
-      strip.scrollTo({ left: target, behavior: smooth ? 'smooth' : 'auto' });
+      stripScrollTo(target, smooth);
     };
     // Day whose section sits at the top of the usable area (just below the frozen
     // header + calendar) -- the adjacent date bar the selection should match.
@@ -32402,6 +32415,15 @@ async function renderTravelView(chosenTripKey) {
           if (ownerScrolled) return;
           measureTopbar();
           scrollItineraryTo(initDay, false);
+          // Re-assert the CALENDAR STRIP's position too, not just the vertical
+          // scroll -- the strip overflows its hidden-scrollbar container on any
+          // 2+ week trip, and its one early recenter (below) can land wrong while
+          // layout is still settling, leaving the strip stuck at the trip's first
+          // day with the last days cut off ("the date is not showing up for the
+          // last few days" -- reported 2026-08-15). Same idempotent-retry lesson
+          // as the vertical jump this function already re-asserts: recenterCal
+          // returns early once the strip is within 1px, so a settled pass is free.
+          recenterCal(false);
         };
         scrollItineraryTo(initDay, false);
         recenterCal(false);

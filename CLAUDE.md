@@ -353,6 +353,22 @@ step 4; git history has it if ever needed.
   back to the device date when nothing qualifies. Note `tripsyTravelTripCandidates` still uses a
   device-local today deliberately: it picks WHICH trip is current, so there's no trip-specific zone
   to reinterpret through yet.
+- **Travel View's top calendar strip must be re-scrolled to the selected day across the settle
+  window, not just once at render.** The strip overflows the 560px `.tv-inner` column on any 2+
+  week trip (18 cells × ~52px vs ~532px usable) with its scrollbar hidden, so whatever it's
+  scrolled to is all the owner ever sees of it. Its recenter logic (`recenterCal`, keeping the
+  selected day at the 4th/5th slot) fired only EARLY — synchronously at render, while layout was
+  still settling — so a wrong/no-op early attempt left the strip parked at the trip's first day
+  with the last days cut off past the right edge (reported 2026-08-15: "the date is not showing up
+  for the last few days"). Fixed the same way the vertical open-on-today jump already fixed the
+  identical lesson: `settleAlign` now re-asserts `recenterCal(false)` alongside `scrollItineraryTo`
+  on every pass (rAF + 120/350/800ms; idempotent — it returns early within 1px — and stops the
+  moment the owner touches the page). Also: all strip movement goes through one `stripScrollTo`
+  choke point where INSTANT positioning assigns `strip.scrollLeft` directly rather than
+  `Element.scrollTo({left, behavior:'auto'})` — the older iPad WebView has bitten this app on
+  missing modern APIs before (see the polyfill block), and a silently no-oping `scrollTo(options)`
+  is indistinguishable from the settle race from the outside; smooth scrolling still tries
+  `scrollTo(options)` for the easing, falling back to the direct assignment if it throws.
 - **A partial itinerary regeneration only rewrites the changed days' SUMMARY rows.**
   `tripsyGenerateNarrativeSections` takes `summaryDayKeys`: when it's an array, only those days'
   rows go to `generateTripsySummaryBlurbs` and the result is MERGED onto the cached set (rows not
