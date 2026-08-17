@@ -296,6 +296,32 @@ step 4; git history has it if ever needed.
   green while a trip card would read yellow — `syncTripsyRelays` loads trips before its badge
   refresh and `renderTripsyEventsList` refreshes the badge after each render to close that gap.
   Owner-only.
+  **Run Parse Now parses IN THE APP first, cloud only as fallback** ("the parse run is way too long
+  for adding a couple of items," 2026-08-17): the button (`runTripsyParseNow`) now runs
+  `runTripsyLocalParse` — pending email BODIES (already in `driveData.tripsyEmailIntake`) and
+  flagged PDF/JPEG/PNG/WebP/GIF attachments (bytes via `downloadDriveFileBlob`, sent as
+  document/image blocks) go straight to the API via the same `tripsyAttireClaudeCall` plumbing
+  (thinking off, `low` effort — pure structured extraction, seconds per item, all items in
+  parallel), staged through the SAME `Store.applyDrainedEmailProposals`/`applyDrainedDocProposals`
+  the cloud relay drain uses so everything downstream is identical. The output schema is one flat
+  fields object (union of the three resources' keys, `''` for absent — the attire grammar-size
+  lesson); `tripsyLocalParseToProposalEvents` applies the per-resource whitelist
+  (`TRIPSY_LOCAL_PARSE_FIELD_KEYS`) and mints review-page-shaped proposal events. Only what the
+  browser can't do falls through to `runTripsyRefreshViaWorker`: `.docx`/`.heic` (no client-side
+  reader / API-unsupported media type), overflow past the 8-item per-press cap, and any item whose
+  LOCAL parse failed — a failure deliberately leaves the item untouched-pending (never stamped),
+  so the scheduled 3×/day cloud runs still pick it up; those scheduled runs are unchanged.
+  **A fired parse run announces itself and pulls its own results in.** The cloud run takes minutes
+  and finishes on another machine, and before 2026-08-17 the app only ever learned about it on the
+  next badge tap or app open — so after pressing Run Parse Now the panel read IDENTICALLY to before
+  ("when I hit parse the triangle is still there with the same message"). A successful fire now
+  records `tripsyParseRunStartedAt` (in-memory): `computeTripsyStatus` adds a non-clickable "A
+  parse run is in progress (started N min ago)" row while items still await parsing (time-bounded
+  by `TRIPSY_PARSE_RUN_WINDOW_MS`, 12 min, so a run that never lands stops being claimed; cleared
+  the moment nothing awaits parsing), and the fire schedules relay polls at 90s/3m/5m/8m/~12m
+  (`syncTripsyRelays` — its own in-flight guard makes an early poll a cheap no-op) so results drain
+  and the badge flips with no further taps. The marker is set ONLY on the worker's `res.ok` branch —
+  a failed fire must not claim a run is underway.
 - **Categories**: flight / transportation / hotel / dining / concert / tour / spa / reception /
   cooking / other — each event's display `type`, derived from its `tripsyRaw.category` slug
   (`TRIPSY_ACTIVITY_CATEGORY_TO_TYPE`, mirrored in `tools/build_tripsy_snapshot.py`), including the

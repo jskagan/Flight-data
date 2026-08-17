@@ -13508,6 +13508,15 @@ async function fetchTripsyRefreshWorkerSecretFromDrive() {
 }
 
 let tripsyRefreshFireInFlight = false;
+// When a Run Parse Now fire last SUCCEEDED (ms epoch; in-memory only). Two jobs:
+// the status panel can say a run is underway instead of showing the identical
+// "waiting for the next scheduled parse run" message the owner just tried to act
+// on ("when I hit parse the triangle is still there with the same message" --
+// reported 2026-08-17), and the post-fire relay polls below know they're wanted.
+let tripsyParseRunStartedAt = null;
+// How long a started run is treated as "in progress" before the panel stops
+// claiming it (a cloud run normally lands well inside this).
+const TRIPSY_PARSE_RUN_WINDOW_MS = 12 * 60 * 1000;
 // Fires the cloud PARSE routine on demand (the slimmed remnant of the old
 // full Tripsy refresh): it reads flagged docs and forwarded emails from
 // Drive/Gmail, parses them, and writes proposal relay files this app drains.
@@ -13525,7 +13534,18 @@ async function runTripsyRefreshViaWorker(triggerEl) {
       headers: { 'Content-Type': 'application/json', 'X-App-Secret': secret },
     });
     if (res.ok) {
-      toast('Parse run started — flagged docs and forwarded emails will appear as proposals in a few minutes. Tap the badge again then to pull them in.');
+      toast('Parse run started — results usually land within a few minutes and will be pulled in automatically.');
+      tripsyParseRunStartedAt = Date.now();
+      // The run finishes on ANOTHER machine and this app only learns about it by
+      // re-checking the relay files -- which previously only happened on the next
+      // badge tap or app open, so the yellow ⚠️ sat unchanged no matter how long
+      // the owner waited. Poll the relays a few times across the window instead:
+      // syncTripsyRelays drains anything found, refreshes the badge, and is a
+      // cheap no-op (with its own in-flight guard) when nothing has landed yet.
+      [90, 180, 300, 480, 700].forEach(s => setTimeout(() => {
+        if (tripsyParseRunStartedAt) syncTripsyRelays();
+      }, s * 1000));
+      await updateTripsyStatusBadge(); // repaint the panel so it reflects the run NOW
     } else if (res.status === 401) {
       toast('Could not start the parse run: the app secret did not match the Worker. Check the "Tripsy Refresh Worker Secret" Drive file.', 'error');
     } else if (res.status === 429) {
@@ -13540,6 +13560,199 @@ async function runTripsyRefreshViaWorker(triggerEl) {
     tripsyRefreshFireInFlight = false;
     if (triggerEl && triggerEl.isConnected) { triggerEl.disabled = false; triggerEl.textContent = originalText; }
   }
+}
+
+// ---- In-app fast parse: "Run Parse Now" parses HERE when the browser can ----
+// The cloud routine spins up a whole sandbox to parse what is often a couple of
+// small forwarded emails -- minutes of provisioning around seconds of actual
+// parsing ("the parse run is way too long for adding a couple of items",
+// 2026-08-17). But the moment the owner presses the button, a browser IS
+// available: the email bodies are already sitting in driveData.tripsyEmailIntake,
+// attachment bytes are one Drive download away, and the app already makes direct
+// Claude calls for attire/outfits/itinerary-compare. So the button now parses
+// locally whatever the browser can handle -- email BODIES, plus flagged PDF and
+// JPEG/PNG/WebP/GIF attachments (sent as document/image blocks, the same shapes
+// compareTripsyItineraryPdf and Compose Outfits already use) -- and stages the
+// results through the exact same Store.applyDrained*Proposals the cloud relay
+// drain uses, so everything downstream (review page, badges, conflict checks) is
+// identical. Only what the browser genuinely can't do falls through to the cloud
+// routine, via runTripsyParseNow's fallback: .docx and .heic attachments (no
+// client-side reader / API-unsupported media type), overflow past the per-press
+// cap, and anything whose LOCAL parse failed -- a failure deliberately leaves the
+// item untouched-pending (never stamped parsed), so the scheduled 3x/day cloud
+// runs still pick it up. Those scheduled runs are unchanged; this is purely the
+// on-demand path.
+const TRIPSY_LOCAL_PARSE_FIELD_KEYS = {
+  activity: ['name', 'category', 'startsAt', 'endsAt', 'address', 'confirmation', 'phone', 'website', 'notes'],
+  hosting: ['name', 'confirmation', 'startsAt', 'endsAt', 'address', 'phone', 'website', 'notes'],
+  transportation: ['category', 'confirmation', 'company', 'transportNumber', 'vehicleDescription',
+    'departureDescription', 'departureTerminal', 'departureAt', 'arrivalDescription', 'arrivalTerminal', 'arrivalAt',
+    'seatClass', 'seatNumber', 'notes'],
+};
+// One flat fields object (the union of the three resources' keys, every key
+// required with '' for not-present) rather than three nested per-resource
+// shapes -- same grammar-size lesson the attire guidance schema learned the
+// hard way ("The compiled grammar is too large").
+function tripsyLocalParseSchema() {
+  const fieldKeys = [...new Set(Object.values(TRIPSY_LOCAL_PARSE_FIELD_KEYS).flat())];
+  return {
+    type: 'object', additionalProperties: false, required: ['events'],
+    properties: {
+      events: {
+        type: 'array',
+        items: {
+          type: 'object', additionalProperties: false,
+          required: ['resource', 'event_summary', 'fields'],
+          properties: {
+            resource: { type: 'string', enum: ['activity', 'hosting', 'transportation'] },
+            event_summary: { type: 'string' },
+            fields: {
+              type: 'object', additionalProperties: false, required: fieldKeys,
+              properties: Object.fromEntries(fieldKeys.map(k => [k, { type: 'string' }])),
+            },
+          },
+        },
+      },
+    },
+  };
+}
+function tripsyLocalParsePrompt(kindLine) {
+  return `You are extracting travel reservations into structured events for a trip-tracking app.
+
+From the ${kindLine} below, extract every REAL reservation/booking/confirmation as one event. Do not invent events — marketing content, links, and unsubscribe boilerplate are not events, and a reminder or update about the SAME booking is still just one event.
+
+resource: 'hosting' for lodging stays; 'transportation' for flights, trains, cars, and transfers; 'activity' for everything else (tours, dining, concerts, spa, theater, …).
+
+fields rules:
+- Dates/times: "YYYY-MM-DDTHH:MM:SS", the event's OWN local time, no timezone suffix. UK/European sources often write day/month order (17/8/2026 = August 17) and 24-hour clocks — read them correctly.
+- Set '' for anything not genuinely present in the source. Never guess.
+- activity category: a short lowercase slug like tour, restaurant, concert, spa, museum, theater. transportation category: airplane, train, car, bus, or boat.
+- An activity/hosting event wants name + address + startsAt (+ endsAt when stated) + confirmation; transportation wants departure/arrival descriptions and times + company + transportNumber.
+- notes: only genuinely useful extras (a check-in time rule, a meeting-point detail) — never boilerplate.
+
+event_summary: a short human label, e.g. "Tour at The Real Mary King's Close".`;
+}
+// Model output -> the exact proposal-event shape the review page reads
+// (tripsyParseReviewCardHtml / tripsyParseImportProposalEvent): per-resource
+// field whitelist applied, empty strings dropped, an event with no real fields
+// dropped outright.
+function tripsyLocalParseToProposalEvents(events) {
+  const out = [];
+  for (const ev of (events || [])) {
+    const resource = TRIPSY_LOCAL_PARSE_FIELD_KEYS[ev && ev.resource] ? ev.resource : null;
+    if (!resource) continue;
+    const fields = {};
+    for (const key of TRIPSY_LOCAL_PARSE_FIELD_KEYS[resource]) {
+      const v = (ev.fields && typeof ev.fields[key] === 'string') ? ev.fields[key].trim() : '';
+      if (v) fields[key] = v;
+    }
+    if (!Object.keys(fields).length) continue;
+    out.push({
+      id: crypto.randomUUID(),
+      resolution: 'pending',
+      tripsyResource: resource,
+      eventSummary: String(ev.event_summary || fields.name || 'Event').trim(),
+      fields,
+    });
+  }
+  return out;
+}
+// At most this many items parsed per press -- a backlog beyond it goes to the
+// cloud fallback rather than grinding through a dozen serial-ish API calls on
+// an iPad. A "couple of items" (the actual complaint) is always well inside it.
+const TRIPSY_LOCAL_PARSE_MAX_ITEMS = 8;
+async function runTripsyLocalParse() {
+  const emails = (driveData.tripsyEmailIntake || []).filter(e => e && !e.parsedAt && e.body);
+  const docsPending = (driveData.tripsyAttachments || []).filter(a => a && a.purpose === 'parse' && a.parseStatus === 'pending');
+  const docBlockType = a => {
+    const mt = String(a.mimeType || '').toLowerCase();
+    if (mt === 'application/pdf') return { type: 'document', mediaType: mt };
+    if (['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mt)) return { type: 'image', mediaType: mt };
+    return null; // .docx / .heic / unknown -> the cloud routine's job
+  };
+  const localDocs = docsPending.filter(a => a.driveFileId && docBlockType(a));
+  const emailBatch = emails.slice(0, TRIPSY_LOCAL_PARSE_MAX_ITEMS);
+  const docBatch = localDocs.slice(0, Math.max(0, TRIPSY_LOCAL_PARSE_MAX_ITEMS - emailBatch.length));
+  const baseLeftovers = (emails.length - emailBatch.length) + (docsPending.length - docBatch.length);
+  if (!emailBatch.length && !docBatch.length) return { attempted: 0, staged: 0, failed: 0, leftovers: baseLeftovers };
+  const apiKey = await fetchAnthropicApiKeyFromDrive();
+  const schema = tripsyLocalParseSchema();
+  let failed = 0;
+  // Every item in parallel -- each is small and independent, and a failure in one
+  // must not take down the rest (it just stays pending for the cloud run).
+  const [emailResults, docResults] = await Promise.all([
+    Promise.all(emailBatch.map(async e => {
+      try {
+        const prompt = `${tripsyLocalParsePrompt('forwarded confirmation email')}\n\nSubject: ${e.subject || ''}\n\nEmail body:\n${e.body}`;
+        const result = await tripsyAttireClaudeCall(apiKey, schema, prompt, `local email parse`, { thinking: false, effort: 'low' });
+        const events = tripsyLocalParseToProposalEvents(result && result.events);
+        return {
+          sourceEmailId: e.id,
+          status: events.length ? 'parsed' : 'empty',
+          proposals: events.length ? [{
+            id: crypto.randomUUID(), sourceEmailId: e.id,
+            sourceFileName: e.subject || 'Forwarded email',
+            summary: 'Parsed in the app from a forwarded email', events,
+          }] : [],
+        };
+      } catch (err) { console.error('Local email parse failed (left pending for the cloud run):', e.id, err); failed++; return null; }
+    })),
+    Promise.all(docBatch.map(async a => {
+      try {
+        const bt = docBlockType(a);
+        const blob = await downloadDriveFileBlob(a.driveFileId);
+        const data = await tripsyFileToBase64(blob);
+        const content = [
+          { type: bt.type, source: { type: 'base64', media_type: bt.mediaType, data } },
+          { type: 'text', text: tripsyLocalParsePrompt('attached document') },
+        ];
+        const result = await tripsyAttireClaudeCall(apiKey, schema, content, `local doc parse`, { thinking: false, effort: 'low' });
+        const events = tripsyLocalParseToProposalEvents(result && result.events);
+        return {
+          attachmentId: a.id,
+          status: events.length ? 'parsed' : 'empty',
+          proposals: events.length ? [{
+            id: crypto.randomUUID(), attachmentId: a.id,
+            sourceFileName: a.fileName || 'Attached document',
+            summary: 'Parsed in the app from an attached document', events,
+          }] : [],
+        };
+      } catch (err) { console.error('Local doc parse failed (left pending for the cloud run):', a.id, err); failed++; return null; }
+    })),
+  ]);
+  let staged = 0;
+  const parsedEmails = emailResults.filter(Boolean);
+  const parsedDocs = docResults.filter(Boolean);
+  if (parsedEmails.length) { const r = await Store.applyDrainedEmailProposals(parsedEmails); staged += (r && r.staged) || 0; }
+  if (parsedDocs.length) { const r = await Store.applyDrainedDocProposals(parsedDocs); staged += (r && r.staged) || 0; }
+  return { attempted: emailBatch.length + docBatch.length, staged, failed, leftovers: baseLeftovers + failed };
+}
+// The button handler: local parse first (seconds), cloud fallback only for what
+// the browser couldn't do -- or when there was nothing local-parseable at all
+// (preserving the old press-the-button-anyway semantics, e.g. re-firing after a
+// failed run while only conflicts keep the badge yellow).
+async function runTripsyParseNow(btn) {
+  if (!isOwner) return;
+  const originalText = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Parsing…'; }
+  let fallThroughToCloud = false;
+  try {
+    const r = await runTripsyLocalParse();
+    if (r.attempted) {
+      toast(r.staged
+        ? `Parsed here in the app — ${r.staged} proposed event${r.staged === 1 ? '' : 's'} ready to review.`
+        : 'Parsed here in the app — nothing usable was found.');
+    }
+    await updateTripsyStatusBadge();
+    if (currentView === 'tripsytrips') renderTripsyEventsList();
+    fallThroughToCloud = r.leftovers > 0 || !r.attempted;
+  } catch (e) {
+    console.error('runTripsyParseNow local parse failed:', e);
+    fallThroughToCloud = true; // e.g. no API key available on this device
+  } finally {
+    if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = originalText; }
+  }
+  if (fallThroughToCloud) await runTripsyRefreshViaWorker(btn);
 }
 
 // The loaded trips array (from trips-data.json), cached in memory so
@@ -30150,6 +30363,23 @@ async function computeTripsyStatus() {
   if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged, waiting for the next scheduled parse run`, view: 'utilitiesparsingdocs' });
   const emailsToParse = tripsyEmailsAwaitingParseCount();
   if (emailsToParse) yellow.push({ label: `${emailsToParse} forwarded email${emailsToParse === 1 ? '' : 's'} waiting for the next scheduled parse run`, view: 'utilitiesparsingdocs' });
+  // A Run Parse Now fire is underway: say so, or the panel reads IDENTICALLY to
+  // before the button was pressed and the press looks like it did nothing (the
+  // run happens on another machine and takes minutes; the polls scheduled by
+  // runTripsyRefreshViaWorker pull its results in when it lands). Once nothing
+  // is left waiting, the run did its job -- drop the marker rather than letting
+  // a stale "in progress" line outlive the work it described.
+  if (tripsyParseRunStartedAt && (docsToParse.length || emailsToParse)) {
+    const ageMs = Date.now() - tripsyParseRunStartedAt;
+    if (ageMs <= TRIPSY_PARSE_RUN_WINDOW_MS) {
+      const mins = Math.max(1, Math.round(ageMs / 60000));
+      yellow.push({ label: `A parse run is in progress (started ${mins} min ago) — results are pulled in automatically when it finishes.` });
+    } else {
+      tripsyParseRunStartedAt = null; // ran long past the window -- stop claiming it
+    }
+  } else if (tripsyParseRunStartedAt && !docsToParse.length && !emailsToParse) {
+    tripsyParseRunStartedAt = null;
+  }
   // Mirror the per-trip yellow ⚠️ flag: while any trip has a still-unresolved
   // parse-proposal conflict, keep the global badge yellow too (it links to the
   // Review Parsed Docs page where each conflict is resolved).
@@ -30264,7 +30494,7 @@ async function renderTripsyStatusPanel() {
     ${state !== 'green' ? `
       <div style="border-top:1px solid var(--line); margin-top:2px; padding:10px 6px 2px;">
         <button class="btn primary" data-tripsy-status-open-routines style="display:block; width:100%; font-size:12px; padding:6px 12px;">Run Parse Now</button>
-        <div style="font-size:11px; color:var(--muted); margin-top:5px; text-align:center;">Runs the cloud parse for flagged docs and forwarded emails; results appear here as proposals in a few minutes.</div>
+        <div style="font-size:11px; color:var(--muted); margin-top:5px; text-align:center;">Parses forwarded emails and flagged docs right here in the app (seconds); anything the browser can't handle goes to the cloud parse instead (a few minutes).</div>
       </div>
     ` : ''}
   `;
@@ -30275,7 +30505,7 @@ async function renderTripsyStatusPanel() {
     });
   });
   const openRoutinesBtn = panel.querySelector('[data-tripsy-status-open-routines]');
-  if (openRoutinesBtn) openRoutinesBtn.addEventListener('click', () => runTripsyRefreshViaWorker(openRoutinesBtn));
+  if (openRoutinesBtn) openRoutinesBtn.addEventListener('click', () => runTripsyParseNow(openRoutinesBtn));
   // Only this specific failed write clears -- per explicit request, it
   // stays listed until the owner dismisses it themselves, never on its own.
   panel.querySelectorAll('[data-tripsy-status-dismiss-write]').forEach(btn => {
