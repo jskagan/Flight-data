@@ -20126,7 +20126,7 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
     };
     setStage(checkedDayKeys.length
       ? `Generating write-ups for ${checkedDayKeys.length} day${checkedDayKeys.length === 1 ? '' : 's'}…`
-      : 'Opening itinerary…');
+      : 'Saving…');
     // Blink the 🧭 glyph's red ▲ for the duration, so the wait is visible on My Trips
     // behind this dialog. Cleared in the `finally` below, so a failure can't strand it.
     // Only when something is genuinely being regenerated.
@@ -20134,6 +20134,7 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       tripsyItineraryGeneratingKeys.add(trip.key);
       tripsyRefreshItineraryGeneratingBadges();
     }
+    let workSucceeded = false;
     try {
       if (checkedDayKeys.length) {
         const { effectiveTrip, dayKeys, byDay: pdByDay, summaryByDay } = await buildTripsyPrintDayData(trip);
@@ -20178,19 +20179,12 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       const warnEl = document.querySelector(`[data-tripsy-itin-warning="${CSS.escape(trip.key)}"]`);
       if (warnEl) warnEl.style.display = 'none'; // clear the ▲ now (no timeline re-render happens here)
       overlay.remove();
-      // A newly-added event's card would otherwise open picture-less whenever its day
-      // wasn't regenerated -- an added place has no cached photo, and a plain open never
-      // fetches. Continue IS a deliberate action, so allow a FIRST photo here (the narrow
-      // flag: an existing photo is still shown verbatim, never refetched or swapped).
-      setStage('Opening itinerary…');
-      _tripsyAllowNewPlacePhotoFetch = true;
-      try { await previewTripsyItinerary(trip.key, { forceGeneratedView: true }); }
-      finally { _tripsyAllowNewPlacePhotoFetch = false; }
+      workSucceeded = true;
     } catch (e) {
       console.error('Itinerary changes generation failed:', e);
       setStage(checkedDayKeys.length
         ? 'Could not generate — see console for details.'
-        : 'Could not open the itinerary — see console for details.');
+        : 'Could not save — see console for details.');
       contBtn.disabled = false;
     } finally {
       // The baseline was just reset, so there are no changed events left and the glyph's
@@ -20204,9 +20198,60 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       // on the last stage as though the run were still going.
       tripsyItineraryProgressWatchers.forEach(fn => { try { fn(); } catch (e) {} });
     }
+    if (!workSucceeded) return;
+    // WHERE TO GO NEXT IS THE OWNER'S CHOICE, not an automatic jump. This used to
+    // open the full Itinerary view unconditionally -- per explicit request
+    // (2026-08-17: "do not automatically open the itinerary view"), it now asks:
+    // Close (stay put), Itinerary View, or Trips View. Asked AFTER the finally
+    // above so the 🧭 glyph's blink and the progress dialog are already settled
+    // while the owner decides, not still claiming a run in progress.
+    const dest = await tripsyItineraryDoneDialog(checkedDayKeys.length);
+    if (dest === 'itinerary') {
+      // A newly-added event's card would otherwise open picture-less whenever its day
+      // wasn't regenerated -- an added place has no cached photo, and a plain open never
+      // fetches. This IS a deliberate action, so allow a FIRST photo here (the narrow
+      // flag: an existing photo is still shown verbatim, never refetched or swapped).
+      _tripsyAllowNewPlacePhotoFetch = true;
+      try { await previewTripsyItinerary(trip.key, { forceGeneratedView: true }); }
+      finally { _tripsyAllowNewPlacePhotoFetch = false; }
+    } else if (dest === 'trips') {
+      // Usually already the page behind the dialog (the ▲ lives on My Trips) -- a
+      // fresh render there also picks up the cleared badge; from anywhere else,
+      // navigate over.
+      if (currentView !== 'tripsytrips') await navigate('tripsytrips');
+      else renderTripsyEventsList();
+    }
   });
   document.body.appendChild(overlay);
   overlay.querySelector('[data-icd-continue]').focus();
+}
+// The three-way "done -- where to?" dialog shown after the changes dialog's Continue
+// finishes. Resolves 'close' | 'itinerary' | 'trips'; clicking outside closes (same as
+// Close -- there is nothing to decline, only somewhere to go).
+function tripsyItineraryDoneDialog(regeneratedCount) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-itindone-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-itindone-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100'; // same layer as tripsyConfirmDialog -- nothing else is open now
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:420px; text-align:center;">
+        <h2 style="margin:0 0 8px; font-size:19px;">${regeneratedCount ? 'Itinerary updated' : 'Changes reviewed'}</h2>
+        <div style="font-size:14.5px; line-height:1.55; margin-bottom:20px; color:var(--text);">${regeneratedCount
+          ? `Write-ups were regenerated for ${regeneratedCount} day${regeneratedCount === 1 ? '' : 's'}.`
+          : 'The changes were marked as reviewed — nothing was regenerated.'}</div>
+        <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
+          <button class="btn" data-itindone-close>Close</button>
+          <button class="btn primary" data-itindone-itinerary>Itinerary View</button>
+          <button class="btn" data-itindone-trips>Trips View</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; ov.onclick = null; resolve(v); };
+    ov.querySelector('[data-itindone-close]').onclick = () => done('close');
+    ov.querySelector('[data-itindone-itinerary]').onclick = () => done('itinerary');
+    ov.querySelector('[data-itindone-trips]').onclick = () => done('trips');
+    ov.onclick = e => { if (e.target === ov) done('close'); };
+  });
 }
 
 // Calls the Claude API directly from the browser (anthropic-dangerous-

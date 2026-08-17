@@ -64,8 +64,12 @@ for (const [stage, label] of [
   ['Generating write-ups for', 'generating'],
   ['Fetching photos', 'photos'],
   ['Saving…', 'saving'],
-  ['Opening itinerary…', 'opening'],
 ]) assert(run.includes(stage), `the run reports its ${label} stage`);
+// The old final 'Opening itinerary…' stage is GONE by design (2026-08-17: "do not
+// automatically open the itinerary view") -- Continue now ends in the three-way
+// Close / Itinerary View / Trips View dialog instead of an unconditional jump.
+// See itindonedialog_test.js for that dialog's own coverage.
+assert(!run.includes('Opening itinerary…'), 'no auto-open stage remains');
 assert(/setStage\(checkedDayKeys\.length\s*\n?\s*\? 'Could not generate/.test(run),
   'a failure is reported through the same channel, not just in the dialog');
 assert(!/status\.textContent = 'Generating…'/.test(run), 'the old fixed "Generating…" line is gone');

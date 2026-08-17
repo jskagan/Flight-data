@@ -434,6 +434,20 @@ step 4; git history has it if ever needed.
   trip's now-stale ▲ immediately, both the small `data-tripsy-itin-warning` span next to Edit and
   the glyph badge (`tripsySetItineraryGlyphBadge(btn, '')`), rather than leaving a wrong badge to
   self-correct on some future render.
+- **The changes dialog's Continue no longer auto-opens the Itinerary view.** Per explicit request
+  (2026-08-17: "do not automatically open the itinerary view. Instead, display 3 buttons: close,
+  itinerary view, or trips view"): after the checked days regenerate (or, with everything
+  unchecked, the changes are just marked reviewed), `showTripsyItineraryChangesDialog`'s Continue
+  handler now ends in **`tripsyItineraryDoneDialog`** — Close / Itinerary View / Trips View, with
+  an outside click meaning Close (there's nothing to decline, only somewhere to go). The dialog is
+  shown AFTER the handler's `finally` cleanup, so the 🧭 glyph's blink and any open progress dialog
+  have already settled to "Finished." while the owner decides — awaiting it inside the `try` would
+  have left them claiming a run in progress. Itinerary View runs the exact code the old auto-jump
+  did (`previewTripsyItinerary` wrapped in the `_tripsyAllowNewPlacePhotoFetch` first-photo
+  allowance); Trips View navigates to My Trips, or re-renders it when it's already the page behind
+  the dialog; a FAILED run shows no destination dialog at all (`workSucceeded` guard) — the error
+  message stays visible in the changes dialog with Continue re-enabled. The zero-checked path's
+  stage line reads `Saving…` now, not the retired `Opening itinerary…`.
 - **Itinerary/day views start from the earliest event, not the trip's `start_date`**: the day
   ranges, "Day N" numbering, and empty-day span all derive their first day from
   `tripsyItineraryStartDayKey(trip)` — the earliest day any visible, dated event falls on — rather
