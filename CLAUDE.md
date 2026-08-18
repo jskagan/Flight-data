@@ -119,6 +119,20 @@ Users page takes effect on their *next* sign-in, not immediately — and note th
 changes which scopes get *requested*; the sync pipelines themselves stay hardcoded to
 `OWNER_EMAIL` regardless of who else has the extra scope granted.
 
+**Returning devices sign in silently** (asked 2026-08-17 as "automatically sign users in using
+biometric information … on the same devices they generally use" — true biometric/WebAuthn sign-in
+is architecturally impossible here: access is a Google OAuth token only Google can mint, and there
+is no server for a passkey to authenticate against; a passkey added to the GOOGLE account at
+myaccount.google.com → Security is what makes Google's own re-auth prompts biometric). What the
+app CAN do, and now does: the cached access token only lives ~1h, and past that a daily-use device
+was bounced to the sign-in screen for a tap even though the browser's Google session was usually
+still alive. `initGoogleAuth` now, on a device that chose "remember me" (a `TOKEN_CACHE_KEY` entry
+exists, even expired — the same signal the mid-session refresh keys on), tries
+`refreshDriveAccessToken(8000)` (the silent `prompt:''` grant, shorter timeout so a dead session
+can't hold a blank splash) behind the splash BEFORE showing the gate — success is a zero-tap
+sign-in; any failure falls back to exactly the old sign-in screen with the offline offer forced
+(the weak-signal lesson). A device that never chose "remember me" is unaffected.
+
 The "Authorized Users" list on the Users utility page isn't a separate registry — it's read live
 from the Drive file's real sharing permissions (`listDriveFilePermissions()`, `index.html:1001`
 area) via `permissions.list`, which is the same source of truth Step 3 on that page tells the owner

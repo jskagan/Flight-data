@@ -33146,17 +33146,19 @@ let _authExpiredNotified = false;
 // Resolves with the new token (also stored in driveAccessToken); rejects if a
 // silent grant isn't possible (the Google session is gone -> needs a reload +
 // interactive sign-in). Concurrent callers share the one in-flight refresh.
-function refreshDriveAccessToken() {
+function refreshDriveAccessToken(timeoutMs = 15000) {
   if (!tokenClient) return Promise.reject(new Error('auth not initialized'));
   if (_pendingTokenRefresh) return _pendingTokenRefresh.promise;
   let resolve, reject;
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
   _pendingTokenRefresh = { resolve, reject, promise };
   // Safety net: if GIS never fires the callback (popup blocked, no active
-  // session), don't leave the awaiting writes hung forever.
+  // session), don't leave the awaiting writes hung forever. The startup
+  // silent sign-in passes a shorter window -- a dead session there should
+  // fall back to the sign-in screen quickly, not hold a blank splash.
   _pendingTokenRefresh.timer = setTimeout(() => {
     if (_pendingTokenRefresh) { const p = _pendingTokenRefresh; _pendingTokenRefresh = null; p.reject(new Error('token refresh timed out')); }
-  }, 15000);
+  }, timeoutMs);
   try {
     tokenClient.requestAccessToken({ prompt: '' });
   } catch (e) {
@@ -33415,6 +33417,32 @@ function initGoogleAuth() {
   if (cached) {
     driveAccessToken = cached;
     completeSignIn();
+    return;
+  }
+  // AUTOMATIC SIGN-IN ON A RETURNING DEVICE. The cached token only lives ~1h; past
+  // that, a device the owner uses every day was bounced to the sign-in screen for a
+  // tap even though the browser's Google session is usually still alive and a
+  // prompt-less token grant would succeed ("is there a way to automatically sign
+  // users in ... on the same devices they generally use", 2026-08-17). So: when this
+  // device chose "remember me" at some point (a TOKEN_CACHE_KEY entry exists, even
+  // expired -- the same signal the mid-session refresh uses to decide whether to
+  // re-save), try the SILENT grant behind the splash before ever showing the gate.
+  // Success signs in with zero interaction; any failure (Google session gone, ITP
+  // blocking the silent flow, popup semantics in a WebView, the 8s timeout) falls
+  // back to exactly today's sign-in screen -- with the offline offer forced, since
+  // a real attempt just failed (the weak-signal lesson: that failure is stronger
+  // evidence than navigator.onLine). A device that never chose "remember me" keeps
+  // the explicit sign-in screen: auto-sign-in is an opt-in the owner already made.
+  const rememberedDevice = (() => { try { return localStorage.getItem(TOKEN_CACHE_KEY) !== null; } catch (e) { return false; } })();
+  if (rememberedDevice && navigator.onLine) {
+    refreshDriveAccessToken(8000)
+      .then(() => { completeSignIn(); })
+      .catch(e => {
+        console.log('Silent startup sign-in unavailable — showing the sign-in screen:', (e && e.message) || e);
+        document.getElementById('splash-screen').style.display = 'none';
+        document.getElementById('signin-gate').style.display = 'flex';
+        maybeOfferOfflineTravelView(true);
+      });
     return;
   }
   document.getElementById('splash-screen').style.display = 'none';
