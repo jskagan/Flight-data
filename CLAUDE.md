@@ -1737,6 +1737,21 @@ pieces:
   "Couldn't reach the sign-in servers" rather than asserting "You're offline," since `navigator.onLine`
   may well disagree. All three still call the same idempotent function
   (`document.getElementById('signin-offline-btn')` guard), so they can never double-render the button.
+  **(4) HANGS needed their own fix too — every case above fires on a call FAILING** ("when the
+  internet connection is weak or fails … I don't think this is happening," 2026-08-17): on a weak
+  connection a fetch can hang for a minute-plus without rejecting, so no catch ever ran and the
+  splash sat on "Loading your data from Drive…" with no fallback offered. `completeSignIn` now arms
+  a 12s watchdog that, if sign-in hasn't finished (`_tripsySignedInDone`) and offline wasn't
+  entered, reveals the gate with an honest "Still ‹stage› — the connection looks weak…" and calls
+  the forced offer while the attempt keeps running behind it. **And on a device whose saved landing
+  preference is Travel View (`loadTravelViewPref()`), a FORCED offer now AUTO-OPENS the cached
+  Travel View instead of rendering a button** — "the app is supposed to SHOW the last used version"
+  — via the shared `enterOfflineTravelView(cached)` (the offer button uses the same entry, so the
+  two can't drift; idempotent via `_tripsyOfflineEntered`). Normal-app-landing devices keep the
+  explicit offer. The in-flight attempt is guarded against the race both ways: a sign-in limping to
+  SUCCESS after offline was entered returns early instead of clobbering the view (`renderHome`
+  writes into the same `#main`), and a late FAILURE stays silent rather than painting the gate over
+  the schedule being read.
 
 `tripsyTripsAreOffline` marks that the in-memory trips came from cache. It drives Travel View's
 `.tv-offline` strip — **"Offline — this schedule is not live. Last refreshed &lt;when&gt;"**, rendered

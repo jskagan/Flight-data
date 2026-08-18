@@ -33196,6 +33196,22 @@ async function fetchSignedInUserEmail() {
 
 async function completeSignIn() {
   let stage = 'signing you in';
+  // THE HANG WATCHDOG. Every earlier offline-fallback fix fires on a network call
+  // FAILING -- but on a WEAK connection ("weak or fails", 2026-08-17) a fetch can
+  // hang for a minute-plus without rejecting, leaving the splash up saying
+  // "Loading your data from Drive…" with no fallback ever offered, because no
+  // catch ever ran. If sign-in hasn't finished within this window, surface the
+  // sign-in screen with the FORCED offline fallback (which auto-opens Travel View
+  // on a Travel-View-preference device) while the attempt keeps running behind
+  // it -- a late success still lands normally unless offline was already entered.
+  const watchdog = setTimeout(() => {
+    if (_tripsySignedInDone || _tripsyOfflineEntered) return;
+    console.log(`completeSignIn watchdog: still ${stage} after 12s -- offering the offline fallback`);
+    document.getElementById('splash-screen').style.display = 'none';
+    document.getElementById('signin-gate').style.display = 'flex';
+    showSignInStatus(`Still ${stage} — the connection looks weak…`, false);
+    maybeOfferOfflineTravelView(true);
+  }, 12000);
   try {
     showSignInStatus('Loading your data from Drive…', false);
 
@@ -33279,6 +33295,12 @@ async function completeSignIn() {
       console.error('Updating scope-tier hint failed (non-fatal):', e);
     }
 
+    // If the watchdog's offline fallback was ENTERED while the calls above were
+    // limping along, the reader is already inside cached Travel View -- stop
+    // here rather than clobbering that view (renderHome below writes into the
+    // same #main). The data loaded so far stays loaded; a later reload with a
+    // real connection lands normally.
+    if (_tripsyOfflineEntered) { clearTimeout(watchdog); return; }
     // Build the home dashboard (and its data-dependent summaries) while
     // still hidden behind the splash screen, so the splash stays up
     // through the load instead of revealing a screen full of "Loading…"
@@ -33297,6 +33319,11 @@ async function completeSignIn() {
       console.error('refreshNavCounts on startup failed:', e);
     }
 
+    // Same guard as above renderHome -- the offline view may have been entered
+    // during these last awaits.
+    if (_tripsyOfflineEntered) { clearTimeout(watchdog); return; }
+    _tripsySignedInDone = true;
+    clearTimeout(watchdog);
     document.getElementById('splash-screen').style.display = 'none';
     document.getElementById('signin-gate').style.display = 'none';
     document.getElementById('app-root').style.display = '';
@@ -33320,7 +33347,12 @@ async function completeSignIn() {
     // and stale local copies alike.
     reconcileTripsyOfflineDocs();
   } catch (e) {
+    clearTimeout(watchdog);
     console.error(`completeSignIn failed while ${stage}:`, e);
+    // A genuine failure while the reader is ALREADY in the offline view (the
+    // watchdog auto-opened it mid-attempt) has nothing left to surface -- the
+    // gate would paint over the schedule they're reading.
+    if (_tripsyOfflineEntered) return;
     // Surface the error on the actual sign-in screen -- if this failed
     // on the cached-token fast path (splash still showing, signin-gate
     // never shown yet), leaving the splash up forever with no visible
@@ -33464,11 +33496,44 @@ function initGoogleAuth() {
 // the failure plainly happened, but the plain onLine check ignored it. The one caller
 // with no prior failure (initGoogleAuth's fresh sign-in gate, nothing attempted yet)
 // still passes no `force`, so it correctly stays quiet while genuinely online.
+// Set once offline Travel View has actually been ENTERED (button or auto-open),
+// so a sign-in attempt that limps to success afterwards doesn't yank the view
+// out from under the reader -- and so the watchdog/offer paths never double-enter.
+let _tripsyOfflineEntered = false;
+// Set at the end of a fully successful completeSignIn -- the watchdog and the
+// auto-open check consult it so neither fires against an app that made it in.
+let _tripsySignedInDone = false;
+// The one shared entry into offline Travel View -- the offer button and the
+// auto-open path below both come through here, so they can't drift.
+async function enterOfflineTravelView(cached) {
+  if (_tripsyOfflineEntered) return;
+  _tripsyOfflineEntered = true;
+  tripsyDecryptedTrips = cached.trips;
+  tripsyTripsAreOffline = true;
+  tripsyOfflineCacheInfo = { updatedAt: cached.updatedAt, cachedAt: cached.cachedAt };
+  // Minimal shape so the Store's readers don't throw on a null driveData --
+  // nothing offline writes, and every list it can ask for is legitimately empty.
+  if (!driveData) driveData = { invoices: [], report: null, reservations: [], psBalanceDeductions: [], syncTimestamps: {} };
+  tripsyPsReservations = [];
+  document.getElementById('splash-screen').style.display = 'none';
+  document.getElementById('signin-gate').style.display = 'none';
+  document.getElementById('app-root').style.display = '';
+  try { await navigate('travelview'); } catch (e) { console.error('Offline Travel View failed:', e); }
+}
 async function maybeOfferOfflineTravelView(force = false) {
   try {
+    if (_tripsyOfflineEntered || _tripsySignedInDone) return;
     if (!force && navigator.onLine) return;
     const cached = await loadTripsyOfflineTrips();
     if (!cached) return;
+    // A device whose saved landing is Travel View (the travelers' phones/iPads)
+    // doesn't get a button to tap -- it gets the schedule. "The app is supposed
+    // to SHOW the last used version of travel view" (2026-08-17): on a REAL
+    // failure (force), auto-open the cached Travel View outright, since Travel
+    // View is exactly where sign-in was about to land anyway. Devices that land
+    // on the normal app keep the explicit offer -- their owner may well prefer
+    // to retry sign-in.
+    if (force && loadTravelViewPref()) { await enterOfflineTravelView(cached); return; }
     const gate = document.getElementById('signin-gate');
     if (!gate || document.getElementById('signin-offline-btn')) return;
     const when = formatSyncTimestamp(cached.cachedAt || cached.updatedAt) || 'earlier';
@@ -33486,18 +33551,7 @@ async function maybeOfferOfflineTravelView(force = false) {
       </div>
       <button id="signin-offline-btn" class="btn" style="padding:10px 20px; font-size:14px;">Open Travel View (offline)</button>`;
     gate.appendChild(box);
-    document.getElementById('signin-offline-btn').addEventListener('click', async () => {
-      tripsyDecryptedTrips = cached.trips;
-      tripsyTripsAreOffline = true;
-      tripsyOfflineCacheInfo = { updatedAt: cached.updatedAt, cachedAt: cached.cachedAt };
-      // Minimal shape so the Store's readers don't throw on a null driveData --
-      // nothing offline writes, and every list it can ask for is legitimately empty.
-      if (!driveData) driveData = { invoices: [], report: null, reservations: [], psBalanceDeductions: [], syncTimestamps: {} };
-      tripsyPsReservations = [];
-      document.getElementById('signin-gate').style.display = 'none';
-      document.getElementById('app-root').style.display = '';
-      try { await navigate('travelview'); } catch (e) { console.error('Offline Travel View failed:', e); }
-    });
+    document.getElementById('signin-offline-btn').addEventListener('click', () => enterOfflineTravelView(cached));
   } catch (e) {
     console.error('maybeOfferOfflineTravelView failed (non-fatal):', e);
   }
