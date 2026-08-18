@@ -1744,6 +1744,15 @@ data. Note the Claude iPad WebView has no service worker, so offline doesn't app
   pixels) while still showing the normal sidebar in that same device's landscape orientation
   (1366px). If nav layout looks wrong on a specific device, check its CSS viewport width against
   this breakpoint before changing anything else.
+  **A second, phone-only breakpoint (`@media (max-width: 600px)`) exists for the event edit form**
+  (reported 2026-08-17: "on an iPhone the minutes drop down menu does not display correctly"): a
+  datetime field used to sit in HALF of the edit form's two-column grid, inside a panel keeping its
+  194px timeline indent — on a ~390px iPhone that crushed the hour/minute/AM-PM controls into
+  slivers. The section grid is now a class (`.tp-edit-grid`, one column under 600px), the panel
+  indent is dropped there (`margin-left: 0 !important` — it's an inline style), every datetime
+  field spans the full grid width on all screens, and the time trio lives in `.tp-time-row`
+  (`flex-wrap: nowrap` + a real min-width per control) so it always reads hour → minutes → AM/PM
+  on one line.
 - Everything — HTML, CSS, and JS — lives in this one file by design (it's distributed/opened as a
   single artifact). Don't split it into separate files/modules unless explicitly asked.
 - **FOP-BP branding easter egg**: clicking either logo (`#fopbp-logo-splash`/`#fopbp-logo-signin`,
