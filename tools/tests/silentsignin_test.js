@@ -42,8 +42,22 @@ assert(/if \(rememberedDevice && navigator\.onLine\) \{/.test(initAuth),
   'the attempt is gated on remember-me AND being plausibly online');
 assert(/refreshDriveAccessToken\(8000\)\s*\n\s*\.then\(\(\) => \{ completeSignIn\(\); \}\)/.test(initAuth),
   'THE FIX: a silent (prompt:\'\') grant runs behind the splash and signs in with zero interaction on success');
-assert(/\.catch\(e => \{[\s\S]*?display = 'none';[\s\S]*?display = 'flex';[\s\S]*?maybeOfferOfflineTravelView\(true\);/.test(initAuth),
-  'any failure falls back to exactly the old sign-in screen, with the offline offer FORCED (a real attempt just failed)');
+// HOW the silent grant failed decides the fallback (follow-up report 2026-08-18:
+// "couldn't reach the sign-in servers" appeared on a CONNECTED, just-signed-out
+// device). An OAuth-level error means Google ANSWERED -- the network is provably
+// fine, so no forced offline claim; only the timeout (Google never answered) is
+// real network evidence.
+assert(/const googleNeverAnswered = msg === 'token refresh timed out';/.test(initAuth),
+  'the timeout (no answer at all) is the ONLY failure treated as network evidence');
+assert(/\.catch\(e => \{[\s\S]*?display = 'none';[\s\S]*?display = 'flex';[\s\S]*?maybeOfferOfflineTravelView\(googleNeverAnswered\);/.test(initAuth),
+  'a failure falls back to the sign-in screen; the offline offer is forced only when Google never answered');
+{
+  const decideOffer = msg => (msg === 'token refresh timed out');
+  assert(decideOffer('token refresh timed out') === true, 'timeout -> forced offline offer (and auto-open on a Travel View device)');
+  assert(decideOffer('interaction_required') === false,
+    'THE FIX: signed out of Google (Google answered with an OAuth error) -> plain sign-in screen, no "couldn\'t reach the sign-in servers"');
+  assert(decideOffer('access_denied') === false, 'any other OAuth answer likewise -> plain sign-in screen');
+}
 
 // ---- a never-remembered device is untouched ----
 assert(/document\.getElementById\('signin-gate'\)\.style\.display = 'flex';\s*\n\s*maybeOfferOfflineTravelView\(\);\s*\n\}/.test(initAuth),

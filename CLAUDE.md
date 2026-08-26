@@ -130,8 +130,14 @@ still alive. `initGoogleAuth` now, on a device that chose "remember me" (a `TOKE
 exists, even expired — the same signal the mid-session refresh keys on), tries
 `refreshDriveAccessToken(8000)` (the silent `prompt:''` grant, shorter timeout so a dead session
 can't hold a blank splash) behind the splash BEFORE showing the gate — success is a zero-tap
-sign-in; any failure falls back to exactly the old sign-in screen with the offline offer forced
-(the weak-signal lesson). A device that never chose "remember me" is unaffected.
+sign-in; any failure falls back to exactly the old sign-in screen. **HOW it failed decides the
+fallback** (follow-up 2026-08-18: "couldn't reach the sign-in servers" appeared on a connected,
+just-signed-out device): only the 8s TIMEOUT — Google never answered at all — counts as network
+evidence and forces the offline offer (auto-opening cached Travel View on a Travel-View-preference
+device); an OAuth-level error (`interaction_required` etc. — signed out of Google, or ITP blocking
+the silent iframe) means Google ANSWERED, so the network is provably fine and the plain sign-in
+screen shows with only the unforced offer (which respects `navigator.onLine`). A device that never
+chose "remember me" is unaffected.
 
 The "Authorized Users" list on the Users utility page isn't a separate registry — it's read live
 from the Drive file's real sharing permissions (`listDriveFilePermissions()`, `index.html:1001`
