@@ -158,7 +158,14 @@ to edit directly in Drive's own Share dialog.
    Gmail message id, since one reservation can get multiple emails as it changes). See
    `index.html:2015`.
 3. **PS Balance** — separate Gmail search over "PS Receipt: Reservation #" emails, parsed into
-   discrete balance deductions. See `index.html:2282`.
+   discrete balance deductions. See `index.html:2282`. **The P/S Balance table hides lines with no
+   dollar amount** ("hide all lines where there is no amount specified," 2026-08-18):
+   `renderPsBalanceTable` filters each receipt group's items to `Number(deductionAmount) > 0` and
+   drops a group's header row too when nothing survives — but ONLY on the ordinary page; the
+   Delete/Re-Parse utilities variant (`showDeleteControls = true`) still shows everything, since a
+   zero-amount group must stay visible to be deletable. The Remaining Balance totals deliberately
+   still sum over ALL items (zeros subtract nothing today, but filtering the math too would be a
+   trap if a credit/negative line ever appears).
 4. **Tripsy Trips** — see its own section below. Architecturally different from the other three:
    trip data is pulled entirely *outside* the browser (a Claude Code scheduled task talking to a
    Tripsy API connector), not via an in-browser Gmail/API sync.
@@ -294,6 +301,23 @@ step 4; git history has it if ever needed.
   — it stays yellow until the conflict is resolved (import-with-conflict, modify one side out of
   overlap, delete the existing event, or ignore the new one), then flips to the green circle (see the
   badge color rule below).
+  **A parsed event IDENTICAL to one already tracked is auto-ignored and never shown** ("ignore the
+  new events automatically and do not show them to the user," 2026-08-18):
+  `tripsyProposalEventIsDuplicate` judges identity conservatively, raw-to-raw (proposal `fields`
+  and `tripsyRaw` share the same camelCase keys) — same resource, same start to the minute, and
+  every identity field the PARSED side actually carries (end, name, company, transportNumber,
+  category) matching the tracked event; an unspecified field never counts against identity, but a
+  specified-and-different one (a new checkout date, a changed flight number) is new information
+  and keeps the event reviewable, and no start time means no identity at all. Fails safe — a miss
+  just shows one more proposal. `tripsyAutoIgnoreDuplicateProposals` sweeps every still-pending
+  proposal event, resolving duplicates exactly as a manual Reject would (`resolution:'rejected'` +
+  `autoIgnored:'duplicate'`, same finish bookkeeping when a proposal empties out, one persist per
+  sweep, no-op while trips aren't loaded). Three call sites: `syncTripsyRelays` right after
+  `ensureTripsyDecrypted` and before the badge refresh (the relay drains stage BEFORE trips load,
+  so this is where cloud-parsed duplicates actually get caught — and an all-duplicates drain never
+  flashes a badge), `runTripsyLocalParse` after staging (subtracting from the toast count so
+  hidden duplicates aren't announced), and the top of `renderTripsyParseReview` as the last line
+  of defense before anything renders.
 - **The consolidated top-right status badge** (`tripsy-status-badge`;
   `computeTripsyStatus`/`updateTripsyStatusBadge`/`renderTripsyStatusPanel`) is a single indicator
   with three prioritized states: **red 🛑** = a Drive write genuinely failed (in-memory
@@ -1787,7 +1811,14 @@ data. Note the Claude iPad WebView has no service worker, so offline doesn't app
   indent is dropped there (`margin-left: 0 !important` — it's an inline style), every datetime
   field spans the full grid width on all screens, and the time trio lives in `.tp-time-row`
   (`flex-wrap: nowrap` + a real min-width per control) so it always reads hour → minutes → AM/PM
-  on one line.
+  on one line. **Picking a minute advances to AM/PM, and the chain ends there** (2026-08-18: "after
+  the user selects the minutes, do not open the calendar menu. Instead, open the am/pm indicator"):
+  the minute dropdown's pick handler used to end in `input.focus()`, and on a phone the tap landed
+  on/near the date input below — popping the CALENDAR after every minute pick. It now focuses the
+  AM/PM `<select>` of the SAME `.tp-time-row` (via `combo.closest`, so a form with several datetime
+  fields can't cross rows) and tries `ampm.showPicker()` behind a feature test + try/catch (needs
+  user activation, absent on older WebViews — a focused-but-unopened AM/PM is the fallback).
+  Nothing is wired to the AM/PM select itself, so choosing AM or PM auto-opens nothing further.
 - Everything — HTML, CSS, and JS — lives in this one file by design (it's distributed/opened as a
   single artifact). Don't split it into separate files/modules unless explicitly asked.
 - **FOP-BP branding easter egg**: clicking either logo (`#fopbp-logo-splash`/`#fopbp-logo-signin`,

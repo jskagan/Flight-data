@@ -4574,6 +4574,13 @@ async function syncTripsyRelays() {
     // ensureTripsyDecrypted reads trips-data.json silently and returns null on
     // failure. Best-effort -- a load failure must never abort the badge refresh.
     try { await ensureTripsyDecrypted(); } catch (e) { /* ignore -- badge falls back to pre-decryption behavior */ }
+    // With the trips now loaded, silently drop any freshly-staged proposal
+    // event that duplicates an existing tracked event -- the drains above run
+    // BEFORE the decrypt (trips may not be loaded yet when they stage), so
+    // this sweep is where relay-staged duplicates actually get caught. Runs
+    // before the badge refresh so an all-duplicates drain never even flashes
+    // a review badge. Best-effort, same as the decrypt above.
+    try { await tripsyAutoIgnoreDuplicateProposals(); } catch (e) { console.error('duplicate-proposal sweep failed:', e); }
     await updateTripsyStatusBadge();
     const relayStateAfter = JSON.stringify([
       driveData.tripsyPendingChanges || [],
@@ -12787,7 +12794,17 @@ async function renderPsBalanceTable(showDeleteControls = false) {
             <td>${fmtMoney(PS_BALANCE_OPENING)}</td>
             <td>${fmtMoney(PS_BALANCE_OPENING * 2)}</td>
           </tr>
-          ${groups.map(g => `
+          ${groups.map(g => {
+            // Only show line items carrying a real dollar amount ("hide all
+            // lines where there is no amount specified") -- a $0/absent
+            // amount line adds nothing to the balance math and just pads
+            // the table. A group left with NO dollar lines drops entirely
+            // (header included). The Delete/Re-Parse utilities variant
+            // (showDeleteControls) still shows everything, since a
+            // zero-amount group has to stay visible to be deletable.
+            const visibleItems = showDeleteControls ? g.items : g.items.filter(item => Number(item.deductionAmount) > 0);
+            if (!visibleItems.length) return "";
+            return `
             <tr style="background:var(--panel-2);">
               <td colspan="4" style="font-family:var(--mono); font-weight:700; color:var(--text);">
                 <span data-psbal-goto-detail="${esc(g.gmailMessageId)}" style="cursor:pointer;">
@@ -12796,7 +12813,7 @@ async function renderPsBalanceTable(showDeleteControls = false) {
                 ${isOwner && showDeleteControls ? `<button class="btn danger" data-psbal-delete-group data-id="${esc(g.gmailMessageId)}" style="font-size:10px; padding:2px 6px; margin-left:8px;">Delete</button>` : ''}
               </td>
             </tr>
-            ${g.items.map(item => {
+            ${visibleItems.map(item => {
               const jonAmt = g.personKey === "jon" ? item.deductionAmount : 0;
               const robAmt = g.personKey === "rob" ? item.deductionAmount : 0;
               // Description already includes "LAX Reservation #:" -- drop
@@ -12811,7 +12828,8 @@ async function renderPsBalanceTable(showDeleteControls = false) {
                   <td>${(jonAmt + robAmt) ? "-" + fmtMoney(jonAmt + robAmt) : ""}</td>
                 </tr>`;
             }).join("")}
-          `).join("")}
+          `;
+          }).join("")}
           <tr style="background:var(--panel-2);">
             <td style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">Remaining Balance</td>
             <td style="font-weight:600;">${fmtMoney(jonRemaining)}</td>
@@ -13747,6 +13765,13 @@ async function runTripsyLocalParse() {
   const parsedDocs = docResults.filter(Boolean);
   if (parsedEmails.length) { const r = await Store.applyDrainedEmailProposals(parsedEmails); staged += (r && r.staged) || 0; }
   if (parsedDocs.length) { const r = await Store.applyDrainedDocProposals(parsedDocs); staged += (r && r.staged) || 0; }
+  // Anything just staged that duplicates an already-tracked event is dropped
+  // silently -- and subtracted from the count, so the success toast never
+  // announces proposals the owner will not actually be shown.
+  if (staged) {
+    try { staged = Math.max(0, staged - await tripsyAutoIgnoreDuplicateProposals()); }
+    catch (e) { console.error('duplicate-proposal sweep failed after local parse:', e); }
+  }
   return { attempted: emailBatch.length + docBatch.length, staged, failed, leftovers: baseLeftovers + failed };
 }
 // The button handler: local parse first (seconds), cloud fallback only for what
@@ -15681,6 +15706,12 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
   // Save just as typing would. Keeping the input focused during the option
   // pointerdown (preventDefault on the menu) avoids a blur-before-click race and
   // works on the iPad WebView, where the old native datalist popup never showed.
+  // Picking a minute ADVANCES to the AM/PM dropdown of the same time row (and
+  // tries to pop it open, where showPicker exists) rather than refocusing the
+  // minute input -- the old refocus left the tap landing on/near the date input
+  // on a phone, which opened the CALENDAR after every minute pick. AM/PM is the
+  // natural next entry in the hour -> minutes -> AM/PM order, and it is also the
+  // END of the chain: nothing auto-opens after an AM/PM choice.
   panel.querySelectorAll('.tp-min-combo').forEach(combo => {
     const input = combo.querySelector('[data-tripsy-edit-time-min]');
     const menu = combo.querySelector('[data-tripsy-min-menu]');
@@ -15696,7 +15727,15 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
         input.value = o.dataset.min;
         input.dispatchEvent(new Event('input', { bubbles: true }));
         closeMenu();
-        input.focus();
+        const row = combo.closest('.tp-time-row');
+        const ampm = row && row.querySelector('[data-tripsy-edit-time-ampm]');
+        if (ampm) {
+          ampm.focus();
+          // showPicker (opening a <select> programmatically) needs user
+          // activation -- this click is one -- and doesn't exist on older
+          // WebViews; a focused-but-unopened AM/PM is the graceful fallback.
+          try { if (typeof ampm.showPicker === 'function') ampm.showPicker(); } catch (e) { /* focused is enough */ }
+        }
       });
     });
   });
@@ -16297,6 +16336,84 @@ function tripsyParseMatchTrips(dayKey, trips) {
     const end = tripsyDayKey(t.end) || start;
     return start && dayKey >= start && dayKey <= end;
   });
+}
+
+// A parsed proposal event that is IDENTICAL to an event already being tracked
+// is noise, not information -- the same confirmation forwarded twice, or a
+// re-parse of an itinerary the trips already reflect. Identity is judged
+// conservatively, raw-to-raw (proposal `fields` and a real event's `tripsyRaw`
+// share the same camelCase key set): same resource, same start (to the minute),
+// and every identity-relevant field the PARSED side actually carries (end,
+// name, company, transportNumber, category) matching the existing event's --
+// a field the proposal doesn't specify never counts against identity (it adds
+// nothing), but a field it DOES specify that differs (a new end time, a
+// different flight number) is new information and keeps the event reviewable.
+// No start time at all -> never a duplicate (no identity to establish).
+// Fails safe by design: a miss just means the owner sees one more proposal.
+function tripsyParseIdentValue(v) {
+  return String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+function tripsyProposalEventIsDuplicate(pev, trips) {
+  const f = (pev && pev.fields) || {};
+  const resource = pev && pev.tripsyResource;
+  const newStart = String(f.startsAt || f.departureAt || '').slice(0, 16);
+  if (!resource || !newStart) return false;
+  const newEnd = String(f.endsAt || f.arrivalAt || '').slice(0, 16);
+  for (const trip of (trips || [])) {
+    for (const ev of ((trip && trip.events) || [])) {
+      const raw = ev && ev.tripsyRaw;
+      if (!raw || raw.resource !== resource) continue;
+      if (String(raw.startsAt || raw.departureAt || '').slice(0, 16) !== newStart) continue;
+      if (newEnd && String(raw.endsAt || raw.arrivalAt || '').slice(0, 16) !== newEnd) continue;
+      let differs = false;
+      for (const key of ['name', 'company', 'transportNumber', 'category']) {
+        const nv = tripsyParseIdentValue(f[key]);
+        if (nv && tripsyParseIdentValue(raw[key]) !== nv) { differs = true; break; }
+      }
+      if (differs) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Auto-resolves every still-pending proposal event that duplicates an existing
+// tracked event ("when there are new events that are parsed that are identical
+// to existing events, ignore the new events automatically and do not show them
+// to the user"). Resolution vocabulary stays 'rejected' -- exactly what a
+// manual Reject writes, so every downstream pending/non-pending check behaves
+// identically -- with an autoIgnored marker recording why. A proposal left
+// with nothing pending gets the same finish bookkeeping a manual Reject does
+// (attachment marked done, empty proposal deleted). Needs the loaded trips to
+// compare against, so callers run it AFTER ensureTripsyDecrypted; with trips
+// still null it does nothing rather than guessing. One persist for the whole
+// sweep, and only when something actually changed.
+async function tripsyAutoIgnoreDuplicateProposals() {
+  if (!isOwner) return 0;
+  const trips = tripsyDecryptedTrips;
+  if (!trips || !trips.length) return 0;
+  let ignored = 0;
+  const now = new Date().toISOString();
+  for (const proposal of [...(driveData.tripsyParseProposals || [])]) {
+    let ignoredHere = 0;
+    for (const ev of (proposal.events || [])) {
+      if (ev.resolution !== 'pending') continue;
+      if (!tripsyProposalEventIsDuplicate(ev, trips)) continue;
+      Object.assign(ev, { resolution: 'rejected', autoIgnored: 'duplicate', resolvedAt: now });
+      ignoredHere++;
+    }
+    if (ignoredHere && proposal.events.every(e => e.resolution !== 'pending')) {
+      const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
+      if (a) a.parseStatus = 'done';
+      driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== proposal.id);
+    }
+    ignored += ignoredHere;
+  }
+  if (ignored) {
+    try { await persistDriveData(); }
+    catch (e) { console.error('tripsyAutoIgnoreDuplicateProposals persist failed:', e); }
+  }
+  return ignored;
 }
 
 // Flags an existing same-resource item on the destination trip whose time
@@ -31143,6 +31260,12 @@ async function renderTripsyParseReview() {
     container.querySelector("[data-parse-review-nav-tripsy]").addEventListener("click", e => { e.preventDefault(); navigate('tripsytrips'); });
     return;
   }
+
+  // Last line of defense for "do not show them to the user": anything still
+  // pending that duplicates a tracked event is auto-ignored right before the
+  // list renders (covers proposals staged while trips weren't loaded, and an
+  // event that BECAME a duplicate after a manual add). Best-effort.
+  try { await tripsyAutoIgnoreDuplicateProposals(); } catch (e) { console.error('duplicate-proposal sweep failed on review page:', e); }
 
   const allProposals = await Store.listTripsyParseProposals();
   const proposals = allProposals.filter(p => p.events.some(e => e.resolution === 'pending'));
