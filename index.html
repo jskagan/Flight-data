@@ -12924,6 +12924,36 @@ async function renderPsBalanceTable(showDeleteControls = false) {
   const container = document.getElementById("psbalance-card");
   const deductions = await Store.listPsBalanceDeductions();
 
+  // Reservation # -> the trip it belongs to, if any -- reuses
+  // findMatchingTripsyPsReservation (the same flight-number/date matching
+  // My Trips' own timeline uses to attach a P/S reservation to a flight
+  // event) rather than re-implementing those matching rules a second time,
+  // just applied in reverse: every trip's flight events, looking for which
+  // one (if any) matches each reservation. Lazy-loads trips/reservations
+  // the same way My Trips and Travel View each already do, since neither
+  // may have run yet this session when P/S Balance is opened directly.
+  // Fails soft -- a trip-name lookup is a nice-to-have, never something
+  // that should block the balance table itself from rendering.
+  const tripNameByReservationNumber = new Map();
+  try {
+    const trips = (await ensureTripsyDecrypted()) || [];
+    if (!tripsyPsReservations) {
+      try { tripsyPsReservations = await Store.listReservations(); } catch (e) { tripsyPsReservations = []; }
+    }
+    for (const trip of trips) {
+      if (isTripsyTripEffectivelyHidden(trip)) continue;
+      for (const ev of (trip.events || [])) {
+        if (ev.type !== 'flight') continue;
+        const match = findMatchingTripsyPsReservation(ev);
+        if (match && match.reservation.reservationNumber) {
+          tripNameByReservationNumber.set(match.reservation.reservationNumber, trip.name);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Matching P/S reservations to trips failed (non-fatal):', e);
+  }
+
   function parseServiceDate(d) {
     if (!d) return null;
     const [mm, dd, yyyy] = d.split("/");
@@ -12995,7 +13025,7 @@ async function renderPsBalanceTable(showDeleteControls = false) {
             <tr style="background:var(--panel-2);">
               <td colspan="4" style="font-family:var(--mono); font-weight:700; color:var(--text);">
                 <span data-psbal-goto-detail="${esc(g.gmailMessageId)}" style="cursor:pointer;">
-                  ${g.dateOfService ? esc(g.dateOfService) : ""} — Reservation #${esc(g.reservationNumber)}
+                  ${g.dateOfService ? esc(g.dateOfService) : ""} — Reservation #${esc(g.reservationNumber)}${tripNameByReservationNumber.has(g.reservationNumber) ? ` (${esc(tripNameByReservationNumber.get(g.reservationNumber))})` : ""}
                 </span>
                 ${isOwner && showDeleteControls ? `<button class="btn danger" data-psbal-delete-group data-id="${esc(g.gmailMessageId)}" style="font-size:10px; padding:2px 6px; margin-left:8px;">Delete</button>` : ''}
               </td>
