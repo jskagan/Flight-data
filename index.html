@@ -1687,6 +1687,7 @@
       <button class="rail-item rail-subitem" data-view="psinvoices">Invoices</button>
     </div>
     <button class="rail-item" data-view="travelview"><span class="nav-icon">🧳</span>Travel View</button>
+    <button class="rail-item" data-view="tripinsurance"><span class="nav-icon">🛡️</span>Trip Insurance</button>
     <div id="storage-health-banner"></div>
     <button class="rail-item" data-submenu-toggle="utilities" id="utilities-toggle" style="display:none; margin-top:auto;">
       <span class="nav-icon">🛠️</span>Utilities
@@ -1802,9 +1803,15 @@ async function driveApiFetch(url, options = {}, _retriedAfterRefresh = false) {
       clearCachedToken(); // cached token is dead -- don't keep offering it
       const err = new Error('Your Google sign-in expired. Please reload the page and sign in again.');
       err.authExpired = true;
+      // Google answered (with a 401) -- the network is clearly fine, this is
+      // an auth problem. completeSignIn's catch reads this flag so a plain
+      // "you're logged out" doesn't get misreported as "no internet".
+      err.reachedServer = true;
       throw err;
     }
-    throw new Error(`Drive API error ${res.status}: ${text.slice(0, 300)}`);
+    const err = new Error(`Drive API error ${res.status}: ${text.slice(0, 300)}`);
+    err.reachedServer = true; // reached Google, got a real (if unhappy) HTTP response
+    throw err;
   }
   return res;
 }
@@ -1880,7 +1887,9 @@ async function loadDriveDataFile(fileId) {
   try {
     return JSON.parse(text);
   } catch (e) {
-    throw new Error('Drive data file exists but is not valid JSON -- it may be corrupted.');
+    const err = new Error('Drive data file exists but is not valid JSON -- it may be corrupted.');
+    err.reachedServer = true; // the file downloaded fine -- this is a data problem, not a network one
+    throw err;
   }
 }
 
@@ -2230,6 +2239,62 @@ async function loadTripsyOfflineTrips() {
 // rendering (and therefore from editing) stale data.
 let tripsyTripsAreOffline = false;
 let tripsyOfflineCacheInfo = null; // { updatedAt, cachedAt }
+// ---- Offline Trip Insurance doc list -- same appCache store as
+// tripsyCacheTripsForOffline/loadTripsyOfflineTrips above, its own key.
+// Document BYTES reuse the existing tripsyDocs store (saveTripsyOfflineDoc/
+// getTripsyOfflineDoc below), keyed by driveFileId same as any other doc --
+// there's no reason for Trip Insurance to have its own blob store too.
+async function tripsyCacheTripInsuranceDocsForOffline(docs) {
+  try {
+    const db = await openTripsyOfflineDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_APP_STORE, 'readwrite');
+      tx.objectStore(TRIPSY_OFFLINE_APP_STORE).put({
+        key: 'tripInsuranceDocs', docs, cachedAt: new Date().toISOString(),
+      });
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    return true;
+  } catch (e) {
+    console.error('tripsyCacheTripInsuranceDocsForOffline failed (non-fatal):', e);
+    return false;
+  }
+}
+async function loadTripInsuranceOfflineDocs() {
+  try {
+    const db = await openTripsyOfflineDb();
+    const rec = await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_APP_STORE, 'readonly');
+      const req = tx.objectStore(TRIPSY_OFFLINE_APP_STORE).get('tripInsuranceDocs');
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+    return (rec && Array.isArray(rec.docs) && rec.docs.length) ? rec : null;
+  } catch (e) {
+    console.error('loadTripInsuranceOfflineDocs failed (non-fatal):', e);
+    return null;
+  }
+}
+// Caches the doc list + every doc's bytes for offline viewing -- called both
+// right after sign-in (so losing the connection mid-session works even if the
+// reader never opened Trip Insurance yet this session) and every time the page
+// itself renders (so a doc added from another device gets picked up on the
+// next visit too). Fails soft throughout: this is a convenience cache on top
+// of the real Drive copy, never something that should block anything.
+async function cacheTripInsuranceDocsOffline(docs) {
+  tripsyCacheTripInsuranceDocsForOffline(docs);
+  for (const d of docs) {
+    try {
+      if (await getTripsyOfflineDoc(d.driveFileId)) continue;
+      const blob = await downloadDriveFileBlob(d.driveFileId);
+      await saveTripsyOfflineDoc({
+        driveFileId: d.driveFileId, blob, mimeType: d.mimeType, fileName: d.fileName,
+        cachedAt: new Date().toISOString(),
+      });
+    } catch (e) { console.error('Caching trip insurance doc for offline failed (non-fatal):', e); }
+  }
+}
 async function saveTripsyOfflineDoc(record) {
   try {
     const db = await openTripsyOfflineDb();
@@ -2806,6 +2871,25 @@ const Store = {
     } catch (e) {
       console.error('Store.deleteTripsyAttachment failed:', e);
       return false;
+    }
+  },
+  // Trip Insurance documents (policies, claims, coverage summaries) -- not
+  // scoped to any one trip, so kept as their own flat list rather than
+  // folded into tripsyAttachments. Same "bytes in their own Drive file,
+  // metadata here" split as attachments, for the same reason (see
+  // uploadBlobToDrive's comment).
+  async listTripInsuranceDocs() {
+    return [...(driveData.tripInsuranceDocs || [])];
+  },
+  async saveTripInsuranceDoc(doc) {
+    try {
+      if (!driveData.tripInsuranceDocs) driveData.tripInsuranceDocs = [];
+      driveData.tripInsuranceDocs.push(doc);
+      await persistDriveData();
+      return { ok: true };
+    } catch (e) {
+      console.error('Store.saveTripInsuranceDoc failed:', e);
+      return { ok: false, error: e.message || String(e) };
     }
   },
   async renameTripsyAttachment(attachmentId, newFileName) {
@@ -5474,6 +5558,11 @@ async function navigate(view, param) {
   // other destination (a stray link, or a navigate('home') like the Travel View
   // exit) to My Trips. Central enforcement so no disallowed view ever renders.
   if (isTripsOnlyUser && !TRIPS_ONLY_ALLOWED_VIEWS.has(view)) { view = 'tripsytrips'; param = undefined; }
+  // Offline mode only has a local cache for Travel View and Trip Insurance --
+  // redirect anything else (e.g. the Travel View exit button's navigate('home'))
+  // to whichever of the two is actually available, so a stray destination
+  // never tries to render a page that needs a live signed-in read.
+  if (appOfflineMode && !OFFLINE_ALLOWED_VIEWS.has(view)) { view = tripsyTripsAreOffline ? 'travelview' : 'tripinsurance'; param = undefined; }
   const previousView = currentView;
   currentView = view;
   setActiveNav(view, param);
@@ -5515,6 +5604,7 @@ async function navigate(view, param) {
     else if (view === "utilitiesfavorites") await renderUtilitiesFavorites();
     else if (view === "passengers") await renderPassengerReport(param || "totals");
     else if (view === "travelview") await renderTravelView();
+    else if (view === "tripinsurance") await renderTripInsurance();
   } catch (e) {
     // Catch-all so a bug in one view shows a visible error instead of an
     // infinite "Loading…" -- individual views may also handle their own
@@ -7977,6 +8067,103 @@ function tripsyFavoriteDateLabel(dayKey) {
   if (!dayKey || !/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) return '';
   return tripPartsToUtcDate({ year: +dayKey.slice(0, 4), month: +dayKey.slice(5, 7), day: +dayKey.slice(8, 10) })
     .toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+// ---- Trip Insurance: a flat icon library of insurance documents (policies,
+// claims, coverage summaries) -- not scoped to any one trip, so it's its own
+// top-level nav item rather than folded into a trip's attachments. Reuses
+// the same "bytes in their own Drive file, metadata in driveData" upload
+// (uploadBinaryFileToDrive) and "open in a new tab" (openDriveFileInNewTab)
+// helpers Tripsy attachments already use above -- no reason for a second
+// document-storage mechanism. Upload is owner-only, matching every other
+// write in the app; everyone with read access can open a document.
+function tripInsuranceDocIcon(mimeType) {
+  const t = (mimeType || '').toLowerCase();
+  if (t === 'application/pdf') return '📄';
+  if (t.startsWith('image/')) return '🖼️';
+  return '📎';
+}
+async function renderTripInsurance() {
+  const main = document.getElementById('main');
+  const docs = await Store.listTripInsuranceDocs();
+
+  // Keep the offline cache current on every live, signed-in visit to this
+  // page too (completeSignIn already does this once right after sign-in, so
+  // losing the connection before ever opening this page still works -- this
+  // second call picks up anything added from another device since then).
+  // Fire-and-forget: never blocks rendering. Skipped entirely in
+  // appOfflineMode, where `docs` already came FROM this cache and any
+  // network call here would just fail anyway.
+  if (!appOfflineMode) cacheTripInsuranceDocsOffline(docs);
+
+  const docTileHtml = d => `
+    <button type="button" class="tw-card" data-tripins-open="${esc(d.driveFileId)}" title="${esc(d.fileName)}" style="cursor:pointer; padding:0;">
+      <div class="tw-photo">${tripInsuranceDocIcon(d.mimeType)}</div>
+      <div style="font-size:12px; color:var(--text); padding:6px 8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(d.fileName)}</div>
+    </button>`;
+  // The "add more" tile after the icons -- a green box with a plus sign,
+  // per the explicit request. Owner-only (matches every other write in the
+  // app) and never offered offline, same reasoning as canUpload below.
+  const addTileHtml = `
+    <button type="button" class="tw-card" data-tripins-add title="Upload another document" style="cursor:pointer; border:none; background:#2E9E5B; align-items:center; justify-content:center; min-height:120px;">
+      <div style="font-size:40px; line-height:1; color:#fff;">+</div>
+    </button>`;
+  // Uploading needs a real Drive write, which offline mode's minimal driveData
+  // can't do -- isOwner is already false in that mode (nobody's identity is
+  // verified with no network), so this is belt-and-suspenders, not the only
+  // thing preventing it.
+  const canUpload = isOwner && !appOfflineMode;
+  const offlineNoticeHtml = appOfflineMode
+    ? `<div style="display:flex; align-items:center; gap:8px; margin:0 0 12px; padding:8px 12px; border:1px solid var(--amber); border-radius:8px; background:rgba(227,164,56,0.10); font-size:13px; color:var(--text);">📴 Offline — showing documents saved on this device. Uploading needs a connection.</div>`
+    : '';
+
+  main.innerHTML = `
+    <div class="page-title">Trip Insurance</div>
+    ${offlineNoticeHtml}
+    ${docs.length
+      ? `<div class="tw-grid">${docs.map(docTileHtml).join('')}${canUpload ? addTileHtml : ''}</div>`
+      : `<div class="empty-state" style="margin-top:16px; display:flex; flex-direction:column; align-items:center; gap:12px;">
+          <div>No insurance documents yet.</div>
+          ${canUpload ? `<button class="btn" data-tripins-add>Upload Documents</button>` : ''}
+        </div>`}
+    <input type="file" data-tripins-file multiple accept="application/pdf,image/*,.doc,.docx">
+  `;
+
+  const fileInput = main.querySelector('[data-tripins-file]');
+  main.querySelectorAll('[data-tripins-add]').forEach(btn => btn.addEventListener('click', () => fileInput.click()));
+  main.querySelectorAll('[data-tripins-open]').forEach(btn => {
+    btn.addEventListener('click', () => openDriveFileInNewTab(btn.getAttribute('data-tripins-open')));
+  });
+  fileInput.addEventListener('change', async () => {
+    const files = [...fileInput.files];
+    if (!files.length) return;
+    fileInput.disabled = true;
+    for (const file of files) {
+      try {
+        const driveFileId = await uploadBinaryFileToDrive(file);
+        const result = await Store.saveTripInsuranceDoc({
+          id: crypto.randomUUID(),
+          fileName: file.name,
+          driveFileId,
+          mimeType: file.type || 'application/octet-stream',
+          sizeBytes: file.size,
+          uploadedAt: new Date().toISOString(),
+          uploadedBy: currentUserEmail,
+        });
+        if (!result.ok) throw new Error(result.error || 'Save failed');
+        // Cache the just-uploaded file's bytes locally too, straight from the
+        // File object already in hand -- same reasoning as the Tripsy attach
+        // panel's identical call. Non-fatal: the proactive cache loop above
+        // would pick it up on the next render anyway.
+        saveTripsyOfflineDoc({
+          driveFileId, blob: file, mimeType: file.type || 'application/octet-stream',
+          fileName: file.name, cachedAt: new Date().toISOString(),
+        });
+      } catch (e) {
+        toast(`Could not upload ${file.name}: ${e.message}`, "error");
+      }
+    }
+    if (currentView === 'tripinsurance') renderTripInsurance();
+  });
 }
 async function renderUtilitiesWardrobe() {
   if (!isOwner) { main.innerHTML = `<div class="page-title">Wardrobe</div><div class="empty-state">Owner only.</div>`; return; }
@@ -32106,7 +32293,11 @@ function tripsyTravelViewTodayKey(trip, firstDay, lastDay) {
 }
 async function renderTravelView(chosenTripKey) {
   ensureTravelViewStyles();
-  const exit = () => { saveTravelViewPref(false); navigate('home'); };
+  // Offline mode has no working 'home' to land on (see navigate()'s own
+  // redirect for that case) -- send the exit button to the other offline-safe
+  // page instead, so it actually goes somewhere rather than bouncing right
+  // back to Travel View.
+  const exit = () => { saveTravelViewPref(false); navigate(appOfflineMode ? 'tripinsurance' : 'home'); };
   const wrap = inner => `<div class="tv-root"><div class="tv-inner">${inner}</div></div>`;
   const wireExit = () => { const b = document.getElementById('tv-exit'); if (b) b.addEventListener('click', exit); };
   const closeBtnHtml = `<button class="tv-close" id="tv-exit" title="Exit Travel View">✕</button>`;
@@ -33312,7 +33503,15 @@ async function fetchSignedInUserEmail() {
   const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
     headers: { Authorization: `Bearer ${driveAccessToken}` },
   });
-  if (!res.ok) throw new Error(`userinfo request failed: ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(`userinfo request failed: ${res.status}`);
+    // Google answered (even with an error, e.g. a revoked/expired token) --
+    // that means the network is fine, so completeSignIn's catch shouldn't
+    // treat this as "no internet" evidence. See driveApiFetch's own use of
+    // this flag for the fuller reasoning.
+    err.reachedServer = true;
+    throw err;
+  }
   const data = await res.json();
   return data.email || null;
 }
@@ -33333,7 +33532,7 @@ async function completeSignIn() {
     document.getElementById('splash-screen').style.display = 'none';
     document.getElementById('signin-gate').style.display = 'flex';
     showSignInStatus(`Still ${stage} — the connection looks weak…`, false);
-    maybeOfferOfflineTravelView(true);
+    maybeOfferOfflineMode(true);
   }, 12000);
   try {
     showSignInStatus('Loading your data from Drive…', false);
@@ -33357,7 +33556,9 @@ async function completeSignIn() {
       // them yet (or doesn't exist) -- don't silently create a new,
       // separate file under their account, since that would defeat the
       // whole point of everyone seeing the same shared data.
-      throw new Error('No shared flight log data found for this account yet. Ask the owner to share the data file with you in Google Drive.');
+      const err = new Error('No shared flight log data found for this account yet. Ask the owner to share the data file with you in Google Drive.');
+      err.reachedServer = true; // findDriveDataFile above succeeded -- this is a sharing/permissions problem, not connectivity
+      throw err;
     }
 
     // One-time cleanup: strip fields left over from the retired
@@ -33469,6 +33670,12 @@ async function completeSignIn() {
     // user's device, not just the owner's, to pick up keepOffline changes
     // and stale local copies alike.
     reconcileTripsyOfflineDocs();
+    // Cache Trip Insurance's doc list + bytes right away too, not only when
+    // the reader happens to open that page -- otherwise losing the connection
+    // mid-session, before ever visiting Trip Insurance, would leave nothing
+    // cached to view. Not owner-gated, same reasoning as reconcileTripsyOfflineDocs
+    // above -- every viewer's own device needs its own local copy.
+    Store.listTripInsuranceDocs().then(cacheTripInsuranceDocsOffline);
   } catch (e) {
     clearTimeout(watchdog);
     console.error(`completeSignIn failed while ${stage}:`, e);
@@ -33492,7 +33699,13 @@ async function completeSignIn() {
     // offline Travel View" report. Offering it here too covers both paths.
     // force:true -- this catch running IS the failure evidence; don't let a
     // weak-signal navigator.onLine:true false positive suppress the offer.
-    maybeOfferOfflineTravelView(true);
+    // BUT only when the failure is actually connectivity evidence: e.reachedServer
+    // means Google/Drive was reached and answered (an expired/revoked sign-in, a
+    // sharing/permissions problem, a corrupt file, ...) -- the network is fine in
+    // that case, so claiming "no internet" would be actively wrong. Only a request
+    // that never got a response at all (unset flag -- see driveApiFetch/
+    // fetchSignedInUserEmail) is real evidence of that.
+    if (!e.reachedServer) maybeOfferOfflineMode(true);
   }
 }
 
@@ -33604,13 +33817,13 @@ function initGoogleAuth() {
         console.log('Silent startup sign-in unavailable — showing the sign-in screen:', msg);
         document.getElementById('splash-screen').style.display = 'none';
         document.getElementById('signin-gate').style.display = 'flex';
-        maybeOfferOfflineTravelView(googleNeverAnswered);
+        maybeOfferOfflineMode(googleNeverAnswered);
       });
     return;
   }
   document.getElementById('splash-screen').style.display = 'none';
   document.getElementById('signin-gate').style.display = 'flex';
-  maybeOfferOfflineTravelView();
+  maybeOfferOfflineMode();
 }
 
 // OFFLINE ENTRY. Google sign-in needs the network, so with no signal the normal
@@ -33627,47 +33840,81 @@ function initGoogleAuth() {
 // the failure plainly happened, but the plain onLine check ignored it. The one caller
 // with no prior failure (initGoogleAuth's fresh sign-in gate, nothing attempted yet)
 // still passes no `force`, so it correctly stays quiet while genuinely online.
-// Set once offline Travel View has actually been ENTERED (button or auto-open),
-// so a sign-in attempt that limps to success afterwards doesn't yank the view
-// out from under the reader -- and so the watchdog/offer paths never double-enter.
+// Set once offline mode has actually been ENTERED (button or auto-open), so a
+// sign-in attempt that limps to success afterwards doesn't yank the view out
+// from under the reader -- and so the watchdog/offer paths never double-enter.
 let _tripsyOfflineEntered = false;
 // Set at the end of a fully successful completeSignIn -- the watchdog and the
 // auto-open check consult it so neither fires against an app that made it in.
 let _tripsySignedInDone = false;
-// The one shared entry into offline Travel View -- the offer button and the
+// True for the rest of the page's life once offline mode has been entered --
+// gates navigate() and hides every rail item that needs a live signed-in read
+// (below), app-wide. Distinct from the narrower tripsyTripsAreOffline (which
+// only says the TRIPS in memory are a stale copy, and drives Travel View's own
+// "not live" banner): a device with only Trip Insurance docs cached and no
+// trips cache is in appOfflineMode without tripsyTripsAreOffline ever being set.
+let appOfflineMode = false;
+// Only these two views work from a local cache with no network -- everything
+// else edits data or needs a live Drive read. Redirected to in navigate()
+// below, and used to hide every other rail item on offline entry.
+const OFFLINE_ALLOWED_VIEWS = new Set(['travelview', 'tripinsurance']);
+// The one shared entry into offline mode -- the offer button and the
 // auto-open path below both come through here, so they can't drift.
-async function enterOfflineTravelView(cached) {
+// `cached` is { trips: {trips,updatedAt,cachedAt}|null, tripInsurance:
+// {docs,cachedAt}|null } -- either half may be missing; whichever is present
+// gets wired up, and the landing view follows whichever exists (trips wins
+// when both do, since that's what the device's own landing preference means).
+async function enterOfflineMode(cached) {
   if (_tripsyOfflineEntered) return;
   _tripsyOfflineEntered = true;
-  tripsyDecryptedTrips = cached.trips;
-  tripsyTripsAreOffline = true;
-  tripsyOfflineCacheInfo = { updatedAt: cached.updatedAt, cachedAt: cached.cachedAt };
+  appOfflineMode = true;
   // Minimal shape so the Store's readers don't throw on a null driveData --
   // nothing offline writes, and every list it can ask for is legitimately empty.
   if (!driveData) driveData = { invoices: [], report: null, reservations: [], psBalanceDeductions: [], syncTimestamps: {} };
   tripsyPsReservations = [];
+  if (cached.trips) {
+    tripsyDecryptedTrips = cached.trips.trips;
+    tripsyTripsAreOffline = true;
+    tripsyOfflineCacheInfo = { updatedAt: cached.trips.updatedAt, cachedAt: cached.trips.cachedAt };
+  }
+  if (cached.tripInsurance) driveData.tripInsuranceDocs = cached.tripInsurance.docs;
+  // Hide every rail item outside the offline-safe set -- normally done inside
+  // completeSignIn for the (unrelated) trips-only tier, but offline mode never
+  // runs that function at all, so it needs its own sweep here.
+  document.querySelectorAll('.rail-item[data-view]').forEach(el => {
+    if (!OFFLINE_ALLOWED_VIEWS.has(el.dataset.view)) el.style.display = 'none';
+  });
+  document.querySelectorAll('.rail-item[data-submenu-toggle], #passengers-submenu, #psreservations-submenu, #utilities-submenu, #ambiguities-submenu, #storage-health-banner').forEach(el => { el.style.display = 'none'; });
   document.getElementById('splash-screen').style.display = 'none';
   document.getElementById('signin-gate').style.display = 'none';
   document.getElementById('app-root').style.display = '';
-  try { await navigate('travelview'); } catch (e) { console.error('Offline Travel View failed:', e); }
+  try { await navigate(cached.trips ? 'travelview' : 'tripinsurance'); } catch (e) { console.error('Offline entry failed:', e); }
 }
-async function maybeOfferOfflineTravelView(force = false) {
+async function maybeOfferOfflineMode(force = false) {
   try {
     if (_tripsyOfflineEntered || _tripsySignedInDone) return;
     if (!force && navigator.onLine) return;
-    const cached = await loadTripsyOfflineTrips();
-    if (!cached) return;
+    const [tripsCache, tripInsuranceCache] = await Promise.all([
+      loadTripsyOfflineTrips(),
+      loadTripInsuranceOfflineDocs(),
+    ]);
+    if (!tripsCache && !tripInsuranceCache) return;
+    const cached = { trips: tripsCache, tripInsurance: tripInsuranceCache };
     // A device whose saved landing is Travel View (the travelers' phones/iPads)
     // doesn't get a button to tap -- it gets the schedule. "The app is supposed
     // to SHOW the last used version of travel view" (2026-08-17): on a REAL
-    // failure (force), auto-open the cached Travel View outright, since Travel
-    // View is exactly where sign-in was about to land anyway. Devices that land
-    // on the normal app keep the explicit offer -- their owner may well prefer
-    // to retry sign-in.
-    if (force && loadTravelViewPref()) { await enterOfflineTravelView(cached); return; }
+    // failure (force), auto-open the cached view outright, since that's exactly
+    // where sign-in was about to land anyway. Only applies when trips are
+    // actually cached -- a device with only Trip Insurance docs falls through
+    // to the button below instead, since there's no "last used view" signal
+    // pointing anywhere else. Devices that land on the normal app keep the
+    // explicit offer -- their owner may well prefer to retry sign-in.
+    if (force && loadTravelViewPref() && tripsCache) { await enterOfflineMode(cached); return; }
     const gate = document.getElementById('signin-gate');
     if (!gate || document.getElementById('signin-offline-btn')) return;
-    const when = formatSyncTimestamp(cached.cachedAt || cached.updatedAt) || 'earlier';
+    const when = formatSyncTimestamp(
+      (tripsCache && (tripsCache.cachedAt || tripsCache.updatedAt)) || (tripInsuranceCache && tripInsuranceCache.cachedAt)
+    ) || 'earlier';
     const box = document.createElement('div');
     box.style.cssText = 'display:flex; flex-direction:column; align-items:center; gap:8px; margin-top:4px; padding:12px 16px; border:1px solid var(--amber); border-radius:10px; background:rgba(227,164,56,0.10); max-width:420px;';
     // Wording matches how we actually know this: a REAL failure (force) doesn't claim
@@ -33677,14 +33924,14 @@ async function maybeOfferOfflineTravelView(force = false) {
     const sub = force ? 'probably a weak or no connection —' : 'so';
     box.innerHTML = `
       <div style="font-size:13px; color:var(--text); text-align:center; line-height:1.5;">
-        📴 <b style="color:var(--amber);">${headline}</b>, ${sub} signing in isn't possible right now — but your saved schedule is on this device.
+        📴 <b style="color:var(--amber);">${headline}</b>, ${sub} signing in isn't possible right now — but what's saved on this device still is.
         <br><span style="color:var(--muted);">Last refreshed ${esc(when)}.</span>
       </div>
-      <button id="signin-offline-btn" class="btn" style="padding:10px 20px; font-size:14px;">Open Travel View (offline)</button>`;
+      <button id="signin-offline-btn" class="btn" style="padding:10px 20px; font-size:14px;">No Internet Connection Available — Open Without Internet</button>`;
     gate.appendChild(box);
-    document.getElementById('signin-offline-btn').addEventListener('click', () => enterOfflineTravelView(cached));
+    document.getElementById('signin-offline-btn').addEventListener('click', () => enterOfflineMode(cached));
   } catch (e) {
-    console.error('maybeOfferOfflineTravelView failed (non-fatal):', e);
+    console.error('maybeOfferOfflineMode failed (non-fatal):', e);
   }
 }
 
@@ -33715,12 +33962,12 @@ if ('serviceWorker' in navigator) {
     // all, Google's own externally-hosted GIS script (accounts.google.com/gsi/client)
     // never loads, so window.google never appears -- this branch fires BEFORE
     // initGoogleAuth() or completeSignIn() ever run, meaning neither of their own
-    // maybeOfferOfflineTravelView() calls is ever reached either. This is the FIRST
+    // maybeOfferOfflineMode() calls is ever reached either. This is the FIRST
     // thing that fails offline, so it's the one that actually matters most in
     // practice; offering it here too closes the last gap. force:true for the same
     // weak-signal reason as completeSignIn's catch -- 50 straight failed poll
     // attempts is real evidence, whatever navigator.onLine happens to claim.
-    maybeOfferOfflineTravelView(true);
+    maybeOfferOfflineMode(true);
   }
 })();
 

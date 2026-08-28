@@ -1,7 +1,7 @@
 // "When there is no WiFi connection, the app is supposed to display the stale travel
 // view - but it is not doing that. It is stuck on a white screen." THREE separate
 // places can land on the sign-in gate with no network, and each needed its own
-// maybeOfferOfflineTravelView() call -- fixed one at a time as the same report kept
+// maybeOfferOfflineMode() call -- fixed one at a time as the same report kept
 // recurring after each partial fix:
 // 1. A device that has signed in before takes the cached-token FAST PATH straight into
 //    completeSignIn(), bypassing the initGoogleAuth() branch that offers it below the
@@ -43,7 +43,7 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 const initAuth = extractFn('initGoogleAuth');
 assert(/const cached = loadCachedToken\(\);\s*\n\s*if \(cached\) \{\s*\n\s*driveAccessToken = cached;\s*\n\s*completeSignIn\(\);\s*\n\s*return;/.test(initAuth),
   'sanity: the cached-token fast path really does return before reaching the offline offer below it');
-assert(/maybeOfferOfflineTravelView\(\);\s*\n\}/.test(initAuth),
+assert(/maybeOfferOfflineMode\(\);\s*\n\}/.test(initAuth),
   'sanity: initGoogleAuth\'s OWN (non-fast-path) branch offers it, confirming the fast path is the one that skips it');
 
 // ---- the fix: completeSignIn's catch block ALSO offers the offline fallback ----
@@ -51,27 +51,27 @@ const signIn = extractFn('completeSignIn');
 const catchBlock = signIn.slice(signIn.lastIndexOf('} catch (e) {'));
 assert(/document\.getElementById\('signin-gate'\)\.style\.display = 'flex';/.test(catchBlock),
   'the sign-in gate is revealed on failure (pre-existing behavior, unaffected)');
-assert(/maybeOfferOfflineTravelView\(true\);/.test(catchBlock),
+assert(/maybeOfferOfflineMode\(true\);/.test(catchBlock),
   'THE FIX: the offline fallback is now offered from this catch too, covering the fast-path failure -- ' +
   'force:true, since this catch running is itself the failure evidence');
 
 // ---- the THIRD, most important gap: Google Identity Services (an external script,
 // accounts.google.com/gsi/client) never loads at all with no network -- this is the
 // FIRST thing that fails offline, firing BEFORE initGoogleAuth() or completeSignIn()
-// ever run, so neither of their own maybeOfferOfflineTravelView() calls is reached ----
+// ever run, so neither of their own maybeOfferOfflineMode() calls is reached ----
 const waitStart = html.indexOf('function waitForGoogleIdentity');
 const waitBlock = html.slice(waitStart, html.indexOf('})();', waitStart) + 5);
 assert(waitBlock.includes('waitForGoogleIdentity'), 'sanity: found the GIS polling IIFE');
 assert(/Could not load Google Sign-In\. Check your connection and reload the page\./.test(waitBlock),
   'sanity: this is the "ran out of tries" branch (GIS never became available)');
-assert(/showSignInStatus\('Could not load Google Sign-In[^;]*;[\s\S]{0,900}maybeOfferOfflineTravelView\(true\);/.test(waitBlock),
+assert(/showSignInStatus\('Could not load Google Sign-In[^;]*;[\s\S]{0,900}maybeOfferOfflineMode\(true\);/.test(waitBlock),
   'THE FIX: the offline fallback is now offered here too -- the gap that actually matters most, since ' +
   'this fires before the other two call sites ever get a chance to run, and with force:true');
 
-// ---- maybeOfferOfflineTravelView itself is idempotent, so calling it from three
+// ---- maybeOfferOfflineMode itself is idempotent, so calling it from three
 // different places can never double-render the offline button ----
-const offlineOffer = extractFn('maybeOfferOfflineTravelView');
-assert(/async function maybeOfferOfflineTravelView\(force = false\)/.test(offlineOffer),
+const offlineOffer = extractFn('maybeOfferOfflineMode');
+assert(/async function maybeOfferOfflineMode\(force = false\)/.test(offlineOffer),
   'takes a force param, defaulting to false so the one non-failure caller is unaffected');
 assert(/if \(!gate \|\| document\.getElementById\('signin-offline-btn'\)\) return;/.test(offlineOffer),
   'a second/third call (this fix stacking on the earlier ones) is a safe no-op if the button already exists');
@@ -81,7 +81,7 @@ assert(/if \(!force && navigator\.onLine\) return;/.test(offlineOffer),
 
 // ---- initGoogleAuth's own proactive call (no failure yet) is unaffected: still no
 // force arg, so it still respects navigator.onLine as before ----
-assert(/document\.getElementById\('signin-gate'\)\.style\.display = 'flex';\s*\n\s*maybeOfferOfflineTravelView\(\);\s*\n\}/.test(initAuth),
+assert(/document\.getElementById\('signin-gate'\)\.style\.display = 'flex';\s*\n\s*maybeOfferOfflineMode\(\);\s*\n\}/.test(initAuth),
   'the one caller with nothing to go on yet still passes no force, unlike the two failure-path callers');
 
 // ---- the wording no longer overclaims "you're offline" when we don't actually know
