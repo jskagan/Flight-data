@@ -1307,7 +1307,20 @@
   .tripsy-diary-fig--left  { float: left;  width: 46%; margin-right: 20px; }
   .tripsy-diary-fig--full  { float: none;  width: 100%; margin: 14px 0; }
   .tripsy-diary-figimg { width: 100%; aspect-ratio: 4 / 3; background: var(--panel-2) center/cover no-repeat; border-radius: 8px; border: 1px solid var(--line); }
+  .tripsy-diary-figimg[data-diary-photo-tap] { cursor: pointer; }
   .tripsy-diary-fig figcaption { font-size: 12.5px; line-height: 1.45; color: var(--muted); margin-top: 6px; font-family: 'Avenir Next', sans-serif; }
+  /* The action menu opened by tapping a placed photo -- same shell as the Attire
+     category menu (positionTripsyFixedMenu anchors it the same way). */
+  .tripsy-diary-photo-menu {
+    display: none; position: fixed; z-index: 9200; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px; min-width: 170px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  .tripsy-diary-photo-menu-item {
+    display: block; width: 100%; text-align: left; background: none; border: none; cursor: pointer;
+    padding: 8px 10px; border-radius: 6px; font: inherit; color: var(--text);
+  }
+  .tripsy-diary-photo-menu-item:hover, .tripsy-diary-photo-menu-item:focus-visible { background: var(--panel); outline: none; }
+  .tripsy-diary-photo-menu-item--danger { color: var(--red); }
   /* The photo list under a day: captions and controls live OUT of the editable prose, so
      an input can never end up nested inside a contenteditable region. */
   .tripsy-diary-photolist { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 10px; }
@@ -20916,6 +20929,79 @@ function tripsyPickImageFile(onPick) {
   ov.onclick = e => { if (e.target === ov || e.target.closest('[data-pick-cancel]')) close(); };
 }
 
+// Action menu opened by tapping a photo placed in the diary's book-mode prose --
+// Replace / Delete / Add Caption / Cancel, per the explicit request. The menu node
+// itself is generic/reusable (same pattern as getOrCreateTripsyAttireCategoryMenu);
+// each open rewires its buttons' onclick to the specific day/photo via the caller's
+// closure (showTripsyTripDiary has the dayOf/upsertDay/save/render it needs).
+function getOrCreateTripsyDiaryPhotoMenu() {
+  let menu = document.getElementById('tripsy-diary-photo-menu');
+  if (menu) return menu;
+  menu = document.createElement('div');
+  menu.id = 'tripsy-diary-photo-menu';
+  menu.className = 'tripsy-diary-photo-menu';
+  menu.innerHTML = `
+    <button type="button" class="tripsy-diary-photo-menu-item" data-diary-menu-replace>Replace Photo</button>
+    <button type="button" class="tripsy-diary-photo-menu-item" data-diary-menu-caption>Add Caption</button>
+    <button type="button" class="tripsy-diary-photo-menu-item tripsy-diary-photo-menu-item--danger" data-diary-menu-delete>Delete Photo</button>
+    <button type="button" class="tripsy-diary-photo-menu-item" data-diary-menu-cancel>Cancel</button>
+  `;
+  document.body.appendChild(menu);
+  // Tapping anywhere else closes it with no action -- the same "cancel" outcome the
+  // explicit Cancel button gives, just via the usual dropdown convention.
+  document.addEventListener('click', e => {
+    if (menu.style.display === 'none' || !menu.style.display) return;
+    if (menu.contains(e.target) || e.target.closest('[data-diary-photo-tap]')) return;
+    menu.style.display = 'none';
+  });
+  return menu;
+}
+// Small text-prompt overlay for setting/editing a diary photo's caption from the menu
+// above -- captions otherwise only live in the under-day list's <input> (see
+// tripsyDiaryPhotoListHtml's own comment on why: an <input> nested in the contenteditable
+// prose is a reliable way to lose text on iPad), so this is a separate modal rather than
+// focusing an input inside the figure itself. `onDone` gets the new text, or null if
+// cancelled (Cancel button, outside click, or Escape) -- callers should treat null as
+// "no change" rather than "clear the caption".
+function getOrCreateTripsyDiaryCaptionOverlay() {
+  let overlay = document.getElementById('tripsy-diary-caption-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-diary-caption-overlay';
+  overlay.style.cssText = 'display:none; position:fixed; inset:0; z-index:9300; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; max-width:360px; width:100%; padding:20px; color:var(--text);">
+      <h2 style="margin:0 0 12px; font-size:16px;">Caption</h2>
+      <input type="text" data-diary-caption-input style="width:100%; font-size:14px; padding:8px 10px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--text); font-family:'Avenir Next', sans-serif; box-sizing:border-box;" placeholder="Caption…">
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
+        <button class="btn" data-diary-caption-cancel>Cancel</button>
+        <button class="btn primary" data-diary-caption-save>Save</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+function tripsyDiaryPromptCaption(currentValue, onDone) {
+  const overlay = getOrCreateTripsyDiaryCaptionOverlay();
+  const input = overlay.querySelector('[data-diary-caption-input]');
+  input.value = currentValue || '';
+  overlay.style.display = 'flex';
+  setTimeout(() => input.focus(), 0);
+  const close = () => { overlay.style.display = 'none'; overlay.onclick = null; input.onkeydown = null; };
+  overlay.querySelector('[data-diary-caption-save]').onclick = () => {
+    const v = input.value;
+    close();
+    onDone(v);
+  };
+  overlay.querySelector('[data-diary-caption-cancel]').onclick = () => { close(); onDone(null); };
+  overlay.onclick = e => { if (e.target === overlay) { close(); onDone(null); } };
+  input.onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); overlay.querySelector('[data-diary-caption-save]').click(); }
+    else if (e.key === 'Escape') { overlay.querySelector('[data-diary-caption-cancel]').click(); }
+  };
+}
+
 // ---- Trip Diary page ----------------------------------------------------------
 // Reached from a trip card's gear menu. Days come from buildTripsyPrintDayData, so the
 // diary's day boundaries are IDENTICAL to the itinerary's (earliest dated event, not
@@ -21037,7 +21123,7 @@ async function showTripsyTripDiary(tripKey) {
       const ph = photoOf(d, no);
       if (!ph) return ''; // token for a photo that was removed -- render nothing
       return `<figure class="tripsy-diary-fig tripsy-diary-fig--${esc(ph.side || 'right')}" data-photo-no="${esc(ph.no)}" contenteditable="false">
-        <div class="tripsy-diary-figimg" data-diary-img="${esc(ph.driveFileId || '')}"></div>
+        <div class="tripsy-diary-figimg" data-diary-img="${esc(ph.driveFileId || '')}"${isOwner ? ` data-diary-photo-tap data-diary-day="${esc(dayKey)}" data-photo-no="${esc(ph.no)}"` : ''}></div>
         ${ph.caption ? `<figcaption>${esc(ph.caption)}</figcaption>` : ''}
       </figure>`;
     };
@@ -21102,6 +21188,57 @@ async function showTripsyTripDiary(tripKey) {
     await save();
     render();
     if (failed) toast(`${failed} photo${failed === 1 ? '' : 's'} could not be added — see console for details.`, 'error');
+  };
+  // Tapping a photo placed in the prose opens Replace / Delete / Add Caption / Cancel,
+  // per the explicit request -- the shared menu node's buttons are rewired to this
+  // specific day+photo on each open, closing over dayOf/upsertDay/save/render the same
+  // way every other control on this page already does.
+  const openPhotoActionMenu = (triggerEl, dayKey, no) => {
+    const menu = getOrCreateTripsyDiaryPhotoMenu();
+    positionTripsyFixedMenu(triggerEl, menu);
+    const d = dayOf(dayKey) || {};
+    const ph = photoOf(d, no);
+    menu.querySelector('[data-diary-menu-caption]').textContent = (ph && ph.caption) ? 'Edit Caption' : 'Add Caption';
+    menu.querySelector('[data-diary-menu-replace]').onclick = () => {
+      menu.style.display = 'none';
+      tripsyPickImageFile(async files => {
+        const file = files && files[0];
+        if (!file) return;
+        setSaveState('Uploading…');
+        try {
+          const small = await tripsyResizeImageBlob(file);
+          const driveFileId = await uploadBlobToDrive(small, `diary-photo-${Date.now()}`, 'image/jpeg');
+          const dd = dayOf(dayKey) || {};
+          upsertDay(dayKey, { photos: (dd.photos || []).map(p => Number(p.no) === no ? { ...p, driveFileId } : p) });
+          await save();
+          render();
+        } catch (e) {
+          console.error('Diary photo replace failed:', e);
+          toast('Could not replace the photo — see console for details.', 'error');
+        }
+      });
+    };
+    menu.querySelector('[data-diary-menu-caption]').onclick = () => {
+      menu.style.display = 'none';
+      tripsyDiaryPromptCaption(ph && ph.caption, newCaption => {
+        if (newCaption === null) return; // cancelled -- no change
+        const dd = dayOf(dayKey) || {};
+        upsertDay(dayKey, { photos: (dd.photos || []).map(p => Number(p.no) === no ? { ...p, caption: newCaption } : p) });
+        save();
+        render();
+      });
+    };
+    menu.querySelector('[data-diary-menu-delete]').onclick = () => {
+      menu.style.display = 'none';
+      const dd = dayOf(dayKey) || {};
+      upsertDay(dayKey, {
+        photos: (dd.photos || []).filter(p => Number(p.no) !== no),
+        text: tripsyDiaryRemoveToken(dd.text || '', no),
+      });
+      save();
+      render();
+    };
+    menu.querySelector('[data-diary-menu-cancel]').onclick = () => { menu.style.display = 'none'; };
   };
   // Fetches candidate photos for every place on a day, once per box opening. Each place
   // costs a Places call, which is why this is behind a button rather than eager.
@@ -21338,6 +21475,11 @@ async function showTripsyTripDiary(tripKey) {
         });
         save();
         render();
+      });
+    });
+    content.querySelectorAll('[data-diary-photo-tap]').forEach(el => {
+      el.addEventListener('click', () => {
+        openPhotoActionMenu(el, el.getAttribute('data-diary-day'), Number(el.getAttribute('data-photo-no')));
       });
     });
     tripsyDiaryPaintPhotos(content);
