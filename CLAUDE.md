@@ -624,11 +624,12 @@ step 4; git history has it if ever needed.
   in `driveData`, since view-only users have no Drive write access to persist anything into the
   shared file.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
-  upload a PDF from a trip's **⚙️ Trip → Update from PDF** menu (moved there 2026-08-29 from the
-  🧭 Itinerary menu: it reconciles trip EVENTS and never touches the generated narrative, so it
-  didn't belong among items that are all about that write-up — it now sits beside Verify Travel
-  Details, the item it most resembles; the label gained "from PDF" because a bare "Update" in a
-  general trip menu doesn't say update *what*), which calls
+  upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
+  outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS
+  and never touches the generated narrative, so it didn't belong among items that are all about
+  that write-up — it now sits beside Verify Travel Details, the item it most resembles. The label
+  says COMPARE rather than the original "Update" because that's what it does: it produces a diff
+  the owner resolves row by row, where "Update" implied it overwrites things by itself. It calls
   `compareTripsyItineraryPdf` (`claude-sonnet-5`, streamed `json_schema`; sets `thinking:
   {type:'adaptive'}` + `effort: 'medium'` EXPLICITLY — see the Attire section's note on Sonnet 5's
   adaptive-thinking-by-default trap, which this call had too; raise to `high` first if comparison

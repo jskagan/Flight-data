@@ -44,9 +44,9 @@ assert(!/data-tripsy-update-itinerary/.test(block),
     'THE ASK: it now sits on the Trip (gear) menu instead');
   assert(tripMenu.indexOf('data-tripsy-verify-travel') < tripMenu.indexOf('data-tripsy-update-itinerary'),
     'and directly after Verify Travel Details, the item it most resembles');
-  assert(/hasPendingUpdatePage \? 'Resume Update' : 'Update from PDF'/.test(tripMenu),
-    'the resume-vs-fresh label still swaps; the fresh label names the PDF, since a bare "Update" ' +
-    'in a general trip menu does not say update WHAT');
+  assert(/hasPendingUpdatePage \? 'Resume Comparison' : 'Compare to PDF'/.test(tripMenu),
+    'the resume-vs-fresh label still swaps, and both halves say COMPARE -- the feature produces a ' +
+    'diff to resolve row by row, where "Update" implied it just overwrites things on its own');
   assert(/\$\{isOwner \? menuListButtonHtml\(`data-tripsy-update-itinerary/.test(tripMenu),
     'still owner-only -- it writes to trip data');
 }
