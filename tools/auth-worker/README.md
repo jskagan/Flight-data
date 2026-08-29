@@ -53,7 +53,19 @@ wrangler deploy
 wrangler secret put GOOGLE_CLIENT_SECRET   # paste the secret from step 1
 ```
 
-No redeploy is needed after `secret put` — it takes effect immediately.
+**Then run `wrangler deploy` once more.** Adding a secret — via `secret put` *or* the
+Cloudflare dashboard — creates a new Worker **version** but does not promote it, so the
+old version keeps serving and the secret appears to have no effect. This is confusing
+precisely because the two ways of checking disagree:
+
+```
+wrangler secret list   ->  GOOGLE_CLIENT_SECRET is there
+POST /auth/health      ->  {"configured":false}
+```
+
+Both are telling the truth: the secret exists, and the *running* version predates it.
+`wrangler deployments list` shows the active version older than the "Add secret" one. A
+plain `wrangler deploy` promotes it and `/auth/health` flips to `configured:true`.
 
 Between those two commands the Worker is live but unconfigured, which is harmless:
 `/auth/health` reports `configured:false`, and the app treats anything short of
