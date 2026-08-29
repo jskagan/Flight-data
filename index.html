@@ -1956,6 +1956,27 @@ async function authWorkerGetAccessToken() {
     return null;
   }
 }
+// Is the Worker actually deployed AND configured? Probed ONCE per page load, early,
+// so the sign-in click can decide SYNCHRONOUSLY which flow to use.
+//
+// It must be synchronous at click time: opening a popup after an `await` loses the
+// click's user activation and gets blocked on Safari/iPad (the same trap
+// openDriveFileInNewTab documents). So this caches into a plain variable rather than
+// being awaited in the handler.
+//
+// null = not answered yet. Every consumer treats anything but `true` as "use the
+// original token flow", so an unfinished, failed, or unconfigured probe all degrade to
+// exactly the pre-Worker behavior -- one popup, as before. Without this gate a
+// not-yet-deployed Worker would give the owner TWO popups: a code popup whose exchange
+// then fails, followed by the token-flow popup it falls back to.
+let _authWorkerAvailable = null;
+function probeAuthWorker() {
+  if (!navigator.onLine) { _authWorkerAvailable = false; return; }
+  authWorkerFetch('/auth/health', {}, 6000)
+    .then(({ ok, data }) => { _authWorkerAvailable = !!(ok && data && data.configured); })
+    .catch(() => { _authWorkerAvailable = false; })
+    .then(() => console.log('Persistent sign-in available:', _authWorkerAvailable));
+}
 // Best-effort: signing out should still work locally even if the Worker is down,
 // so the caller clears local state regardless of what this returns.
 async function authWorkerRevoke() {
@@ -34042,6 +34063,11 @@ async function completeSignIn() {
 }
 
 function initGoogleAuth() {
+  // Fire the Worker health probe immediately, so its answer is almost always in hand by
+  // the time the owner clicks sign-in (which reads it synchronously -- see startSignIn).
+  // Fire-and-forget: it never blocks startup, and not finishing just means the original
+  // token flow is used for that sign-in.
+  probeAuthWorker();
   // Create the token client FIRST -- it's needed both for interactive sign-in AND for
   // the silent mid-session token refresh (refreshDriveAccessToken). Previously the
   // cached-token ("remember me") fast path returned BEFORE this ran, so a remembered
@@ -34180,7 +34206,12 @@ function initGoogleAuth() {
   const startSignIn = travelView => {
     saveTravelViewPref(travelView);
     showSignInStatus('Opening Google sign-in…', false);
-    if (codeClient) codeClient.requestCode();
+    // Synchronous on purpose -- awaiting the probe here would lose this click's user
+    // activation and get the popup blocked on Safari/iPad. `_authWorkerAvailable` is
+    // filled in by the startup probe; anything other than a definite true means take
+    // the original token flow, so an undeployed Worker behaves exactly as before
+    // (one popup) instead of a code popup that can't be exchanged plus a fallback one.
+    if (codeClient && _authWorkerAvailable === true) codeClient.requestCode();
     else tokenClient.requestAccessToken();
   };
   document.getElementById('signin-btn').addEventListener('click', () => startSignIn(false));

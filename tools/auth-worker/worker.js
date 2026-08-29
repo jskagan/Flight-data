@@ -214,11 +214,25 @@ export default {
       return json({ error: 'forbidden_origin' }, 403, env);
     }
 
+    const path = new URL(request.url).pathname.replace(/\/+$/, '');
+
+    // Health check, answered BEFORE the configuration guard below so it can report
+    // being unconfigured rather than just failing with it. The app probes this once
+    // at startup and only offers the code flow when it comes back configured:true --
+    // otherwise a not-yet-deployed Worker would send the owner through a code popup
+    // that cannot be exchanged, followed by a second popup for the fallback token
+    // flow. Deliberately reveals nothing but whether the bindings are present.
+    if (path === '/auth/health') {
+      return json({
+        ok: true,
+        configured: !!(env.GOOGLE_CLIENT_SECRET && env.GOOGLE_CLIENT_ID && env.AUTH_KV),
+      }, 200, env);
+    }
+
     if (!env.GOOGLE_CLIENT_SECRET || !env.GOOGLE_CLIENT_ID || !env.AUTH_KV) {
       return json({ error: 'worker_not_configured' }, 500, env);
     }
 
-    const path = new URL(request.url).pathname.replace(/\/+$/, '');
     try {
       if (path === '/auth/exchange') return await handleExchange(request, env);
       if (path === '/auth/token') return await handleToken(request, env);

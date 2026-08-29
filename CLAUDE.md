@@ -158,7 +158,15 @@ path both call `/auth/token` FIRST — an ordinary fetch, so ITP has nothing to 
 to the untouched GIS paths otherwise.
 **Everything here fails soft, deliberately**: an undeployed, unconfigured or unreachable Worker
 leaves the original flow working exactly as before (this is why it could ship before the Worker was
-deployed), and sign-in is the whole app, so that fallback matters more than the feature. The
+deployed), and sign-in is the whole app, so that fallback matters more than the feature. That
+fallback is *gated*, not just caught: `probeAuthWorker()` hits `/auth/health` once at startup and
+`startSignIn` reads the cached `_authWorkerAvailable` **synchronously** — anything but a definite
+`true` (unfinished, unreachable, unconfigured) takes the old token flow. Two reasons it's shaped
+this way: without the gate an undeployed Worker gave TWO popups (a code popup whose exchange fails,
+then the token-flow popup it falls back to), and the check can't be `await`ed inside the click
+handler because that loses the click's user activation and Safari/iPad blocks the popup outright —
+the same trap `openDriveFileInNewTab` documents. `/auth/health` is answered BEFORE the Worker's own
+not-configured guard, so it can report `configured:false` instead of failing with it. The
 pre-Worker startup logic was MOVED VERBATIM into `continueWithGisStartup()` (hence
 `silentsignin_test.js`/`offlinesignin_test.js` now extract both functions and concatenate them).
 Two rules worth keeping: a `/auth/token` **401 is permanent** (revoked/expired/unknown → clear the

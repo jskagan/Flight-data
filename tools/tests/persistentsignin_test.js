@@ -75,8 +75,47 @@ assert(/access_type: 'offline',/.test(initAuth),
   'the code client asks for offline access -- without it Google issues no refresh token at all');
 assert(/prompt: 'consent',/.test(initAuth),
   'and forces consent, or an already-granted account silently gets a code with NO refresh token');
-assert(/if \(codeClient\) codeClient\.requestCode\(\);\s*\n\s*else tokenClient\.requestAccessToken\(\);/.test(initAuth),
-  'sign-in prefers the code flow but falls back to the original token flow when unavailable');
+assert(/if \(codeClient && _authWorkerAvailable === true\) codeClient\.requestCode\(\);\s*\n\s*else tokenClient\.requestAccessToken\(\);/.test(initAuth),
+  'sign-in uses the code flow ONLY when the Worker is known-good, else the original token flow');
+
+// ---- the availability gate: no double popup before the Worker is deployed ----
+// Without it, an undeployed Worker gave TWO popups (a code popup whose exchange fails,
+// then the token popup it falls back to). The gate makes the undeployed case identical
+// to the pre-Worker behavior: one popup.
+assert(/probeAuthWorker\(\);/.test(initAuth),
+  'the probe is fired at startup, so its answer is in hand before the owner can click');
+const probe = extractFn('probeAuthWorker');
+assert(/\/auth\/health/.test(probe), 'it probes a dedicated health endpoint rather than inferring from an error code');
+assert(/_authWorkerAvailable = !!\(ok && data && data\.configured\)/.test(probe),
+  'only a deployed AND configured Worker counts as available');
+assert(/\.catch\(\(\) => \{ _authWorkerAvailable = false; \}\)/.test(probe),
+  'an unreachable Worker resolves to false rather than leaving it pending forever');
+assert(/let _authWorkerAvailable = null;/.test(html),
+  'it starts null (not answered yet), which the === true check treats as unavailable');
+// The reason the gate is a plain variable rather than an awaited call.
+// NB: "user activation" wraps across a comment line break in the source, so match the
+// two halves separately rather than the phrase.
+assert(/Synchronous on purpose/.test(initAuth) && /activation/.test(initAuth),
+  'startSignIn documents why it must not await -- awaiting loses the click\'s user activation and Safari blocks the popup');
+{
+  // The decision, exactly as startSignIn expresses it.
+  const flow = (hasCodeClient, available) => (hasCodeClient && available === true) ? 'code' : 'token';
+  assert(flow(true, true) === 'code', 'Worker deployed and configured -> code flow, which is what yields a refresh token');
+  assert(flow(true, false) === 'token', 'Worker absent/unconfigured -> token flow only, one popup, exactly as before');
+  assert(flow(true, null) === 'token', 'probe not finished yet -> token flow; a slow probe must not cost a popup');
+  assert(flow(false, true) === 'token', 'no code client (older GIS) -> token flow regardless of the Worker');
+}
+
+// ---- the Worker answers health before its own configuration guard ----
+{
+  const worker = fs.readFileSync(require('path').join(__dirname, '..', 'auth-worker', 'worker.js'), 'utf8');
+  const healthIdx = worker.indexOf("path === '/auth/health'");
+  const guardIdx = worker.indexOf("worker_not_configured");
+  assert(healthIdx > -1 && guardIdx > -1 && healthIdx < guardIdx,
+    'health is handled BEFORE the not-configured guard, so it can REPORT being unconfigured instead of failing with it');
+  assert(/configured: !!\(env\.GOOGLE_CLIENT_SECRET && env\.GOOGLE_CLIENT_ID && env\.AUTH_KV\)/.test(worker),
+    'and reports configured only when every binding the exchange actually needs is present');
+}
 assert(/if \(!result\) \{[\s\S]*?tokenClient\.requestAccessToken\(\);/.test(initAuth),
   'a failed exchange (Worker down/not configured) still signs the owner in, just without persistence');
 
