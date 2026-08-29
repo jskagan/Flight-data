@@ -139,6 +139,35 @@ the silent iframe) means Google ANSWERED, so the network is provably fine and th
 screen shows with only the unforced offer (which respects `navigator.onLine`). A device that never
 chose "remember me" is unaffected.
 
+**Persistent sign-in — the auth Worker (`tools/auth-worker/`)** (asked 2026-08-29: "keep me logged
+in … on a device that must be unlocked"). The silent grant above helped but kept failing on the
+owner's iPad, and the reason is structural, not a bug: `initTokenClient` is the browser-only token
+flow and **never issues a refresh token**, so its only silent renewal is a hidden
+`accounts.google.com` iframe — exactly what Safari/iOS **ITP blocks**. Hence a re-login roughly
+hourly. (Device unlock can't fix this: Face ID authenticates you to the DEVICE, not to Google, and
+there's no relying-party server for a passkey. A passkey on the *Google account* only makes
+Google's own re-auth prompt biometric.) A refresh token needs the authorization-CODE flow, which
+needs a client secret, which can never sit in this public file — so it lives in a Cloudflare Worker
+(a second one, separate from the `tripsy-refresh-proxy` parse trigger, so auth can't break it).
+Sign-in now uses `initCodeClient` (`ux_mode:'popup'`, and **both** `access_type:'offline'` and
+`prompt:'consent'` — without the latter an already-granted account gets a code that exchanges to an
+access token with NO refresh token, and persistence silently never starts working); the code goes to
+`/auth/exchange`, which stores the refresh token in Worker KV and returns a random 32-byte
+**`device_id`** the app keeps in `localStorage` (`DEVICE_ID_KEY`). Startup and the mid-session 401
+path both call `/auth/token` FIRST — an ordinary fetch, so ITP has nothing to block — falling back
+to the untouched GIS paths otherwise.
+**Everything here fails soft, deliberately**: an undeployed, unconfigured or unreachable Worker
+leaves the original flow working exactly as before (this is why it could ship before the Worker was
+deployed), and sign-in is the whole app, so that fallback matters more than the feature. The
+pre-Worker startup logic was MOVED VERBATIM into `continueWithGisStartup()` (hence
+`silentsignin_test.js`/`offlinesignin_test.js` now extract both functions and concatenate them).
+Two rules worth keeping: a `/auth/token` **401 is permanent** (revoked/expired/unknown → clear the
+credential, fall back to interactive sign-in) while **any other failure keeps it** (a flaky
+connection must never sign a device out for good); and **Sign out must call `/auth/revoke`** before
+clearing local state, or the next load just mints a new token and the owner never actually signs
+out. A `device_id` is a session credential — Drive (plus Gmail where granted) until revoked — see
+that folder's README for the security notes and the Google Cloud Console / KV setup.
+
 The "Authorized Users" list on the Users utility page isn't a separate registry — it's read live
 from the Drive file's real sharing permissions (`listDriveFilePermissions()`, `index.html:1001`
 area) via `permissions.list`, which is the same source of truth Step 3 on that page tells the owner
@@ -555,8 +584,8 @@ step 4; git history has it if ever needed.
   which is what keeps `tripsyAttireGoToEvent`/`tripsyGoToTripDay` (both expand their target trip
   then re-render) working with no knowledge of years; closing a year therefore also re-collapses
   its trips, or that rule would bounce it straight open.
-- **Regression tests live in `tools/tests/`** (`node tools/tests/run_all.js` — 33 suites,
-  ~750 assertions, exit 0 = all green). They only READ `index.html` (extracting functions by
+- **Regression tests live in `tools/tests/`** (`node tools/tests/run_all.js` — 72 suites,
+  ~1400 assertions, exit 0 = all green). They only READ `index.html` (extracting functions by
   name and asserting on behavior and on source patterns), so they don't violate the single-file
   rule. Some suites are GENERATORS that write a sibling `*_run.js` (gitignored) holding the
   executable assertions — the runner executes both halves. Run them before any push that touches

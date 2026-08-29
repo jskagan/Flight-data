@@ -27,7 +27,12 @@ function extractFn(name) {
 }
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
-const initAuth = extractFn('initGoogleAuth');
+// The startup path spans TWO functions since the persistent-sign-in (auth Worker)
+// attempt was added: initGoogleAuth tries the Worker first, then falls through to
+// continueWithGisStartup, which holds these original GIS paths unchanged. Assert
+// against them concatenated in call order, so this suite keeps checking the whole
+// startup sequence rather than only the half that kept the old name.
+const initAuth = extractFn('initGoogleAuth') + '\n' + extractFn('continueWithGisStartup');
 
 // ---- ordering: valid cached token still wins outright (unchanged fast path) ----
 const cachedIdx = initAuth.indexOf('const cached = loadCachedToken();');

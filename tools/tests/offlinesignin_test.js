@@ -40,7 +40,11 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 
 // ---- the fast path: a cached token skips straight to completeSignIn(), bypassing
 // the branch that normally offers the offline fallback ----
-const initAuth = extractFn('initGoogleAuth');
+// Spans two functions since persistent sign-in (the auth Worker) was added --
+// initGoogleAuth tries the Worker, then falls through to continueWithGisStartup,
+// which holds these original GIS paths unchanged. Concatenated in call order so
+// this suite still covers the whole startup sequence.
+const initAuth = extractFn('initGoogleAuth') + '\n' + extractFn('continueWithGisStartup');
 assert(/const cached = loadCachedToken\(\);\s*\n\s*if \(cached\) \{\s*\n\s*driveAccessToken = cached;\s*\n\s*completeSignIn\(\);\s*\n\s*return;/.test(initAuth),
   'sanity: the cached-token fast path really does return before reaching the offline offer below it');
 assert(/maybeOfferOfflineMode\(\);\s*\n\}/.test(initAuth),
