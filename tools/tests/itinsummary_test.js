@@ -76,6 +76,42 @@ assert(!/previewTripsyItinerary/.test(overlay) && !/previewTripsyItinerary/.test
   'it does NOT reuse the editable preview overlay, whose owner controls are exactly what must not appear here');
 assert(/e\.target === overlay/.test(overlay), 'click-outside closes it, same rule as the preview overlay');
 
+// ---- Email: a prefilled draft, because the app cannot send ----
+// gmail.readonly cannot send mail, and a web page cannot attach a file to an email, so
+// the itinerary travels as text in a mailto: body and the owner sends it themselves.
+{
+  assert(/id="tripsy-summary-email-btn"/.test(overlay), 'THE ASK: the Summary screen has an Email button');
+  assert(/const TRIPSY_MAILTO_SAFE_LENGTH = 1800;/.test(overlay),
+    'a conservative mailto length ceiling exists');
+  assert(/if \(full\.length <= TRIPSY_MAILTO_SAFE_LENGTH\)/.test(overlay),
+    'the check measures the ENCODED mailto URL, not the raw text -- encoding inflates it by ~1.5x');
+  assert(/navigator\.clipboard\.writeText\(text\)/.test(overlay),
+    'over the ceiling it copies the full text rather than sending a silently truncated itinerary');
+  assert(/catch \(e\) \{[\s\S]*?Clipboard write failed[\s\S]*?\}/.test(overlay),
+    'and a refused clipboard (permissions/insecure context/old WebView) is caught, not thrown');
+  assert(/copying failed[\s\S]*?Save as PDF and attach it instead/.test(overlay),
+    'in that case it says so honestly and points at the attachment route');
+  const text = extractFn('buildTripsyItinerarySummaryText');
+  assert(/buildTripsyPrintDayData\(trip\)/.test(text),
+    'the text is built from the same day data as the HTML summary, so the two cannot list different events');
+  assert(/tripsyDiaryScheduleLines\(/.test(text),
+    'reusing the diary schedule rows keeps per-row wording consistent across surfaces');
+}
+{
+  // Executed: the prefill-vs-clipboard decision, at realistic sizes.
+  const decide = t => (`mailto:?subject=${encodeURIComponent('Itinerary — Trip')}&body=${encodeURIComponent(t)}`.length <= 1800)
+    ? 'prefill' : 'clipboard';
+  const shortTrip = ['Trip', 'Jun 19 – Jun 22, 2026', '', 'Day 1 — Fri, Jun 19', '  4:00 PM  Hotel Check-in'].join('\n');
+  assert(decide(shortTrip) === 'prefill', 'a short trip prefills the draft');
+  const rows = [];
+  for (let d = 1; d <= 17; d++) {
+    rows.push('', `Day ${d} — Mon, Aug ${d}`);
+    for (let e = 0; e < 4; e++) rows.push('  9:00 AM  Some Event Name Here (123 Example Street, Somewhere, UK)');
+  }
+  assert(decide(['Trip', 'Aug 1 – Aug 17, 2026', ...rows].join('\n')) === 'clipboard',
+    'a long trip falls back to clipboard rather than truncating');
+}
+
 // ---- print isolation: this overlay must not print alongside the print root ----
 assert(/#tripsy-preview-overlay, #tripsy-summary-overlay \{ display: none !important; \}/.test(html),
   'the Summary overlay is hidden in @media print, or it would print on top of #tripsy-print-root');

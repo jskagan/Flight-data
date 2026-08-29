@@ -641,6 +641,19 @@ step 4; git history has it if ever needed.
   browser's print dialog is where "Save as PDF" actually lives on macOS/iOS) rather than printing
   the on-screen node, so the output carries no overlay toolbar. Not owner-gated — read-only, like
   Print.
+  **Email opens a prefilled draft; it does not send.** The app's Gmail scope is
+  `gmail.readonly`, so it *cannot* send mail, and a web page can't attach a file to an email
+  either — so the itinerary travels as plain text in a `mailto:` body
+  (`buildTripsyItinerarySummaryText`, built from the same `buildTripsyPrintDayData` as the HTML
+  summary and reusing `tripsyDiaryScheduleLines` for the rows, so no surface can describe
+  different events). Sending directly would mean adding `gmail.send` — a THIRD restricted scope,
+  re-consent for everyone, and a broader consent-screen warning — which was considered and
+  rejected. The length guard matters: `mailto:` URLs get truncated by browsers/mail clients well
+  before any formal limit, and `encodeURIComponent` inflates the body ~1.5× (spaces and newlines
+  become 3 chars each), so the check measures the **encoded URL**, not the raw text. Past
+  `TRIPSY_MAILTO_SAFE_LENGTH` (1800) it copies the full text to the clipboard and opens an EMPTY
+  draft — a silently truncated itinerary would be worse than no prefill. A refused clipboard
+  (permissions, insecure context, old WebView) is caught and says so, pointing at Save as PDF.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS

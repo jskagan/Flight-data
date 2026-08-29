@@ -24111,6 +24111,7 @@ function getOrCreateTripsySummaryOverlay() {
   overlay.innerHTML = `
     <div class="tripsy-preview-toolbar">
       <button class="btn" id="tripsy-summary-close-btn">Close</button>
+      <button class="btn" id="tripsy-summary-email-btn">Email</button>
       <button class="btn primary tripsy-preview-action" id="tripsy-summary-pdf-btn">Save as PDF</button>
     </div>
     <div class="tripsy-preview-paper" id="tripsy-summary-content"></div>
@@ -24121,6 +24122,56 @@ function getOrCreateTripsySummaryOverlay() {
   // Same click-outside rule the preview overlay uses: the overlay itself is the
   // full-screen backdrop, so a click whose target IS it landed outside the paper.
   overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  // Email: opens a prefilled draft rather than sending. The app's Gmail scope is
+  // gmail.readonly, so it CANNOT send mail, and a web page cannot attach a file to an
+  // email either -- so the itinerary travels as text in the body, and the owner adds
+  // recipients and sends from their own mail client.
+  //
+  // mailto: URLs have practical length limits (browsers and mail clients start
+  // truncating well before any formal maximum), and a long trip's summary can exceed
+  // them -- silently losing the end of the itinerary, which is worse than not offering
+  // the button. So past a conservative threshold it copies the full text to the
+  // clipboard and opens an EMPTY draft instead, telling the owner to paste.
+  const TRIPSY_MAILTO_SAFE_LENGTH = 1800;
+  overlay.querySelector('#tripsy-summary-email-btn').addEventListener('click', async () => {
+    const btn = overlay.querySelector('#tripsy-summary-email-btn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Preparing…';
+    try {
+      const tripKey = overlay.dataset.tripKey || '';
+      const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+      const text = await buildTripsyItinerarySummaryText(tripKey);
+      if (text == null) { toast('Could not build the summary text.', 'error'); return; }
+      const subject = trip && trip.name ? `Itinerary — ${trip.name}` : 'Itinerary';
+      const full = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`;
+      if (full.length <= TRIPSY_MAILTO_SAFE_LENGTH) {
+        window.location.href = full;
+        return;
+      }
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } catch (e) {
+        // Clipboard can be refused (permissions, an insecure context, an older
+        // WebView). Fall through: an empty draft plus an honest message still beats
+        // sending a silently truncated itinerary.
+        console.error('Clipboard write failed:', e);
+      }
+      window.location.href = `mailto:?subject=${encodeURIComponent(subject)}`;
+      toast(copied
+        ? 'This itinerary is too long to prefill — it\'s copied to your clipboard, so just paste it into the draft.'
+        : 'This itinerary is too long to prefill, and copying failed. Use Save as PDF and attach it instead.',
+        copied ? 'success' : 'error');
+    } catch (e) {
+      console.error('Summary email failed:', e);
+      toast('Could not prepare the email. Please try again.', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
   overlay.querySelector('#tripsy-summary-pdf-btn').addEventListener('click', async () => {
     const btn = overlay.querySelector('#tripsy-summary-pdf-btn');
     const original = btn.textContent;
@@ -24141,6 +24192,41 @@ function getOrCreateTripsySummaryOverlay() {
     }
   });
   return overlay;
+}
+// The same day-by-day listing as plain text, for the Summary screen's Email button.
+// Built from buildTripsyPrintDayData -- the same source the HTML summary uses -- so the
+// two can't describe different events, and reusing tripsyDiaryScheduleLines means the
+// per-row wording matches the diary's schedule blocks too.
+//
+// Plain text rather than HTML on purpose: this goes into a mailto: body, which is
+// text-only, and it stays readable in any mail client.
+async function buildTripsyItinerarySummaryText(tripKey) {
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return null;
+  const { effectiveTrip, dayKeys, summaryByDay } = await buildTripsyPrintDayData(trip);
+  const tripStartDayKey = tripsyItineraryStartDayKey(effectiveTrip);
+  const dateLabel = dayKey => tripPartsToUtcDate({
+    year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)),
+  }).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+  const out = [];
+  const range = formatTripDateRange(effectiveTrip.start, effectiveTrip.end);
+  out.push(effectiveTrip.name || 'Trip');
+  if (range) out.push(range);
+  for (const dayKey of dayKeys) {
+    const lines = tripsyDiaryScheduleLines(summaryByDay.get(dayKey) || []);
+    if (!lines.length) continue;
+    const isUndated = dayKey === 'undated';
+    const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
+    out.push('');
+    out.push(isUndated ? 'Undated' : `Day ${dayNumber ?? '—'} — ${dateLabel(dayKey)}`);
+    for (const l of lines) {
+      // An event with no time still gets its own line rather than being dropped or
+      // silently aligned under the previous one's time.
+      out.push(`  ${l.time ? l.time + '  ' : ''}${l.label}${l.place ? ` (${l.place})` : ''}`);
+    }
+  }
+  return out.join('\n');
 }
 async function showTripsyItinerarySummary(tripKey) {
   const overlay = getOrCreateTripsySummaryOverlay();
