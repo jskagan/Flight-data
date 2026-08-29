@@ -13873,6 +13873,68 @@ let tripsyParseRunStartedAt = null;
 // How long a started run is treated as "in progress" before the panel stops
 // claiming it (a cloud run normally lands well inside this).
 const TRIPSY_PARSE_RUN_WINDOW_MS = 12 * 60 * 1000;
+
+// ---- When the cloud parse routine next runs ----
+// Mirrored BY HAND from the "Tripsy Trips Refresh" Routine at claude.ai/code/routines
+// (this app has no API to query a Routine, and the cloud sandbox can't read this repo,
+// so the two can only be kept in step deliberately). Entries are {hour, minute} in
+// **UTC**, because that's how a Routine's cron is evaluated -- the UI converts to the
+// viewer's own local time for display.
+//
+// LEAVE THIS EMPTY IF YOU DON'T KNOW THE TIMES. Empty means "cadence known, clock times
+// not", and every caller below falls back to naming the cadence instead of a specific
+// time -- vague but never WRONG, which matters more here: a confidently-stated "parses
+// at 6:00 PM" that the Routine no longer honours is worse than saying nothing, because
+// the owner would wait for a run that isn't coming. Same reasoning if the Routine's
+// schedule ever changes and nobody updates this: clear it rather than leave it stale.
+const TRIPSY_PARSE_RUN_UTC_TIMES = [];
+// How often it runs, for the wording used when the exact times aren't known. Kept as
+// prose because that's all it's ever used for (the Parsing Docs utilities page says the
+// same thing in its own copy -- index.html's "three times a day, in the cloud").
+const TRIPSY_PARSE_RUN_CADENCE_LABEL = 'three times a day';
+
+// The next scheduled run strictly after `now`, or null when the times aren't known.
+// Walks today's and tomorrow's slots in UTC so a run later today is preferred over the
+// first one tomorrow, and the day boundary is handled without any local-time reasoning
+// (the same trap parseTripLocalParts exists to avoid elsewhere in this file).
+function tripsyNextScheduledParseRun(now = new Date()) {
+  if (!TRIPSY_PARSE_RUN_UTC_TIMES.length) return null;
+  // Sorted, not taken in array order: this constant is maintained by hand, and a
+  // perfectly reasonable edit that lists the times out of order would otherwise
+  // return whichever slot happened to be written first rather than the soonest
+  // one -- a wrong time, silently, which is the exact failure this whole feature
+  // is supposed to avoid.
+  const slots = [...TRIPSY_PARSE_RUN_UTC_TIMES]
+    .sort((a, b) => (a.hour - b.hour) || ((a.minute || 0) - (b.minute || 0)));
+  for (const dayOffset of [0, 1]) {
+    for (const { hour, minute } of slots) {
+      const candidate = new Date(Date.UTC(
+        now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + dayOffset, hour, minute || 0, 0, 0));
+      if (candidate > now) return candidate;
+    }
+  }
+  return null;
+}
+// "today at 6:00 PM" / "tomorrow at 2:00 AM", in the VIEWER's local time -- unlike trip
+// event times (deliberately shown as their own local wall-clock, see formatTripTime),
+// this is a real instant, so the device's own zone is exactly the right frame.
+function tripsyFormatNextParseRun(when, now = new Date()) {
+  if (!when) return null;
+  const time = when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const isSameLocalDay = when.toDateString() === now.toDateString();
+  const isNextLocalDay = when.toDateString() === new Date(now.getTime() + 86400000).toDateString();
+  if (isSameLocalDay) return `today at ${time}`;
+  if (isNextLocalDay) return `tomorrow at ${time}`;
+  return `${when.toLocaleDateString([], { weekday: 'long' })} at ${time}`;
+}
+// The one sentence both the doc and email rows use, so they can never disagree about
+// what happens next. Names the time when known, the cadence when not.
+function tripsyNextParseRunSentence() {
+  const label = tripsyFormatNextParseRun(tripsyNextScheduledParseRun());
+  return label
+    ? `They'll be parsed automatically in the next scheduled run, ${label}.`
+    : `They'll be parsed automatically in the next scheduled run (${TRIPSY_PARSE_RUN_CADENCE_LABEL}).`;
+}
 // Fires the cloud PARSE routine on demand (the slimmed remnant of the old
 // full Tripsy refresh): it reads flagged docs and forwarded emails from
 // Drive/Gmail, parses them, and writes proposal relay files this app drains.
@@ -30994,9 +31056,18 @@ async function computeTripsyStatus() {
     yellow.push({ label: tripsyInFlightWrites.length === 1 ? tripsyInFlightWrites[0].label : `${tripsyInFlightWrites.length} events being written to Drive…` });
   }
   const docsToParse = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'pending');
-  if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged, waiting for the next scheduled parse run`, view: 'utilitiesparsingdocs' });
+  if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged for parsing`, view: 'utilitiesparsingdocs' });
   const emailsToParse = tripsyEmailsAwaitingParseCount();
-  if (emailsToParse) yellow.push({ label: `${emailsToParse} forwarded email${emailsToParse === 1 ? '' : 's'} waiting for the next scheduled parse run`, view: 'utilitiesparsingdocs' });
+  if (emailsToParse) yellow.push({ label: `${emailsToParse} forwarded email${emailsToParse === 1 ? '' : 's'} waiting to be parsed`, view: 'utilitiesparsingdocs' });
+  // Says WHEN the wait ends, rather than leaving "waiting for the next scheduled parse
+  // run" to imply an unknowable delay ("tell the user the time for the next scheduled
+  // parse run and say the document will be parsed then, or give the parse now option").
+  // One row for both kinds, since a single run handles them together -- repeating it per
+  // row would just say the same thing twice. Not clickable: it's a statement, and the
+  // "or" half of the ask is the Run Parse Now button the panel already renders below.
+  if (docsToParse.length || emailsToParse) {
+    yellow.push({ label: `${tripsyNextParseRunSentence()} Don't want to wait? Use Run Parse Now below.` });
+  }
   // A Run Parse Now fire is underway: say so, or the panel reads IDENTICALLY to
   // before the button was pressed and the press looks like it did nothing (the
   // run happens on another machine and takes minutes; the polls scheduled by
