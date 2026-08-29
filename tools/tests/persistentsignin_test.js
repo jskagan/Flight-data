@@ -153,3 +153,31 @@ assert(/catch \(e\) \{[\s\S]*?keeping the credential[\s\S]*?return null;/.test(g
   assert(decide(false, 502) === 'keep-credential', 'Google unreachable from the Worker -> keep, try again next load');
   assert(decide(false, 0) === 'keep-credential', 'network/timeout -> keep, so an offline trip does not sign the device out');
 }
+
+// ---- one sign-in attempt at a time ----
+// Each extra click orphans the open popup and starts a SECOND GIS polling loop against
+// it, and each loop emits its own stream of Google's "Cross-Origin-Opener-Policy would
+// block the window.closed call" warnings -- which is what buried the useful lines while
+// debugging the exchange.
+assert(/if \(_signInInFlight\) return;\s*\n\s*_signInInFlight = true;/.test(initAuth),
+  'a second click while an attempt is open is ignored rather than opening another popup');
+assert(/_signInInFlightTimer = setTimeout\(\(\) => \{ _signInInFlight = false; \}, 120000\);/.test(initAuth),
+  'THE SAFETY NET: a timer always releases it, so a popup GIS never reports on cannot ' +
+  'leave sign-in permanently un-clickable -- sign-in is the whole app');
+{
+  // Every path that resolves an attempt must release the guard, or the owner waits out
+  // the timeout before they can retry.
+  const cleared = (html.match(/clearSignInInFlight\(\);/g) || []).length;
+  assert(cleared >= 3,
+    `released on each resolving path -- code callback, code error_callback, and the token flow (found ${cleared})`);
+}
+assert(/function clearSignInInFlight\(\) \{[\s\S]*?clearTimeout\(_signInInFlightTimer\);/.test(html),
+  'releasing also cancels the safety timer, so it cannot fire against a later attempt');
+
+// ---- the deprecated meta tag ----
+// Keep BOTH: current browsers warn on the apple- prefixed one, older iOS understands
+// only that one, and this app is launched from an iPad home screen.
+assert(/<meta name="mobile-web-app-capable" content="yes">/.test(html),
+  'the standard mobile-web-app-capable meta is present (silences the deprecation warning)');
+assert(/<meta name="apple-mobile-web-app-capable" content="yes">/.test(html),
+  'and the apple- form is kept, since older iOS home-screen launches still need it');

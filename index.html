@@ -8,6 +8,11 @@
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 <link rel="manifest" href="manifest.json">
+<!-- Both, deliberately: the standard name is what current browsers want (the
+     apple- prefixed one now logs a deprecation warning), but older iOS versions
+     only understand the apple- form, and this app is used from an iPad home
+     screen. Dropping either would regress one of the two. -->
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Travel Tracker">
@@ -33992,6 +33997,15 @@ let isOwner = false;
 const TRIPS_ONLY_ALLOWED_VIEWS = new Set(['tripsytrips', 'travelview']);
 let isTripsOnlyUser = false;
 let tokenClient = null;
+// True between clicking sign-in and that attempt resolving -- see startSignIn for why
+// (repeat clicks stack popups and their polling loops). Always cleared by a timer as
+// well as by the callbacks, so it can never leave sign-in permanently un-clickable.
+let _signInInFlight = false;
+let _signInInFlightTimer = null;
+function clearSignInInFlight() {
+  _signInInFlight = false;
+  clearTimeout(_signInInFlightTimer);
+}
 
 // A silent, mid-session token refresh in flight: the resolvers the token-client
 // callback hands the new token to (instead of re-running the whole sign-in).
@@ -34297,6 +34311,9 @@ function initGoogleAuth() {
         pending.resolve(response.access_token);
         return;
       }
+      // Past the refresh branch above, so this is an interactive sign-in resolving --
+      // release the one-attempt-at-a-time guard either way (see startSignIn).
+      clearSignInInFlight();
       if (response.error) {
         showSignInStatus('Sign-in failed: ' + response.error, true);
         return;
@@ -34357,6 +34374,7 @@ function initGoogleAuth() {
         access_type: 'offline',
         prompt: 'consent',
         callback: async (response) => {
+          clearSignInInFlight(); // this attempt has resolved, one way or another
           if (!response || !response.code) {
             showSignInStatus('Sign-in failed: ' + ((response && response.error) || 'no code returned'), true);
             return;
@@ -34382,6 +34400,7 @@ function initGoogleAuth() {
           completeSignIn();
         },
         error_callback: () => {
+          clearSignInInFlight(); // cancelled/blocked -- let the owner try again at once
           // Popup closed/blocked. Say so plainly rather than leaving the button
           // looking like it did nothing.
           showSignInStatus('Sign-in was cancelled or the popup was blocked.', true);
@@ -34398,6 +34417,17 @@ function initGoogleAuth() {
   // the default on this device until exited via the red ✕); "Use Travel Tracker"
   // clears it so sign-in lands on the normal app.
   const startSignIn = travelView => {
+    // One attempt at a time. A second click while a popup is already open orphans the
+    // first popup and starts a SECOND GIS polling loop against it -- each loop emitting
+    // its own stream of "Cross-Origin-Opener-Policy would block the window.closed call"
+    // warnings, which is what made the console unreadable while debugging.
+    if (_signInInFlight) return;
+    _signInInFlight = true;
+    // Never latch: if GIS delivers neither its callback nor its error_callback (an
+    // OS-blocked popup, say), this flag would otherwise make the sign-in button dead
+    // for the rest of the page's life -- and sign-in is the whole app.
+    clearTimeout(_signInInFlightTimer);
+    _signInInFlightTimer = setTimeout(() => { _signInInFlight = false; }, 120000);
     saveTravelViewPref(travelView);
     showSignInStatus('Opening Google sign-in…', false);
     // Synchronous on purpose -- awaiting the probe here would lose this click's user
