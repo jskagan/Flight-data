@@ -623,6 +623,24 @@ step 4; git history has it if ever needed.
   (`isTripsyTripCollapsed`/`setTripsyTripCollapsed`, `index.html:6313` area) — deliberately *not*
   in `driveData`, since view-only users have no Drive write access to persist anything into the
   shared file.
+- **Itinerary → Summary is Part 1 on its own, read-only** (asked 2026-08-29: "the listing of
+  events broken down by dates with no narratives"). `buildTripsyPrintHtml` gained a
+  `summaryOnly` option that returns just the cover header + Part 1 and **returns before Part 2 /
+  Travel Information are built at all**, so their per-place photo lookups — the slow part of a
+  full build — are skipped rather than computed and discarded. `showTripsyItinerarySummary`
+  renders that into its own overlay (`#tripsy-summary-overlay`, sharing the preview's shell
+  classes, and hidden in `@media print` for the same reason the preview is). It deliberately does
+  **not** reuse `previewTripsyItinerary`: that overlay carries the owner's generate/regenerate/
+  per-day editing controls, and the requirement is that this screen can't edit — rendering print
+  HTML means there is nothing interactive to suppress, rather than hiding controls one by one and
+  hoping a future one gets hidden too (`itinsummary_test.js` asserts the summary path emits no
+  `<button>`/`<input>`/`contenteditable` at all). Day blocks also drop their
+  `tp-day-block-linkable` class and `data-tripsy-summary-day-link` attribute in this mode, since
+  there's no Part 2 to jump to and the pointer/hover ring would promise a scroll that can't
+  happen. **Save as PDF** re-runs the same summary-only build through `triggerTripsyPrint` (the
+  browser's print dialog is where "Save as PDF" actually lives on macOS/iOS) rather than printing
+  the on-screen node, so the output carries no overlay toolbar. Not owner-gated — read-only, like
+  Print.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS

@@ -914,12 +914,15 @@
      itself (display:none inside @media print) since if it were somehow
      left open while printing, it shouldn't ever end up as a second copy
      of the document alongside #tripsy-print-root. */
-  #tripsy-preview-overlay {
+  /* The read-only Summary view (Itinerary -> Summary) shares the preview's shell
+     exactly -- same backdrop, toolbar and paper -- so it must also be hidden while
+     printing, or it would print alongside #tripsy-print-root. */
+  #tripsy-preview-overlay, #tripsy-summary-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9000;
     overflow-y: auto; padding: 32px 16px; flex-direction: column; align-items: center;
   }
   @media print {
-    #tripsy-preview-overlay { display: none !important; }
+    #tripsy-preview-overlay, #tripsy-summary-overlay { display: none !important; }
   }
   .tripsy-preview-toolbar {
     max-width: 800px; width: 100%; display: flex; justify-content: flex-end; gap: 10px; margin-bottom: 12px;
@@ -23202,7 +23205,13 @@ async function tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, 
 // openTripsyItineraryPrintView (writes it into #tripsy-print-root and
 // prints) and previewTripsyItinerary (shows it on-screen in an overlay,
 // with no OS print dialog) share one code path and can never drift apart.
-async function buildTripsyPrintHtml(tripKey) {
+// `summaryOnly` returns just the cover header + Part 1 (the day-by-day event
+// listing), skipping Part 2's narrative cards and the Travel Information tables --
+// and, more importantly, skipping the place-photo lookups those need, which are the
+// slow part of a full build. Used by the Itinerary menu's read-only Summary view and
+// by its Save as PDF, so both render from this one builder rather than a second
+// implementation that could drift from what Print produces.
+async function buildTripsyPrintHtml(tripKey, { summaryOnly = false } = {}) {
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return null;
   const { effectiveTrip, dayKeys, byDay, placesByDay, placeEvents, summaryByDay } = await buildTripsyPrintDayData(trip);
@@ -23308,8 +23317,11 @@ async function buildTripsyPrintHtml(tripKey) {
     // (tripsyDetailedDayDividerHtml) into view. Works whether or not a
     // narrative was ever generated, since Part 2's flat photo-grid
     // fallback still draws the same day dividers.
+    // In summaryOnly mode there IS no Part 2 to jump to, so the day block is neither
+    // marked linkable (which would show a pointer cursor and hover ring promising a
+    // jump that can't happen) nor given the link attribute.
     return `
-      <div class="tp-day-block tp-day-block-linkable" data-tripsy-summary-day-link="${esc(dayKey)}">
+      <div class="tp-day-block${summaryOnly ? '' : ' tp-day-block-linkable'}"${summaryOnly ? '' : ` data-tripsy-summary-day-link="${esc(dayKey)}"`}>
         <div class="tp-day-tile">
           <div class="tp-day-tile-label">Day</div>
           <div class="tp-day-tile-num">${esc(tileNum)}</div>
@@ -23340,7 +23352,7 @@ async function buildTripsyPrintHtml(tripKey) {
       ? tripsySummaryDayTileDate(firstKey)
       : `${tripsySummaryDayTileDate(firstKey)} – ${tripsySummaryDayTileDate(lastKey)}`;
     return `
-      <div class="tp-day-block tp-day-block-empty tp-day-block-linkable" data-tripsy-summary-day-link="${esc(firstKey)}">
+      <div class="tp-day-block tp-day-block-empty${summaryOnly ? '' : ' tp-day-block-linkable'}"${summaryOnly ? '' : ` data-tripsy-summary-day-link="${esc(firstKey)}"`}>
         <div class="tp-day-tile">
           <div class="tp-day-tile-label">Day</div>
           ${numHtml}
@@ -23367,6 +23379,11 @@ async function buildTripsyPrintHtml(tripKey) {
   }
   if (dayKeys.includes('undated')) summaryBlockParts.push(tripsySummaryDayBlockHtml('undated'));
   const summaryHtml = summaryBlockParts.join('');
+
+  // Everything below builds Part 2 and the Travel Information tables, including the
+  // per-place photo lookups that dominate a full build's time. A summary-only caller
+  // wants none of it, so stop here rather than computing and discarding it.
+  if (summaryOnly) return `${headerHtml}${summaryHtml}`;
 
   // ---- Part 2: one card per event, grouped by day and rendered in the
   // exact chronological (+ P/S-interleaved) order summaryByDay already
@@ -24064,12 +24081,80 @@ async function openTripsyDiaryPrintView(tripKey) {
   await triggerTripsyPrint(printRoot);
 }
 
-async function openTripsyItineraryPrintView(tripKey) {
-  const html = await buildTripsyPrintHtml(tripKey);
+async function openTripsyItineraryPrintView(tripKey, { summaryOnly = false } = {}) {
+  const html = await buildTripsyPrintHtml(tripKey, { summaryOnly });
   if (html == null) return;
   const printRoot = getOrCreateTripsyPrintRoot();
   printRoot.innerHTML = html;
   await triggerTripsyPrint(printRoot);
+}
+
+// ---- Itinerary → Summary: Part 1 on its own, read-only ----
+// The day-by-day event listing without any narrative, for someone who wants the
+// schedule at a glance rather than the written-up itinerary.
+//
+// Deliberately NOT built on previewTripsyItinerary: that overlay carries the owner's
+// generate/regenerate/per-day editing controls, which is exactly what this screen must
+// not offer ("the user should not be able to edit the summary from the Summary
+// screen"). Rendering buildTripsyPrintHtml's summary-only output into an overlay of its
+// own means there is nothing interactive to suppress -- the print HTML contains no
+// controls at all -- rather than relying on hiding them one by one.
+//
+// Available to every viewer, like Print: it only reads existing data.
+function getOrCreateTripsySummaryOverlay() {
+  let overlay = document.getElementById('tripsy-summary-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-summary-overlay';
+  // Reuses the preview overlay's own layout/paper classes so this matches the rest of
+  // the itinerary surfaces (and so the .tp-* print styles render on screen here too).
+  overlay.innerHTML = `
+    <div class="tripsy-preview-toolbar">
+      <button class="btn" id="tripsy-summary-close-btn">Close</button>
+      <button class="btn primary tripsy-preview-action" id="tripsy-summary-pdf-btn">Save as PDF</button>
+    </div>
+    <div class="tripsy-preview-paper" id="tripsy-summary-content"></div>
+  `;
+  document.body.appendChild(overlay);
+  const close = () => { overlay.style.display = 'none'; };
+  overlay.querySelector('#tripsy-summary-close-btn').addEventListener('click', close);
+  // Same click-outside rule the preview overlay uses: the overlay itself is the
+  // full-screen backdrop, so a click whose target IS it landed outside the paper.
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  overlay.querySelector('#tripsy-summary-pdf-btn').addEventListener('click', async () => {
+    const btn = overlay.querySelector('#tripsy-summary-pdf-btn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Preparing…';
+    try {
+      // Goes through the same print path Print uses -- the browser's print dialog is
+      // where "Save as PDF" actually lives on both macOS and iOS. Rebuilt rather than
+      // printing the on-screen node so the output is the clean print HTML, without
+      // this overlay's toolbar.
+      await openTripsyItineraryPrintView(overlay.dataset.tripKey || '', { summaryOnly: true });
+    } catch (e) {
+      console.error('Summary PDF failed:', e);
+      toast('Could not prepare the summary for printing. Please try again.', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+  return overlay;
+}
+async function showTripsyItinerarySummary(tripKey) {
+  const overlay = getOrCreateTripsySummaryOverlay();
+  const content = overlay.querySelector('#tripsy-summary-content');
+  overlay.dataset.tripKey = tripKey;
+  content.innerHTML = `<div style="padding:24px; color:var(--muted);">Building summary…</div>`;
+  overlay.style.display = 'flex';
+  const html = await buildTripsyPrintHtml(tripKey, { summaryOnly: true });
+  if (html == null) {
+    content.innerHTML = `<div style="padding:24px; color:var(--muted);">This trip could not be loaded.</div>`;
+    return;
+  }
+  content.innerHTML = html;
+  content.scrollTop = 0;
 }
 
 // Itinerary menu's "Update" button -- compares an uploaded PDF against
@@ -29433,6 +29518,7 @@ async function renderTripsyEventsListImpl() {
             return `
               ${hasGeneratedNarrative ? '' : createOrDelete}
               ${showPreviewItem ? menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '✏️', isOwner ? 'Edit' : 'Preview', `<span data-tripsy-itin-warning="${esc(trip.key)}" title="Events changed since this itinerary was generated" style="display:none; margin-left:auto; color:#e02424; font-size:13px; line-height:1;">▲</span>`) : ''}
+              ${menuListButtonHtml(`data-tripsy-summary-itinerary data-key="${esc(trip.key)}"`, '📅', 'Summary')}
               ${menuListButtonHtml(`data-tripsy-status-itinerary data-key="${esc(trip.key)}"`, '📋', 'Status')}
               ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
               ${hasGeneratedNarrative ? createOrDelete : ''}
@@ -29931,6 +30017,28 @@ async function renderTripsyEventsListImpl() {
       await tripsyRunGeneratePanelUpdate(panel, tripKey);
     });
   }
+
+  container.querySelectorAll("[data-tripsy-summary-itinerary]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      closeAllTripsyTripPanels();
+      // Same icon-span swap as Print below (see its comment for why textContent
+      // on the button itself would flatten the icon/label layout).
+      const iconSpan = btn.querySelector('span');
+      const originalIcon = iconSpan.textContent;
+      btn.disabled = true;
+      iconSpan.textContent = '⏳';
+      try {
+        await showTripsyItinerarySummary(btn.dataset.key);
+      } catch (err) {
+        console.error('showTripsyItinerarySummary failed:', err);
+        toast("Could not build the summary. Please try again.", "error");
+      } finally {
+        btn.disabled = false;
+        iconSpan.textContent = originalIcon;
+      }
+    });
+  });
 
   container.querySelectorAll("[data-tripsy-print-itinerary]").forEach(btn => {
     btn.addEventListener("click", async e => {
