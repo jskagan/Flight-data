@@ -180,6 +180,18 @@ Cached data always shows immediately on load; syncing happens invisibly behind i
 unattended on every open. Tripsy Trips does not fit this shape at all — see below for how it
 actually refreshes.
 
+**There is deliberately no "Refresh All" catch-all** (a Utilities menu item + `refreshAllReports()`,
+removed 2026-08-29 as fully redundant — don't re-add it). Its three sync pipelines (reservations,
+P/S balance, `syncTripsyRelays`) are exactly what `runBackgroundSyncs` above already runs on every
+app load, so pressing it did what reloading the page does. Its one seemingly-unique step, a
+`recomputeReport()` for the NetJets passenger report, was covered too: that report derives purely
+from stored invoices, every invoice-mutating path (upload, Review Queue resolve, auto-resolve, undo)
+already calls `recomputeReport()` itself, and `navigate()` nulls `cachedReport` whenever the Reports
+view is entered from elsewhere, so it recomputes fresh exactly when someone goes to look at it. All
+that was left that the automatic path didn't give was a confirmation toast — and the per-pipeline
+**Force Sync** buttons above answer that better anyway, since they sit on the page where staleness
+would be noticed and show an inline status line plus a real "Last updated" timestamp.
+
 ### Tripsy Trips (labeled "My Trips" in the nav; render code `index.html:12301`/`14198` area)
 
 **Trip data lives in a private Drive file, `trips-data.json`** (same folder as
