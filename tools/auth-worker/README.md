@@ -47,9 +47,18 @@ wrangler login
 wrangler kv namespace create AUTH_KV
 # -> copy the printed id into wrangler.toml
 
-wrangler secret put GOOGLE_CLIENT_SECRET   # paste the secret from step 1
+# DEPLOY BEFORE SETTING THE SECRET. Secrets attach to an existing Worker, so on a
+# first deploy `secret put` fails with 'Worker "travel-tracker-auth" not found'.
 wrangler deploy
+wrangler secret put GOOGLE_CLIENT_SECRET   # paste the secret from step 1
 ```
+
+No redeploy is needed after `secret put` — it takes effect immediately.
+
+Between those two commands the Worker is live but unconfigured, which is harmless:
+`/auth/health` reports `configured:false`, and the app treats anything short of
+`configured:true` as "use the original browser-only sign-in", so sign-in keeps working
+exactly as before throughout.
 
 Then set `AUTH_WORKER_URL` in `index.html` to the deployed URL if it differs from the
 default already there.
