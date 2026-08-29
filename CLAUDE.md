@@ -381,6 +381,25 @@ step 4; git history has it if ever needed.
   green while a trip card would read yellow — `syncTripsyRelays` loads trips before its badge
   refresh and `renderTripsyEventsList` refreshes the badge after each render to close that gap.
   Owner-only.
+  **The panel names WHEN the next scheduled run is, not just that one is coming** (asked
+  2026-08-29): the doc/email rows used to read "waiting for the next scheduled parse run", which
+  states no time and reads as an unknowable delay. They now pair with one shared row —
+  `tripsyNextParseRunSentence()`, emitted once for docs+emails together since a single run handles
+  both — reading "They'll be parsed automatically in the next scheduled run, today at 9:00 AM.
+  Don't want to wait? Use Run Parse Now below.", pointing at the button the panel already renders.
+  The schedule is `TRIPSY_PARSE_RUN_UTC_TIMES`, **hand-mirrored** from the cloud Routine's cron
+  (`0 0,6,16 * * *` → 00:00/06:00/16:00 **UTC**; deliberately uneven at 6h/10h/8h — don't "tidy"
+  them without changing the Routine). Nothing enforces that agreement at runtime — the app can't
+  query a Routine and the cloud sandbox can't read this repo — so `nextparserun_test.js` pins the
+  constant against the cron expression recorded in its own comment, and failing that test is the
+  intended signal to update both. **An EMPTY array is a legitimate state**, not a bug: every caller
+  then falls back to naming the cadence (`TRIPSY_PARSE_RUN_CADENCE_LABEL`) with no clock time,
+  which is vague but never wrong — clear it rather than leave it stale if the Routine changes and
+  the new times aren't known, since an owner waiting for a run that isn't coming is worse than one
+  who was only told "three times a day". Two traps the tests lock down: slots are **sorted** before
+  the walk (a hand-edit listing them out of order otherwise returns whichever was written first),
+  and "today/tomorrow" is judged in the viewer's **local** dates, so a 00:00 UTC run correctly reads
+  as "today at 5:00 PM" in Los Angeles rather than tomorrow.
   **Run Parse Now parses IN THE APP first, cloud only as fallback** ("the parse run is way too long
   for adding a couple of items," 2026-08-17): the button (`runTripsyParseNow`) now runs
   `runTripsyLocalParse` — pending email BODIES (already in `driveData.tripsyEmailIntake`) and

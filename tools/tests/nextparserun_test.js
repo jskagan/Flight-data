@@ -39,6 +39,29 @@ assert(/\*\*UTC\*\*/.test(html) && /LEAVE THIS EMPTY IF YOU DON'T KNOW THE TIMES
 assert(/const TRIPSY_PARSE_RUN_CADENCE_LABEL = /.test(html),
   'the fallback cadence wording is its own constant rather than inline prose');
 
+// ---- the shipped constant matches the Routine's actual cron ----
+// Pinned deliberately: these two live in different systems (this file vs. the Routine at
+// claude.ai/code/routines) and nothing enforces agreement at runtime, so this is the only
+// place the relationship is checked at all. If the Routine's schedule changes, this fails
+// and names what to update -- which is the intended outcome, not a nuisance.
+{
+  const m = html.match(/Currently mirroring the Routine's cron `([^`]+)`/);
+  assert(!!m, 'the comment records WHICH cron expression the constant mirrors');
+  const cron = m ? m[1] : '';
+  assert(cron === '0 0,6,16 * * *', `the recorded cron is the one the owner confirmed (got: ${cron})`);
+  // Derive the expected hours from the cron itself rather than restating them, so the
+  // two halves of this check can't drift apart either.
+  const [minute, hours] = cron.split(' ');
+  const expected = hours.split(',').map(h => ({ hour: Number(h), minute: Number(minute) }));
+  const decl = html.match(/const TRIPSY_PARSE_RUN_UTC_TIMES = (\[[^\]]*\]);/);
+  assert(!!decl, 'the constant is a plain literal array, readable without executing the file');
+  const actual = decl ? new Function(`return ${decl[1]};`)() : [];
+  assert(actual.length === expected.length,
+    `one entry per cron hour (expected ${expected.length}, got ${actual.length})`);
+  assert(expected.every(e => actual.some(a => a.hour === e.hour && (a.minute || 0) === e.minute)),
+    'every hour in the cron has a matching entry -- UTC, since Routine crons are evaluated in UTC');
+}
+
 // ---- executed: next-run selection, with a real schedule ----
 const withSchedule = times => new Function(
   `const TRIPSY_PARSE_RUN_UTC_TIMES = ${JSON.stringify(times)};\n` +
