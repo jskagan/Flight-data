@@ -31,6 +31,30 @@ assert(/\$\{hasGeneratedNarrative \? '' : createOrDelete\}/.test(block),
 assert(/\$\{hasGeneratedNarrative \? createOrDelete : ''\}/.test(block),
   'and Delete still trails the menu once something is (unchanged)');
 
+// ---- Update lives on the Trip (gear) menu, not the Itinerary one ----
+// It reconciles trip EVENTS against an uploaded operator PDF and never touches the
+// generated narrative, so it did not belong in a menu whose every other item is about
+// that write-up. Moved beside "Verify Travel Details", which is the same kind of job.
+assert(!/data-tripsy-update-itinerary/.test(block),
+  'Update is no longer in the itinerary menu');
+{
+  const tripMenuIdx = html.indexOf('data-tripsy-trip-menu="');
+  const tripMenu = html.slice(tripMenuIdx, tripMenuIdx + 1400);
+  assert(/data-tripsy-update-itinerary/.test(tripMenu),
+    'THE ASK: it now sits on the Trip (gear) menu instead');
+  assert(tripMenu.indexOf('data-tripsy-verify-travel') < tripMenu.indexOf('data-tripsy-update-itinerary'),
+    'and directly after Verify Travel Details, the item it most resembles');
+  assert(/hasPendingUpdatePage \? 'Resume Update' : 'Update from PDF'/.test(tripMenu),
+    'the resume-vs-fresh label still swaps; the fresh label names the PDF, since a bare "Update" ' +
+    'in a general trip menu does not say update WHAT');
+  assert(/\$\{isOwner \? menuListButtonHtml\(`data-tripsy-update-itinerary/.test(tripMenu),
+    'still owner-only -- it writes to trip data');
+}
+// The click handler is a container-wide querySelectorAll, so moving the button between
+// menus needs no rewiring; assert that's still how it's found.
+assert(/container\.querySelectorAll\("\[data-tripsy-update-itinerary\]"\)/.test(html),
+  'the handler still binds by attribute across the whole card, independent of which menu holds it');
+
 // ---- executed: the four cases, mirroring the template's own conditions ----
 {
   // Which of the two mutually-exclusive items each state yields.
