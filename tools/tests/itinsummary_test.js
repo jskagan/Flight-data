@@ -129,6 +129,24 @@ assert(/e\.target === overlay/.test(overlay), 'click-outside closes it, same rul
 assert(/#tripsy-preview-overlay, #tripsy-summary-overlay \{ display: none !important; \}/.test(html),
   'the Summary overlay is hidden in @media print, or it would print on top of #tripsy-print-root');
 
+// ---- printing started BY THE BROWSER also prints the summary ----
+// Reported: printing from the Summary screen produced "the app's own interface". Save
+// as PDF adds body.tripsy-printing, but Cmd+P / Share->Print add nothing -- so the app
+// behind the overlay printed instead. The screen now keeps the print root loaded and
+// marks the body while it is open, covering every route into printing.
+assert(/body\.tripsy-summary-open > \*:not\(#tripsy-print-root\) \{ display: none !important; \}/.test(html),
+  'a browser-initiated print hides the app when the Summary screen is open');
+assert(/body\.tripsy-summary-open #tripsy-print-root \{ display: block !important; \}/.test(html),
+  'and reveals the print root instead');
+assert(/getOrCreateTripsyPrintRoot\(\)\.innerHTML = html;\s*\n\s*document\.body\.classList\.add\('tripsy-summary-open'\);/.test(show),
+  'the print root is loaded with the SAME html the screen shows, so the two cannot differ');
+{
+  // Closing must undo both, or a later Cmd+P elsewhere in the app prints this stale summary.
+  const closeFn = overlay.slice(overlay.indexOf('const close = () => {'), overlay.indexOf('overlay.querySelector(\'#tripsy-summary-close-btn\')'));
+  assert(/classList\.remove\('tripsy-summary-open'\)/.test(closeFn), 'closing drops the print marker');
+  assert(/printRoot\.innerHTML = ''/.test(closeFn), 'and clears the print root, so no stale summary can print later');
+}
+
 // ---- the menu entry ----
 {
   const start = html.indexOf('// Create/Delete are the two states of one owner-only button:');
