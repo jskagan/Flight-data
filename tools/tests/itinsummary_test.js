@@ -89,8 +89,21 @@ assert(/e\.target === overlay/.test(overlay), 'click-outside closes it, same rul
     'over the ceiling it copies the full text rather than sending a silently truncated itinerary');
   assert(/catch \(e\) \{[\s\S]*?Clipboard write failed[\s\S]*?\}/.test(overlay),
     'and a refused clipboard (permissions/insecure context/old WebView) is caught, not thrown');
-  assert(/copying failed[\s\S]*?Save as PDF and attach it instead/.test(overlay),
+  assert(/copying it to the clipboard was refused[\s\S]*?Save as PDF instead and attach the file/.test(overlay),
     'in that case it says so honestly and points at the attachment route');
+  // The message must come BEFORE the mailto: hand-off. Opening a mail client takes
+  // focus, so a toast fired alongside it is shown in a window nobody is looking at --
+  // reported as "no content in the email, no toast message", i.e. this path running
+  // invisibly and looking broken.
+  const tooLongIdx = overlay.indexOf('Too long to prefill');
+  const copiedIdx = overlay.indexOf('Copied to clipboard');
+  const blankMailtoIdx = overlay.indexOf("if (openBlank) window.location.href = `mailto:?subject=");
+  assert(tooLongIdx > -1 && copiedIdx > -1 && blankMailtoIdx > copiedIdx,
+    'the owner is told what happened BEFORE any mail client is opened, not after');
+  assert(/tripsyConfirmDialog\([\s\S]*?title: 'Copied to clipboard'/.test(overlay),
+    'and via a dialog that waits to be dismissed, not a toast that auto-hides behind the mail app');
+  assert(/yes: 'Open blank draft', no: 'Just copy'/.test(overlay),
+    'opening a blank draft is offered, not forced -- an empty draft is not obviously wanted');
   const text = extractFn('buildTripsyItinerarySummaryText');
   assert(/buildTripsyPrintDayData\(trip\)/.test(text),
     'the text is built from the same day data as the HTML summary, so the two cannot list different events');
