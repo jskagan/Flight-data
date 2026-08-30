@@ -10,6 +10,8 @@ NetJets fractional-jet usage, The Private Suite ("PS", the LAX private terminal)
 reservations/billing, and a Trips view (labeled "My Trips" in the nav — flights, hotels, and
 other reservations) whose data lives in its own private Drive file, `trips-data.json` (see "Tripsy
 Trips" below — the name survives from the Tripsy service the data was migrated off on 2026-08-04).
+There's also a small **Trip Insurance** page (its own top-level nav item) holding insurance
+documents, and a **privacy policy** served as its own page — see their sections below.
 
 Open the file directly in a browser (or serve the directory statically) to run it — there is
 nothing to install or compile. The file **must** be named `index.html`, not something more
@@ -175,6 +177,24 @@ connection must never sign a device out for good); and **Sign out must call `/au
 clearing local state, or the next load just mints a new token and the owner never actually signs
 out. A `device_id` is a session credential — Drive (plus Gmail where granted) until revoked — see
 that folder's README for the security notes and the Google Cloud Console / KV setup.
+Two operational traps that cost real debugging time when this was first deployed, both now in that
+README: **adding a Worker secret does not take effect until you `wrangler deploy` again** (it
+creates a new version without promoting it, so `wrangler secret list` says the secret exists while
+`/auth/health` still reports `configured:false` — both true at once); and **`wrangler kv key list`
+is eventually consistent**, so a freshly written device record can be missing from it for a while.
+`localStorage.getItem('flightlog_device_id')` in the browser is the faster, more reliable check
+that a device actually registered.
+
+**One sign-in attempt at a time** (`_signInInFlight`, released by a `clearSignInInFlight()` on every
+resolving path plus a 120s timer). A second click while a popup is open orphans the first popup and
+starts a SECOND GIS polling loop against it — and each loop emits its own stream of Google's
+`Cross-Origin-Opener-Policy would block the window.closed call` warnings, which is what made the
+console unreadable while debugging the exchange. Those COOP warnings themselves are **not ours and
+not fixable**: they come from Google's own `accounts.google.com` pages severing the opener
+relationship, emitted by the GIS library. The only way to eliminate them is abandoning the popup
+flow for full-page redirect mode, which isn't worth churning working auth for console cosmetics.
+The timer matters more than the guard: sign-in is the whole app, so a popup GIS never reports on
+must not leave the button dead for the rest of the page's life.
 
 The "Authorized Users" list on the Users utility page isn't a separate registry — it's read live
 from the Drive file's real sharing permissions (`listDriveFilePermissions()`, `index.html:1001`
@@ -203,6 +223,14 @@ to edit directly in Drive's own Share dialog.
    zero-amount group must stay visible to be deletable. The Remaining Balance totals deliberately
    still sum over ALL items (zeros subtract nothing today, but filtering the math too would be a
    trap if a credit/negative line ever appears).
+   **Each receipt's header line also names the TRIP it belongs to**, in parentheses after the
+   reservation number (asked 2026-08-29). Built by running `findMatchingTripsyPsReservation` — the
+   same flight-number/date matching My Trips' timeline uses to attach a P/S reservation to a flight
+   — over every visible trip's flight events, i.e. the same rules applied in reverse, rather than a
+   second matcher that could disagree with the timeline. It lazy-loads trips and reservations the
+   way My Trips and Travel View each already do (this page can be opened directly, with neither
+   having run), and fails soft: a trip-name lookup is a nice-to-have and must never stop the balance
+   table itself from rendering.
 4. **Tripsy Trips** — see its own section below. Architecturally different from the other three:
    trip data is pulled entirely *outside* the browser (a Claude Code scheduled task talking to a
    Tripsy API connector), not via an in-browser Gmail/API sync.
@@ -611,8 +639,8 @@ step 4; git history has it if ever needed.
   which is what keeps `tripsyAttireGoToEvent`/`tripsyGoToTripDay` (both expand their target trip
   then re-render) working with no knowledge of years; closing a year therefore also re-collapses
   its trips, or that rule would bounce it straight open.
-- **Regression tests live in `tools/tests/`** (`node tools/tests/run_all.js` — 72 suites,
-  ~1400 assertions, exit 0 = all green). They only READ `index.html` (extracting functions by
+- **Regression tests live in `tools/tests/`** (`node tools/tests/run_all.js` — 75 suites,
+  ~1500 assertions, exit 0 = all green). They only READ `index.html` (extracting functions by
   name and asserting on behavior and on source patterns), so they don't violate the single-file
   rule. Some suites are GENERATORS that write a sibling `*_run.js` (gitignored) holding the
   executable assertions — the runner executes both halves. Run them before any push that touches
@@ -623,6 +651,14 @@ step 4; git history has it if ever needed.
   (`isTripsyTripCollapsed`/`setTripsyTripCollapsed`, `index.html:6313` area) — deliberately *not*
   in `driveData`, since view-only users have no Drive write access to persist anything into the
   shared file.
+- **The 🧭 Itinerary menu never shows Create and Edit together** (asked 2026-08-29: "both shouldn't
+  exist on the same menu"). Create was already conditional, but Edit was emitted unconditionally —
+  so an ungenerated trip offered both, and picking Edit merely opened Preview's first-time section
+  picker, i.e. it created. Edit now appears only once a narrative exists. The gate is
+  `hasGeneratedNarrative || !isOwner`, NOT just the first half: Create is owner-only, so gating
+  purely on "has a narrative" would leave a VIEWER with no on-screen route to the itinerary at all
+  — and it still renders the day-by-day events without any prose. Viewers therefore keep the item,
+  labelled **Preview** rather than Edit, which is also more honest for someone who can't edit.
 - **Itinerary → Summary is Part 1 on its own, read-only** (asked 2026-08-29: "the listing of
   events broken down by dates with no narratives"). `buildTripsyPrintHtml` gained a
   `summaryOnly` option that returns just the cover header + Part 1 and **returns before Part 2 /
@@ -641,6 +677,13 @@ step 4; git history has it if ever needed.
   browser's print dialog is where "Save as PDF" actually lives on macOS/iOS) rather than printing
   the on-screen node, so the output carries no overlay toolbar. Not owner-gated — read-only, like
   Print.
+  **A print started BY THE BROWSER prints the summary too** (reported 2026-08-29: printing from
+  this screen produced "the app's own interface"). Save as PDF adds `body.tripsy-printing`, which is
+  what the `@media print` rules key on to hide the app and reveal `#tripsy-print-root` — but ⌘P, or
+  Share → Print on iPad, adds nothing, so the nav rail and trip cards behind the overlay printed
+  instead. The screen therefore keeps `#tripsy-print-root` loaded with the SAME html it displays and
+  marks `body.tripsy-summary-open` while open, with a parallel pair of print rules. **Closing must
+  undo both** (it does), or a later ⌘P anywhere in the app would print a stale summary.
   **Email opens a prefilled draft; it does not send.** The app's Gmail scope is
   `gmail.readonly`, so it *cannot* send mail, and a web page can't attach a file to an email
   either — so the itinerary travels as plain text in a `mailto:` body
@@ -1772,6 +1815,16 @@ not.**
   per-paragraph **+ Photo** button takes the owner's own via `tripsyPickImageFile` (Take Photo /
   Choose Photo over two hidden inputs — the shape that works on iPad) and places it exactly
   where pressed; it is resized first, since a day of iPhone photos is otherwise tens of MB.
+- **Tapping a placed photo opens Replace / Add-or-Edit Caption / Delete / Cancel**
+  (`getOrCreateTripsyDiaryPhotoMenu`, anchored by the same `positionTripsyFixedMenu` every other
+  Tripsy dropdown uses; asked 2026-08-29). Owner-only, and only on photos actually placed in the
+  prose. The menu node is generic and its buttons are rewired per open, closing over the caller's
+  `dayOf`/`upsertDay`/`save`/`render` the way every other control on that page does. Caption editing
+  goes through its own small overlay (`tripsyDiaryPromptCaption`) rather than an inline field, for
+  the same reason the caption list below exists: an `<input>` nested in a contenteditable region is
+  a reliable way to lose text on iPad. Cancel — and an outside click — resolve to null, meaning "no
+  change", never "clear the caption". This is a second entry point to the same mutations the
+  per-day photo list already offers, not a separate mechanism.
 - **Caption / side / move / remove live in a list UNDER the day**, not in the prose: an `<input>`
   nested in a contenteditable region is a reliable way to lose a caption on iPad. Side cycles
   right → left → full. A photo whose token was deleted while editing is not lost — it shows as
@@ -1824,10 +1877,11 @@ The NetJets report's Hours/Legs/Flight Log mode is a nav-rail-driven toggle (not
 `passengerReportMode`, set by clicking the nav submenu items, independent of the
 Totals/Kagan/Lopata filter which *is* passed as `navigate`'s `param`.
 
-### Offline (Travel View only)
+### Offline (Travel View + Trip Insurance)
 
-The app works with no signal, but **only Travel View** — deliberately, since it's read-only. Three
-pieces:
+The app works with no signal, but only for the two READ-ONLY surfaces — Travel View and Trip
+Insurance (`OFFLINE_ALLOWED_VIEWS`). Everything else edits data or needs a live Drive read.
+Three pieces:
 
 - **`sw.js`** — the one real exception to "everything lives in `index.html`" (a service worker
   cannot be inlined or registered from a blob URL; `manifest.json` is the existing sidecar
@@ -1893,6 +1947,68 @@ inside the sticky topbar of BOTH Travel View shells so it can't scroll away — 
 from rendering (`unlockTripsyTrips`), which shows an "Offline" card instead. That block is the
 point: My Trips edits, and saving an edit made against a stale cached copy would overwrite newer
 data. Note the Claude iPad WebView has no service worker, so offline doesn't apply there.
+
+**`appOfflineMode` vs `tripsyTripsAreOffline`** — two different flags, easy to confuse. The latter
+says only that the TRIPS in memory are a stale cached copy (driving the banner above and the My
+Trips block). `appOfflineMode` is app-wide: set once offline mode is entered, it gates `navigate()`
+to `OFFLINE_ALLOWED_VIEWS` and hides every other rail item. A device with Trip Insurance docs cached
+but no trips cache is in `appOfflineMode` without `tripsyTripsAreOffline` ever being set.
+
+`enterOfflineMode(cached)` is the one entry (button and auto-open both route through it), taking
+`{trips, tripInsurance}` where either half may be missing — whichever is present gets wired up, and
+the landing view follows it (trips wins when both exist, since that's what the device's Travel View
+preference means). The sign-in gate's offer reads **"No Internet Connection Available — Open Without
+Internet"** and appears when EITHER cache exists. Rail trimming happens here rather than in
+`completeSignIn`, which offline mode never runs.
+
+**A logged-out session is not an offline session** (2026-08-29: "I do not want my app to be
+verified" era — the offline offer was appearing on a connected device whose Google sign-in had
+merely expired). Every error path that got a real HTTP response — a 401 from `driveApiFetch`, any
+other Drive API status, a corrupt data file, "no shared file for this account" — is tagged
+`err.reachedServer = true`, and `completeSignIn`'s catch only offers offline when that flag is
+ABSENT, i.e. when a request never got an answer at all. Google answering "you're not authorized" is
+proof the network is fine, so claiming otherwise is actively wrong. The GIS-script-load timeout and
+the 12s hang watchdog still force the offer unconditionally: the first is genuine connectivity
+evidence, and the second has no error object to inspect.
+
+### Trip Insurance (own nav item; `renderTripInsurance`)
+
+A flat icon library of insurance documents (policies, claims, coverage summaries), deliberately NOT
+scoped to a trip — hence its own top-level nav item rather than living under a trip. Metadata in
+`driveData.tripInsuranceDocs` (`Store.listTripInsuranceDocs`/`saveTripInsuranceDoc`), bytes in their
+own Drive file, exactly the split Tripsy attachments use; opening one reuses `openDriveFileInNewTab`.
+There was no reason for a second document-storage mechanism.
+
+- **Tiles are icon-only buttons sized to the glyph** (`tripInsIconBtnStyle`), with the document name
+  as plain text BELOW the button rather than inside it, and the `.pdf` extension stripped for display
+  only (`tripInsuranceDisplayName` — the stored `fileName` keeps it, since that's what the upload and
+  the opened tab use). The green **+ Add Document** button shares that same style string, so "same
+  size and style" holds by construction rather than by keeping two definitions in step.
+- **Uploading is owner-only AND never offered offline** (`canUpload`), since it needs a real Drive
+  write; the empty state offers it as a plain button instead of the + tile.
+- **Offline coverage is the point.** `cacheTripInsuranceDocsOffline` stores the doc LIST (its own
+  `appCache` key) plus every document's BYTES (the same per-`driveFileId` blob store Tripsy
+  attachments use). It runs from `completeSignIn` right after sign-in AND on every visit to the page
+  — the first so losing the connection mid-session works even if the page was never opened this
+  session, the second to pick up documents added from another device. Skipped entirely in
+  `appOfflineMode`, where the list already came FROM that cache.
+
+### The privacy policy page (`privacy.html`)
+
+A sidecar file, against the single-file rule, for the same reason `sw.js` and `manifest.json` are:
+Google requires a fetchable privacy-policy URL before an External app requesting restricted scopes
+can be published out of "Testing" — and Testing caps refresh tokens at 7 days, which would defeat
+the persistent sign-in work entirely. Served at `jskagan.github.io/Flight-data/privacy.html`.
+
+**Keep it factually accurate**: it describes real data flows (Drive-resident storage, the three
+scopes and why each is needed, and the outside services data actually reaches — Anthropic, Google
+Places, Open-Meteo, the two Workers), plus the Limited Use declaration Google expects. If the app
+starts sending data somewhere new, that belongs on this page too.
+
+Related, and worth not re-litigating: **the app should stay unverified**. Verification for its
+restricted scopes (`drive` + `gmail.readonly`) requires an annual paid third-party CASA assessment;
+unverified-but-published is a stable state whose only costs are a click-through warning at consent
+and a 100-user cap this app will never approach. Do not press "Submit for verification".
 
 ## Notable constraints
 
