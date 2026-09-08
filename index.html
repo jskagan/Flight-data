@@ -4135,6 +4135,30 @@ function htmlToPlainText(html) {
     .trim();
 }
 
+// The email intake's own HTML -> text step (fetchTripsyIntakeEmail), replacing a
+// direct htmlToPlainText call. That shared helper -- also used by the two PS
+// email parsers, which pre-clean their HTML and are left untouched -- neither
+// strips <style>/<script>/<head> nor keeps any line structure: fed a raw
+// airline email it stored 16.6K chars of which the first 15.1K were CSS, with
+// the whole five-leg itinerary then flattened into ONE 1,256-char line (found
+// 2026-09-08 on a real United itinerary). That is noise the parser has to
+// wade through, and bytes every device re-uploads until the body is pruned.
+// Order matters: SOURCE whitespace is collapsed first, so a tag whose
+// attributes wrap across source lines can never be split in half by the line
+// split below; then comments and the non-content elements go; then <br> and
+// closing block tags become line breaks; then the UNCHANGED htmlToPlainText
+// runs over each line -- reusing its entity decoding verbatim rather than a
+// second copy that could drift -- and empty lines are dropped.
+function tripsyIntakeHtmlToText(html) {
+  const flat = String(html || '')
+    .replace(/\s+/g, ' ')
+    .replace(/<!--.*?-->/g, ' ')
+    .replace(/<(style|script|head|title)\b[^>]*>.*?<\/\1\s*>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|li|h[1-6]|table|section|header|footer|blockquote|ul|ol|dd|dt)\s*>/gi, '\n');
+  return flat.split('\n').map(line => htmlToPlainText(line)).filter(Boolean).join('\n');
+}
+
 function parseTravelersList(travelersStr) {
   if (!travelersStr) return [];
   return travelersStr.split(',').map(t => t.trim()).filter(Boolean).map(t => ({
@@ -4665,7 +4689,7 @@ async function fetchTripsyIntakeEmail(messageId) {
   let body = '';
   const htmlData = findHtmlPartData(msg.payload);
   if (htmlData) {
-    body = htmlToPlainText(decodeQuotedPrintableIfNeeded(base64UrlDecodeToUtf8(htmlData)));
+    body = tripsyIntakeHtmlToText(decodeQuotedPrintableIfNeeded(base64UrlDecodeToUtf8(htmlData)));
   } else {
     const textData = findTextPartData(msg.payload) || (msg.payload.body && msg.payload.body.data);
     if (textData) body = decodeQuotedPrintableIfNeeded(base64UrlDecodeToUtf8(textData)).replace(/\s+/g, ' ').trim();
@@ -16931,6 +16955,17 @@ function tripsyProposalEventIsDuplicate(pev, trips) {
       if (!raw || raw.resource !== resource) continue;
       if (String(raw.startsAt || raw.departureAt || '').slice(0, 16) !== newStart) continue;
       if (newEnd && String(raw.endsAt || raw.arrivalAt || '').slice(0, 16) !== newEnd) continue;
+      // A different confirmation number is a different BOOKING, never a
+      // duplicate: two travelers on the same flight under separate reservations
+      // each need the leg in their own trip. Found 2026-09-08 -- Mo's UA2303
+      // (her PNR) was already tracked in her NY trip, so Jon's identical-times
+      // UA2303 from his own confirmation was auto-ignored and never shown. Only
+      // when BOTH sides carry one and they disagree; an absent confirmation on
+      // either side still never counts against identity, so the same
+      // confirmation forwarded twice still dedupes exactly as before.
+      const newConf = tripsyParseIdentValue(f.confirmation);
+      const oldConf = tripsyParseIdentValue(raw.confirmation);
+      if (newConf && oldConf && newConf !== oldConf) continue;
       let differs = false;
       for (const key of ['name', 'company', 'transportNumber', 'category']) {
         const nv = tripsyParseIdentValue(f[key]);

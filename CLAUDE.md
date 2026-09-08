@@ -340,7 +340,14 @@ step 4; git history has it if ever needed.
   direction — a real reservation update was lost that way; dedup is per message-id.) It's split so no
   browser is ever needed: the **app** (on any device, owner only, in
   `runTripsyEmailIntake`/`scanTripsyEmailIntake`, `index.html:2515` area) searches Gmail
-  for those forwards and appends each one's plain-text body to `driveData.tripsyEmailIntake`; the
+  for those forwards and appends each one's plain-text body to `driveData.tripsyEmailIntake` — via
+  **`tripsyIntakeHtmlToText`**, the intake's OWN HTML→text step (2026-09-08): it collapses source
+  whitespace first (so a tag whose attributes wrap across source lines is never split), strips
+  `<style>`/`<script>`/`<head>`/comments, turns `<br>` and closing block tags into line breaks, and
+  runs the UNCHANGED `htmlToPlainText` per line for its entity decoding. The shared helper alone
+  stored 16.6K chars for a real United itinerary, 15.1K of them raw CSS, with all five legs
+  flattened into one 1,256-char line; the two PS parsers pre-clean their own HTML and still call
+  `htmlToPlainText` directly, untouched; the
   **cloud parse routine** (headless — it reads `flight-log-data.json` directly via its Drive
   connector) parses each into
   events and writes them to a separate `tripsy-email-proposals.json` Drive file; the **app** drains
@@ -378,7 +385,14 @@ step 4; git history has it if ever needed.
   category) matching the tracked event; an unspecified field never counts against identity, but a
   specified-and-different one (a new checkout date, a changed flight number) is new information
   and keeps the event reviewable, and no start time means no identity at all. Fails safe — a miss
-  just shows one more proposal. `tripsyAutoIgnoreDuplicateProposals` sweeps every still-pending
+  just shows one more proposal. **A different confirmation number is a different BOOKING, never a
+  duplicate** (found 2026-09-08: two travelers on the same UA2303 under separate PNRs — Mo's leg,
+  already tracked in her NY trip, made Jon's identical-times leg from his OWN confirmation vanish
+  from review, silently): the check skips a tracked event only when BOTH sides carry a
+  `confirmation` and they differ; an absent one on either side still never counts against
+  identity, so the same confirmation forwarded twice still dedupes. Note the sweep is trip-blind
+  by design (it scans every trip), which is exactly why the confirmation is the discriminator
+  that matters. `intaketext_test.js`. `tripsyAutoIgnoreDuplicateProposals` sweeps every still-pending
   proposal event, resolving duplicates exactly as a manual Reject would (`resolution:'rejected'` +
   `autoIgnored:'duplicate'`, same finish bookkeeping when a proposal empties out, one persist per
   sweep, no-op while trips aren't loaded). Three call sites: `syncTripsyRelays` right after
