@@ -261,6 +261,26 @@ step 4; git history has it if ever needed.
   `driveData.tripsyPendingChanges` still exists in the data model but is permanently empty; the
   timeline's pending-overlay plumbing (`getEffectiveTripsyEvent`/`getEffectiveTripsyTrip`,
   `pendingCreates`, `cancelTripsyChange`) is retained but inert-on-empty by construction.
+- **An event can be MOVED to another existing trip** (asked 2026-09-08: "allow the user to
+  re-assign an event to another existing trip"): a ↪️ icon in the timeline row's owner-only
+  Edit/Attach/Delete block (`data-tripsy-move-event`) opens `tripsyMoveEventDialog` — a picker
+  listing every OTHER trip, newest first, same overlay shell/z-index tier as
+  `tripsyConfirmDialog` — and queues a `move_event` change (`tripKey` = source,
+  `targetTripKey`, `eventKey`) through the one `Store.queueTripsyChange` entry point. The
+  `applyTripsyChangeToTrips` branch carries the **very same event object** across (same id,
+  same `tripsyRaw`) — deliberately NOT delete + re-create, which mints a new id and silently
+  detaches everything keyed on the old one (attachments, outfit blocks, the dress guide,
+  itinerary baselines); only which trip's `events[]` holds it changes, and the destination is
+  re-sorted. The source is located by `eventKey` exactly like edit/delete (a stale
+  caller-supplied `tripKey` can't misroute it); an unknown target, or a move onto the trip
+  it's already in, throws rather than losing the event. Post-save, `tripsyReHomeMovedEvent`
+  (in the same best-effort cleanup block as the delete cascade) strips the event from the
+  SOURCE trip's guide/outfits via `tripsyStripDeletedEventFromCaches` — it has genuinely left
+  that trip — and re-points event-scoped attachments' `tripKey` at the destination, since trip
+  cards list docs by `tripKey`; a saved Update page referencing the event is invalidated like
+  an edit would. The destination trip's guide needs nothing: its own fingerprint check flags
+  the newcomer on next open, same as any added event. Existing trips only, by design —
+  creating a trip to move into is the Review Parsed Docs page's job. `moveevent_test.js`.
 - **Deleting an event also cleans it out of the derived caches that reference it by id, not just
   the live trip.** Reported 2026-08-14: "when I delete an event it should also be deleted from
   itinerary, daily dress, schedule, etc." — `applyTripsyChangeToTrips` only ever touched the live

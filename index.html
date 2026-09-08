@@ -2954,14 +2954,17 @@ const Store = {
         if (before && before.length) {
           if (change.type === 'delete_trip') {
             driveData.tripsyUpdatePages = before.filter(p => p.tripKey !== change.tripKey);
-          } else if ((change.type === 'edit_event' || change.type === 'delete_event') && change.source !== 'tripsy_update_page') {
+          } else if ((change.type === 'edit_event' || change.type === 'delete_event' || change.type === 'move_event') && change.source !== 'tripsy_update_page') {
             driveData.tripsyUpdatePages = before.filter(p => !(p.eventKeys || []).includes(change.eventKey));
           }
           touchedUpdatePages = driveData.tripsyUpdatePages.length !== before.length;
         }
         const touchedGuidesOrOutfits = change.type === 'delete_event'
           && tripsyStripDeletedEventFromCaches(change.tripKey, change.eventKey.replace(':', '-'));
-        if (touchedUpdatePages || touchedGuidesOrOutfits) await persistDriveData({ silentConflict: true });
+        // A moved event leaves its SOURCE trip's guide/outfits exactly like a deleted
+        // one, and takes its attached documents with it -- see tripsyReHomeMovedEvent.
+        const touchedByMove = change.type === 'move_event' && tripsyReHomeMovedEvent(change);
+        if (touchedUpdatePages || touchedGuidesOrOutfits || touchedByMove) await persistDriveData({ silentConflict: true });
       } catch (e) {
         console.error('Derived-cache cleanup write failed (non-fatal):', e);
       }
@@ -9897,6 +9900,43 @@ function tripsyConfirmDialog(message, { title = '', yes = 'Yes', no = 'No' } = {
     ov.onclick = e => { if (e.target === ov) done(no === null); };
   });
 }
+// The trip picker behind the timeline's ↪️ Move icon: resolves to the chosen trip's
+// key, or null on Cancel / click-outside. Lists every OTHER existing trip (the
+// event's current trip is excluded -- moving onto it is the no-op the applier
+// refuses anyway), newest first, so the current/upcoming trips an event most
+// plausibly belongs to sit at the top rather than under a wall of 2011 rows.
+// Existing trips only, by design: creating a trip to move into is the Review
+// Parsed Docs page's job. Same overlay shell and z-index tier as
+// tripsyConfirmDialog; nothing on the My Trips timeline opens above it.
+function tripsyMoveEventDialog(currentTripKey, eventSummary) {
+  return new Promise(resolve => {
+    const others = [...(tripsyDecryptedTrips || [])]
+      .filter(t => t.key !== currentTripKey)
+      .sort((a, b) => ((a.start || '') < (b.start || '') ? 1 : ((a.start || '') > (b.start || '') ? -1 : 0)));
+    if (!others.length) { toast('There is no other trip to move this event to.', 'error'); resolve(null); return; }
+    let ov = document.getElementById('tripsy-move-event-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-move-event-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100';
+    const label = t => `${t.name || 'Untitled trip'}${t.start ? ` (${t.start}${t.end && t.end !== t.start ? ` – ${t.end}` : ''})` : ''}`;
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:460px; text-align:center;">
+        <h2 style="margin:0 0 8px; font-size:19px;">Move to another trip</h2>
+        <div style="font-size:14.5px; line-height:1.55; margin-bottom:14px; color:var(--text);">Move <strong>${esc(eventSummary || 'this event')}</strong> to:</div>
+        <select data-move-target style="width:100%; font-size:15px; padding:8px; margin-bottom:20px;">
+          ${others.map(t => `<option value="${esc(t.key)}">${esc(label(t))}</option>`).join('')}
+        </select>
+        <div style="display:flex; gap:10px; justify-content:center;">
+          <button class="btn primary" data-move-yes>Move</button>
+          <button class="btn" data-move-no>Cancel</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; resolve(v); };
+    ov.querySelector('[data-move-yes]').onclick = () => done(ov.querySelector('[data-move-target]').value || null);
+    ov.querySelector('[data-move-no]').onclick = () => done(null);
+    ov.onclick = e => { if (e.target === ov) done(null); };
+  });
+}
 // Celebration when a person's Plan Packing List is completed: offer to compose
 // outfits, then (after composing) offer to view them in that person's Daily Dress
 // Guide. Owner-only path (composition needs the owner's API key).
@@ -13796,6 +13836,29 @@ function tripsyStripDeletedEventFromCaches(tripKey, hyphenBase) {
   return changed;
 }
 
+// The derived-cache bookkeeping for a move_event, run from queueTripsyChange's
+// best-effort post-save cleanup (same block that handles delete_event). Two
+// things, both mechanical, neither needing a Claude call: (1) the event has LEFT
+// its source trip, so that trip's Daily Dress Guide and composed Outfits must
+// drop it exactly as a deletion would -- reuses tripsyStripDeletedEventFromCaches
+// verbatim (the destination trip needs nothing here: its guide's own fingerprint
+// check flags the newcomer as "may be out of date" on next open, same as any
+// added event); (2) any document attached to the event rides along -- event-
+// scoped attachments carry a tripKey alongside their eventKey, and the trip card
+// lists docs by that tripKey, so without re-homing them the files would keep
+// showing under the trip the event just left. Mutates driveData in place and
+// returns whether anything changed, so the caller only writes when needed.
+function tripsyReHomeMovedEvent(change) {
+  let changed = tripsyStripDeletedEventFromCaches(change.tripKey, change.eventKey.replace(':', '-'));
+  for (const a of (driveData.tripsyAttachments || [])) {
+    if (a.scope === 'event' && a.eventKey === change.eventKey && a.tripKey !== change.targetTripKey) {
+      a.tripKey = change.targetTripKey;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 // Applies one plain-data change object -- the exact shape Store.queueTripsyChange
 // has always been handed by every edit/create/delete call site -- directly to
 // tripsyDecryptedTrips, REPLACING the array (and any touched trip) rather than
@@ -13842,6 +13905,24 @@ function applyTripsyChangeToTrips(change) {
     next = trips.filter(t => t.key !== change.tripKey);
   } else if (change.type === 'create_trip') {
     next = sortTrips([...trips, { key: change.tripKey, name: change.name || null, start: change.start || null, end: change.end || null, location: null, events: [] }]);
+  } else if (change.type === 'move_event') {
+    // Re-homes an event under another EXISTING trip. The very same event object
+    // (same id, same tripsyRaw) is carried across -- NOT deleted and re-created --
+    // so every id-keyed reference to it (attachments, outfit blocks, itinerary
+    // baselines) still resolves after the move; only which trip's events[] holds
+    // it changes. The source is located by eventKey exactly like edit/delete
+    // (never trusting a caller-supplied tripKey that may have gone stale), and
+    // moving an event onto the trip it's already in is refused as a no-op error
+    // rather than silently dropping and re-adding it.
+    const si = trips.findIndex(t => (t.events || []).some(ev => tripsyEventKey(ev.tripsyRaw) === change.eventKey));
+    if (si < 0) throw new Error(`event not found: ${change.eventKey}`);
+    const di = trips.findIndex(t => t.key === change.targetTripKey);
+    if (di < 0) throw new Error(`trip not found: ${change.targetTripKey}`);
+    if (si === di) throw new Error(`event is already in trip ${change.targetTripKey}`);
+    const moving = trips[si].events.find(ev => tripsyEventKey(ev.tripsyRaw) === change.eventKey);
+    next = [...trips];
+    next[si] = { ...trips[si], events: trips[si].events.filter(ev => ev !== moving) };
+    next[di] = { ...trips[di], events: sortEvents([...(trips[di].events || []), moving]) };
   } else {
     throw new Error(`unknown change type: ${change.type}`);
   }
@@ -29394,6 +29475,7 @@ async function renderTripsyEventsListImpl() {
         : `${docIconHtml}
             <button class="btn" data-tripsy-edit-event data-key="${esc(eventKey)}" style="font-size:17px; padding:4px 10px;" title="Edit">✏️</button>
             <button class="btn" data-tripsy-attach-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" style="font-size:17px; padding:4px 10px;" title="Attach Doc">📎</button>
+            <button class="btn" data-tripsy-move-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" style="font-size:17px; padding:4px 10px;" title="Move to another trip">↪️</button>
             <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:17px; padding:4px 10px;" title="Delete">🗑️</button>`;
       const actionsHtml = (outfitGlyphHtml || ownerIconsHtml)
         ? `<div style="display:flex; gap:6px; flex-shrink:0;">${outfitGlyphHtml}${ownerIconsHtml}</div>`
@@ -31036,6 +31118,36 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
+  // Move to another EXISTING trip. Same optimistic shape as Delete above: the
+  // in-memory move is applied synchronously inside queueTripsyChange before its
+  // Drive write, so the immediate re-render already shows the event under its
+  // new trip; a failed write rolls the trips back and raises the red badge.
+  container.querySelectorAll("[data-tripsy-move-event]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const summary = btn.dataset.summary;
+      const targetTripKey = await tripsyMoveEventDialog(btn.dataset.tripKey, summary);
+      btn.blur();
+      if (!targetTripKey) return;
+      const target = (tripsyDecryptedTrips || []).find(t => t.key === targetTripKey);
+      btn.disabled = true;
+      const pending = Store.queueTripsyChange({
+        id: crypto.randomUUID(),
+        type: 'move_event',
+        createdAt: new Date().toISOString(),
+        tripKey: btn.dataset.tripKey,
+        tripName: btn.dataset.tripName,
+        targetTripKey,
+        targetTripName: target ? target.name : null,
+        eventKey: btn.dataset.key,
+        eventSummary: summary,
+      });
+      renderTripsyEventsList();
+      updateTripsyPendingWarningBadge();
+      if (!(await pending)) toast("Could not move the event — storage error. Please try again.", "error");
+      else toast(`Moved "${summary}" to ${target ? target.name : 'the selected trip'}.`);
+    });
+  });
+
   // Re-derives the event's CURRENT effective raw fields from the decrypted
   // snapshot + pending queue on click rather than trusting the closure over
   // `trips`, so the form always reflects the latest state even if something
@@ -31155,6 +31267,7 @@ const TRIPSY_PENDING_CHANGE_LABEL = {
   edit_event: '✏️ Edit',
   edit_trip: '✏️ Edit trip',
   delete_event: '🗑️ Delete event',
+  move_event: '↪️ Move to trip',
   delete_trip: '🗑️ Delete trip',
   create_event: '➕ New item',
   create_trip: '➕ New trip',
