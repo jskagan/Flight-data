@@ -3513,17 +3513,30 @@ const Store = {
           throw e;
         }
       }
+      // The cluster may span several proposals (an outbound and a return flight
+      // that arrived as two emails): each entry names its own proposalId, with
+      // the top-level `proposalId` kept only as a fallback for the old
+      // single-proposal shape. Resolve each event inside its own proposal and
+      // finish any proposal left with nothing pending -- one write for all.
+      const byProposal = new Map();
+      for (const ec of eventChanges) {
+        const pid = ec.proposalId || proposalId;
+        if (!byProposal.has(pid)) byProposal.set(pid, []);
+        byProposal.get(pid).push(ec);
+      }
       for (let attempt = 0; ; attempt++) {
-        const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
-        if (!proposal) break; // resolved elsewhere -- the trips write already saved
-        for (const { eventId, patch } of eventChanges) {
-          const event = proposal.events.find(e => e.id === eventId);
-          if (event) Object.assign(event, patch);
-        }
-        if (proposal.events.every(e => e.resolution !== 'pending')) {
-          const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
-          if (a) a.parseStatus = 'done';
-          driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== proposalId);
+        for (const [pid, changes] of byProposal) {
+          const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === pid);
+          if (!proposal) continue; // resolved elsewhere -- the trips write already saved
+          for (const { eventId, patch } of changes) {
+            const event = proposal.events.find(e => e.id === eventId);
+            if (event) Object.assign(event, patch);
+          }
+          if (proposal.events.every(e => e.resolution !== 'pending')) {
+            const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
+            if (a) a.parseStatus = 'done';
+            driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== pid);
+          }
         }
         try { await persistDriveData({ silentConflict: true }); break; }
         catch (e) {
@@ -9935,6 +9948,57 @@ function tripsyMoveEventDialog(currentTripKey, eventSummary) {
     ov.querySelector('[data-move-yes]').onclick = () => done(ov.querySelector('[data-move-target]').value || null);
     ov.querySelector('[data-move-no]').onclick = () => done(null);
     ov.onclick = e => { if (e.target === ov) done(null); };
+  });
+}
+// The "Create a new trip" dialog behind the review page's per-event Import:
+// name + start + end, resolving to {name, start, end} or null on Cancel /
+// click-outside. Replaces a bare prompt() that asked for only a NAME and then
+// silently made the trip a single day (the event's own) -- which the NEXT
+// event's destination dropdown, being date-matched, couldn't see, so a
+// two-flight booking ended up as two one-day trips (reported 2026-09-08).
+// Defaults come from the event itself (a hotel's check-in/out, a flight's
+// departure/arrival day), so the usual case is just confirming. An end before
+// the start is swapped rather than refused; a missing end becomes the start.
+// Same overlay shell and z-index tier as tripsyMoveEventDialog.
+function tripsyNewTripDialog({ name = 'New Trip', start = '', end = '' } = {}) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-new-trip-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-new-trip-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100';
+    const field = 'width:100%; font-size:15px; padding:8px; margin-top:4px; box-sizing:border-box;';
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:460px;">
+        <h2 style="margin:0 0 12px; font-size:19px; text-align:center;">Create a new trip</h2>
+        <label style="display:block; font-size:12px; color:var(--muted);">Trip name</label>
+        <input type="text" data-newtrip-name value="${esc(name)}" class="field-input" style="${field} margin-bottom:12px;">
+        <div style="display:flex; gap:12px;">
+          <div style="flex:1;"><label style="display:block; font-size:12px; color:var(--muted);">Start</label>
+            <input type="date" data-newtrip-start value="${esc(start)}" class="field-input" style="${field}"></div>
+          <div style="flex:1;"><label style="display:block; font-size:12px; color:var(--muted);">End</label>
+            <input type="date" data-newtrip-end value="${esc(end)}" class="field-input" style="${field}"></div>
+        </div>
+        <div data-newtrip-error style="color:var(--red, #c0392b); font-size:12px; min-height:16px; margin-top:8px;"></div>
+        <div style="display:flex; gap:10px; justify-content:center; margin-top:12px;">
+          <button class="btn primary" data-newtrip-yes>Create</button>
+          <button class="btn" data-newtrip-no>Cancel</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; resolve(v); };
+    ov.querySelector('[data-newtrip-yes]').onclick = () => {
+      const err = ov.querySelector('[data-newtrip-error]');
+      const nm = ov.querySelector('[data-newtrip-name]').value.trim();
+      let s = ov.querySelector('[data-newtrip-start]').value, e = ov.querySelector('[data-newtrip-end]').value;
+      if (!nm) { err.textContent = 'Enter a name for the trip.'; return; }
+      if (!s && !e) { err.textContent = 'Enter at least a start date.'; return; }
+      if (!s) s = e;
+      if (!e) e = s;
+      if (e < s) [s, e] = [e, s];
+      done({ name: nm, start: s, end: e });
+    };
+    ov.querySelector('[data-newtrip-no]').onclick = () => done(null);
+    ov.onclick = e => { if (e.target === ov) done(null); };
+    setTimeout(() => { const n = ov.querySelector('[data-newtrip-name]'); if (n) { n.focus(); n.select(); } }, 0);
   });
 }
 // Celebration when a person's Plan Packing List is completed: offer to compose
@@ -17231,6 +17295,60 @@ function tripsyParseFindCluster(unmatchedPendingEvents) {
   const spanDays = (new Date(dayKeys[dayKeys.length - 1]) - new Date(dayKeys[0])) / 86400000;
   if (spanDays > TRIPSY_PARSE_CLUSTER_MAX_SPAN_DAYS) return null;
   return { eventIds: unmatchedPendingEvents.map(e => e.id), start: dayKeys[0], end: dayKeys[dayKeys.length - 1] };
+}
+
+// The destination-trip <select> options for one proposed event, shared by the
+// review card's first render and tripsyRefreshTripSelect (after a Modify
+// changes the date) so the two can never disagree. Date-MATCHED trips come
+// first and the first of them is the default -- unchanged -- but every OTHER
+// trip is offered too, under an "Other trips" group (newest first, with dates,
+// since out-of-range trips need disambiguating): before this the list held
+// ONLY date-matched trips, so a trip just created from the previous event as
+// a single day could not be picked for the next event, whose date fell outside
+// that range (reported 2026-09-08). `selected` is stamped explicitly -- with
+// the extra group present, the browser's "first option" default would land on
+// an unrelated trip whenever nothing matches.
+function tripsyParseTripOptionsHtml(dayKey, trips) {
+  const all = trips || [];
+  const matches = tripsyParseMatchTrips(dayKey, all);
+  const matched = new Set(matches.map(t => t.key));
+  const others = all.filter(t => !matched.has(t.key))
+    .sort((a, b) => ((a.start || '') < (b.start || '') ? 1 : ((a.start || '') > (b.start || '') ? -1 : 0)));
+  const opt = (t, sel, withDates) =>
+    `<option value="${esc(t.key)}"${sel ? ' selected' : ''}>${esc(t.name || 'Untitled trip')}${withDates && t.start ? ` (${esc(formatTripDateRange(t.start, t.end || t.start))})` : ''}</option>`;
+  return [
+    ...matches.map((t, i) => opt(t, i === 0, false)),
+    `<option value="__new__"${matches.length ? '' : ' selected'}>➕ Create a new trip</option>`,
+    others.length ? `<optgroup label="Other trips">${others.map(t => opt(t, false, true)).join('')}</optgroup>` : '',
+  ].join('');
+}
+
+// Page-level clusters of still-unmatched pending events, ACROSS every
+// proposal: tripsyParseFindCluster's rule (2+ dated events within
+// TRIPSY_PARSE_CLUSTER_MAX_SPAN_DAYS) applied as a greedy walk over the events
+// sorted by day, starting a new cluster whenever the next event falls more
+// than the span past the current cluster's first day -- so two unrelated
+// future trips don't cancel each other's offer the way one all-or-nothing
+// span check would. Before this, clustering ran PER PROPOSAL, so an outbound
+// and a return flight that arrived as two separate emails never clustered and
+// each fell to the one-event "create a new trip" path (reported 2026-09-08).
+// Input/entries are {proposal, event}; each cluster is {events, start, end}.
+// Undated events are skipped (they can't place a trip); a lone event is not
+// offered -- that's what the per-event dropdown is for.
+function tripsyParseFindClusters(unmatched) {
+  const dated = (unmatched || [])
+    .map(x => ({ ...x, day: tripsyDayKey(x.event.fields.startsAt || x.event.fields.departureAt) }))
+    .filter(x => x.day)
+    .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+  const clusters = [];
+  let cur = null;
+  for (const x of dated) {
+    const spanDays = cur ? (new Date(x.day) - new Date(cur.start)) / 86400000 : 0;
+    if (!cur || spanDays > TRIPSY_PARSE_CLUSTER_MAX_SPAN_DAYS) { cur = { events: [], start: x.day, end: x.day }; clusters.push(cur); }
+    cur.events.push({ proposal: x.proposal, event: x.event });
+    cur.end = x.day;
+  }
+  return clusters.filter(c => c.events.length >= 2);
 }
 
 // Per-category dot color/icon for the timeline -- a new, small palette
@@ -31657,15 +31775,19 @@ async function tripsyParseImportProposalEvent(proposal, event, destinationValue,
   const fields = { ...(fieldsOverride || event.fields) };
   let tripKey, tripName, tripsyTripId, newTripChange;
   if (destinationValue === '__new__') {
-    const name = prompt('Name for the new trip:', event.eventSummary || 'New Trip');
-    if (!name || !name.trim()) return false;
-    const dayKey = tripsyDayKey(fields.startsAt || fields.departureAt) || new Date().toISOString().slice(0, 10);
+    // Asks for name AND dates (see tripsyNewTripDialog), defaulting the range
+    // to the event's own span -- a hotel's check-in/out, a flight's
+    // departure/arrival day -- instead of hardcoding a single day.
+    const startDay = tripsyDayKey(fields.startsAt || fields.departureAt) || new Date().toISOString().slice(0, 10);
+    const endDayRaw = tripsyDayKey(fields.endsAt || fields.arrivalAt) || startDay;
+    const picked = await tripsyNewTripDialog({ name: event.eventSummary || 'New Trip', start: startDay, end: endDayRaw >= startDay ? endDayRaw : startDay });
+    if (!picked) return false;
     tripKey = `tripsy-pending-${crypto.randomUUID().slice(0, 8)}`;
-    tripName = name.trim();
+    tripName = picked.name;
     tripsyTripId = null;
     newTripChange = {
       id: crypto.randomUUID(), type: 'create_trip', createdAt: new Date().toISOString(),
-      tripKey, name: tripName, start: dayKey, end: dayKey,
+      tripKey, name: tripName, start: picked.start, end: picked.end,
     };
   } else {
     const trip = tripsyDecryptedTrips.find(t => t.key === destinationValue);
@@ -31781,10 +31903,7 @@ function tripsyRefreshTripSelect(ctx) {
   const day = tripsyDayKey(ns) || tripsyDayKey(ne);
   const matches = day ? tripsyParseMatchTrips(day, tripsyDecryptedTrips) : [];
   const prev = select.value;
-  select.innerHTML = [
-    ...matches.map(t => `<option value="${esc(t.key)}">${esc(t.name)}</option>`),
-    `<option value="__new__">➕ Create a new trip</option>`,
-  ].join('');
+  select.innerHTML = tripsyParseTripOptionsHtml(day, tripsyDecryptedTrips);
   if (prev && [...select.options].some(o => o.value === prev)) select.value = prev;
   else if (matches.length) select.value = matches[0].key;
   else select.value = '__new__';
@@ -32082,10 +32201,7 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
   const eventRowHtml = ev => {
     const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
     const matches = tripsyParseMatchTrips(dayKey, tripsyDecryptedTrips);
-    const selectOptions = [
-      ...matches.map(t => `<option value="${esc(t.key)}">${esc(t.name)}</option>`),
-      `<option value="__new__">➕ Create a new trip</option>`,
-    ].join('');
+    const selectOptions = tripsyParseTripOptionsHtml(dayKey, tripsyDecryptedTrips);
     const destTrip = matches[0] || null;
     const conflicts = destTrip ? tripsyParseFindConflicts(ev, destTrip, pendingChanges) : [];
     // A proposed event with no date at all is itself a potential conflict (it
@@ -32111,9 +32227,9 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
     `;
   };
 
-  const clusterCandidates = pendingEvents.filter(ev => !tripsyParseMatchTrips(tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt), tripsyDecryptedTrips).length);
-  const cluster = tripsyParseFindCluster(clusterCandidates);
-
+  // The "create a new trip for these" offer is no longer per card -- it's
+  // computed across every proposal and rendered once at the top of the page
+  // by renderTripsyParseReview (see tripsyParseFindClusters).
   return `
     <div class="card" style="margin-bottom:16px;">
       <div style="font-family:var(--mono); font-size:15px; font-weight:700; color:var(--amber);">${esc(proposal.sourceFileName)}</div>
@@ -32122,16 +32238,6 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
         <div style="font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:12px;">${dayKey === 'undated' ? 'Undated' : esc(tripsyDayHeaderLabel(dayKey))}</div>
         ${byDay.get(dayKey).map(eventRowHtml).join('')}
       `).join('')}
-      ${cluster ? `
-        <div data-parse-cluster-box data-proposal-id="${esc(proposal.id)}" data-event-ids="${esc(cluster.eventIds.join(','))}" style="margin-top:16px; padding:10px 12px; border:1px solid var(--home-green); border-radius:6px;">
-          <div style="font-size:13px; color:var(--home-green); font-weight:700;">These ${cluster.eventIds.length} events (${esc(formatTripDateRange(cluster.start, cluster.end))}) don't match any existing trip — create a new trip for them?</div>
-          <input type="text" data-parse-cluster-name value="${esc(proposal.sourceFileName.replace(/\.[a-z0-9]+$/i, ''))}" class="field-input" style="margin-top:8px; max-width:320px;">
-          <div style="margin-top:8px; display:flex; gap:8px;">
-            <button class="btn primary" data-parse-cluster-accept style="font-size:12px; padding:5px 12px;">Create trip for these ${cluster.eventIds.length} events</button>
-            <button class="btn" data-parse-cluster-dismiss style="font-size:12px; padding:5px 12px;">No thanks</button>
-          </div>
-        </div>
-      ` : ''}
     </div>
   `;
 }
@@ -32174,7 +32280,36 @@ async function renderTripsyParseReview() {
   // see tripsyParseFindConflicts.
   const pendingChanges = await Store.listTripsyPendingChanges();
 
-  container.innerHTML = proposals.map(p => tripsyParseReviewCardHtml(p, pendingChanges)).join('');
+  // "Create a new trip for these" offers, computed across EVERY proposal's
+  // still-unmatched pending events (tripsyParseFindClusters) and rendered once,
+  // above the cards -- the headline action whenever one exists. Each box carries
+  // its events as "<proposalId>:<eventId>" refs, since a cluster can span
+  // proposals (an outbound and a return flight from two emails). The default
+  // name comes from the first event's source, as the old per-card box did.
+  const unmatched = [];
+  for (const p of proposals) {
+    for (const ev of p.events) {
+      if (ev.resolution !== 'pending') continue;
+      if (tripsyParseMatchTrips(tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt), trips).length) continue;
+      unmatched.push({ proposal: p, event: ev });
+    }
+  }
+  const clusters = tripsyParseFindClusters(unmatched);
+  const clusterHtml = clusters.map(c => {
+    const refs = c.events.map(x => `${x.proposal.id}:${x.event.id}`).join(',');
+    const defaultName = String(c.events[0].proposal.sourceFileName || 'New Trip').replace(/\.[a-z0-9]+$/i, '');
+    return `
+      <div class="card" data-parse-cluster-box data-event-refs="${esc(refs)}" style="margin-bottom:16px; border:1px solid var(--home-green);">
+        <div style="font-size:13px; color:var(--home-green); font-weight:700;">These ${c.events.length} events (${esc(formatTripDateRange(c.start, c.end))}) don't match any existing trip — create a new trip for them?</div>
+        <div style="font-size:12px; color:var(--muted); margin-top:4px;">${c.events.map(x => esc(x.event.eventSummary)).join(' · ')}</div>
+        <input type="text" data-parse-cluster-name value="${esc(defaultName)}" class="field-input" style="margin-top:8px; max-width:320px;">
+        <div style="margin-top:8px; display:flex; gap:8px;">
+          <button class="btn primary" data-parse-cluster-accept style="font-size:12px; padding:5px 12px;">Create trip for these ${c.events.length} events</button>
+          <button class="btn" data-parse-cluster-dismiss style="font-size:12px; padding:5px 12px;">No thanks</button>
+        </div>
+      </div>`;
+  }).join('');
+  container.innerHTML = clusterHtml + proposals.map(p => tripsyParseReviewCardHtml(p, pendingChanges)).join('');
 
   // Every action below follows the same shape: mutate, then re-render this
   // whole page fresh (matches how the rest of the Tripsy Trips code
@@ -32296,13 +32431,18 @@ async function renderTripsyParseReview() {
   container.querySelectorAll("[data-parse-cluster-accept]").forEach(btn => {
     btn.addEventListener("click", async () => {
       const box = btn.closest("[data-parse-cluster-box]");
-      const proposalId = box.dataset.proposalId;
-      const eventIds = box.dataset.eventIds.split(',');
-      const proposal = proposals.find(p => p.id === proposalId);
       const name = box.querySelector("[data-parse-cluster-name]").value.trim();
       if (!name) { toast("Enter a name for the new trip.", "error"); return; }
-      const clusterEvents = eventIds.map(id => proposal.events.find(e => e.id === id)).filter(Boolean);
-      const dayKeys = clusterEvents.map(e => tripsyDayKey(e.fields.startsAt || e.fields.departureAt)).filter(Boolean).sort();
+      // Each ref is "<proposalId>:<eventId>" -- the cluster can span proposals.
+      // Both ids are UUIDs, so the first colon is the separator.
+      const clusterEvents = box.dataset.eventRefs.split(',').map(ref => {
+        const i = ref.indexOf(':');
+        const proposal = proposals.find(p => p.id === ref.slice(0, i));
+        const event = proposal && proposal.events.find(e => e.id === ref.slice(i + 1));
+        return event ? { proposal, event } : null;
+      }).filter(Boolean);
+      const dayKeys = clusterEvents.map(x => tripsyDayKey(x.event.fields.startsAt || x.event.fields.departureAt)).filter(Boolean).sort();
+      if (!dayKeys.length) { toast("Those events have no dates to build a trip from.", "error"); return; }
       btn.disabled = true;
       // Built in memory and sent as ONE write (Store.acceptTripsyParseProposalCluster)
       // instead of 1 (create_trip) + N (create_event) + 1 (resolve) + up to 2
@@ -32313,12 +32453,13 @@ async function renderTripsyParseReview() {
         id: crypto.randomUUID(), type: 'create_trip', createdAt: new Date().toISOString(),
         tripKey, name, start: dayKeys[0], end: dayKeys[dayKeys.length - 1],
       };
-      const eventChanges = await Promise.all(clusterEvents.map(async ev => {
+      const eventChanges = await Promise.all(clusterEvents.map(async ({ proposal, event: ev }) => {
         const changeId = crypto.randomUUID();
         // Copy so geocoding adds coords to the change, not the stored proposal.
         const fields = { ...ev.fields };
         await tripsyAddCoordsToActivityFields(ev.tripsyResource, fields);
         return {
+          proposalId: proposal.id,
           eventId: ev.id,
           change: {
             id: changeId, type: 'create_event', createdAt: new Date().toISOString(),
@@ -32328,7 +32469,7 @@ async function renderTripsyParseReview() {
           patch: { resolution: 'accepted', resolvedAt: new Date().toISOString(), destinationTripKey: tripKey, appliedChangeId: changeId },
         };
       }));
-      const ok = await Store.acceptTripsyParseProposalCluster({ tripChange, eventChanges, proposalId });
+      const ok = await Store.acceptTripsyParseProposalCluster({ tripChange, eventChanges });
       if (!ok) { toast("Could not create the new trip — storage error. Please try again.", "error"); btn.disabled = false; return; }
       toast(`Created "${name}" with ${eventChanges.length} event${eventChanges.length === 1 ? '' : 's'}.`);
       await afterImport();

@@ -387,6 +387,30 @@ step 4; git history has it if ever needed.
   flashes a badge), `runTripsyLocalParse` after staging (subtracting from the toast count so
   hidden duplicates aren't announced), and the top of `renderTripsyParseReview` as the last line
   of defense before anything renders.
+- **Review Parsed Docs: creating a trip asks for DATES, any trip is pickable, and clusters span
+  proposals** (reported 2026-09-08: "Create a new trip only lets me pick a name, not the dates, and
+  I cannot add later flights imported at the same time to that trip"). One gap, two compounding
+  symptoms: the per-event import used a bare `prompt()` for a NAME and hardcoded the trip to a
+  single day (the event's own), and each card's destination dropdown offered ONLY date-matched
+  trips (`tripsyParseMatchTrips`), so the just-created one-day trip was invisible to the return
+  flight days later — a two-flight booking became two one-day trips. Fixed three ways: **(1)**
+  `tripsyNewTripDialog` (name + start + end, defaulting to the event's own span — a hotel's
+  check-in/out, a flight's departure/arrival day; a missing end becomes the start, end-before-start
+  is swapped) replaces the prompt in `tripsyParseImportProposalEvent`, and the `create_trip` change
+  carries the picked dates. **(2)** `tripsyParseTripOptionsHtml` — ONE builder shared by the card's
+  first render and `tripsyRefreshTripSelect` — keeps date-matched trips first (still the default)
+  but offers every other trip under an "Other trips" `<optgroup>` (newest first, with dates);
+  `selected` is stamped explicitly, since with the group present the browser's first-option default
+  would otherwise land on an unrelated trip when nothing matches. **(3)** the "create a new trip for
+  these N events" offer now runs ACROSS proposals: `tripsyParseFindClusters` applies the existing
+  2+-events-within-45-days rule as a greedy day-sorted walk over every proposal's unmatched pending
+  events (a new cluster starts when the next event is >45 days past the current cluster's first day,
+  so two unrelated future trips get two offers instead of one span check cancelling both), rendered
+  ONCE above the cards with `data-event-refs="<proposalId>:<eventId>,…"`; the accept resolves each
+  event inside its own proposal, and `Store.acceptTripsyParseProposalCluster` groups its
+  `eventChanges` by their per-entry `proposalId` (top-level `proposalId` kept only as a fallback),
+  finishing any proposal left with nothing pending — still one write. The old per-card
+  `tripsyParseFindCluster` is kept but unused by the page. `newtripdates_test.js`.
 - **The consolidated top-right status badge** (`tripsy-status-badge`;
   `computeTripsyStatus`/`updateTripsyStatusBadge`/`renderTripsyStatusPanel`) is a single indicator
   with three prioritized states: **red 🛑** = a Drive write genuinely failed (in-memory
