@@ -14704,6 +14704,28 @@ function matchPsReservationToTripsyFlight(res, ev, maxDayDrift = 0, ignoreFlight
   const isDeparture = res.origin === 'LAX' || res.departureAirport === 'LAX';
   const isArrival = res.destination === 'LAX' || res.arrivalAirport === 'LAX';
 
+  if (ignoreFlightNumber) {
+    // Tier 3 (see findMatchingTripsyPsReservation) drops the flight-number
+    // constraint entirely, so the EVENT's own airports must corroborate the
+    // match instead: P/S is a terminal at LAX, so the event's matching side
+    // has to actually BE Los Angeles. Found in production 2026-09-10: an
+    // LHR→LAX arrival reservation (UA935, Nov 24) also matched that same
+    // day's Düsseldorf→London positioning leg — which lands at Heathrow,
+    // not LAX — planting a spurious second P/S card at that flight's own
+    // 1:05 PM arrival time. The airports come from the raw
+    // departure/arrivalDescription, falling back to the summary's
+    // "Flight from X to Y" halves; an event that names NEITHER side keeps
+    // the old behavior rather than becoming unmatchable, since tier 3
+    // exists precisely for records whose details have drifted.
+    const raw = ev.tripsyRaw || {};
+    const summaryRoute = String(ev.summary || '').match(/from\s+(.+?)\s+to\s+(.+?)(?:\s+•|$)/i);
+    const depText = String(raw.departureDescription || (summaryRoute ? summaryRoute[1] : ''));
+    const arrText = String(raw.arrivalDescription || (summaryRoute ? summaryRoute[2] : ''));
+    const mentionsLax = s => /\bLAX\b|Los Angeles/i.test(s);
+    if (isDeparture && depText && !mentionsLax(depText)) return null;
+    if (isArrival && arrText && !mentionsLax(arrText)) return null;
+  }
+
   if (isDeparture && withinDrift(startParts)) return 'before';
   if (isArrival && withinDrift(endParts)) return 'after';
   if (!isDeparture && !isArrival) {

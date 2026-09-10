@@ -556,6 +556,21 @@ step 4; git history has it if ever needed.
   (`syncTripsyRelays` — its own in-flight guard makes an early poll a cheap no-op) so results drain
   and the badge flips with no further taps. The marker is set ONLY on the worker's `res.ok` branch —
   a failed fire must not claim a run is underway.
+- **P/S reservation cards match trip flights in three tiers, and the number-blind tier must
+  corroborate airports** (`findMatchingTripsyPsReservation`/`matchPsReservationToTripsyFlight`,
+  `TRIPSY_PS_MATCH_DAY_DRIFT`): tier 1 exact flight number + exact date, tier 2 exact number +
+  ±3-day drift (schedule moved), tier 3 number ignored entirely + exact date (airline re-issued
+  the flight under a new number — a real production case, AA137 against a reservation reading
+  "135"). Found 2026-09-10 ("why is there a P/S reservation for 1:05 PM on 11/24?"): tier 3
+  checked the date and which side of the RESERVATION is LAX, but never the EVENT's airports — so
+  an LHR→LAX arrival reservation (UA935) also matched the same day's Düsseldorf→London
+  positioning leg, planting a spurious second P/S card at that flight's own 1:05 PM arrival
+  (`tripsyPsReservationTimeLabel` prefers the flight's time on a drifted match). Tier 3 now
+  requires the event's matching side to actually be Los Angeles (`departureDescription`/
+  `arrivalDescription`, falling back to the summary's "Flight from X to Y" halves); an event
+  naming NEITHER side keeps the lenient old behavior, since tier 3 exists precisely for drifted
+  records. Tiers 1–2 are untouched — an exact flight number already pins the right leg.
+  `pswrongflight_test.js`.
 - **Categories**: flight / transportation / hotel / dining / concert / tour / spa / reception /
   cooking / other — each event's display `type`, derived from its `tripsyRaw.category` slug
   (`TRIPSY_ACTIVITY_CATEGORY_TO_TYPE`, mirrored in `tools/build_tripsy_snapshot.py`), including the
