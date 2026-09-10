@@ -98,6 +98,32 @@ prune rule here at the same time.
 There is no server — auth and API calls happen entirely client-side via Google Identity Services
 (OAuth token client) and the Drive/Gmail REST APIs.
 
+**Finding the data file is deterministic and blip-proof — never weaken this** (incident, found
+2026-09-10 while chasing an unlabeled email: THREE duplicate `flight-log-data.json` files appeared
+2026-08-18→08-24 and the app silently migrated onto the newest 54KB one, stranding the original
+520KB file — wardrobe, invoices, attire guides, outfits, laundry history, favorites, the Places
+key — and this, not anything P/S-specific, was 08-18's "why did my P/S reservations disappear").
+Two weaknesses compounded: Drive's `files.list` name search rides an **eventually-consistent
+search index** that can transiently return 200-with-zero-results for a file that exists, and
+`completeSignIn`'s owner path CREATED a fresh file on any empty result; then with several
+same-named files, `files[0]` of an unordered search is Drive's relevance ranking, which favored
+the newest. Three defenses in `findDriveDataFile`/`completeSignIn` (`dupedatafile_test.js`): the
+last-known file id is cached per device (`DRIVE_DATA_FILE_ID_KEY`) and verified by a **direct
+`files.get` first** (id lookups don't touch the search index); when the search does run, matches
+sort by `createdTime` and the **OLDEST wins** (the original is by definition the oldest, so every
+device converges on it no matter how many stray copies exist); and the owner create path
+re-confirms an empty result after a 3s delay — only two agreeing empty answers create. **The
+repair lives IN THE APP and self-heals any recurrence**: when the search finds several same-named
+files, `completeSignIn` (owner-only, before the data loads) runs `repairDriveDataDuplicates` —
+download every copy, merge via `tripsyMergeDataCopies` (oldest copy is the base since it holds
+what a fresh copy can never rebuild — wardrobe, attire, invoices, keys; newest overlays it —
+Gmail-derived arrays re-sync as supersets; intake unions by id newest-wins; attachments union on
+`sourceEmailId`+`fileName` since Gmail attachment ids are per-fetch tokens re-minted per rescan,
+preferring an already-parsed entry over a pending twin so nothing re-parses; plain-object caches
+merge per key newest-wins; stranded mid-copy proposals are NOT resurrected), write the result
+into the OLDEST file, trash the rest. Validated against the four real incident files: the in-app
+merge reproduced the hand-built merge exactly.
+
 **Auth model** (`index.html:15075`-`15227` area): a single hardcoded `OWNER_EMAIL` gets
 read/write access (upload, edit, delete, sync); anyone else who signs in with a Google account the
 owner has shared the Drive file with gets read-only access. This is enforced both at the UI level
@@ -448,6 +474,21 @@ step 4; git history has it if ever needed.
   `eventChanges` by their per-entry `proposalId` (top-level `proposalId` kept only as a fallback),
   finishing any proposal left with nothing pending — still one write. The old per-card
   `tripsyParseFindCluster` is kept but unused by the page. `newtripdates_test.js`.
+- **Every row-ENDING action on the review page is optimistic — the conflict box's Import and
+  Delete Existing Event were the last two holdouts** ("when I delete the existing event there is a
+  delay," 2026-09-10): both awaited their writes in the foreground — two full-file Drive PATCHes
+  at ~2.5s each (trips data, then proposal bookkeeping) plus a geocode for a new activity — with
+  only a disabled button to look at, while Ignore, the modify dialog's Add/Drop, and the
+  non-conflict Import already cleared instantly. Both now go through one shared
+  `finishRowOptimistically` in `wireTripsyConflictUi` (hide the row + toast immediately, writes in
+  the serialized `_tripsyParseImportChain`, reconcile via `afterImport` only once every queued
+  action settles, row + button restored with an error toast on failure — the exact shape the
+  Ignore handler and the non-conflict Import already use). Delete + import still land in ONE
+  combined write (`deleteExistingChange` passed through). The one exception, on both buttons:
+  destination "Create a new trip" (`__new__`) stays BLOCKING, because
+  `tripsyParseImportProposalEvent` opens the name/dates dialog — which must not appear after the
+  row already vanished (the same documented exception the non-conflict Import makes).
+  `conflictdeletefast_test.js`.
 - **The consolidated top-right status badge** (`tripsy-status-badge`;
   `computeTripsyStatus`/`updateTripsyStatusBadge`/`renderTripsyStatusPanel`) is a single indicator
   with three prioritized states: **red 🛑** = a Drive write genuinely failed (in-memory

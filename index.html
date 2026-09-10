@@ -2002,11 +2002,146 @@ async function authWorkerRevoke() {
   clearDeviceId();
 }
 
+// Finding the data file must be DETERMINISTIC and immune to search-index blips.
+// Incident, found 2026-09-10: between 2026-08-18 and 2026-08-24 THREE duplicate
+// flight-log-data.json files appeared, and the app silently migrated onto the
+// newest (54KB) one -- stranding the original 520KB file (wardrobe, invoices,
+// attire guides, outfits, laundry history, favorites, the Places key) and
+// explaining the 2026-08-18 "why did my P/S reservations disappear" report. Two
+// weaknesses compounded: the name search (Drive's eventually-consistent search
+// index, which can transiently return 200-with-zero-results for files that
+// exist) fed completeSignIn's owner path, which CREATED a fresh file on any
+// empty result; and with several files sharing the name, `files[0]` of an
+// unordered search is whatever Drive's relevance ranking felt like, which
+// favored the newest. Three defenses now: (1) the last-known file ID is cached
+// per device and verified by a DIRECT files.get first -- a lookup by id does
+// not depend on the search index at all; (2) when the search does run, matches
+// are sorted by createdTime and the OLDEST wins -- the original file is by
+// definition the oldest, so every device converges on it no matter how many
+// stray copies exist; (3) completeSignIn re-confirms an empty result after a
+// delay before ever creating (see its owner branch).
+const DRIVE_DATA_FILE_ID_KEY = 'flightlog_drive_data_file_id';
+function loadKnownDataFileId() {
+  try { return localStorage.getItem(DRIVE_DATA_FILE_ID_KEY); } catch (e) { return null; }
+}
+function saveKnownDataFileId(id) {
+  try { if (id) localStorage.setItem(DRIVE_DATA_FILE_ID_KEY, id); } catch (e) { /* ignore */ }
+}
 async function findDriveDataFile() {
+  const known = loadKnownDataFileId();
+  if (known) {
+    try {
+      const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(known)}?fields=id,name,trashed`);
+      const f = await res.json();
+      if (f && f.id && !f.trashed && f.name === DRIVE_DATA_FILENAME) return f.id;
+    } catch (e) {
+      // 404 (file deleted) or a transient failure -- fall through to the search.
+      console.warn('Known data-file id did not verify; falling back to the name search:', e && e.message);
+    }
+  }
   const q = encodeURIComponent(`name='${DRIVE_DATA_FILENAME}' and trashed=false`);
-  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&spaces=drive`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime)&spaces=drive`);
   const json = await res.json();
-  return (json.files && json.files.length) ? json.files[0].id : null;
+  const files = (json.files || []).slice().sort((a, b) => (String(a.createdTime || '') < String(b.createdTime || '') ? -1 : 1));
+  if (files.length > 1) console.warn(`Found ${files.length} files named ${DRIVE_DATA_FILENAME} -- using the oldest (created ${files[0].createdTime}).`);
+  // Stash any duplicates for completeSignIn's owner-only repair step -- the
+  // oldest is still returned either way, so a viewer (or a failed repair)
+  // simply reads the original.
+  _driveDataDuplicateFiles = files.length > 1 ? files : [];
+  if (!files.length) return null;
+  saveKnownDataFileId(files[0].id);
+  return files[0].id;
+}
+let _driveDataDuplicateFiles = [];
+
+// Merges the parsed contents of every same-named data-file copy (oldest first)
+// into one document -- the recovery for the 2026-08→09 duplicate incident, kept
+// in the app so any recurrence heals itself on the owner's next sign-in. The
+// rules, validated against the four real incident files: the OLDEST copy is the
+// base (it holds everything a fresh copy can never rebuild -- wardrobe, attire
+// guides, outfits, laundry history, favorites, packing cubes, API keys) and the
+// NEWEST overlays it (its Gmail-derived reservations/psBalance re-sync from a
+// full fresh scan, so they're supersets; its sync state and newer features'
+// data are current). Then the special cases: invoices only ever enter by hand,
+// so a newest copy that has none keeps the base's (and its report, which
+// derives from them); email-intake entries union by id, newest copy winning;
+// attachments union on their STABLE identity -- (sourceEmailId, fileName) for
+// email-scoped ones, since Gmail attachment ids are per-fetch tokens re-minted
+// by every copy's own rescan, own id for manual trip/event ones -- preferring
+// an already-parsed entry over a pending twin so nothing already processed is
+// re-parsed; plain-object caches (narrative, overrides, weather, sync stamps)
+// merge per key with the newest winning. Middle copies contribute only their
+// intake/attachments -- everything else in them was a partial rebuild of what
+// the base already holds.
+function tripsyMergeDataCopies(copies) {
+  const oldest = copies[0] || {};
+  const newest = copies[copies.length - 1] || {};
+  const merged = { ...oldest, ...newest };
+  for (const k of Object.keys(merged)) {
+    const o = oldest[k], n = newest[k];
+    if (o && n && typeof o === 'object' && typeof n === 'object' && !Array.isArray(o) && !Array.isArray(n)) {
+      merged[k] = { ...o, ...n };
+    }
+  }
+  if (!(newest.invoices || []).length && (oldest.invoices || []).length) {
+    merged.invoices = oldest.invoices;
+    merged.report = oldest.report || null;
+  }
+  const intake = new Map();
+  for (const c of [...copies].reverse()) {
+    for (const e of (c.tripsyEmailIntake || [])) if (e && e.id && !intake.has(e.id)) intake.set(e.id, e);
+  }
+  merged.tripsyEmailIntake = [...intake.values()];
+  const attKey = a => (a.sourceEmailId ? `e:${a.sourceEmailId}:${a.fileName || ''}` : `m:${a.id}`);
+  const attRank = a => (a.parseStatus && a.parseStatus !== 'pending' ? 2 : (a.parseStatus === 'pending' ? 0 : 1));
+  const atts = new Map();
+  for (const c of copies) {
+    for (const a of (c.tripsyAttachments || [])) {
+      if (!a) continue;
+      const k = attKey(a), prev = atts.get(k);
+      if (!prev || attRank(a) >= attRank(prev)) atts.set(k, a);
+    }
+  }
+  merged.tripsyAttachments = [...atts.values()];
+  // Stranded mid-copy proposals are NOT resurrected: their source emails were
+  // re-scanned and re-reviewed in the newest copy, so they'd only re-offer
+  // decisions already made. (The newest copy's own proposals ride the spread.)
+  merged.tripsyParseProposals = newest.tripsyParseProposals || [];
+  merged.tripsyPendingChanges = [];
+  delete merged.__concurrencyTest;
+  return merged;
+}
+
+// Owner-only: downloads every duplicate, merges them (above), writes the result
+// into the OLDEST file -- the id the deterministic search picks forever after --
+// and trashes the rest (recoverable from Drive's trash for 30 days). A corrupt
+// copy contributes nothing rather than aborting the repair; a failed trash only
+// logs, since the oldest-wins selection ignores leftovers anyway.
+async function repairDriveDataDuplicates(files) {
+  const copies = [];
+  for (const f of files) {
+    try {
+      const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`);
+      copies.push(JSON.parse(await res.text()));
+    } catch (e) {
+      console.error('Duplicate repair: could not read copy', f.id, e);
+      copies.push({});
+    }
+  }
+  const merged = tripsyMergeDataCopies(copies);
+  await updateDriveDataFile(files[0].id, merged);
+  for (const f of files.slice(1)) {
+    try {
+      await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trashed: true }),
+      });
+    } catch (e) { console.error('Duplicate repair: could not trash copy', f.id, e); }
+  }
+  console.warn(`Repaired ${files.length} duplicate ${DRIVE_DATA_FILENAME} files into ${files[0].id}.`);
+  saveKnownDataFileId(files[0].id);
+  return files[0].id;
 }
 
 // Real Drive sharing permissions for the data file -- this is the actual
@@ -32071,10 +32206,40 @@ function wireTripsyConflictUi(ctx) {
   if (!ui) return;
   const destValue = () => ctx.row.querySelector('[data-parse-event-trip-select]').value;
 
-  async function doImport() {
-    const ok = await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null);
-    if (ok) { toast('Imported.'); await ctx.afterImport(); }
-    return ok;
+  // Shared optimistic finisher for the conflict box's row-ending buttons
+  // (Import / Import with conflict, and Delete Existing Event): clear the row
+  // and confirm immediately, run the write(s) -- two full-file Drive PATCHes
+  // at ~2.5s each, plus a geocode for a new activity -- in the background
+  // (serialized via _tripsyParseImportChain), reconcile once everything
+  // queued has settled, and restore the row + button if the save actually
+  // fails. Same shape as the Ignore button right below and the non-conflict
+  // Import -- these two were the last row-ending actions still awaiting the
+  // writes in the FOREGROUND, which read as a several-second dead button
+  // ("when I delete the existing event there is a delay," 2026-09-10).
+  function finishRowOptimistically(confirmMsg, restoreBtn, runFinish) {
+    ctx.row.style.display = 'none';
+    toast(confirmMsg);
+    _tripsyParseImportPending++;
+    _tripsyParseImportChain = _tripsyParseImportChain
+      .then(runFinish)
+      .then(ok => {
+        _tripsyParseImportPending--;
+        if (!ok) {
+          ctx.row.style.display = '';
+          if (restoreBtn) restoreBtn.disabled = false;
+          toast("That didn't save — please try again.", 'error');
+          return;
+        }
+        if (_tripsyParseImportPending === 0) ctx.afterImport();
+        else updateTripsyDocParseBadge();
+      })
+      .catch(err => {
+        _tripsyParseImportPending--;
+        console.error('Optimistic conflict finish failed:', err);
+        ctx.row.style.display = '';
+        if (restoreBtn) restoreBtn.disabled = false;
+        toast("That didn't save — please try again.", 'error');
+      });
   }
 
   // After a modify-screen Save, ask what to do with the OTHER event and carry
@@ -32155,7 +32320,16 @@ function wireTripsyConflictUi(ctx) {
     const importBtn = q('[data-parse-conflict-import]') || q('[data-parse-conflict-import-anyway]');
     if (importBtn) importBtn.addEventListener('click', async () => {
       importBtn.disabled = true;
-      if (!await doImport()) importBtn.disabled = false;
+      // "Create a new trip" asks for name/dates first, so it can't optimistically
+      // clear the row before the reviewer confirms/cancels -- keep that path
+      // blocking, the same exception the non-conflict Import makes.
+      if (destValue() === '__new__') {
+        const ok = await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null);
+        if (ok) { toast('Imported.'); await ctx.afterImport(); } else { importBtn.disabled = false; }
+        return;
+      }
+      finishRowOptimistically('Imported.', importBtn,
+        () => tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null));
     });
 
     const ignoreBtn = q('[data-parse-conflict-ignore-new]');
@@ -32206,8 +32380,14 @@ function wireTripsyConflictUi(ctx) {
         tripKey: found.tripKey, tripName: found.tripName, eventKey: delBtn.dataset.eventKey,
         eventSummary: summary, tripsyResource: found.raw.resource, tripsyId: found.raw.id,
       };
-      const ok = await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null, deleteChange);
-      if (ok) { toast('Deleted the existing event and imported the new one.'); await ctx.afterImport(); } else { delBtn.disabled = false; }
+      // Same new-trip blocking exception as Import above; otherwise optimistic.
+      if (destValue() === '__new__') {
+        const ok = await tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null, deleteChange);
+        if (ok) { toast('Deleted the existing event and imported the new one.'); await ctx.afterImport(); } else { delBtn.disabled = false; }
+        return;
+      }
+      finishRowOptimistically('Deleted the existing event and imported the new one.', delBtn,
+        () => tripsyParseImportProposalEvent(ctx.proposal, ctx.event, destValue(), ctx.newModified ? ctx.newFields : null, deleteChange));
     });
 
     const modNewBtn = q('[data-parse-conflict-modify-new]');
@@ -34552,12 +34732,34 @@ async function completeSignIn() {
     driveFileId = await findDriveDataFile();
 
     stage = 'loading your data from Drive';
+    if (!driveFileId && isOwner) {
+      // NEVER create off a single empty search result -- Drive's search index
+      // is eventually consistent and can transiently return zero results for a
+      // file that exists, and creating then is what silently forked the data
+      // file into duplicates between 2026-08-18 and 2026-08-24 (see
+      // findDriveDataFile's incident note). Wait out the blip and ask again;
+      // only two agreeing empty answers reach the create below.
+      stage = 'double-checking for the data file';
+      await new Promise(r => setTimeout(r, 3000));
+      driveFileId = await findDriveDataFile();
+    }
+    if (driveFileId && isOwner && _driveDataDuplicateFiles.length > 1) {
+      // Same-named duplicates exist (the 2026-08→09 incident, or a recurrence):
+      // merge them back into the oldest file and trash the rest BEFORE loading,
+      // so this session runs on the repaired data. Best-effort -- a failure just
+      // continues on the oldest file, which the deterministic search picked.
+      stage = 'repairing duplicate data files';
+      try { driveFileId = await repairDriveDataDuplicates(_driveDataDuplicateFiles); }
+      catch (e) { console.error('Duplicate data-file repair failed (continuing on the oldest copy):', e); }
+      _driveDataDuplicateFiles = [];
+    }
     if (driveFileId) {
       driveData = await loadDriveDataFile(driveFileId);
     } else if (isOwner) {
       stage = 'creating a new data file in Drive';
       driveData = { invoices: [], report: null, reservations: [], psBalanceDeductions: [], syncTimestamps: {}, gmailCalendarAccessEmails: [], tripsOnlyEmails: [] };
       driveFileId = await createDriveDataFile(driveData);
+      saveKnownDataFileId(driveFileId);
     } else {
       // A viewer signed in but the shared file hasn't been shared with
       // them yet (or doesn't exist) -- don't silently create a new,
