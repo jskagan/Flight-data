@@ -8,7 +8,7 @@
 // to simply SHOW on a travel device. Fixed: completeSignIn arms a 12s watchdog that
 // surfaces the forced fallback when sign-in is merely stuck, and a forced fallback
 // on a device whose saved landing preference is Travel View AUTO-OPENS the cached
-// schedule instead of offering a button. One shared enterOfflineTravelView is used
+// schedule instead of offering a button. One shared enterOfflineMode is used
 // by both the button and the auto path, and flags guard against the in-flight
 // sign-in attempt later clobbering an entered offline view.
 const fs = require('fs');
@@ -33,7 +33,7 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 const signIn = extractFn('completeSignIn');
 assert(/const watchdog = setTimeout\(\(\) => \{\s*\n\s*if \(_tripsySignedInDone \|\| _tripsyOfflineEntered\) return;/.test(signIn),
   'THE FIX: a watchdog fires when sign-in is merely STUCK (no failure to catch), unless it already finished or offline was entered');
-assert(/maybeOfferOfflineTravelView\(true\);\s*\n\s*\}, 12000\);/.test(signIn),
+assert(/maybeOfferOfflineMode\(true\);\s*\n\s*\}, 12000\);/.test(signIn),
   'after 12s it surfaces the FORCED offline fallback while the attempt keeps running');
 assert(/Still \$\{stage\} — the connection looks weak…/.test(signIn),
   'and says honestly what it is still doing');
@@ -48,23 +48,25 @@ assert(/if \(_tripsyOfflineEntered\) return;\s*\n\s*\/\/ Surface the error/.test
   'and a late FAILURE with offline already entered stays silent rather than painting the gate over the schedule');
 
 // ---- auto-open on Travel View devices ----
-const offer = extractFn('maybeOfferOfflineTravelView');
+const offer = extractFn('maybeOfferOfflineMode');
 assert(/if \(_tripsyOfflineEntered \|\| _tripsySignedInDone\) return;/.test(offer),
   'the offer never fires against an already-entered offline view or a signed-in app');
-assert(/if \(force && loadTravelViewPref\(\)\) \{ await enterOfflineTravelView\(cached\); return; \}/.test(offer),
-  'THE ASK: on a real failure, a device whose saved landing is Travel View auto-OPENS the cached schedule -- no button tap');
-assert(/document\.getElementById\('signin-offline-btn'\)\.addEventListener\('click', \(\) => enterOfflineTravelView\(cached\)\);/.test(offer),
+assert(/if \(force && loadTravelViewPref\(\) && tripsCache\) \{ await enterOfflineMode\(cached\); return; \}/.test(offer),
+  'THE ASK: on a real failure, a device whose saved landing is Travel View auto-OPENS the cached schedule -- no button tap ' +
+  '(only when trips are actually cached -- a Trip-Insurance-only cache falls through to the button instead)');
+assert(/document\.getElementById\('signin-offline-btn'\)\.addEventListener\('click', \(\) => enterOfflineMode\(cached\)\);/.test(offer),
   'the offer button (for normal-app devices) goes through the same shared entry');
 
 // ---- the shared entry ----
-const enter = extractFn('enterOfflineTravelView');
+const enter = extractFn('enterOfflineMode');
 assert(/if \(_tripsyOfflineEntered\) return;\s*\n\s*_tripsyOfflineEntered = true;/.test(enter),
   'entering is idempotent -- watchdog, catch, and button can all race without double-entering');
-assert(/tripsyTripsAreOffline = true;/.test(enter) && /tripsyPsReservations = \[\];/.test(enter),
-  'the offline flags and minimal driveData shape are set exactly as the old button did');
+assert(/if \(cached\.trips\) \{[\s\S]*?tripsyTripsAreOffline = true;/.test(enter) && /tripsyPsReservations = \[\];/.test(enter),
+  'the offline flags and minimal driveData shape are set exactly as the old button did, now scoped to whichever half of the cache is present');
 assert(/document\.getElementById\('splash-screen'\)\.style\.display = 'none';/.test(enter),
   'the splash is hidden too -- the watchdog path enters straight from behind the splash');
-assert(/await navigate\('travelview'\)/.test(enter), 'and it lands on Travel View');
+assert(/await navigate\(cached\.trips \? 'travelview' : 'tripinsurance'\)/.test(enter),
+  'and it lands on Travel View when trips are cached, falling back to Trip Insurance when only that half is');
 
 // ---- executed: the decision logic, against fixtures ----
 {

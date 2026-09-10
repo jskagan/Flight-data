@@ -48,7 +48,8 @@ assert(/\.filter\(b => b\.eventIds\.length > 0\)/.test(stripFn),
 const queueSrc = html.slice(html.indexOf('async queueTripsyChange(change) {'), html.indexOf('async cancelTripsyChange('));
 assert(/const touchedGuidesOrOutfits = change\.type === 'delete_event'\s*\n\s*&& tripsyStripDeletedEventFromCaches\(change\.tripKey, change\.eventKey\.replace\(':', '-'\)\);/.test(queueSrc),
   'THE FIX: a delete_event change triggers the cache cleanup, converting the colon eventKey to the hyphen id space');
-assert(/if \(touchedUpdatePages \|\| touchedGuidesOrOutfits\) await persistDriveData\(\{ silentConflict: true \}\);/.test(queueSrc),
+// (touchedByMove joined this condition when move_event was added -- see moveevent_test.js.)
+assert(/if \(touchedUpdatePages \|\| touchedGuidesOrOutfits \|\| touchedByMove\) await persistDriveData\(\{ silentConflict: true \}\);/.test(queueSrc),
   'only writes when something actually changed, combined with the existing Update-page cleanup into one write');
 
 // ---- source-pattern checks: itinerary deletion detection ----

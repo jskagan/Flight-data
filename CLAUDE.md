@@ -139,6 +139,43 @@ the silent iframe) means Google ANSWERED, so the network is provably fine and th
 screen shows with only the unforced offer (which respects `navigator.onLine`). A device that never
 chose "remember me" is unaffected.
 
+**Persistent sign-in — the auth Worker (`tools/auth-worker/`)** (asked 2026-08-29: "keep me logged
+in … on a device that must be unlocked"). The silent grant above helped but kept failing on the
+owner's iPad, and the reason is structural, not a bug: `initTokenClient` is the browser-only token
+flow and **never issues a refresh token**, so its only silent renewal is a hidden
+`accounts.google.com` iframe — exactly what Safari/iOS **ITP blocks**. Hence a re-login roughly
+hourly. (Device unlock can't fix this: Face ID authenticates you to the DEVICE, not to Google, and
+there's no relying-party server for a passkey. A passkey on the *Google account* only makes
+Google's own re-auth prompt biometric.) A refresh token needs the authorization-CODE flow, which
+needs a client secret, which can never sit in this public file — so it lives in a Cloudflare Worker
+(a second one, separate from the `tripsy-refresh-proxy` parse trigger, so auth can't break it).
+Sign-in now uses `initCodeClient` (`ux_mode:'popup'`, and **both** `access_type:'offline'` and
+`prompt:'consent'` — without the latter an already-granted account gets a code that exchanges to an
+access token with NO refresh token, and persistence silently never starts working); the code goes to
+`/auth/exchange`, which stores the refresh token in Worker KV and returns a random 32-byte
+**`device_id`** the app keeps in `localStorage` (`DEVICE_ID_KEY`). Startup and the mid-session 401
+path both call `/auth/token` FIRST — an ordinary fetch, so ITP has nothing to block — falling back
+to the untouched GIS paths otherwise.
+**Everything here fails soft, deliberately**: an undeployed, unconfigured or unreachable Worker
+leaves the original flow working exactly as before (this is why it could ship before the Worker was
+deployed), and sign-in is the whole app, so that fallback matters more than the feature. That
+fallback is *gated*, not just caught: `probeAuthWorker()` hits `/auth/health` once at startup and
+`startSignIn` reads the cached `_authWorkerAvailable` **synchronously** — anything but a definite
+`true` (unfinished, unreachable, unconfigured) takes the old token flow. Two reasons it's shaped
+this way: without the gate an undeployed Worker gave TWO popups (a code popup whose exchange fails,
+then the token-flow popup it falls back to), and the check can't be `await`ed inside the click
+handler because that loses the click's user activation and Safari/iPad blocks the popup outright —
+the same trap `openDriveFileInNewTab` documents. `/auth/health` is answered BEFORE the Worker's own
+not-configured guard, so it can report `configured:false` instead of failing with it. The
+pre-Worker startup logic was MOVED VERBATIM into `continueWithGisStartup()` (hence
+`silentsignin_test.js`/`offlinesignin_test.js` now extract both functions and concatenate them).
+Two rules worth keeping: a `/auth/token` **401 is permanent** (revoked/expired/unknown → clear the
+credential, fall back to interactive sign-in) while **any other failure keeps it** (a flaky
+connection must never sign a device out for good); and **Sign out must call `/auth/revoke`** before
+clearing local state, or the next load just mints a new token and the owner never actually signs
+out. A `device_id` is a session credential — Drive (plus Gmail where granted) until revoked — see
+that folder's README for the security notes and the Google Cloud Console / KV setup.
+
 The "Authorized Users" list on the Users utility page isn't a separate registry — it's read live
 from the Drive file's real sharing permissions (`listDriveFilePermissions()`, `index.html:1001`
 area) via `permissions.list`, which is the same source of truth Step 3 on that page tells the owner
@@ -180,6 +217,18 @@ Cached data always shows immediately on load; syncing happens invisibly behind i
 unattended on every open. Tripsy Trips does not fit this shape at all — see below for how it
 actually refreshes.
 
+**There is deliberately no "Refresh All" catch-all** (a Utilities menu item + `refreshAllReports()`,
+removed 2026-08-29 as fully redundant — don't re-add it). Its three sync pipelines (reservations,
+P/S balance, `syncTripsyRelays`) are exactly what `runBackgroundSyncs` above already runs on every
+app load, so pressing it did what reloading the page does. Its one seemingly-unique step, a
+`recomputeReport()` for the NetJets passenger report, was covered too: that report derives purely
+from stored invoices, every invoice-mutating path (upload, Review Queue resolve, auto-resolve, undo)
+already calls `recomputeReport()` itself, and `navigate()` nulls `cachedReport` whenever the Reports
+view is entered from elsewhere, so it recomputes fresh exactly when someone goes to look at it. All
+that was left that the automatic path didn't give was a confirmation toast — and the per-pipeline
+**Force Sync** buttons above answer that better anyway, since they sit on the page where staleness
+would be noticed and show an inline status line plus a real "Last updated" timestamp.
+
 ### Tripsy Trips (labeled "My Trips" in the nav; render code `index.html:12301`/`14198` area)
 
 **Trip data lives in a private Drive file, `trips-data.json`** (same folder as
@@ -212,6 +261,26 @@ step 4; git history has it if ever needed.
   `driveData.tripsyPendingChanges` still exists in the data model but is permanently empty; the
   timeline's pending-overlay plumbing (`getEffectiveTripsyEvent`/`getEffectiveTripsyTrip`,
   `pendingCreates`, `cancelTripsyChange`) is retained but inert-on-empty by construction.
+- **An event can be MOVED to another existing trip** (asked 2026-09-08: "allow the user to
+  re-assign an event to another existing trip"): a ↪️ icon in the timeline row's owner-only
+  Edit/Attach/Delete block (`data-tripsy-move-event`) opens `tripsyMoveEventDialog` — a picker
+  listing every OTHER trip, newest first, same overlay shell/z-index tier as
+  `tripsyConfirmDialog` — and queues a `move_event` change (`tripKey` = source,
+  `targetTripKey`, `eventKey`) through the one `Store.queueTripsyChange` entry point. The
+  `applyTripsyChangeToTrips` branch carries the **very same event object** across (same id,
+  same `tripsyRaw`) — deliberately NOT delete + re-create, which mints a new id and silently
+  detaches everything keyed on the old one (attachments, outfit blocks, the dress guide,
+  itinerary baselines); only which trip's `events[]` holds it changes, and the destination is
+  re-sorted. The source is located by `eventKey` exactly like edit/delete (a stale
+  caller-supplied `tripKey` can't misroute it); an unknown target, or a move onto the trip
+  it's already in, throws rather than losing the event. Post-save, `tripsyReHomeMovedEvent`
+  (in the same best-effort cleanup block as the delete cascade) strips the event from the
+  SOURCE trip's guide/outfits via `tripsyStripDeletedEventFromCaches` — it has genuinely left
+  that trip — and re-points event-scoped attachments' `tripKey` at the destination, since trip
+  cards list docs by `tripKey`; a saved Update page referencing the event is invalidated like
+  an edit would. The destination trip's guide needs nothing: its own fingerprint check flags
+  the newcomer on next open, same as any added event. Existing trips only, by design —
+  creating a trip to move into is the Review Parsed Docs page's job. `moveevent_test.js`.
 - **Deleting an event also cleans it out of the derived caches that reference it by id, not just
   the live trip.** Reported 2026-08-14: "when I delete an event it should also be deleted from
   itinerary, daily dress, schedule, etc." — `applyTripsyChangeToTrips` only ever touched the live
@@ -271,7 +340,14 @@ step 4; git history has it if ever needed.
   direction — a real reservation update was lost that way; dedup is per message-id.) It's split so no
   browser is ever needed: the **app** (on any device, owner only, in
   `runTripsyEmailIntake`/`scanTripsyEmailIntake`, `index.html:2515` area) searches Gmail
-  for those forwards and appends each one's plain-text body to `driveData.tripsyEmailIntake`; the
+  for those forwards and appends each one's plain-text body to `driveData.tripsyEmailIntake` — via
+  **`tripsyIntakeHtmlToText`**, the intake's OWN HTML→text step (2026-09-08): it collapses source
+  whitespace first (so a tag whose attributes wrap across source lines is never split), strips
+  `<style>`/`<script>`/`<head>`/comments, turns `<br>` and closing block tags into line breaks, and
+  runs the UNCHANGED `htmlToPlainText` per line for its entity decoding. The shared helper alone
+  stored 16.6K chars for a real United itinerary, 15.1K of them raw CSS, with all five legs
+  flattened into one 1,256-char line; the two PS parsers pre-clean their own HTML and still call
+  `htmlToPlainText` directly, untouched; the
   **cloud parse routine** (headless — it reads `flight-log-data.json` directly via its Drive
   connector) parses each into
   events and writes them to a separate `tripsy-email-proposals.json` Drive file; the **app** drains
@@ -332,7 +408,14 @@ step 4; git history has it if ever needed.
   category) matching the tracked event; an unspecified field never counts against identity, but a
   specified-and-different one (a new checkout date, a changed flight number) is new information
   and keeps the event reviewable, and no start time means no identity at all. Fails safe — a miss
-  just shows one more proposal. `tripsyAutoIgnoreDuplicateProposals` sweeps every still-pending
+  just shows one more proposal. **A different confirmation number is a different BOOKING, never a
+  duplicate** (found 2026-09-08: two travelers on the same UA2303 under separate PNRs — Mo's leg,
+  already tracked in her NY trip, made Jon's identical-times leg from his OWN confirmation vanish
+  from review, silently): the check skips a tracked event only when BOTH sides carry a
+  `confirmation` and they differ; an absent one on either side still never counts against
+  identity, so the same confirmation forwarded twice still dedupes. Note the sweep is trip-blind
+  by design (it scans every trip), which is exactly why the confirmation is the discriminator
+  that matters. `intaketext_test.js`. `tripsyAutoIgnoreDuplicateProposals` sweeps every still-pending
   proposal event, resolving duplicates exactly as a manual Reject would (`resolution:'rejected'` +
   `autoIgnored:'duplicate'`, same finish bookkeeping when a proposal empties out, one persist per
   sweep, no-op while trips aren't loaded). Three call sites: `syncTripsyRelays` right after
@@ -341,6 +424,30 @@ step 4; git history has it if ever needed.
   flashes a badge), `runTripsyLocalParse` after staging (subtracting from the toast count so
   hidden duplicates aren't announced), and the top of `renderTripsyParseReview` as the last line
   of defense before anything renders.
+- **Review Parsed Docs: creating a trip asks for DATES, any trip is pickable, and clusters span
+  proposals** (reported 2026-09-08: "Create a new trip only lets me pick a name, not the dates, and
+  I cannot add later flights imported at the same time to that trip"). One gap, two compounding
+  symptoms: the per-event import used a bare `prompt()` for a NAME and hardcoded the trip to a
+  single day (the event's own), and each card's destination dropdown offered ONLY date-matched
+  trips (`tripsyParseMatchTrips`), so the just-created one-day trip was invisible to the return
+  flight days later — a two-flight booking became two one-day trips. Fixed three ways: **(1)**
+  `tripsyNewTripDialog` (name + start + end, defaulting to the event's own span — a hotel's
+  check-in/out, a flight's departure/arrival day; a missing end becomes the start, end-before-start
+  is swapped) replaces the prompt in `tripsyParseImportProposalEvent`, and the `create_trip` change
+  carries the picked dates. **(2)** `tripsyParseTripOptionsHtml` — ONE builder shared by the card's
+  first render and `tripsyRefreshTripSelect` — keeps date-matched trips first (still the default)
+  but offers every other trip under an "Other trips" `<optgroup>` (newest first, with dates);
+  `selected` is stamped explicitly, since with the group present the browser's first-option default
+  would otherwise land on an unrelated trip when nothing matches. **(3)** the "create a new trip for
+  these N events" offer now runs ACROSS proposals: `tripsyParseFindClusters` applies the existing
+  2+-events-within-45-days rule as a greedy day-sorted walk over every proposal's unmatched pending
+  events (a new cluster starts when the next event is >45 days past the current cluster's first day,
+  so two unrelated future trips get two offers instead of one span check cancelling both), rendered
+  ONCE above the cards with `data-event-refs="<proposalId>:<eventId>,…"`; the accept resolves each
+  event inside its own proposal, and `Store.acceptTripsyParseProposalCluster` groups its
+  `eventChanges` by their per-entry `proposalId` (top-level `proposalId` kept only as a fallback),
+  finishing any proposal left with nothing pending — still one write. The old per-card
+  `tripsyParseFindCluster` is kept but unused by the page. `newtripdates_test.js`.
 - **The consolidated top-right status badge** (`tripsy-status-badge`;
   `computeTripsyStatus`/`updateTripsyStatusBadge`/`renderTripsyStatusPanel`) is a single indicator
   with three prioritized states: **red 🛑** = a Drive write genuinely failed (in-memory
@@ -363,6 +470,25 @@ step 4; git history has it if ever needed.
   green while a trip card would read yellow — `syncTripsyRelays` loads trips before its badge
   refresh and `renderTripsyEventsList` refreshes the badge after each render to close that gap.
   Owner-only.
+  **The panel names WHEN the next scheduled run is, not just that one is coming** (asked
+  2026-08-29): the doc/email rows used to read "waiting for the next scheduled parse run", which
+  states no time and reads as an unknowable delay. They now pair with one shared row —
+  `tripsyNextParseRunSentence()`, emitted once for docs+emails together since a single run handles
+  both — reading "They'll be parsed automatically in the next scheduled run, today at 9:00 AM.
+  Don't want to wait? Use Run Parse Now below.", pointing at the button the panel already renders.
+  The schedule is `TRIPSY_PARSE_RUN_UTC_TIMES`, **hand-mirrored** from the cloud Routine's cron
+  (`0 0,6,16 * * *` → 00:00/06:00/16:00 **UTC**; deliberately uneven at 6h/10h/8h — don't "tidy"
+  them without changing the Routine). Nothing enforces that agreement at runtime — the app can't
+  query a Routine and the cloud sandbox can't read this repo — so `nextparserun_test.js` pins the
+  constant against the cron expression recorded in its own comment, and failing that test is the
+  intended signal to update both. **An EMPTY array is a legitimate state**, not a bug: every caller
+  then falls back to naming the cadence (`TRIPSY_PARSE_RUN_CADENCE_LABEL`) with no clock time,
+  which is vague but never wrong — clear it rather than leave it stale if the Routine changes and
+  the new times aren't known, since an owner waiting for a run that isn't coming is worse than one
+  who was only told "three times a day". Two traps the tests lock down: slots are **sorted** before
+  the walk (a hand-edit listing them out of order otherwise returns whichever was written first),
+  and "today/tomorrow" is judged in the viewer's **local** dates, so a 00:00 UTC run correctly reads
+  as "today at 5:00 PM" in Los Angeles rather than tomorrow.
   **Run Parse Now parses IN THE APP first, cloud only as fallback** ("the parse run is way too long
   for adding a couple of items," 2026-08-17): the button (`runTripsyParseNow`) now runs
   `runTripsyLocalParse` — pending email BODIES (already in `driveData.tripsyEmailIntake`) and
@@ -566,8 +692,8 @@ step 4; git history has it if ever needed.
   which is what keeps `tripsyAttireGoToEvent`/`tripsyGoToTripDay` (both expand their target trip
   then re-render) working with no knowledge of years; closing a year therefore also re-collapses
   its trips, or that rule would bounce it straight open.
-- **Regression tests live in `tools/tests/`** (`node tools/tests/run_all.js` — 33 suites,
-  ~750 assertions, exit 0 = all green). They only READ `index.html` (extracting functions by
+- **Regression tests live in `tools/tests/`** (`node tools/tests/run_all.js` — 72 suites,
+  ~1400 assertions, exit 0 = all green). They only READ `index.html` (extracting functions by
   name and asserting on behavior and on source patterns), so they don't violate the single-file
   rule. Some suites are GENERATORS that write a sibling `*_run.js` (gitignored) holding the
   executable assertions — the runner executes both halves. Run them before any push that touches
@@ -578,8 +704,44 @@ step 4; git history has it if ever needed.
   (`isTripsyTripCollapsed`/`setTripsyTripCollapsed`, `index.html:6313` area) — deliberately *not*
   in `driveData`, since view-only users have no Drive write access to persist anything into the
   shared file.
+- **Itinerary → Summary is Part 1 on its own, read-only** (asked 2026-08-29: "the listing of
+  events broken down by dates with no narratives"). `buildTripsyPrintHtml` gained a
+  `summaryOnly` option that returns just the cover header + Part 1 and **returns before Part 2 /
+  Travel Information are built at all**, so their per-place photo lookups — the slow part of a
+  full build — are skipped rather than computed and discarded. `showTripsyItinerarySummary`
+  renders that into its own overlay (`#tripsy-summary-overlay`, sharing the preview's shell
+  classes, and hidden in `@media print` for the same reason the preview is). It deliberately does
+  **not** reuse `previewTripsyItinerary`: that overlay carries the owner's generate/regenerate/
+  per-day editing controls, and the requirement is that this screen can't edit — rendering print
+  HTML means there is nothing interactive to suppress, rather than hiding controls one by one and
+  hoping a future one gets hidden too (`itinsummary_test.js` asserts the summary path emits no
+  `<button>`/`<input>`/`contenteditable` at all). Day blocks also drop their
+  `tp-day-block-linkable` class and `data-tripsy-summary-day-link` attribute in this mode, since
+  there's no Part 2 to jump to and the pointer/hover ring would promise a scroll that can't
+  happen. **Save as PDF** re-runs the same summary-only build through `triggerTripsyPrint` (the
+  browser's print dialog is where "Save as PDF" actually lives on macOS/iOS) rather than printing
+  the on-screen node, so the output carries no overlay toolbar. Not owner-gated — read-only, like
+  Print.
+  **Email opens a prefilled draft; it does not send.** The app's Gmail scope is
+  `gmail.readonly`, so it *cannot* send mail, and a web page can't attach a file to an email
+  either — so the itinerary travels as plain text in a `mailto:` body
+  (`buildTripsyItinerarySummaryText`, built from the same `buildTripsyPrintDayData` as the HTML
+  summary and reusing `tripsyDiaryScheduleLines` for the rows, so no surface can describe
+  different events). Sending directly would mean adding `gmail.send` — a THIRD restricted scope,
+  re-consent for everyone, and a broader consent-screen warning — which was considered and
+  rejected. The length guard matters: `mailto:` URLs get truncated by browsers/mail clients well
+  before any formal limit, and `encodeURIComponent` inflates the body ~1.5× (spaces and newlines
+  become 3 chars each), so the check measures the **encoded URL**, not the raw text. Past
+  `TRIPSY_MAILTO_SAFE_LENGTH` (1800) it copies the full text to the clipboard and opens an EMPTY
+  draft — a silently truncated itinerary would be worse than no prefill. A refused clipboard
+  (permissions, insecure context, old WebView) is caught and says so, pointing at Save as PDF.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
-  upload a PDF from a trip's Itinerary → Modify → Update menu, which calls
+  upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
+  outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS
+  and never touches the generated narrative, so it didn't belong among items that are all about
+  that write-up — it now sits beside Verify Travel Details, the item it most resembles. The label
+  says COMPARE rather than the original "Update" because that's what it does: it produces a diff
+  the owner resolves row by row, where "Update" implied it overwrites things by itself. It calls
   `compareTripsyItineraryPdf` (`claude-sonnet-5`, streamed `json_schema`; sets `thinking:
   {type:'adaptive'}` + `effort: 'medium'` EXPLICITLY — see the Attire section's note on Sonnet 5's
   adaptive-thinking-by-default trap, which this call had too; raise to `high` first if comparison

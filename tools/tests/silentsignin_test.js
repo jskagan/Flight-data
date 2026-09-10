@@ -27,7 +27,12 @@ function extractFn(name) {
 }
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
-const initAuth = extractFn('initGoogleAuth');
+// The startup path spans TWO functions since the persistent-sign-in (auth Worker)
+// attempt was added: initGoogleAuth tries the Worker first, then falls through to
+// continueWithGisStartup, which holds these original GIS paths unchanged. Assert
+// against them concatenated in call order, so this suite keeps checking the whole
+// startup sequence rather than only the half that kept the old name.
+const initAuth = extractFn('initGoogleAuth') + '\n' + extractFn('continueWithGisStartup');
 
 // ---- ordering: valid cached token still wins outright (unchanged fast path) ----
 const cachedIdx = initAuth.indexOf('const cached = loadCachedToken();');
@@ -49,7 +54,7 @@ assert(/refreshDriveAccessToken\(8000\)\s*\n\s*\.then\(\(\) => \{ completeSignIn
 // real network evidence.
 assert(/const googleNeverAnswered = msg === 'token refresh timed out';/.test(initAuth),
   'the timeout (no answer at all) is the ONLY failure treated as network evidence');
-assert(/\.catch\(e => \{[\s\S]*?display = 'none';[\s\S]*?display = 'flex';[\s\S]*?maybeOfferOfflineTravelView\(googleNeverAnswered\);/.test(initAuth),
+assert(/\.catch\(e => \{[\s\S]*?display = 'none';[\s\S]*?display = 'flex';[\s\S]*?maybeOfferOfflineMode\(googleNeverAnswered\);/.test(initAuth),
   'a failure falls back to the sign-in screen; the offline offer is forced only when Google never answered');
 {
   const decideOffer = msg => (msg === 'token refresh timed out');
@@ -60,7 +65,7 @@ assert(/\.catch\(e => \{[\s\S]*?display = 'none';[\s\S]*?display = 'flex';[\s\S]
 }
 
 // ---- a never-remembered device is untouched ----
-assert(/document\.getElementById\('signin-gate'\)\.style\.display = 'flex';\s*\n\s*maybeOfferOfflineTravelView\(\);\s*\n\}/.test(initAuth),
+assert(/document\.getElementById\('signin-gate'\)\.style\.display = 'flex';\s*\n\s*maybeOfferOfflineMode\(\);\s*\n\}/.test(initAuth),
   'a device that never chose "remember me" still gets the explicit sign-in screen, exactly as before');
 
 // ---- the shared refresh helper takes the startup timeout without changing its default ----

@@ -8,6 +8,11 @@
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 <link rel="manifest" href="manifest.json">
+<!-- Both, deliberately: the standard name is what current browsers want (the
+     apple- prefixed one now logs a deprecation warning), but older iOS versions
+     only understand the apple- form, and this app is used from an iPad home
+     screen. Dropping either would regress one of the two. -->
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Travel Tracker">
@@ -630,6 +635,13 @@
   @media print {
     body.tripsy-printing > *:not(#tripsy-print-root) { display: none !important; }
     body.tripsy-printing #tripsy-print-root { display: block !important; }
+    /* The Summary screen keeps #tripsy-print-root loaded with its own content while it
+       is open, so a print started BY THE BROWSER (Cmd+P, or Share -> Print on iPad)
+       prints the summary too -- not the app's nav rail and trip cards behind the
+       overlay, which is what happened before this rule existed. The Save as PDF button
+       still works via .tripsy-printing above; this covers every other way in. */
+    body.tripsy-summary-open > *:not(#tripsy-print-root) { display: none !important; }
+    body.tripsy-summary-open #tripsy-print-root { display: block !important; }
     /* Chrome (and other browsers) drop background colors/images from
        printed output by default to save ink, unless a page opts in --
        without this, the photo-fallback icon's light-gray background
@@ -914,12 +926,15 @@
      itself (display:none inside @media print) since if it were somehow
      left open while printing, it shouldn't ever end up as a second copy
      of the document alongside #tripsy-print-root. */
-  #tripsy-preview-overlay {
+  /* The read-only Summary view (Itinerary -> Summary) shares the preview's shell
+     exactly -- same backdrop, toolbar and paper -- so it must also be hidden while
+     printing, or it would print alongside #tripsy-print-root. */
+  #tripsy-preview-overlay, #tripsy-summary-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9000;
     overflow-y: auto; padding: 32px 16px; flex-direction: column; align-items: center;
   }
   @media print {
-    #tripsy-preview-overlay { display: none !important; }
+    #tripsy-preview-overlay, #tripsy-summary-overlay { display: none !important; }
   }
   .tripsy-preview-toolbar {
     max-width: 800px; width: 100%; display: flex; justify-content: flex-end; gap: 10px; margin-bottom: 12px;
@@ -1307,7 +1322,20 @@
   .tripsy-diary-fig--left  { float: left;  width: 46%; margin-right: 20px; }
   .tripsy-diary-fig--full  { float: none;  width: 100%; margin: 14px 0; }
   .tripsy-diary-figimg { width: 100%; aspect-ratio: 4 / 3; background: var(--panel-2) center/cover no-repeat; border-radius: 8px; border: 1px solid var(--line); }
+  .tripsy-diary-figimg[data-diary-photo-tap] { cursor: pointer; }
   .tripsy-diary-fig figcaption { font-size: 12.5px; line-height: 1.45; color: var(--muted); margin-top: 6px; font-family: 'Avenir Next', sans-serif; }
+  /* The action menu opened by tapping a placed photo -- same shell as the Attire
+     category menu (positionTripsyFixedMenu anchors it the same way). */
+  .tripsy-diary-photo-menu {
+    display: none; position: fixed; z-index: 9200; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px; min-width: 170px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  .tripsy-diary-photo-menu-item {
+    display: block; width: 100%; text-align: left; background: none; border: none; cursor: pointer;
+    padding: 8px 10px; border-radius: 6px; font: inherit; color: var(--text);
+  }
+  .tripsy-diary-photo-menu-item:hover, .tripsy-diary-photo-menu-item:focus-visible { background: var(--panel); outline: none; }
+  .tripsy-diary-photo-menu-item--danger { color: var(--red); }
   /* The photo list under a day: captions and controls live OUT of the editable prose, so
      an input can never end up nested inside a contenteditable region. */
   .tripsy-diary-photolist { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 10px; }
@@ -1687,6 +1715,7 @@
       <button class="rail-item rail-subitem" data-view="psinvoices">Invoices</button>
     </div>
     <button class="rail-item" data-view="travelview"><span class="nav-icon">🧳</span>Travel View</button>
+    <button class="rail-item" data-view="tripinsurance"><span class="nav-icon">🛡️</span>Trip Insurance</button>
     <div id="storage-health-banner"></div>
     <button class="rail-item" data-submenu-toggle="utilities" id="utilities-toggle" style="display:none; margin-top:auto;">
       <span class="nav-icon">🛠️</span>Utilities
@@ -1697,7 +1726,6 @@
       <button class="rail-item rail-subitem" data-view="utilitiestripsonly">Trips-Only Access</button>
       <button class="rail-item rail-subitem" data-view="utilitieswardrobe">Wardrobe</button>
       <button class="rail-item rail-subitem" data-view="utilitiesfavorites">Favorites</button>
-      <button class="rail-item rail-subitem" id="utilities-refresh-all-btn">Refresh All</button>
       <div class="rail-submenu-heading">P/S</div>
       <button class="rail-item rail-subitem rail-subitem-nested" data-view="utilitiesdeletepsreservations">Delete Reservations</button>
       <button class="rail-item rail-subitem rail-subitem-nested" data-view="utilitiesreparsepsreservations">Re-Parse Reservations</button>
@@ -1786,12 +1814,24 @@ async function driveApiFetch(url, options = {}, _retriedAfterRefresh = false) {
     const text = await res.text().catch(() => '');
     if (res.status === 401) {
       // The access token expired mid-session (common on iPad, whose WebView
-      // doesn't silently renew it). Try ONE transparent GIS refresh and replay
-      // the request, so a write doesn't fail just because the ~1h token lapsed
-      // (the "two Write Failed messages" case). All bodies here are strings, so
-      // replaying is safe. Only if the silent refresh ALSO fails (the Google
-      // session is truly gone) do we surface an expired-session error.
+      // doesn't silently renew it). Try ONE transparent refresh and replay the
+      // request, so a write doesn't fail just because the ~1h token lapsed (the
+      // "two Write Failed messages" case). All bodies here are strings, so
+      // replaying is safe. Only if the refresh ALSO fails (the Google session is
+      // truly gone) do we surface an expired-session error.
       if (!_retriedAfterRefresh) {
+        // The Worker first: it renews from a stored refresh token, so unlike the
+        // GIS silent grant below it doesn't depend on a hidden iframe that
+        // Safari/iOS ITP blocks. Returns null (never throws) when this device has
+        // no credential or the Worker is unreachable, which is exactly when the
+        // original GIS path should still get its turn.
+        const viaWorker = await authWorkerGetAccessToken();
+        if (viaWorker) {
+          driveAccessToken = viaWorker.accessToken;
+          _authExpiredNotified = false; // fresh token -> let a future expiry notify again
+          try { if (localStorage.getItem(TOKEN_CACHE_KEY) !== null) saveCachedToken(viaWorker.accessToken, viaWorker.expiresIn); } catch (_) {}
+          return await driveApiFetch(url, options, true);
+        }
         try {
           await refreshDriveAccessToken();
           return await driveApiFetch(url, options, true);
@@ -1802,9 +1842,15 @@ async function driveApiFetch(url, options = {}, _retriedAfterRefresh = false) {
       clearCachedToken(); // cached token is dead -- don't keep offering it
       const err = new Error('Your Google sign-in expired. Please reload the page and sign in again.');
       err.authExpired = true;
+      // Google answered (with a 401) -- the network is clearly fine, this is
+      // an auth problem. completeSignIn's catch reads this flag so a plain
+      // "you're logged out" doesn't get misreported as "no internet".
+      err.reachedServer = true;
       throw err;
     }
-    throw new Error(`Drive API error ${res.status}: ${text.slice(0, 300)}`);
+    const err = new Error(`Drive API error ${res.status}: ${text.slice(0, 300)}`);
+    err.reachedServer = true; // reached Google, got a real (if unhappy) HTTP response
+    throw err;
   }
   return res;
 }
@@ -1836,6 +1882,124 @@ function loadCachedToken() {
 
 function clearCachedToken() {
   try { localStorage.removeItem(TOKEN_CACHE_KEY); } catch (e) { /* ignore */ }
+}
+
+// ---- Persistent sign-in via the auth Worker (tools/auth-worker) ----
+// The browser-only token flow this app has always used (initTokenClient) never
+// issues a REFRESH token, so its only silent renewal is a hidden iframe against
+// accounts.google.com -- which Safari/iOS ITP blocks, bouncing the owner's iPad to
+// the sign-in screen roughly hourly once the ~1h access token lapsed.
+//
+// The Worker holds the client secret (which can never live in this public file),
+// exchanges an authorization code for a refresh token, keeps that token
+// server-side, and mints fresh access tokens on request. Renewal becomes an
+// ordinary fetch rather than a third-party iframe, so ITP has nothing to block.
+//
+// EVERY path here is optional and fails soft: if the Worker isn't deployed, isn't
+// configured, or can't be reached, the app falls straight back to the original
+// GIS flow. That fallback is why this could ship before the Worker existed.
+const AUTH_WORKER_URL = 'https://travel-tracker-auth.jskagan.workers.dev';
+// This device's credential for the Worker (see the Worker's own header comment on
+// why it can't be the Drive-file secret the parse-trigger Worker uses: reading
+// Drive needs the very token this mints). Treat it as a logged-in session.
+const DEVICE_ID_KEY = 'flightlog_device_id';
+function loadDeviceId() {
+  try { return localStorage.getItem(DEVICE_ID_KEY); } catch (e) { return null; }
+}
+function saveDeviceId(id) {
+  try { localStorage.setItem(DEVICE_ID_KEY, id); } catch (e) { /* ignore */ }
+}
+function clearDeviceId() {
+  try { localStorage.removeItem(DEVICE_ID_KEY); } catch (e) { /* ignore */ }
+}
+async function authWorkerFetch(path, body, timeoutMs = 10000) {
+  // Own timeout: a hanging Worker must not hold the splash screen the way the old
+  // silent-grant hang did (see completeSignIn's watchdog for that lesson).
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${AUTH_WORKER_URL}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_) { /* status is enough */ }
+    return { ok: res.ok, status: res.status, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+// Trades the popup code flow's authorization code for a device credential.
+// Returns the access token on success, or null if persistent sign-in isn't
+// available -- callers then continue with the ordinary one-hour token.
+async function authWorkerExchangeCode(code) {
+  try {
+    const { ok, data } = await authWorkerFetch('/auth/exchange', { code });
+    if (!ok || !data.device_id || !data.access_token) {
+      console.log('Persistent sign-in unavailable (exchange):', (data && data.error) || 'unknown');
+      return null;
+    }
+    saveDeviceId(data.device_id);
+    return { accessToken: data.access_token, expiresIn: data.expires_in };
+  } catch (e) {
+    console.log('Persistent sign-in unavailable (exchange failed):', (e && e.message) || e);
+    return null;
+  }
+}
+// The whole point of the Worker: a fresh access token with no iframe and no
+// interaction. Returns null when this device has no credential or it's dead.
+//
+// A 401 is PERMANENT (revoked at myaccount.google.com, expired, or unknown), so
+// the stale credential is cleared and the caller falls back to interactive
+// sign-in. Any other failure is transient and deliberately leaves the credential
+// in place, so a flaky connection doesn't silently sign the device out forever.
+async function authWorkerGetAccessToken() {
+  const deviceId = loadDeviceId();
+  if (!deviceId) return null;
+  try {
+    const { ok, status, data } = await authWorkerFetch('/auth/token', { device_id: deviceId });
+    if (ok && data.access_token) return { accessToken: data.access_token, expiresIn: data.expires_in };
+    if (status === 401) {
+      console.log('Persistent sign-in credential is no longer valid — clearing it.');
+      clearDeviceId();
+    }
+    return null;
+  } catch (e) {
+    console.log('Persistent sign-in token request failed (keeping the credential):', (e && e.message) || e);
+    return null;
+  }
+}
+// Is the Worker actually deployed AND configured? Probed ONCE per page load, early,
+// so the sign-in click can decide SYNCHRONOUSLY which flow to use.
+//
+// It must be synchronous at click time: opening a popup after an `await` loses the
+// click's user activation and gets blocked on Safari/iPad (the same trap
+// openDriveFileInNewTab documents). So this caches into a plain variable rather than
+// being awaited in the handler.
+//
+// null = not answered yet. Every consumer treats anything but `true` as "use the
+// original token flow", so an unfinished, failed, or unconfigured probe all degrade to
+// exactly the pre-Worker behavior -- one popup, as before. Without this gate a
+// not-yet-deployed Worker would give the owner TWO popups: a code popup whose exchange
+// then fails, followed by the token-flow popup it falls back to.
+let _authWorkerAvailable = null;
+function probeAuthWorker() {
+  if (!navigator.onLine) { _authWorkerAvailable = false; return; }
+  authWorkerFetch('/auth/health', {}, 6000)
+    .then(({ ok, data }) => { _authWorkerAvailable = !!(ok && data && data.configured); })
+    .catch(() => { _authWorkerAvailable = false; })
+    .then(() => console.log('Persistent sign-in available:', _authWorkerAvailable));
+}
+// Best-effort: signing out should still work locally even if the Worker is down,
+// so the caller clears local state regardless of what this returns.
+async function authWorkerRevoke() {
+  const deviceId = loadDeviceId();
+  if (!deviceId) return;
+  try { await authWorkerFetch('/auth/revoke', { device_id: deviceId }, 5000); }
+  catch (e) { console.log('Revoking the device credential failed (clearing it locally anyway):', (e && e.message) || e); }
+  clearDeviceId();
 }
 
 async function findDriveDataFile() {
@@ -1880,7 +2044,9 @@ async function loadDriveDataFile(fileId) {
   try {
     return JSON.parse(text);
   } catch (e) {
-    throw new Error('Drive data file exists but is not valid JSON -- it may be corrupted.');
+    const err = new Error('Drive data file exists but is not valid JSON -- it may be corrupted.');
+    err.reachedServer = true; // the file downloaded fine -- this is a data problem, not a network one
+    throw err;
   }
 }
 
@@ -2230,6 +2396,62 @@ async function loadTripsyOfflineTrips() {
 // rendering (and therefore from editing) stale data.
 let tripsyTripsAreOffline = false;
 let tripsyOfflineCacheInfo = null; // { updatedAt, cachedAt }
+// ---- Offline Trip Insurance doc list -- same appCache store as
+// tripsyCacheTripsForOffline/loadTripsyOfflineTrips above, its own key.
+// Document BYTES reuse the existing tripsyDocs store (saveTripsyOfflineDoc/
+// getTripsyOfflineDoc below), keyed by driveFileId same as any other doc --
+// there's no reason for Trip Insurance to have its own blob store too.
+async function tripsyCacheTripInsuranceDocsForOffline(docs) {
+  try {
+    const db = await openTripsyOfflineDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_APP_STORE, 'readwrite');
+      tx.objectStore(TRIPSY_OFFLINE_APP_STORE).put({
+        key: 'tripInsuranceDocs', docs, cachedAt: new Date().toISOString(),
+      });
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    return true;
+  } catch (e) {
+    console.error('tripsyCacheTripInsuranceDocsForOffline failed (non-fatal):', e);
+    return false;
+  }
+}
+async function loadTripInsuranceOfflineDocs() {
+  try {
+    const db = await openTripsyOfflineDb();
+    const rec = await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_APP_STORE, 'readonly');
+      const req = tx.objectStore(TRIPSY_OFFLINE_APP_STORE).get('tripInsuranceDocs');
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+    return (rec && Array.isArray(rec.docs) && rec.docs.length) ? rec : null;
+  } catch (e) {
+    console.error('loadTripInsuranceOfflineDocs failed (non-fatal):', e);
+    return null;
+  }
+}
+// Caches the doc list + every doc's bytes for offline viewing -- called both
+// right after sign-in (so losing the connection mid-session works even if the
+// reader never opened Trip Insurance yet this session) and every time the page
+// itself renders (so a doc added from another device gets picked up on the
+// next visit too). Fails soft throughout: this is a convenience cache on top
+// of the real Drive copy, never something that should block anything.
+async function cacheTripInsuranceDocsOffline(docs) {
+  tripsyCacheTripInsuranceDocsForOffline(docs);
+  for (const d of docs) {
+    try {
+      if (await getTripsyOfflineDoc(d.driveFileId)) continue;
+      const blob = await downloadDriveFileBlob(d.driveFileId);
+      await saveTripsyOfflineDoc({
+        driveFileId: d.driveFileId, blob, mimeType: d.mimeType, fileName: d.fileName,
+        cachedAt: new Date().toISOString(),
+      });
+    } catch (e) { console.error('Caching trip insurance doc for offline failed (non-fatal):', e); }
+  }
+}
 async function saveTripsyOfflineDoc(record) {
   try {
     const db = await openTripsyOfflineDb();
@@ -2732,14 +2954,17 @@ const Store = {
         if (before && before.length) {
           if (change.type === 'delete_trip') {
             driveData.tripsyUpdatePages = before.filter(p => p.tripKey !== change.tripKey);
-          } else if ((change.type === 'edit_event' || change.type === 'delete_event') && change.source !== 'tripsy_update_page') {
+          } else if ((change.type === 'edit_event' || change.type === 'delete_event' || change.type === 'move_event') && change.source !== 'tripsy_update_page') {
             driveData.tripsyUpdatePages = before.filter(p => !(p.eventKeys || []).includes(change.eventKey));
           }
           touchedUpdatePages = driveData.tripsyUpdatePages.length !== before.length;
         }
         const touchedGuidesOrOutfits = change.type === 'delete_event'
           && tripsyStripDeletedEventFromCaches(change.tripKey, change.eventKey.replace(':', '-'));
-        if (touchedUpdatePages || touchedGuidesOrOutfits) await persistDriveData({ silentConflict: true });
+        // A moved event leaves its SOURCE trip's guide/outfits exactly like a deleted
+        // one, and takes its attached documents with it -- see tripsyReHomeMovedEvent.
+        const touchedByMove = change.type === 'move_event' && tripsyReHomeMovedEvent(change);
+        if (touchedUpdatePages || touchedGuidesOrOutfits || touchedByMove) await persistDriveData({ silentConflict: true });
       } catch (e) {
         console.error('Derived-cache cleanup write failed (non-fatal):', e);
       }
@@ -2806,6 +3031,25 @@ const Store = {
     } catch (e) {
       console.error('Store.deleteTripsyAttachment failed:', e);
       return false;
+    }
+  },
+  // Trip Insurance documents (policies, claims, coverage summaries) -- not
+  // scoped to any one trip, so kept as their own flat list rather than
+  // folded into tripsyAttachments. Same "bytes in their own Drive file,
+  // metadata here" split as attachments, for the same reason (see
+  // uploadBlobToDrive's comment).
+  async listTripInsuranceDocs() {
+    return [...(driveData.tripInsuranceDocs || [])];
+  },
+  async saveTripInsuranceDoc(doc) {
+    try {
+      if (!driveData.tripInsuranceDocs) driveData.tripInsuranceDocs = [];
+      driveData.tripInsuranceDocs.push(doc);
+      await persistDriveData();
+      return { ok: true };
+    } catch (e) {
+      console.error('Store.saveTripInsuranceDoc failed:', e);
+      return { ok: false, error: e.message || String(e) };
     }
   },
   async renameTripsyAttachment(attachmentId, newFileName) {
@@ -3269,17 +3513,30 @@ const Store = {
           throw e;
         }
       }
+      // The cluster may span several proposals (an outbound and a return flight
+      // that arrived as two emails): each entry names its own proposalId, with
+      // the top-level `proposalId` kept only as a fallback for the old
+      // single-proposal shape. Resolve each event inside its own proposal and
+      // finish any proposal left with nothing pending -- one write for all.
+      const byProposal = new Map();
+      for (const ec of eventChanges) {
+        const pid = ec.proposalId || proposalId;
+        if (!byProposal.has(pid)) byProposal.set(pid, []);
+        byProposal.get(pid).push(ec);
+      }
       for (let attempt = 0; ; attempt++) {
-        const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
-        if (!proposal) break; // resolved elsewhere -- the trips write already saved
-        for (const { eventId, patch } of eventChanges) {
-          const event = proposal.events.find(e => e.id === eventId);
-          if (event) Object.assign(event, patch);
-        }
-        if (proposal.events.every(e => e.resolution !== 'pending')) {
-          const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
-          if (a) a.parseStatus = 'done';
-          driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== proposalId);
+        for (const [pid, changes] of byProposal) {
+          const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === pid);
+          if (!proposal) continue; // resolved elsewhere -- the trips write already saved
+          for (const { eventId, patch } of changes) {
+            const event = proposal.events.find(e => e.id === eventId);
+            if (event) Object.assign(event, patch);
+          }
+          if (proposal.events.every(e => e.resolution !== 'pending')) {
+            const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
+            if (a) a.parseStatus = 'done';
+            driveData.tripsyParseProposals = driveData.tripsyParseProposals.filter(p => p.id !== pid);
+          }
         }
         try { await persistDriveData({ silentConflict: true }); break; }
         catch (e) {
@@ -3876,6 +4133,30 @@ function htmlToPlainText(html) {
     .replace(/\uFFFD/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// The email intake's own HTML -> text step (fetchTripsyIntakeEmail), replacing a
+// direct htmlToPlainText call. That shared helper -- also used by the two PS
+// email parsers, which pre-clean their HTML and are left untouched -- neither
+// strips <style>/<script>/<head> nor keeps any line structure: fed a raw
+// airline email it stored 16.6K chars of which the first 15.1K were CSS, with
+// the whole five-leg itinerary then flattened into ONE 1,256-char line (found
+// 2026-09-08 on a real United itinerary). That is noise the parser has to
+// wade through, and bytes every device re-uploads until the body is pruned.
+// Order matters: SOURCE whitespace is collapsed first, so a tag whose
+// attributes wrap across source lines can never be split in half by the line
+// split below; then comments and the non-content elements go; then <br> and
+// closing block tags become line breaks; then the UNCHANGED htmlToPlainText
+// runs over each line -- reusing its entity decoding verbatim rather than a
+// second copy that could drift -- and empty lines are dropped.
+function tripsyIntakeHtmlToText(html) {
+  const flat = String(html || '')
+    .replace(/\s+/g, ' ')
+    .replace(/<!--.*?-->/g, ' ')
+    .replace(/<(style|script|head|title)\b[^>]*>.*?<\/\1\s*>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|li|h[1-6]|table|section|header|footer|blockquote|ul|ol|dd|dt)\s*>/gi, '\n');
+  return flat.split('\n').map(line => htmlToPlainText(line)).filter(Boolean).join('\n');
 }
 
 function parseTravelersList(travelersStr) {
@@ -4494,7 +4775,7 @@ async function fetchTripsyIntakeEmail(messageId) {
   let body = '';
   const htmlData = findHtmlPartData(msg.payload);
   if (htmlData) {
-    body = htmlToPlainText(decodeQuotedPrintableIfNeeded(base64UrlDecodeToUtf8(htmlData)));
+    body = tripsyIntakeHtmlToText(decodeQuotedPrintableIfNeeded(base64UrlDecodeToUtf8(htmlData)));
   } else {
     const textData = findTextPartData(msg.payload) || (msg.payload.body && msg.payload.body.data);
     if (textData) body = decodeQuotedPrintableIfNeeded(base64UrlDecodeToUtf8(textData)).replace(/\s+/g, ' ').trim();
@@ -4622,7 +4903,7 @@ async function drainTripsyDocProposals() {
 }
 
 
-// Runs the app's side of every Drive-relay pipeline on startup / Refresh All:
+// Runs the app's side of every Drive-relay pipeline on startup:
 // drain applied-change confirmations and parsed email proposals a refresh left,
 // then scan Gmail for newly forwarded confirmations. Drains run before the scan
 // so anything already processed is reflected first. Refreshes the status badge
@@ -4748,50 +5029,14 @@ function todayLocalDateString() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
-// Manual "Refresh All" -- runs every sync pipeline plus a passenger-report
-// recompute, then re-renders whatever page is currently open. Unlike
-// runBackgroundSyncs (silent, best-effort on every app load), this is
-// user-triggered from the Utilities menu and surfaces a toast either way.
-async function refreshAllReports() {
-  if (!isOwner) return;
-
-  let anyFailure = false;
-
-  try {
-    const r = await syncReservationsFromGmail();
-    if (r.ok) updateLastSyncedLabel('sync-reservations-last');
-    else anyFailure = true;
-  } catch (e) {
-    console.error('Refresh All: reservations sync failed:', e);
-    anyFailure = true;
-  }
-
-  try {
-    const r = await syncPsBalanceFromGmail();
-    if (r.ok) updateLastSyncedLabel('sync-psbalance-last');
-    else anyFailure = true;
-  } catch (e) {
-    console.error('Refresh All: PS balance sync failed:', e);
-    anyFailure = true;
-  }
-
-  try {
-    await recomputeReport();
-  } catch (e) {
-    console.error('Refresh All: report recompute failed:', e);
-    anyFailure = true;
-  }
-
-  await syncTripsyRelays();
-
-  if (currentView === 'home') await renderHome();
-  else if (currentView === 'reservations') await renderReservationsList();
-  else if (currentView === 'psbalance') await renderPsBalanceTable(false);
-  else if (currentView === 'psinvoices') await renderPsInvoices();
-  else if (currentView === 'passengers') await renderPassengerReport(currentPassengerFilter);
-
-  toast(anyFailure ? 'Refresh All finished with some errors -- check the console.' : 'All reports refreshed.', anyFailure ? 'error' : 'success');
-}
+// (The Utilities menu's "Refresh All" button and its refreshAllReports()
+// were removed as fully redundant: all three of its sync pipelines already
+// run on every app load via runBackgroundSyncs, and its recomputeReport()
+// was covered too -- every invoice-mutating path calls that itself, and
+// navigate() nulls cachedReport on entering the Reports view so it always
+// recomputes fresh there anyway. The per-page "Force Sync" buttons on
+// Reservations and P/S Balance remain for a targeted manual refresh, with
+// better feedback than the old catch-all toast.)
 
 // =============================================================
 // PARSER (validated against a real sample invoice in Node before
@@ -5588,6 +5833,11 @@ async function navigate(view, param) {
   // other destination (a stray link, or a navigate('home') like the Travel View
   // exit) to My Trips. Central enforcement so no disallowed view ever renders.
   if (isTripsOnlyUser && !TRIPS_ONLY_ALLOWED_VIEWS.has(view)) { view = 'tripsytrips'; param = undefined; }
+  // Offline mode only has a local cache for Travel View and Trip Insurance --
+  // redirect anything else (e.g. the Travel View exit button's navigate('home'))
+  // to whichever of the two is actually available, so a stray destination
+  // never tries to render a page that needs a live signed-in read.
+  if (appOfflineMode && !OFFLINE_ALLOWED_VIEWS.has(view)) { view = tripsyTripsAreOffline ? 'travelview' : 'tripinsurance'; param = undefined; }
   const previousView = currentView;
   currentView = view;
   setActiveNav(view, param);
@@ -5629,6 +5879,7 @@ async function navigate(view, param) {
     else if (view === "utilitiesfavorites") await renderUtilitiesFavorites();
     else if (view === "passengers") await renderPassengerReport(param || "totals");
     else if (view === "travelview") await renderTravelView();
+    else if (view === "tripinsurance") await renderTripInsurance();
   } catch (e) {
     // Catch-all so a bug in one view shows a visible error instead of an
     // infinite "Loading…" -- individual views may also handle their own
@@ -8092,6 +8343,117 @@ function tripsyFavoriteDateLabel(dayKey) {
   return tripPartsToUtcDate({ year: +dayKey.slice(0, 4), month: +dayKey.slice(5, 7), day: +dayKey.slice(8, 10) })
     .toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
+// ---- Trip Insurance: a flat icon library of insurance documents (policies,
+// claims, coverage summaries) -- not scoped to any one trip, so it's its own
+// top-level nav item rather than folded into a trip's attachments. Reuses
+// the same "bytes in their own Drive file, metadata in driveData" upload
+// (uploadBinaryFileToDrive) and "open in a new tab" (openDriveFileInNewTab)
+// helpers Tripsy attachments already use above -- no reason for a second
+// document-storage mechanism. Upload is owner-only, matching every other
+// write in the app; everyone with read access can open a document.
+function tripInsuranceDocIcon(mimeType) {
+  const t = (mimeType || '').toLowerCase();
+  if (t === 'application/pdf') return '📄';
+  if (t.startsWith('image/')) return '🖼️';
+  if (t.includes('word') || t.includes('officedocument.wordprocessingml')) return '📝';
+  return '📃';
+}
+// Display only -- the stored fileName (used for the Drive upload, the tab
+// title when opened, etc.) keeps its real extension throughout.
+function tripInsuranceDisplayName(fileName) {
+  return (fileName || '').replace(/\.pdf$/i, '');
+}
+async function renderTripInsurance() {
+  const main = document.getElementById('main');
+  const docs = await Store.listTripInsuranceDocs();
+
+  // Keep the offline cache current on every live, signed-in visit to this
+  // page too (completeSignIn already does this once right after sign-in, so
+  // losing the connection before ever opening this page still works -- this
+  // second call picks up anything added from another device since then).
+  // Fire-and-forget: never blocks rendering. Skipped entirely in
+  // appOfflineMode, where `docs` already came FROM this cache and any
+  // network call here would just fail anyway.
+  if (!appOfflineMode) cacheTripInsuranceDocsOffline(docs);
+
+  // The button is just the glyph, padded barely past its own edge (not a
+  // big square card) -- the document name sits below it as plain text,
+  // outside the button entirely, per the explicit request. Both the doc
+  // buttons and the add button below share this exact size/shape (base
+  // style), differing only in color, so "same size and style" holds by
+  // construction rather than by keeping two definitions in sync by hand.
+  const tripInsIconBtnStyle = 'cursor:pointer; display:inline-flex; align-items:center; justify-content:center; padding:16px; border-radius:16px; line-height:1; font-size:46px;';
+  const docTileHtml = d => `
+    <div style="display:flex; flex-direction:column; align-items:center; width:104px; gap:6px;">
+      <button type="button" data-tripins-open="${esc(d.driveFileId)}" title="${esc(d.fileName)}" style="${tripInsIconBtnStyle} border:1px solid var(--line); background:var(--panel-2); color:var(--text);">${tripInsuranceDocIcon(d.mimeType)}</button>
+      <div style="font-size:12px; color:var(--text); text-align:center; max-width:104px; word-break:break-word; line-height:1.25;">${esc(tripInsuranceDisplayName(d.fileName))}</div>
+    </div>`;
+  // The "add more" button after the icons -- green, per the explicit
+  // request -- same tripInsIconBtnStyle base as every doc button above, so
+  // it matches their size and shape exactly.
+  const addTileHtml = `
+    <div style="display:flex; flex-direction:column; align-items:center; width:104px; gap:6px;">
+      <button type="button" data-tripins-add title="Upload another document" style="${tripInsIconBtnStyle} border:none; background:#2E9E5B; color:#fff;">+</button>
+      <div style="font-size:12px; color:var(--text); text-align:center;">Add Document</div>
+    </div>`;
+  // Uploading needs a real Drive write, which offline mode's minimal driveData
+  // can't do -- isOwner is already false in that mode (nobody's identity is
+  // verified with no network), so this is belt-and-suspenders, not the only
+  // thing preventing it.
+  const canUpload = isOwner && !appOfflineMode;
+  const offlineNoticeHtml = appOfflineMode
+    ? `<div style="display:flex; align-items:center; gap:8px; margin:0 0 12px; padding:8px 12px; border:1px solid var(--amber); border-radius:8px; background:rgba(227,164,56,0.10); font-size:13px; color:var(--text);">📴 Offline — showing documents saved on this device. Uploading needs a connection.</div>`
+    : '';
+
+  main.innerHTML = `
+    <div class="page-title">Trip Insurance</div>
+    ${offlineNoticeHtml}
+    ${docs.length
+      ? `<div style="display:flex; flex-wrap:wrap; align-items:flex-start; gap:20px 24px;">${docs.map(docTileHtml).join('')}${canUpload ? addTileHtml : ''}</div>`
+      : `<div class="empty-state" style="margin-top:16px; display:flex; flex-direction:column; align-items:center; gap:12px;">
+          <div>No insurance documents yet.</div>
+          ${canUpload ? `<button class="btn" data-tripins-add>Upload Documents</button>` : ''}
+        </div>`}
+    <input type="file" data-tripins-file multiple accept="application/pdf,image/*,.doc,.docx">
+  `;
+
+  const fileInput = main.querySelector('[data-tripins-file]');
+  main.querySelectorAll('[data-tripins-add]').forEach(btn => btn.addEventListener('click', () => fileInput.click()));
+  main.querySelectorAll('[data-tripins-open]').forEach(btn => {
+    btn.addEventListener('click', () => openDriveFileInNewTab(btn.getAttribute('data-tripins-open')));
+  });
+  fileInput.addEventListener('change', async () => {
+    const files = [...fileInput.files];
+    if (!files.length) return;
+    fileInput.disabled = true;
+    for (const file of files) {
+      try {
+        const driveFileId = await uploadBinaryFileToDrive(file);
+        const result = await Store.saveTripInsuranceDoc({
+          id: crypto.randomUUID(),
+          fileName: file.name,
+          driveFileId,
+          mimeType: file.type || 'application/octet-stream',
+          sizeBytes: file.size,
+          uploadedAt: new Date().toISOString(),
+          uploadedBy: currentUserEmail,
+        });
+        if (!result.ok) throw new Error(result.error || 'Save failed');
+        // Cache the just-uploaded file's bytes locally too, straight from the
+        // File object already in hand -- same reasoning as the Tripsy attach
+        // panel's identical call. Non-fatal: the proactive cache loop above
+        // would pick it up on the next render anyway.
+        saveTripsyOfflineDoc({
+          driveFileId, blob: file, mimeType: file.type || 'application/octet-stream',
+          fileName: file.name, cachedAt: new Date().toISOString(),
+        });
+      } catch (e) {
+        toast(`Could not upload ${file.name}: ${e.message}`, "error");
+      }
+    }
+    if (currentView === 'tripinsurance') renderTripInsurance();
+  });
+}
 async function renderUtilitiesWardrobe() {
   if (!isOwner) { main.innerHTML = `<div class="page-title">Wardrobe</div><div class="empty-state">Owner only.</div>`; return; }
   const allGarments = await Store.listWardrobe();
@@ -9687,6 +10049,94 @@ function tripsyConfirmDialog(message, { title = '', yes = 'Yes', no = 'No' } = {
     const noBtn = ov.querySelector('[data-confirm-no]');
     if (noBtn) noBtn.onclick = () => done(false);
     ov.onclick = e => { if (e.target === ov) done(no === null); };
+  });
+}
+// The trip picker behind the timeline's ↪️ Move icon: resolves to the chosen trip's
+// key, or null on Cancel / click-outside. Lists every OTHER existing trip (the
+// event's current trip is excluded -- moving onto it is the no-op the applier
+// refuses anyway), newest first, so the current/upcoming trips an event most
+// plausibly belongs to sit at the top rather than under a wall of 2011 rows.
+// Existing trips only, by design: creating a trip to move into is the Review
+// Parsed Docs page's job. Same overlay shell and z-index tier as
+// tripsyConfirmDialog; nothing on the My Trips timeline opens above it.
+function tripsyMoveEventDialog(currentTripKey, eventSummary) {
+  return new Promise(resolve => {
+    const others = [...(tripsyDecryptedTrips || [])]
+      .filter(t => t.key !== currentTripKey)
+      .sort((a, b) => ((a.start || '') < (b.start || '') ? 1 : ((a.start || '') > (b.start || '') ? -1 : 0)));
+    if (!others.length) { toast('There is no other trip to move this event to.', 'error'); resolve(null); return; }
+    let ov = document.getElementById('tripsy-move-event-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-move-event-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100';
+    const label = t => `${t.name || 'Untitled trip'}${t.start ? ` (${t.start}${t.end && t.end !== t.start ? ` – ${t.end}` : ''})` : ''}`;
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:460px; text-align:center;">
+        <h2 style="margin:0 0 8px; font-size:19px;">Move to another trip</h2>
+        <div style="font-size:14.5px; line-height:1.55; margin-bottom:14px; color:var(--text);">Move <strong>${esc(eventSummary || 'this event')}</strong> to:</div>
+        <select data-move-target style="width:100%; font-size:15px; padding:8px; margin-bottom:20px;">
+          ${others.map(t => `<option value="${esc(t.key)}">${esc(label(t))}</option>`).join('')}
+        </select>
+        <div style="display:flex; gap:10px; justify-content:center;">
+          <button class="btn primary" data-move-yes>Move</button>
+          <button class="btn" data-move-no>Cancel</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; resolve(v); };
+    ov.querySelector('[data-move-yes]').onclick = () => done(ov.querySelector('[data-move-target]').value || null);
+    ov.querySelector('[data-move-no]').onclick = () => done(null);
+    ov.onclick = e => { if (e.target === ov) done(null); };
+  });
+}
+// The "Create a new trip" dialog behind the review page's per-event Import:
+// name + start + end, resolving to {name, start, end} or null on Cancel /
+// click-outside. Replaces a bare prompt() that asked for only a NAME and then
+// silently made the trip a single day (the event's own) -- which the NEXT
+// event's destination dropdown, being date-matched, couldn't see, so a
+// two-flight booking ended up as two one-day trips (reported 2026-09-08).
+// Defaults come from the event itself (a hotel's check-in/out, a flight's
+// departure/arrival day), so the usual case is just confirming. An end before
+// the start is swapped rather than refused; a missing end becomes the start.
+// Same overlay shell and z-index tier as tripsyMoveEventDialog.
+function tripsyNewTripDialog({ name = 'New Trip', start = '', end = '' } = {}) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-new-trip-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-new-trip-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100';
+    const field = 'width:100%; font-size:15px; padding:8px; margin-top:4px; box-sizing:border-box;';
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:460px;">
+        <h2 style="margin:0 0 12px; font-size:19px; text-align:center;">Create a new trip</h2>
+        <label style="display:block; font-size:12px; color:var(--muted);">Trip name</label>
+        <input type="text" data-newtrip-name value="${esc(name)}" class="field-input" style="${field} margin-bottom:12px;">
+        <div style="display:flex; gap:12px;">
+          <div style="flex:1;"><label style="display:block; font-size:12px; color:var(--muted);">Start</label>
+            <input type="date" data-newtrip-start value="${esc(start)}" class="field-input" style="${field}"></div>
+          <div style="flex:1;"><label style="display:block; font-size:12px; color:var(--muted);">End</label>
+            <input type="date" data-newtrip-end value="${esc(end)}" class="field-input" style="${field}"></div>
+        </div>
+        <div data-newtrip-error style="color:var(--red, #c0392b); font-size:12px; min-height:16px; margin-top:8px;"></div>
+        <div style="display:flex; gap:10px; justify-content:center; margin-top:12px;">
+          <button class="btn primary" data-newtrip-yes>Create</button>
+          <button class="btn" data-newtrip-no>Cancel</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; resolve(v); };
+    ov.querySelector('[data-newtrip-yes]').onclick = () => {
+      const err = ov.querySelector('[data-newtrip-error]');
+      const nm = ov.querySelector('[data-newtrip-name]').value.trim();
+      let s = ov.querySelector('[data-newtrip-start]').value, e = ov.querySelector('[data-newtrip-end]').value;
+      if (!nm) { err.textContent = 'Enter a name for the trip.'; return; }
+      if (!s && !e) { err.textContent = 'Enter at least a start date.'; return; }
+      if (!s) s = e;
+      if (!e) e = s;
+      if (e < s) [s, e] = [e, s];
+      done({ name: nm, start: s, end: e });
+    };
+    ov.querySelector('[data-newtrip-no]').onclick = () => done(null);
+    ov.onclick = e => { if (e.target === ov) done(null); };
+    setTimeout(() => { const n = ov.querySelector('[data-newtrip-name]'); if (n) { n.focus(); n.select(); } }, 0);
   });
 }
 // Celebration when a person's Plan Packing List is completed: offer to compose
@@ -12851,6 +13301,36 @@ async function renderPsBalanceTable(showDeleteControls = false) {
   const container = document.getElementById("psbalance-card");
   const deductions = await Store.listPsBalanceDeductions();
 
+  // Reservation # -> the trip it belongs to, if any -- reuses
+  // findMatchingTripsyPsReservation (the same flight-number/date matching
+  // My Trips' own timeline uses to attach a P/S reservation to a flight
+  // event) rather than re-implementing those matching rules a second time,
+  // just applied in reverse: every trip's flight events, looking for which
+  // one (if any) matches each reservation. Lazy-loads trips/reservations
+  // the same way My Trips and Travel View each already do, since neither
+  // may have run yet this session when P/S Balance is opened directly.
+  // Fails soft -- a trip-name lookup is a nice-to-have, never something
+  // that should block the balance table itself from rendering.
+  const tripNameByReservationNumber = new Map();
+  try {
+    const trips = (await ensureTripsyDecrypted()) || [];
+    if (!tripsyPsReservations) {
+      try { tripsyPsReservations = await Store.listReservations(); } catch (e) { tripsyPsReservations = []; }
+    }
+    for (const trip of trips) {
+      if (isTripsyTripEffectivelyHidden(trip)) continue;
+      for (const ev of (trip.events || [])) {
+        if (ev.type !== 'flight') continue;
+        const match = findMatchingTripsyPsReservation(ev);
+        if (match && match.reservation.reservationNumber) {
+          tripNameByReservationNumber.set(match.reservation.reservationNumber, trip.name);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Matching P/S reservations to trips failed (non-fatal):', e);
+  }
+
   function parseServiceDate(d) {
     if (!d) return null;
     const [mm, dd, yyyy] = d.split("/");
@@ -12922,7 +13402,7 @@ async function renderPsBalanceTable(showDeleteControls = false) {
             <tr style="background:var(--panel-2);">
               <td colspan="4" style="font-family:var(--mono); font-weight:700; color:var(--text);">
                 <span data-psbal-goto-detail="${esc(g.gmailMessageId)}" style="cursor:pointer;">
-                  ${g.dateOfService ? esc(g.dateOfService) : ""} — Reservation #${esc(g.reservationNumber)}
+                  ${g.dateOfService ? esc(g.dateOfService) : ""} — Reservation #${esc(g.reservationNumber)}${tripNameByReservationNumber.has(g.reservationNumber) ? ` (${esc(tripNameByReservationNumber.get(g.reservationNumber))})` : ""}
                 </span>
                 ${isOwner && showDeleteControls ? `<button class="btn danger" data-psbal-delete-group data-id="${esc(g.gmailMessageId)}" style="font-size:10px; padding:2px 6px; margin-left:8px;">Delete</button>` : ''}
               </td>
@@ -13558,6 +14038,29 @@ function tripsyStripDeletedEventFromCaches(tripKey, hyphenBase) {
   return changed;
 }
 
+// The derived-cache bookkeeping for a move_event, run from queueTripsyChange's
+// best-effort post-save cleanup (same block that handles delete_event). Two
+// things, both mechanical, neither needing a Claude call: (1) the event has LEFT
+// its source trip, so that trip's Daily Dress Guide and composed Outfits must
+// drop it exactly as a deletion would -- reuses tripsyStripDeletedEventFromCaches
+// verbatim (the destination trip needs nothing here: its guide's own fingerprint
+// check flags the newcomer as "may be out of date" on next open, same as any
+// added event); (2) any document attached to the event rides along -- event-
+// scoped attachments carry a tripKey alongside their eventKey, and the trip card
+// lists docs by that tripKey, so without re-homing them the files would keep
+// showing under the trip the event just left. Mutates driveData in place and
+// returns whether anything changed, so the caller only writes when needed.
+function tripsyReHomeMovedEvent(change) {
+  let changed = tripsyStripDeletedEventFromCaches(change.tripKey, change.eventKey.replace(':', '-'));
+  for (const a of (driveData.tripsyAttachments || [])) {
+    if (a.scope === 'event' && a.eventKey === change.eventKey && a.tripKey !== change.targetTripKey) {
+      a.tripKey = change.targetTripKey;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 // Applies one plain-data change object -- the exact shape Store.queueTripsyChange
 // has always been handed by every edit/create/delete call site -- directly to
 // tripsyDecryptedTrips, REPLACING the array (and any touched trip) rather than
@@ -13604,6 +14107,24 @@ function applyTripsyChangeToTrips(change) {
     next = trips.filter(t => t.key !== change.tripKey);
   } else if (change.type === 'create_trip') {
     next = sortTrips([...trips, { key: change.tripKey, name: change.name || null, start: change.start || null, end: change.end || null, location: null, events: [] }]);
+  } else if (change.type === 'move_event') {
+    // Re-homes an event under another EXISTING trip. The very same event object
+    // (same id, same tripsyRaw) is carried across -- NOT deleted and re-created --
+    // so every id-keyed reference to it (attachments, outfit blocks, itinerary
+    // baselines) still resolves after the move; only which trip's events[] holds
+    // it changes. The source is located by eventKey exactly like edit/delete
+    // (never trusting a caller-supplied tripKey that may have gone stale), and
+    // moving an event onto the trip it's already in is refused as a no-op error
+    // rather than silently dropping and re-adding it.
+    const si = trips.findIndex(t => (t.events || []).some(ev => tripsyEventKey(ev.tripsyRaw) === change.eventKey));
+    if (si < 0) throw new Error(`event not found: ${change.eventKey}`);
+    const di = trips.findIndex(t => t.key === change.targetTripKey);
+    if (di < 0) throw new Error(`trip not found: ${change.targetTripKey}`);
+    if (si === di) throw new Error(`event is already in trip ${change.targetTripKey}`);
+    const moving = trips[si].events.find(ev => tripsyEventKey(ev.tripsyRaw) === change.eventKey);
+    next = [...trips];
+    next[si] = { ...trips[si], events: trips[si].events.filter(ev => ev !== moving) };
+    next[di] = { ...trips[di], events: sortEvents([...(trips[di].events || []), moving]) };
   } else {
     throw new Error(`unknown change type: ${change.type}`);
   }
@@ -13671,6 +14192,75 @@ let tripsyParseRunStartedAt = null;
 // How long a started run is treated as "in progress" before the panel stops
 // claiming it (a cloud run normally lands well inside this).
 const TRIPSY_PARSE_RUN_WINDOW_MS = 12 * 60 * 1000;
+
+// ---- When the cloud parse routine next runs ----
+// Mirrored BY HAND from the "Tripsy Trips Refresh" Routine at claude.ai/code/routines
+// (this app has no API to query a Routine, and the cloud sandbox can't read this repo,
+// so the two can only be kept in step deliberately). Entries are {hour, minute} in
+// **UTC**, because that's how a Routine's cron is evaluated -- the UI converts to the
+// viewer's own local time for display.
+//
+// LEAVE THIS EMPTY IF YOU DON'T KNOW THE TIMES. Empty means "cadence known, clock times
+// not", and every caller below falls back to naming the cadence instead of a specific
+// time -- vague but never WRONG, which matters more here: a confidently-stated "parses
+// at 6:00 PM" that the Routine no longer honours is worse than saying nothing, because
+// the owner would wait for a run that isn't coming. Same reasoning if the Routine's
+// schedule ever changes and nobody updates this: clear it rather than leave it stale.
+//
+// Currently mirroring the Routine's cron `0 0,6,16 * * *` -- minute 0 at hours 0, 6 and
+// 16 UTC. (Deliberately NOT evenly spaced: 6h, then 10h, then 8h. Don't "tidy" these
+// into an even split without changing the Routine to match.) A cron listing explicit
+// hours like this is stored verbatim, unlike an every-N-hours form (`0 */8 * * *`),
+// which the Routine service re-anchors to its creation minute -- so if the cron is ever
+// rewritten in that shape, these literal times stop being trustworthy.
+const TRIPSY_PARSE_RUN_UTC_TIMES = [{ hour: 0 }, { hour: 6 }, { hour: 16 }];
+// How often it runs, for the wording used when the exact times aren't known. Kept as
+// prose because that's all it's ever used for (the Parsing Docs utilities page says the
+// same thing in its own copy -- index.html's "three times a day, in the cloud").
+const TRIPSY_PARSE_RUN_CADENCE_LABEL = 'three times a day';
+
+// The next scheduled run strictly after `now`, or null when the times aren't known.
+// Walks today's and tomorrow's slots in UTC so a run later today is preferred over the
+// first one tomorrow, and the day boundary is handled without any local-time reasoning
+// (the same trap parseTripLocalParts exists to avoid elsewhere in this file).
+function tripsyNextScheduledParseRun(now = new Date()) {
+  if (!TRIPSY_PARSE_RUN_UTC_TIMES.length) return null;
+  // Sorted, not taken in array order: this constant is maintained by hand, and a
+  // perfectly reasonable edit that lists the times out of order would otherwise
+  // return whichever slot happened to be written first rather than the soonest
+  // one -- a wrong time, silently, which is the exact failure this whole feature
+  // is supposed to avoid.
+  const slots = [...TRIPSY_PARSE_RUN_UTC_TIMES]
+    .sort((a, b) => (a.hour - b.hour) || ((a.minute || 0) - (b.minute || 0)));
+  for (const dayOffset of [0, 1]) {
+    for (const { hour, minute } of slots) {
+      const candidate = new Date(Date.UTC(
+        now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + dayOffset, hour, minute || 0, 0, 0));
+      if (candidate > now) return candidate;
+    }
+  }
+  return null;
+}
+// "today at 6:00 PM" / "tomorrow at 2:00 AM", in the VIEWER's local time -- unlike trip
+// event times (deliberately shown as their own local wall-clock, see formatTripTime),
+// this is a real instant, so the device's own zone is exactly the right frame.
+function tripsyFormatNextParseRun(when, now = new Date()) {
+  if (!when) return null;
+  const time = when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const isSameLocalDay = when.toDateString() === now.toDateString();
+  const isNextLocalDay = when.toDateString() === new Date(now.getTime() + 86400000).toDateString();
+  if (isSameLocalDay) return `today at ${time}`;
+  if (isNextLocalDay) return `tomorrow at ${time}`;
+  return `${when.toLocaleDateString([], { weekday: 'long' })} at ${time}`;
+}
+// The one sentence both the doc and email rows use, so they can never disagree about
+// what happens next. Names the time when known, the cadence when not.
+function tripsyNextParseRunSentence() {
+  const label = tripsyFormatNextParseRun(tripsyNextScheduledParseRun());
+  return label
+    ? `They'll be parsed automatically in the next scheduled run, ${label}.`
+    : `They'll be parsed automatically in the next scheduled run (${TRIPSY_PARSE_RUN_CADENCE_LABEL}).`;
+}
 // Fires the cloud PARSE routine on demand (the slimmed remnant of the old
 // full Tripsy refresh): it reads flagged docs and forwarded emails from
 // Drive/Gmail, parses them, and writes proposal relay files this app drains.
@@ -16485,6 +17075,17 @@ function tripsyProposalEventIsDuplicate(pev, trips) {
       if (!raw || raw.resource !== resource) continue;
       if (String(raw.startsAt || raw.departureAt || '').slice(0, 16) !== newStart) continue;
       if (newEnd && String(raw.endsAt || raw.arrivalAt || '').slice(0, 16) !== newEnd) continue;
+      // A different confirmation number is a different BOOKING, never a
+      // duplicate: two travelers on the same flight under separate reservations
+      // each need the leg in their own trip. Found 2026-09-08 -- Mo's UA2303
+      // (her PNR) was already tracked in her NY trip, so Jon's identical-times
+      // UA2303 from his own confirmation was auto-ignored and never shown. Only
+      // when BOTH sides carry one and they disagree; an absent confirmation on
+      // either side still never counts against identity, so the same
+      // confirmation forwarded twice still dedupes exactly as before.
+      const newConf = tripsyParseIdentValue(f.confirmation);
+      const oldConf = tripsyParseIdentValue(raw.confirmation);
+      if (newConf && oldConf && newConf !== oldConf) continue;
       let differs = false;
       for (const key of ['name', 'company', 'transportNumber', 'category']) {
         const nv = tripsyParseIdentValue(f[key]);
@@ -16849,6 +17450,60 @@ function tripsyParseFindCluster(unmatchedPendingEvents) {
   const spanDays = (new Date(dayKeys[dayKeys.length - 1]) - new Date(dayKeys[0])) / 86400000;
   if (spanDays > TRIPSY_PARSE_CLUSTER_MAX_SPAN_DAYS) return null;
   return { eventIds: unmatchedPendingEvents.map(e => e.id), start: dayKeys[0], end: dayKeys[dayKeys.length - 1] };
+}
+
+// The destination-trip <select> options for one proposed event, shared by the
+// review card's first render and tripsyRefreshTripSelect (after a Modify
+// changes the date) so the two can never disagree. Date-MATCHED trips come
+// first and the first of them is the default -- unchanged -- but every OTHER
+// trip is offered too, under an "Other trips" group (newest first, with dates,
+// since out-of-range trips need disambiguating): before this the list held
+// ONLY date-matched trips, so a trip just created from the previous event as
+// a single day could not be picked for the next event, whose date fell outside
+// that range (reported 2026-09-08). `selected` is stamped explicitly -- with
+// the extra group present, the browser's "first option" default would land on
+// an unrelated trip whenever nothing matches.
+function tripsyParseTripOptionsHtml(dayKey, trips) {
+  const all = trips || [];
+  const matches = tripsyParseMatchTrips(dayKey, all);
+  const matched = new Set(matches.map(t => t.key));
+  const others = all.filter(t => !matched.has(t.key))
+    .sort((a, b) => ((a.start || '') < (b.start || '') ? 1 : ((a.start || '') > (b.start || '') ? -1 : 0)));
+  const opt = (t, sel, withDates) =>
+    `<option value="${esc(t.key)}"${sel ? ' selected' : ''}>${esc(t.name || 'Untitled trip')}${withDates && t.start ? ` (${esc(formatTripDateRange(t.start, t.end || t.start))})` : ''}</option>`;
+  return [
+    ...matches.map((t, i) => opt(t, i === 0, false)),
+    `<option value="__new__"${matches.length ? '' : ' selected'}>➕ Create a new trip</option>`,
+    others.length ? `<optgroup label="Other trips">${others.map(t => opt(t, false, true)).join('')}</optgroup>` : '',
+  ].join('');
+}
+
+// Page-level clusters of still-unmatched pending events, ACROSS every
+// proposal: tripsyParseFindCluster's rule (2+ dated events within
+// TRIPSY_PARSE_CLUSTER_MAX_SPAN_DAYS) applied as a greedy walk over the events
+// sorted by day, starting a new cluster whenever the next event falls more
+// than the span past the current cluster's first day -- so two unrelated
+// future trips don't cancel each other's offer the way one all-or-nothing
+// span check would. Before this, clustering ran PER PROPOSAL, so an outbound
+// and a return flight that arrived as two separate emails never clustered and
+// each fell to the one-event "create a new trip" path (reported 2026-09-08).
+// Input/entries are {proposal, event}; each cluster is {events, start, end}.
+// Undated events are skipped (they can't place a trip); a lone event is not
+// offered -- that's what the per-event dropdown is for.
+function tripsyParseFindClusters(unmatched) {
+  const dated = (unmatched || [])
+    .map(x => ({ ...x, day: tripsyDayKey(x.event.fields.startsAt || x.event.fields.departureAt) }))
+    .filter(x => x.day)
+    .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+  const clusters = [];
+  let cur = null;
+  for (const x of dated) {
+    const spanDays = cur ? (new Date(x.day) - new Date(cur.start)) / 86400000 : 0;
+    if (!cur || spanDays > TRIPSY_PARSE_CLUSTER_MAX_SPAN_DAYS) { cur = { events: [], start: x.day, end: x.day }; clusters.push(cur); }
+    cur.events.push({ proposal: x.proposal, event: x.event });
+    cur.end = x.day;
+  }
+  return clusters.filter(c => c.events.length >= 2);
 }
 
 // Per-category dot color/icon for the timeline -- a new, small palette
@@ -20805,6 +21460,79 @@ function tripsyPickImageFile(onPick) {
   ov.onclick = e => { if (e.target === ov || e.target.closest('[data-pick-cancel]')) close(); };
 }
 
+// Action menu opened by tapping a photo placed in the diary's book-mode prose --
+// Replace / Delete / Add Caption / Cancel, per the explicit request. The menu node
+// itself is generic/reusable (same pattern as getOrCreateTripsyAttireCategoryMenu);
+// each open rewires its buttons' onclick to the specific day/photo via the caller's
+// closure (showTripsyTripDiary has the dayOf/upsertDay/save/render it needs).
+function getOrCreateTripsyDiaryPhotoMenu() {
+  let menu = document.getElementById('tripsy-diary-photo-menu');
+  if (menu) return menu;
+  menu = document.createElement('div');
+  menu.id = 'tripsy-diary-photo-menu';
+  menu.className = 'tripsy-diary-photo-menu';
+  menu.innerHTML = `
+    <button type="button" class="tripsy-diary-photo-menu-item" data-diary-menu-replace>Replace Photo</button>
+    <button type="button" class="tripsy-diary-photo-menu-item" data-diary-menu-caption>Add Caption</button>
+    <button type="button" class="tripsy-diary-photo-menu-item tripsy-diary-photo-menu-item--danger" data-diary-menu-delete>Delete Photo</button>
+    <button type="button" class="tripsy-diary-photo-menu-item" data-diary-menu-cancel>Cancel</button>
+  `;
+  document.body.appendChild(menu);
+  // Tapping anywhere else closes it with no action -- the same "cancel" outcome the
+  // explicit Cancel button gives, just via the usual dropdown convention.
+  document.addEventListener('click', e => {
+    if (menu.style.display === 'none' || !menu.style.display) return;
+    if (menu.contains(e.target) || e.target.closest('[data-diary-photo-tap]')) return;
+    menu.style.display = 'none';
+  });
+  return menu;
+}
+// Small text-prompt overlay for setting/editing a diary photo's caption from the menu
+// above -- captions otherwise only live in the under-day list's <input> (see
+// tripsyDiaryPhotoListHtml's own comment on why: an <input> nested in the contenteditable
+// prose is a reliable way to lose text on iPad), so this is a separate modal rather than
+// focusing an input inside the figure itself. `onDone` gets the new text, or null if
+// cancelled (Cancel button, outside click, or Escape) -- callers should treat null as
+// "no change" rather than "clear the caption".
+function getOrCreateTripsyDiaryCaptionOverlay() {
+  let overlay = document.getElementById('tripsy-diary-caption-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-diary-caption-overlay';
+  overlay.style.cssText = 'display:none; position:fixed; inset:0; z-index:9300; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; max-width:360px; width:100%; padding:20px; color:var(--text);">
+      <h2 style="margin:0 0 12px; font-size:16px;">Caption</h2>
+      <input type="text" data-diary-caption-input style="width:100%; font-size:14px; padding:8px 10px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--text); font-family:'Avenir Next', sans-serif; box-sizing:border-box;" placeholder="Caption…">
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
+        <button class="btn" data-diary-caption-cancel>Cancel</button>
+        <button class="btn primary" data-diary-caption-save>Save</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+function tripsyDiaryPromptCaption(currentValue, onDone) {
+  const overlay = getOrCreateTripsyDiaryCaptionOverlay();
+  const input = overlay.querySelector('[data-diary-caption-input]');
+  input.value = currentValue || '';
+  overlay.style.display = 'flex';
+  setTimeout(() => input.focus(), 0);
+  const close = () => { overlay.style.display = 'none'; overlay.onclick = null; input.onkeydown = null; };
+  overlay.querySelector('[data-diary-caption-save]').onclick = () => {
+    const v = input.value;
+    close();
+    onDone(v);
+  };
+  overlay.querySelector('[data-diary-caption-cancel]').onclick = () => { close(); onDone(null); };
+  overlay.onclick = e => { if (e.target === overlay) { close(); onDone(null); } };
+  input.onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); overlay.querySelector('[data-diary-caption-save]').click(); }
+    else if (e.key === 'Escape') { overlay.querySelector('[data-diary-caption-cancel]').click(); }
+  };
+}
+
 // ---- Trip Diary page ----------------------------------------------------------
 // Reached from a trip card's gear menu. Days come from buildTripsyPrintDayData, so the
 // diary's day boundaries are IDENTICAL to the itinerary's (earliest dated event, not
@@ -20926,7 +21654,7 @@ async function showTripsyTripDiary(tripKey) {
       const ph = photoOf(d, no);
       if (!ph) return ''; // token for a photo that was removed -- render nothing
       return `<figure class="tripsy-diary-fig tripsy-diary-fig--${esc(ph.side || 'right')}" data-photo-no="${esc(ph.no)}" contenteditable="false">
-        <div class="tripsy-diary-figimg" data-diary-img="${esc(ph.driveFileId || '')}"></div>
+        <div class="tripsy-diary-figimg" data-diary-img="${esc(ph.driveFileId || '')}"${isOwner ? ` data-diary-photo-tap data-diary-day="${esc(dayKey)}" data-photo-no="${esc(ph.no)}"` : ''}></div>
         ${ph.caption ? `<figcaption>${esc(ph.caption)}</figcaption>` : ''}
       </figure>`;
     };
@@ -20991,6 +21719,57 @@ async function showTripsyTripDiary(tripKey) {
     await save();
     render();
     if (failed) toast(`${failed} photo${failed === 1 ? '' : 's'} could not be added — see console for details.`, 'error');
+  };
+  // Tapping a photo placed in the prose opens Replace / Delete / Add Caption / Cancel,
+  // per the explicit request -- the shared menu node's buttons are rewired to this
+  // specific day+photo on each open, closing over dayOf/upsertDay/save/render the same
+  // way every other control on this page already does.
+  const openPhotoActionMenu = (triggerEl, dayKey, no) => {
+    const menu = getOrCreateTripsyDiaryPhotoMenu();
+    positionTripsyFixedMenu(triggerEl, menu);
+    const d = dayOf(dayKey) || {};
+    const ph = photoOf(d, no);
+    menu.querySelector('[data-diary-menu-caption]').textContent = (ph && ph.caption) ? 'Edit Caption' : 'Add Caption';
+    menu.querySelector('[data-diary-menu-replace]').onclick = () => {
+      menu.style.display = 'none';
+      tripsyPickImageFile(async files => {
+        const file = files && files[0];
+        if (!file) return;
+        setSaveState('Uploading…');
+        try {
+          const small = await tripsyResizeImageBlob(file);
+          const driveFileId = await uploadBlobToDrive(small, `diary-photo-${Date.now()}`, 'image/jpeg');
+          const dd = dayOf(dayKey) || {};
+          upsertDay(dayKey, { photos: (dd.photos || []).map(p => Number(p.no) === no ? { ...p, driveFileId } : p) });
+          await save();
+          render();
+        } catch (e) {
+          console.error('Diary photo replace failed:', e);
+          toast('Could not replace the photo — see console for details.', 'error');
+        }
+      });
+    };
+    menu.querySelector('[data-diary-menu-caption]').onclick = () => {
+      menu.style.display = 'none';
+      tripsyDiaryPromptCaption(ph && ph.caption, newCaption => {
+        if (newCaption === null) return; // cancelled -- no change
+        const dd = dayOf(dayKey) || {};
+        upsertDay(dayKey, { photos: (dd.photos || []).map(p => Number(p.no) === no ? { ...p, caption: newCaption } : p) });
+        save();
+        render();
+      });
+    };
+    menu.querySelector('[data-diary-menu-delete]').onclick = () => {
+      menu.style.display = 'none';
+      const dd = dayOf(dayKey) || {};
+      upsertDay(dayKey, {
+        photos: (dd.photos || []).filter(p => Number(p.no) !== no),
+        text: tripsyDiaryRemoveToken(dd.text || '', no),
+      });
+      save();
+      render();
+    };
+    menu.querySelector('[data-diary-menu-cancel]').onclick = () => { menu.style.display = 'none'; };
   };
   // Fetches candidate photos for every place on a day, once per box opening. Each place
   // costs a Places call, which is why this is behind a button rather than eager.
@@ -21227,6 +22006,11 @@ async function showTripsyTripDiary(tripKey) {
         });
         save();
         render();
+      });
+    });
+    content.querySelectorAll('[data-diary-photo-tap]').forEach(el => {
+      el.addEventListener('click', () => {
+        openPhotoActionMenu(el, el.getAttribute('data-diary-day'), Number(el.getAttribute('data-photo-no')));
       });
     });
     tripsyDiaryPaintPhotos(content);
@@ -22787,7 +23571,13 @@ async function tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, 
 // openTripsyItineraryPrintView (writes it into #tripsy-print-root and
 // prints) and previewTripsyItinerary (shows it on-screen in an overlay,
 // with no OS print dialog) share one code path and can never drift apart.
-async function buildTripsyPrintHtml(tripKey) {
+// `summaryOnly` returns just the cover header + Part 1 (the day-by-day event
+// listing), skipping Part 2's narrative cards and the Travel Information tables --
+// and, more importantly, skipping the place-photo lookups those need, which are the
+// slow part of a full build. Used by the Itinerary menu's read-only Summary view and
+// by its Save as PDF, so both render from this one builder rather than a second
+// implementation that could drift from what Print produces.
+async function buildTripsyPrintHtml(tripKey, { summaryOnly = false } = {}) {
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return null;
   const { effectiveTrip, dayKeys, byDay, placesByDay, placeEvents, summaryByDay } = await buildTripsyPrintDayData(trip);
@@ -22893,8 +23683,11 @@ async function buildTripsyPrintHtml(tripKey) {
     // (tripsyDetailedDayDividerHtml) into view. Works whether or not a
     // narrative was ever generated, since Part 2's flat photo-grid
     // fallback still draws the same day dividers.
+    // In summaryOnly mode there IS no Part 2 to jump to, so the day block is neither
+    // marked linkable (which would show a pointer cursor and hover ring promising a
+    // jump that can't happen) nor given the link attribute.
     return `
-      <div class="tp-day-block tp-day-block-linkable" data-tripsy-summary-day-link="${esc(dayKey)}">
+      <div class="tp-day-block${summaryOnly ? '' : ' tp-day-block-linkable'}"${summaryOnly ? '' : ` data-tripsy-summary-day-link="${esc(dayKey)}"`}>
         <div class="tp-day-tile">
           <div class="tp-day-tile-label">Day</div>
           <div class="tp-day-tile-num">${esc(tileNum)}</div>
@@ -22925,7 +23718,7 @@ async function buildTripsyPrintHtml(tripKey) {
       ? tripsySummaryDayTileDate(firstKey)
       : `${tripsySummaryDayTileDate(firstKey)} – ${tripsySummaryDayTileDate(lastKey)}`;
     return `
-      <div class="tp-day-block tp-day-block-empty tp-day-block-linkable" data-tripsy-summary-day-link="${esc(firstKey)}">
+      <div class="tp-day-block tp-day-block-empty${summaryOnly ? '' : ' tp-day-block-linkable'}"${summaryOnly ? '' : ` data-tripsy-summary-day-link="${esc(firstKey)}"`}>
         <div class="tp-day-tile">
           <div class="tp-day-tile-label">Day</div>
           ${numHtml}
@@ -22952,6 +23745,11 @@ async function buildTripsyPrintHtml(tripKey) {
   }
   if (dayKeys.includes('undated')) summaryBlockParts.push(tripsySummaryDayBlockHtml('undated'));
   const summaryHtml = summaryBlockParts.join('');
+
+  // Everything below builds Part 2 and the Travel Information tables, including the
+  // per-place photo lookups that dominate a full build's time. A summary-only caller
+  // wants none of it, so stop here rather than computing and discarding it.
+  if (summaryOnly) return `${headerHtml}${summaryHtml}`;
 
   // ---- Part 2: one card per event, grouped by day and rendered in the
   // exact chronological (+ P/S-interleaved) order summaryByDay already
@@ -23649,12 +24447,190 @@ async function openTripsyDiaryPrintView(tripKey) {
   await triggerTripsyPrint(printRoot);
 }
 
-async function openTripsyItineraryPrintView(tripKey) {
-  const html = await buildTripsyPrintHtml(tripKey);
+async function openTripsyItineraryPrintView(tripKey, { summaryOnly = false } = {}) {
+  const html = await buildTripsyPrintHtml(tripKey, { summaryOnly });
   if (html == null) return;
   const printRoot = getOrCreateTripsyPrintRoot();
   printRoot.innerHTML = html;
   await triggerTripsyPrint(printRoot);
+}
+
+// ---- Itinerary → Summary: Part 1 on its own, read-only ----
+// The day-by-day event listing without any narrative, for someone who wants the
+// schedule at a glance rather than the written-up itinerary.
+//
+// Deliberately NOT built on previewTripsyItinerary: that overlay carries the owner's
+// generate/regenerate/per-day editing controls, which is exactly what this screen must
+// not offer ("the user should not be able to edit the summary from the Summary
+// screen"). Rendering buildTripsyPrintHtml's summary-only output into an overlay of its
+// own means there is nothing interactive to suppress -- the print HTML contains no
+// controls at all -- rather than relying on hiding them one by one.
+//
+// Available to every viewer, like Print: it only reads existing data.
+function getOrCreateTripsySummaryOverlay() {
+  let overlay = document.getElementById('tripsy-summary-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-summary-overlay';
+  // Reuses the preview overlay's own layout/paper classes so this matches the rest of
+  // the itinerary surfaces (and so the .tp-* print styles render on screen here too).
+  overlay.innerHTML = `
+    <div class="tripsy-preview-toolbar">
+      <button class="btn" id="tripsy-summary-close-btn">Close</button>
+      <button class="btn" id="tripsy-summary-email-btn">Email</button>
+      <button class="btn primary tripsy-preview-action" id="tripsy-summary-pdf-btn">Save as PDF</button>
+    </div>
+    <div class="tripsy-preview-paper" id="tripsy-summary-content"></div>
+  `;
+  document.body.appendChild(overlay);
+  // Closing must also drop the print marker AND the print root's copy of the summary,
+  // or a later Cmd+P anywhere in the app would print this trip's summary instead of
+  // whatever the owner is actually looking at.
+  const close = () => {
+    overlay.style.display = 'none';
+    document.body.classList.remove('tripsy-summary-open');
+    const printRoot = document.getElementById('tripsy-print-root');
+    if (printRoot) printRoot.innerHTML = '';
+  };
+  overlay.querySelector('#tripsy-summary-close-btn').addEventListener('click', close);
+  // Same click-outside rule the preview overlay uses: the overlay itself is the
+  // full-screen backdrop, so a click whose target IS it landed outside the paper.
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  // Email: opens a prefilled draft rather than sending. The app's Gmail scope is
+  // gmail.readonly, so it CANNOT send mail, and a web page cannot attach a file to an
+  // email either -- so the itinerary travels as text in the body, and the owner adds
+  // recipients and sends from their own mail client.
+  //
+  // mailto: URLs have practical length limits (browsers and mail clients start
+  // truncating well before any formal maximum), and a long trip's summary can exceed
+  // them -- silently losing the end of the itinerary, which is worse than not offering
+  // the button. So past a conservative threshold it copies the full text to the
+  // clipboard and opens an EMPTY draft instead, telling the owner to paste.
+  const TRIPSY_MAILTO_SAFE_LENGTH = 1800;
+  overlay.querySelector('#tripsy-summary-email-btn').addEventListener('click', async () => {
+    const btn = overlay.querySelector('#tripsy-summary-email-btn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Preparing…';
+    try {
+      const tripKey = overlay.dataset.tripKey || '';
+      const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+      const text = await buildTripsyItinerarySummaryText(tripKey);
+      if (text == null) { toast('Could not build the summary text.', 'error'); return; }
+      const subject = trip && trip.name ? `Itinerary — ${trip.name}` : 'Itinerary';
+      const full = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`;
+      if (full.length <= TRIPSY_MAILTO_SAFE_LENGTH) {
+        window.location.href = full;
+        return;
+      }
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } catch (e) {
+        // Clipboard can be refused (permissions, an insecure context, an older
+        // WebView). Handled below -- there's still something useful to say.
+        console.error('Clipboard write failed:', e);
+      }
+      // EXPLAIN BEFORE HANDING OFF, and in a dialog rather than a toast. Opening a
+      // mailto: gives focus to the mail client, so a toast fired alongside it is
+      // displayed in a window the owner is no longer looking at -- reported as "no
+      // content in the email, no toast message", which was this path running invisibly
+      // and looking simply broken. A dialog also waits to be dismissed, so the message
+      // can't be missed, and the owner chooses whether a blank draft is even wanted.
+      if (!copied) {
+        await tripsyConfirmDialog(
+          'This itinerary is too long to put in a mail link, and copying it to the clipboard was refused by the browser. Use Save as PDF instead and attach the file to your email.',
+          { title: 'Too long to prefill', yes: 'OK', no: null });
+        return;
+      }
+      const openBlank = await tripsyConfirmDialog(
+        'This itinerary is too long to put in a mail link, so it has been copied to your clipboard instead. Open a blank draft and paste it in?',
+        { title: 'Copied to clipboard', yes: 'Open blank draft', no: 'Just copy' });
+      if (openBlank) window.location.href = `mailto:?subject=${encodeURIComponent(subject)}`;
+    } catch (e) {
+      console.error('Summary email failed:', e);
+      toast('Could not prepare the email. Please try again.', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+  overlay.querySelector('#tripsy-summary-pdf-btn').addEventListener('click', async () => {
+    const btn = overlay.querySelector('#tripsy-summary-pdf-btn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Preparing…';
+    try {
+      // Goes through the same print path Print uses -- the browser's print dialog is
+      // where "Save as PDF" actually lives on both macOS and iOS. Rebuilt rather than
+      // printing the on-screen node so the output is the clean print HTML, without
+      // this overlay's toolbar.
+      await openTripsyItineraryPrintView(overlay.dataset.tripKey || '', { summaryOnly: true });
+    } catch (e) {
+      console.error('Summary PDF failed:', e);
+      toast('Could not prepare the summary for printing. Please try again.', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+  return overlay;
+}
+// The same day-by-day listing as plain text, for the Summary screen's Email button.
+// Built from buildTripsyPrintDayData -- the same source the HTML summary uses -- so the
+// two can't describe different events, and reusing tripsyDiaryScheduleLines means the
+// per-row wording matches the diary's schedule blocks too.
+//
+// Plain text rather than HTML on purpose: this goes into a mailto: body, which is
+// text-only, and it stays readable in any mail client.
+async function buildTripsyItinerarySummaryText(tripKey) {
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return null;
+  const { effectiveTrip, dayKeys, summaryByDay } = await buildTripsyPrintDayData(trip);
+  const tripStartDayKey = tripsyItineraryStartDayKey(effectiveTrip);
+  const dateLabel = dayKey => tripPartsToUtcDate({
+    year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)),
+  }).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+  const out = [];
+  const range = formatTripDateRange(effectiveTrip.start, effectiveTrip.end);
+  out.push(effectiveTrip.name || 'Trip');
+  if (range) out.push(range);
+  for (const dayKey of dayKeys) {
+    const lines = tripsyDiaryScheduleLines(summaryByDay.get(dayKey) || []);
+    if (!lines.length) continue;
+    const isUndated = dayKey === 'undated';
+    const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
+    out.push('');
+    out.push(isUndated ? 'Undated' : `Day ${dayNumber ?? '—'} — ${dateLabel(dayKey)}`);
+    for (const l of lines) {
+      // An event with no time still gets its own line rather than being dropped or
+      // silently aligned under the previous one's time.
+      out.push(`  ${l.time ? l.time + '  ' : ''}${l.label}${l.place ? ` (${l.place})` : ''}`);
+    }
+  }
+  return out.join('\n');
+}
+async function showTripsyItinerarySummary(tripKey) {
+  const overlay = getOrCreateTripsySummaryOverlay();
+  const content = overlay.querySelector('#tripsy-summary-content');
+  overlay.dataset.tripKey = tripKey;
+  content.innerHTML = `<div style="padding:24px; color:var(--muted);">Building summary…</div>`;
+  overlay.style.display = 'flex';
+  const html = await buildTripsyPrintHtml(tripKey, { summaryOnly: true });
+  if (html == null) {
+    content.innerHTML = `<div style="padding:24px; color:var(--muted);">This trip could not be loaded.</div>`;
+    return;
+  }
+  content.innerHTML = html;
+  content.scrollTop = 0;
+  // Load the SAME html into the print root and mark the body, so a print started by the
+  // browser itself (Cmd+P, or Share -> Print on iPad) prints this summary rather than
+  // the app interface sitting behind the overlay. Save as PDF doesn't depend on this --
+  // it rebuilds and uses .tripsy-printing -- but every other route into printing does.
+  getOrCreateTripsyPrintRoot().innerHTML = html;
+  document.body.classList.add('tripsy-summary-open');
 }
 
 // Itinerary menu's "Update" button -- compares an uploaded PDF against
@@ -28772,6 +29748,7 @@ async function renderTripsyEventsListImpl() {
         : `${docIconHtml}
             <button class="btn" data-tripsy-edit-event data-key="${esc(eventKey)}" style="font-size:17px; padding:4px 10px;" title="Edit">✏️</button>
             <button class="btn" data-tripsy-attach-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" style="font-size:17px; padding:4px 10px;" title="Attach Doc">📎</button>
+            <button class="btn" data-tripsy-move-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" style="font-size:17px; padding:4px 10px;" title="Move to another trip">↪️</button>
             <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:17px; padding:4px 10px;" title="Delete">🗑️</button>`;
       const actionsHtml = (outfitGlyphHtml || ownerIconsHtml)
         ? `<div style="display:flex; gap:6px; flex-shrink:0;">${outfitGlyphHtml}${ownerIconsHtml}</div>`
@@ -29007,11 +29984,19 @@ async function renderTripsyEventsListImpl() {
                 ? menuListButtonHtml(`data-tripsy-delete-generated-itinerary data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete')
                 : menuListButtonHtml(`data-tripsy-generate-panel-toggle data-key="${esc(trip.key)}"`, '✨', 'Create'))
               : '';
+            // Create and Edit are the same job at two life stages, so only ONE is
+            // ever offered ("both shouldn't exist on the same menu"): with nothing
+            // generated, Edit would open Preview's first-time section picker --
+            // i.e. it would CREATE -- which is exactly what Create already does.
+            // A viewer keeps the item regardless (labelled Preview, since they
+            // can't edit): it's their only on-screen route to the itinerary, and
+            // with no narrative it still renders the day-by-day events.
+            const showPreviewItem = hasGeneratedNarrative || !isOwner;
             return `
               ${hasGeneratedNarrative ? '' : createOrDelete}
-              ${menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '✏️', 'Edit', `<span data-tripsy-itin-warning="${esc(trip.key)}" title="Events changed since this itinerary was generated" style="display:none; margin-left:auto; color:#e02424; font-size:13px; line-height:1;">▲</span>`)}
+              ${showPreviewItem ? menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '✏️', isOwner ? 'Edit' : 'Preview', `<span data-tripsy-itin-warning="${esc(trip.key)}" title="Events changed since this itinerary was generated" style="display:none; margin-left:auto; color:#e02424; font-size:13px; line-height:1;">▲</span>`) : ''}
+              ${menuListButtonHtml(`data-tripsy-summary-itinerary data-key="${esc(trip.key)}"`, '📅', 'Summary')}
               ${menuListButtonHtml(`data-tripsy-status-itinerary data-key="${esc(trip.key)}"`, '📋', 'Status')}
-              ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', hasPendingUpdatePage ? 'Resume Update' : 'Update') : ''}
               ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
               ${hasGeneratedNarrative ? createOrDelete : ''}
             `;
@@ -29081,6 +30066,7 @@ async function renderTripsyEventsListImpl() {
         <div data-tripsy-trip-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${isOwner ? menuListButtonHtml(`data-tripsy-edit-trip-toggle data-key="${esc(trip.key)}"`, '✏️', 'Edit Details') : ''}
           ${menuListButtonHtml(`data-tripsy-verify-travel data-key="${esc(trip.key)}"`, '✅', 'Verify Travel Details')}
+          ${isOwner ? menuListButtonHtml(`data-tripsy-update-itinerary data-key="${esc(trip.key)}"`, '🔄', hasPendingUpdatePage ? 'Resume Comparison' : 'Compare to PDF') : ''}
           ${menuListButtonHtml(`data-tripsy-trip-diary data-key="${esc(trip.key)}"`, '📖', 'Trip Diary')}
           ${menuListButtonHtml(`data-tripsy-hide-trip data-key="${esc(trip.key)}"`, '🙈', 'Hide Trip')}
           ${isOwner ? menuListButtonHtml(`data-tripsy-delete-trip data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🗑️', 'Delete Trip') : ''}
@@ -29508,6 +30494,28 @@ async function renderTripsyEventsListImpl() {
       await tripsyRunGeneratePanelUpdate(panel, tripKey);
     });
   }
+
+  container.querySelectorAll("[data-tripsy-summary-itinerary]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      closeAllTripsyTripPanels();
+      // Same icon-span swap as Print below (see its comment for why textContent
+      // on the button itself would flatten the icon/label layout).
+      const iconSpan = btn.querySelector('span');
+      const originalIcon = iconSpan.textContent;
+      btn.disabled = true;
+      iconSpan.textContent = '⏳';
+      try {
+        await showTripsyItinerarySummary(btn.dataset.key);
+      } catch (err) {
+        console.error('showTripsyItinerarySummary failed:', err);
+        toast("Could not build the summary. Please try again.", "error");
+      } finally {
+        btn.disabled = false;
+        iconSpan.textContent = originalIcon;
+      }
+    });
+  });
 
   container.querySelectorAll("[data-tripsy-print-itinerary]").forEach(btn => {
     btn.addEventListener("click", async e => {
@@ -30383,6 +31391,36 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
+  // Move to another EXISTING trip. Same optimistic shape as Delete above: the
+  // in-memory move is applied synchronously inside queueTripsyChange before its
+  // Drive write, so the immediate re-render already shows the event under its
+  // new trip; a failed write rolls the trips back and raises the red badge.
+  container.querySelectorAll("[data-tripsy-move-event]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const summary = btn.dataset.summary;
+      const targetTripKey = await tripsyMoveEventDialog(btn.dataset.tripKey, summary);
+      btn.blur();
+      if (!targetTripKey) return;
+      const target = (tripsyDecryptedTrips || []).find(t => t.key === targetTripKey);
+      btn.disabled = true;
+      const pending = Store.queueTripsyChange({
+        id: crypto.randomUUID(),
+        type: 'move_event',
+        createdAt: new Date().toISOString(),
+        tripKey: btn.dataset.tripKey,
+        tripName: btn.dataset.tripName,
+        targetTripKey,
+        targetTripName: target ? target.name : null,
+        eventKey: btn.dataset.key,
+        eventSummary: summary,
+      });
+      renderTripsyEventsList();
+      updateTripsyPendingWarningBadge();
+      if (!(await pending)) toast("Could not move the event — storage error. Please try again.", "error");
+      else toast(`Moved "${summary}" to ${target ? target.name : 'the selected trip'}.`);
+    });
+  });
+
   // Re-derives the event's CURRENT effective raw fields from the decrypted
   // snapshot + pending queue on click rather than trusting the closure over
   // `trips`, so the form always reflects the latest state even if something
@@ -30502,6 +31540,7 @@ const TRIPSY_PENDING_CHANGE_LABEL = {
   edit_event: '✏️ Edit',
   edit_trip: '✏️ Edit trip',
   delete_event: '🗑️ Delete event',
+  move_event: '↪️ Move to trip',
   delete_trip: '🗑️ Delete trip',
   create_event: '➕ New item',
   create_trip: '➕ New trip',
@@ -30669,9 +31708,18 @@ async function computeTripsyStatus() {
     yellow.push({ label: tripsyInFlightWrites.length === 1 ? tripsyInFlightWrites[0].label : `${tripsyInFlightWrites.length} events being written to Drive…` });
   }
   const docsToParse = attachments.filter(a => a.purpose === 'parse' && a.parseStatus === 'pending');
-  if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged, waiting for the next scheduled parse run`, view: 'utilitiesparsingdocs' });
+  if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged for parsing`, view: 'utilitiesparsingdocs' });
   const emailsToParse = tripsyEmailsAwaitingParseCount();
-  if (emailsToParse) yellow.push({ label: `${emailsToParse} forwarded email${emailsToParse === 1 ? '' : 's'} waiting for the next scheduled parse run`, view: 'utilitiesparsingdocs' });
+  if (emailsToParse) yellow.push({ label: `${emailsToParse} forwarded email${emailsToParse === 1 ? '' : 's'} waiting to be parsed`, view: 'utilitiesparsingdocs' });
+  // Says WHEN the wait ends, rather than leaving "waiting for the next scheduled parse
+  // run" to imply an unknowable delay ("tell the user the time for the next scheduled
+  // parse run and say the document will be parsed then, or give the parse now option").
+  // One row for both kinds, since a single run handles them together -- repeating it per
+  // row would just say the same thing twice. Not clickable: it's a statement, and the
+  // "or" half of the ask is the Run Parse Now button the panel already renders below.
+  if (docsToParse.length || emailsToParse) {
+    yellow.push({ label: `${tripsyNextParseRunSentence()} Don't want to wait? Use Run Parse Now below.` });
+  }
   // A Run Parse Now fire is underway: say so, or the panel reads IDENTICALLY to
   // before the button was pressed and the press looks like it did nothing (the
   // run happens on another machine and takes minutes; the polls scheduled by
@@ -30882,15 +31930,19 @@ async function tripsyParseImportProposalEvent(proposal, event, destinationValue,
   const fields = { ...(fieldsOverride || event.fields) };
   let tripKey, tripName, tripsyTripId, newTripChange;
   if (destinationValue === '__new__') {
-    const name = prompt('Name for the new trip:', event.eventSummary || 'New Trip');
-    if (!name || !name.trim()) return false;
-    const dayKey = tripsyDayKey(fields.startsAt || fields.departureAt) || new Date().toISOString().slice(0, 10);
+    // Asks for name AND dates (see tripsyNewTripDialog), defaulting the range
+    // to the event's own span -- a hotel's check-in/out, a flight's
+    // departure/arrival day -- instead of hardcoding a single day.
+    const startDay = tripsyDayKey(fields.startsAt || fields.departureAt) || new Date().toISOString().slice(0, 10);
+    const endDayRaw = tripsyDayKey(fields.endsAt || fields.arrivalAt) || startDay;
+    const picked = await tripsyNewTripDialog({ name: event.eventSummary || 'New Trip', start: startDay, end: endDayRaw >= startDay ? endDayRaw : startDay });
+    if (!picked) return false;
     tripKey = `tripsy-pending-${crypto.randomUUID().slice(0, 8)}`;
-    tripName = name.trim();
+    tripName = picked.name;
     tripsyTripId = null;
     newTripChange = {
       id: crypto.randomUUID(), type: 'create_trip', createdAt: new Date().toISOString(),
-      tripKey, name: tripName, start: dayKey, end: dayKey,
+      tripKey, name: tripName, start: picked.start, end: picked.end,
     };
   } else {
     const trip = tripsyDecryptedTrips.find(t => t.key === destinationValue);
@@ -31006,10 +32058,7 @@ function tripsyRefreshTripSelect(ctx) {
   const day = tripsyDayKey(ns) || tripsyDayKey(ne);
   const matches = day ? tripsyParseMatchTrips(day, tripsyDecryptedTrips) : [];
   const prev = select.value;
-  select.innerHTML = [
-    ...matches.map(t => `<option value="${esc(t.key)}">${esc(t.name)}</option>`),
-    `<option value="__new__">➕ Create a new trip</option>`,
-  ].join('');
+  select.innerHTML = tripsyParseTripOptionsHtml(day, tripsyDecryptedTrips);
   if (prev && [...select.options].some(o => o.value === prev)) select.value = prev;
   else if (matches.length) select.value = matches[0].key;
   else select.value = '__new__';
@@ -31307,10 +32356,7 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
   const eventRowHtml = ev => {
     const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
     const matches = tripsyParseMatchTrips(dayKey, tripsyDecryptedTrips);
-    const selectOptions = [
-      ...matches.map(t => `<option value="${esc(t.key)}">${esc(t.name)}</option>`),
-      `<option value="__new__">➕ Create a new trip</option>`,
-    ].join('');
+    const selectOptions = tripsyParseTripOptionsHtml(dayKey, tripsyDecryptedTrips);
     const destTrip = matches[0] || null;
     const conflicts = destTrip ? tripsyParseFindConflicts(ev, destTrip, pendingChanges) : [];
     // A proposed event with no date at all is itself a potential conflict (it
@@ -31336,9 +32382,9 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
     `;
   };
 
-  const clusterCandidates = pendingEvents.filter(ev => !tripsyParseMatchTrips(tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt), tripsyDecryptedTrips).length);
-  const cluster = tripsyParseFindCluster(clusterCandidates);
-
+  // The "create a new trip for these" offer is no longer per card -- it's
+  // computed across every proposal and rendered once at the top of the page
+  // by renderTripsyParseReview (see tripsyParseFindClusters).
   return `
     <div class="card" style="margin-bottom:16px;">
       <div style="font-family:var(--mono); font-size:15px; font-weight:700; color:var(--amber);">${esc(proposal.sourceFileName)}</div>
@@ -31347,16 +32393,6 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
         <div style="font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:12px;">${dayKey === 'undated' ? 'Undated' : esc(tripsyDayHeaderLabel(dayKey))}</div>
         ${byDay.get(dayKey).map(eventRowHtml).join('')}
       `).join('')}
-      ${cluster ? `
-        <div data-parse-cluster-box data-proposal-id="${esc(proposal.id)}" data-event-ids="${esc(cluster.eventIds.join(','))}" style="margin-top:16px; padding:10px 12px; border:1px solid var(--home-green); border-radius:6px;">
-          <div style="font-size:13px; color:var(--home-green); font-weight:700;">These ${cluster.eventIds.length} events (${esc(formatTripDateRange(cluster.start, cluster.end))}) don't match any existing trip — create a new trip for them?</div>
-          <input type="text" data-parse-cluster-name value="${esc(proposal.sourceFileName.replace(/\.[a-z0-9]+$/i, ''))}" class="field-input" style="margin-top:8px; max-width:320px;">
-          <div style="margin-top:8px; display:flex; gap:8px;">
-            <button class="btn primary" data-parse-cluster-accept style="font-size:12px; padding:5px 12px;">Create trip for these ${cluster.eventIds.length} events</button>
-            <button class="btn" data-parse-cluster-dismiss style="font-size:12px; padding:5px 12px;">No thanks</button>
-          </div>
-        </div>
-      ` : ''}
     </div>
   `;
 }
@@ -31399,7 +32435,36 @@ async function renderTripsyParseReview() {
   // see tripsyParseFindConflicts.
   const pendingChanges = await Store.listTripsyPendingChanges();
 
-  container.innerHTML = proposals.map(p => tripsyParseReviewCardHtml(p, pendingChanges)).join('');
+  // "Create a new trip for these" offers, computed across EVERY proposal's
+  // still-unmatched pending events (tripsyParseFindClusters) and rendered once,
+  // above the cards -- the headline action whenever one exists. Each box carries
+  // its events as "<proposalId>:<eventId>" refs, since a cluster can span
+  // proposals (an outbound and a return flight from two emails). The default
+  // name comes from the first event's source, as the old per-card box did.
+  const unmatched = [];
+  for (const p of proposals) {
+    for (const ev of p.events) {
+      if (ev.resolution !== 'pending') continue;
+      if (tripsyParseMatchTrips(tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt), trips).length) continue;
+      unmatched.push({ proposal: p, event: ev });
+    }
+  }
+  const clusters = tripsyParseFindClusters(unmatched);
+  const clusterHtml = clusters.map(c => {
+    const refs = c.events.map(x => `${x.proposal.id}:${x.event.id}`).join(',');
+    const defaultName = String(c.events[0].proposal.sourceFileName || 'New Trip').replace(/\.[a-z0-9]+$/i, '');
+    return `
+      <div class="card" data-parse-cluster-box data-event-refs="${esc(refs)}" style="margin-bottom:16px; border:1px solid var(--home-green);">
+        <div style="font-size:13px; color:var(--home-green); font-weight:700;">These ${c.events.length} events (${esc(formatTripDateRange(c.start, c.end))}) don't match any existing trip — create a new trip for them?</div>
+        <div style="font-size:12px; color:var(--muted); margin-top:4px;">${c.events.map(x => esc(x.event.eventSummary)).join(' · ')}</div>
+        <input type="text" data-parse-cluster-name value="${esc(defaultName)}" class="field-input" style="margin-top:8px; max-width:320px;">
+        <div style="margin-top:8px; display:flex; gap:8px;">
+          <button class="btn primary" data-parse-cluster-accept style="font-size:12px; padding:5px 12px;">Create trip for these ${c.events.length} events</button>
+          <button class="btn" data-parse-cluster-dismiss style="font-size:12px; padding:5px 12px;">No thanks</button>
+        </div>
+      </div>`;
+  }).join('');
+  container.innerHTML = clusterHtml + proposals.map(p => tripsyParseReviewCardHtml(p, pendingChanges)).join('');
 
   // Every action below follows the same shape: mutate, then re-render this
   // whole page fresh (matches how the rest of the Tripsy Trips code
@@ -31521,13 +32586,18 @@ async function renderTripsyParseReview() {
   container.querySelectorAll("[data-parse-cluster-accept]").forEach(btn => {
     btn.addEventListener("click", async () => {
       const box = btn.closest("[data-parse-cluster-box]");
-      const proposalId = box.dataset.proposalId;
-      const eventIds = box.dataset.eventIds.split(',');
-      const proposal = proposals.find(p => p.id === proposalId);
       const name = box.querySelector("[data-parse-cluster-name]").value.trim();
       if (!name) { toast("Enter a name for the new trip.", "error"); return; }
-      const clusterEvents = eventIds.map(id => proposal.events.find(e => e.id === id)).filter(Boolean);
-      const dayKeys = clusterEvents.map(e => tripsyDayKey(e.fields.startsAt || e.fields.departureAt)).filter(Boolean).sort();
+      // Each ref is "<proposalId>:<eventId>" -- the cluster can span proposals.
+      // Both ids are UUIDs, so the first colon is the separator.
+      const clusterEvents = box.dataset.eventRefs.split(',').map(ref => {
+        const i = ref.indexOf(':');
+        const proposal = proposals.find(p => p.id === ref.slice(0, i));
+        const event = proposal && proposal.events.find(e => e.id === ref.slice(i + 1));
+        return event ? { proposal, event } : null;
+      }).filter(Boolean);
+      const dayKeys = clusterEvents.map(x => tripsyDayKey(x.event.fields.startsAt || x.event.fields.departureAt)).filter(Boolean).sort();
+      if (!dayKeys.length) { toast("Those events have no dates to build a trip from.", "error"); return; }
       btn.disabled = true;
       // Built in memory and sent as ONE write (Store.acceptTripsyParseProposalCluster)
       // instead of 1 (create_trip) + N (create_event) + 1 (resolve) + up to 2
@@ -31538,12 +32608,13 @@ async function renderTripsyParseReview() {
         id: crypto.randomUUID(), type: 'create_trip', createdAt: new Date().toISOString(),
         tripKey, name, start: dayKeys[0], end: dayKeys[dayKeys.length - 1],
       };
-      const eventChanges = await Promise.all(clusterEvents.map(async ev => {
+      const eventChanges = await Promise.all(clusterEvents.map(async ({ proposal, event: ev }) => {
         const changeId = crypto.randomUUID();
         // Copy so geocoding adds coords to the change, not the stored proposal.
         const fields = { ...ev.fields };
         await tripsyAddCoordsToActivityFields(ev.tripsyResource, fields);
         return {
+          proposalId: proposal.id,
           eventId: ev.id,
           change: {
             id: changeId, type: 'create_event', createdAt: new Date().toISOString(),
@@ -31553,7 +32624,7 @@ async function renderTripsyParseReview() {
           patch: { resolution: 'accepted', resolvedAt: new Date().toISOString(), destinationTripKey: tripKey, appliedChangeId: changeId },
         };
       }));
-      const ok = await Store.acceptTripsyParseProposalCluster({ tripChange, eventChanges, proposalId });
+      const ok = await Store.acceptTripsyParseProposalCluster({ tripChange, eventChanges });
       if (!ok) { toast("Could not create the new trip — storage error. Please try again.", "error"); btn.disabled = false; return; }
       toast(`Created "${name}" with ${eventChanges.length} event${eventChanges.length === 1 ? '' : 's'}.`);
       await afterImport();
@@ -32226,7 +33297,11 @@ function tripsyTravelViewTodayKey(trip, firstDay, lastDay) {
 }
 async function renderTravelView(chosenTripKey) {
   ensureTravelViewStyles();
-  const exit = () => { saveTravelViewPref(false); navigate('home'); };
+  // Offline mode has no working 'home' to land on (see navigate()'s own
+  // redirect for that case) -- send the exit button to the other offline-safe
+  // page instead, so it actually goes somewhere rather than bouncing right
+  // back to Travel View.
+  const exit = () => { saveTravelViewPref(false); navigate(appOfflineMode ? 'tripinsurance' : 'home'); };
   const wrap = inner => `<div class="tv-root"><div class="tv-inner">${inner}</div></div>`;
   const wireExit = () => { const b = document.getElementById('tv-exit'); if (b) b.addEventListener('click', exit); };
   const closeBtnHtml = `<button class="tv-close" id="tv-exit" title="Exit Travel View">✕</button>`;
@@ -33275,18 +34350,6 @@ document.getElementById("utilities-toggle").addEventListener("click", () => {
     document.getElementById("utilities-caret").textContent = "▸";
   }
 });
-document.getElementById("utilities-refresh-all-btn").addEventListener("click", async (e) => {
-  const btn = e.currentTarget;
-  const originalText = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "Refreshing…";
-  try {
-    await refreshAllReports();
-  } finally {
-    btn.disabled = false;
-    btn.textContent = originalText;
-  }
-});
 // The NetJets button itself is a split control: clicking the label/icon
 // always goes to the NetJets Overview page (and, via setActiveNav, leaves
 // the Hours/Legs/Flight Log submenu collapsed rather than expanding it);
@@ -33380,6 +34443,15 @@ let isOwner = false;
 const TRIPS_ONLY_ALLOWED_VIEWS = new Set(['tripsytrips', 'travelview']);
 let isTripsOnlyUser = false;
 let tokenClient = null;
+// True between clicking sign-in and that attempt resolving -- see startSignIn for why
+// (repeat clicks stack popups and their polling loops). Always cleared by a timer as
+// well as by the callbacks, so it can never leave sign-in permanently un-clickable.
+let _signInInFlight = false;
+let _signInInFlightTimer = null;
+function clearSignInInFlight() {
+  _signInInFlight = false;
+  clearTimeout(_signInInFlightTimer);
+}
 
 // A silent, mid-session token refresh in flight: the resolvers the token-client
 // callback hands the new token to (instead of re-running the whole sign-in).
@@ -33438,7 +34510,15 @@ async function fetchSignedInUserEmail() {
   const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
     headers: { Authorization: `Bearer ${driveAccessToken}` },
   });
-  if (!res.ok) throw new Error(`userinfo request failed: ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(`userinfo request failed: ${res.status}`);
+    // Google answered (even with an error, e.g. a revoked/expired token) --
+    // that means the network is fine, so completeSignIn's catch shouldn't
+    // treat this as "no internet" evidence. See driveApiFetch's own use of
+    // this flag for the fuller reasoning.
+    err.reachedServer = true;
+    throw err;
+  }
   const data = await res.json();
   return data.email || null;
 }
@@ -33459,7 +34539,7 @@ async function completeSignIn() {
     document.getElementById('splash-screen').style.display = 'none';
     document.getElementById('signin-gate').style.display = 'flex';
     showSignInStatus(`Still ${stage} — the connection looks weak…`, false);
-    maybeOfferOfflineTravelView(true);
+    maybeOfferOfflineMode(true);
   }, 12000);
   try {
     showSignInStatus('Loading your data from Drive…', false);
@@ -33483,7 +34563,9 @@ async function completeSignIn() {
       // them yet (or doesn't exist) -- don't silently create a new,
       // separate file under their account, since that would defeat the
       // whole point of everyone seeing the same shared data.
-      throw new Error('No shared flight log data found for this account yet. Ask the owner to share the data file with you in Google Drive.');
+      const err = new Error('No shared flight log data found for this account yet. Ask the owner to share the data file with you in Google Drive.');
+      err.reachedServer = true; // findDriveDataFile above succeeded -- this is a sharing/permissions problem, not connectivity
+      throw err;
     }
 
     // One-time cleanup: strip fields left over from the retired
@@ -33595,6 +34677,12 @@ async function completeSignIn() {
     // user's device, not just the owner's, to pick up keepOffline changes
     // and stale local copies alike.
     reconcileTripsyOfflineDocs();
+    // Cache Trip Insurance's doc list + bytes right away too, not only when
+    // the reader happens to open that page -- otherwise losing the connection
+    // mid-session, before ever visiting Trip Insurance, would leave nothing
+    // cached to view. Not owner-gated, same reasoning as reconcileTripsyOfflineDocs
+    // above -- every viewer's own device needs its own local copy.
+    Store.listTripInsuranceDocs().then(cacheTripInsuranceDocsOffline);
   } catch (e) {
     clearTimeout(watchdog);
     console.error(`completeSignIn failed while ${stage}:`, e);
@@ -33618,11 +34706,22 @@ async function completeSignIn() {
     // offline Travel View" report. Offering it here too covers both paths.
     // force:true -- this catch running IS the failure evidence; don't let a
     // weak-signal navigator.onLine:true false positive suppress the offer.
-    maybeOfferOfflineTravelView(true);
+    // BUT only when the failure is actually connectivity evidence: e.reachedServer
+    // means Google/Drive was reached and answered (an expired/revoked sign-in, a
+    // sharing/permissions problem, a corrupt file, ...) -- the network is fine in
+    // that case, so claiming "no internet" would be actively wrong. Only a request
+    // that never got a response at all (unset flag -- see driveApiFetch/
+    // fetchSignedInUserEmail) is real evidence of that.
+    if (!e.reachedServer) maybeOfferOfflineMode(true);
   }
 }
 
 function initGoogleAuth() {
+  // Fire the Worker health probe immediately, so its answer is almost always in hand by
+  // the time the owner clicks sign-in (which reads it synchronously -- see startSignIn).
+  // Fire-and-forget: it never blocks startup, and not finishing just means the original
+  // token flow is used for that sign-in.
+  probeAuthWorker();
   // Create the token client FIRST -- it's needed both for interactive sign-in AND for
   // the silent mid-session token refresh (refreshDriveAccessToken). Previously the
   // cached-token ("remember me") fast path returned BEFORE this ran, so a remembered
@@ -33658,6 +34757,9 @@ function initGoogleAuth() {
         pending.resolve(response.access_token);
         return;
       }
+      // Past the refresh branch above, so this is an interactive sign-in resolving --
+      // release the one-attempt-at-a-time guard either way (see startSignIn).
+      clearSignInInFlight();
       if (response.error) {
         showSignInStatus('Sign-in failed: ' + response.error, true);
         return;
@@ -33677,15 +34779,110 @@ function initGoogleAuth() {
       document.getElementById('splash-screen').style.display = 'flex';
       completeSignIn();
     },
+    // GIS's OWN failure notification -- without this registered, a silent
+    // (prompt:'') request that can't succeed (the Google session genuinely
+    // expired/revoked and needs interactive re-auth, a blocked popup, ...)
+    // never calls the `callback` above EITHER, so a pending silent refresh
+    // was left to hang until its own timeout fired -- which then read as
+    // "Google never answered", i.e. NETWORK evidence, when the real story is
+    // "Google answered immediately: you need to sign in again." (Reported:
+    // "no internet message on startup when there is a connection but the
+    // Google log-in has expired.") Only the silent-refresh
+    // (_pendingTokenRefresh) case is handled here -- the interactive sign-in
+    // button's own failure already surfaces via response.error in the main
+    // callback above, and has no pending refresh to reject.
+    error_callback: (err) => {
+      if (_pendingTokenRefresh) {
+        const pending = _pendingTokenRefresh;
+        clearTimeout(pending.timer);
+        _pendingTokenRefresh = null;
+        pending.reject(new Error((err && err.type) || 'auth error'));
+      }
+    },
   });
+  // PERSISTENT SIGN-IN. The code flow is what yields a refresh token (the token
+  // flow above structurally cannot), so this is the path that ends the hourly
+  // re-login. The code goes to the auth Worker, which holds the client secret and
+  // keeps the refresh token server-side; the app only ever sees a device id.
+  //   access_type:'offline' asks for the refresh token at all.
+  //   prompt:'consent' forces Google to RE-ISSUE one: without it, an account that
+  //   already granted these scopes gets a code that exchanges to an access token
+  //   with NO refresh token, and persistence silently never starts working.
+  // Constructed defensively -- if this GIS version lacks initCodeClient, codeClient
+  // stays null and startSignIn falls back to the original token flow below.
+  let codeClient = null;
+  try {
+    if (google.accounts.oauth2.initCodeClient) {
+      codeClient = google.accounts.oauth2.initCodeClient({
+        client_id: DRIVE_CLIENT_ID,
+        scope: loadScopeTierHint() === 'base' ? DRIVE_SCOPE_BASE : DRIVE_SCOPE_FULL,
+        ux_mode: 'popup',
+        access_type: 'offline',
+        prompt: 'consent',
+        callback: async (response) => {
+          clearSignInInFlight(); // this attempt has resolved, one way or another
+          if (!response || !response.code) {
+            showSignInStatus('Sign-in failed: ' + ((response && response.error) || 'no code returned'), true);
+            return;
+          }
+          showSignInStatus('Finishing sign-in…', false);
+          const result = await authWorkerExchangeCode(response.code);
+          if (!result) {
+            // The Worker is down or not configured yet. Rather than dead-end the
+            // owner, fall back to the ordinary one-hour token flow -- they get in,
+            // just without persistence.
+            showSignInStatus('Opening Google sign-in…', false);
+            tokenClient.requestAccessToken();
+            return;
+          }
+          driveAccessToken = result.accessToken;
+          // "Remember me" still governs the ~1h token cache; the device credential
+          // is what actually persists, and is only created by this deliberate
+          // interactive sign-in.
+          if (document.getElementById('remember-me-checkbox').checked) saveCachedToken(result.accessToken, result.expiresIn);
+          else clearCachedToken();
+          document.getElementById('signin-gate').style.display = 'none';
+          document.getElementById('splash-screen').style.display = 'flex';
+          completeSignIn();
+        },
+        error_callback: () => {
+          clearSignInInFlight(); // cancelled/blocked -- let the owner try again at once
+          // Popup closed/blocked. Say so plainly rather than leaving the button
+          // looking like it did nothing.
+          showSignInStatus('Sign-in was cancelled or the popup was blocked.', true);
+        },
+      });
+    }
+  } catch (e) {
+    console.log('Code-flow sign-in unavailable, using the token flow:', (e && e.message) || e);
+    codeClient = null;
+  }
+
   // Two entry points -- both sign in the same way. "Travel View" also sets this
   // device's Travel View preference so completeSignIn() lands on it (and it stays
   // the default on this device until exited via the red ✕); "Use Travel Tracker"
   // clears it so sign-in lands on the normal app.
   const startSignIn = travelView => {
+    // One attempt at a time. A second click while a popup is already open orphans the
+    // first popup and starts a SECOND GIS polling loop against it -- each loop emitting
+    // its own stream of "Cross-Origin-Opener-Policy would block the window.closed call"
+    // warnings, which is what made the console unreadable while debugging.
+    if (_signInInFlight) return;
+    _signInInFlight = true;
+    // Never latch: if GIS delivers neither its callback nor its error_callback (an
+    // OS-blocked popup, say), this flag would otherwise make the sign-in button dead
+    // for the rest of the page's life -- and sign-in is the whole app.
+    clearTimeout(_signInInFlightTimer);
+    _signInInFlightTimer = setTimeout(() => { _signInInFlight = false; }, 120000);
     saveTravelViewPref(travelView);
     showSignInStatus('Opening Google sign-in…', false);
-    tokenClient.requestAccessToken();
+    // Synchronous on purpose -- awaiting the probe here would lose this click's user
+    // activation and get the popup blocked on Safari/iPad. `_authWorkerAvailable` is
+    // filled in by the startup probe; anything other than a definite true means take
+    // the original token flow, so an undeployed Worker behaves exactly as before
+    // (one popup) instead of a code popup that can't be exchanged plus a fallback one.
+    if (codeClient && _authWorkerAvailable === true) codeClient.requestCode();
+    else tokenClient.requestAccessToken();
   };
   document.getElementById('signin-btn').addEventListener('click', () => startSignIn(false));
   const tvSigninBtn = document.getElementById('signin-travelview-btn');
@@ -33700,6 +34897,36 @@ function initGoogleAuth() {
     completeSignIn();
     return;
   }
+  // PERSISTENT SIGN-IN, and the reason this whole Worker exists: a device that has
+  // signed in once mints a fresh access token from the stored refresh token. This
+  // runs BEFORE the GIS silent grant below because it's strictly more reliable --
+  // an ordinary fetch rather than a hidden accounts.google.com iframe, so Safari/
+  // iOS ITP can't block it, which is precisely where the old path kept failing.
+  // Only a device with a credential (i.e. one that signed in since the Worker
+  // shipped) takes this path; everything else falls through unchanged.
+  if (loadDeviceId() && navigator.onLine) {
+    authWorkerGetAccessToken().then(result => {
+      if (result) {
+        driveAccessToken = result.accessToken;
+        // Keep the ~1h cache in step so the rest of the app's existing
+        // remembered-device logic behaves exactly as it does after any sign-in.
+        saveCachedToken(result.accessToken, result.expiresIn);
+        completeSignIn();
+        return;
+      }
+      // No token: either the credential was revoked (already cleared by
+      // authWorkerGetAccessToken) or the Worker is unreachable. Continue with the
+      // original GIS paths rather than stranding the device.
+      continueWithGisStartup();
+    });
+    return;
+  }
+  continueWithGisStartup();
+}
+
+// The original (pre-Worker) startup paths, unchanged in behavior -- split into its
+// own function purely so the Worker attempt above can fall back into it.
+function continueWithGisStartup() {
   // AUTOMATIC SIGN-IN ON A RETURNING DEVICE. The cached token only lives ~1h; past
   // that, a device the owner uses every day was bounced to the sign-in screen for a
   // tap even though the browser's Google session is usually still alive and a
@@ -33730,13 +34957,13 @@ function initGoogleAuth() {
         console.log('Silent startup sign-in unavailable — showing the sign-in screen:', msg);
         document.getElementById('splash-screen').style.display = 'none';
         document.getElementById('signin-gate').style.display = 'flex';
-        maybeOfferOfflineTravelView(googleNeverAnswered);
+        maybeOfferOfflineMode(googleNeverAnswered);
       });
     return;
   }
   document.getElementById('splash-screen').style.display = 'none';
   document.getElementById('signin-gate').style.display = 'flex';
-  maybeOfferOfflineTravelView();
+  maybeOfferOfflineMode();
 }
 
 // OFFLINE ENTRY. Google sign-in needs the network, so with no signal the normal
@@ -33753,47 +34980,81 @@ function initGoogleAuth() {
 // the failure plainly happened, but the plain onLine check ignored it. The one caller
 // with no prior failure (initGoogleAuth's fresh sign-in gate, nothing attempted yet)
 // still passes no `force`, so it correctly stays quiet while genuinely online.
-// Set once offline Travel View has actually been ENTERED (button or auto-open),
-// so a sign-in attempt that limps to success afterwards doesn't yank the view
-// out from under the reader -- and so the watchdog/offer paths never double-enter.
+// Set once offline mode has actually been ENTERED (button or auto-open), so a
+// sign-in attempt that limps to success afterwards doesn't yank the view out
+// from under the reader -- and so the watchdog/offer paths never double-enter.
 let _tripsyOfflineEntered = false;
 // Set at the end of a fully successful completeSignIn -- the watchdog and the
 // auto-open check consult it so neither fires against an app that made it in.
 let _tripsySignedInDone = false;
-// The one shared entry into offline Travel View -- the offer button and the
+// True for the rest of the page's life once offline mode has been entered --
+// gates navigate() and hides every rail item that needs a live signed-in read
+// (below), app-wide. Distinct from the narrower tripsyTripsAreOffline (which
+// only says the TRIPS in memory are a stale copy, and drives Travel View's own
+// "not live" banner): a device with only Trip Insurance docs cached and no
+// trips cache is in appOfflineMode without tripsyTripsAreOffline ever being set.
+let appOfflineMode = false;
+// Only these two views work from a local cache with no network -- everything
+// else edits data or needs a live Drive read. Redirected to in navigate()
+// below, and used to hide every other rail item on offline entry.
+const OFFLINE_ALLOWED_VIEWS = new Set(['travelview', 'tripinsurance']);
+// The one shared entry into offline mode -- the offer button and the
 // auto-open path below both come through here, so they can't drift.
-async function enterOfflineTravelView(cached) {
+// `cached` is { trips: {trips,updatedAt,cachedAt}|null, tripInsurance:
+// {docs,cachedAt}|null } -- either half may be missing; whichever is present
+// gets wired up, and the landing view follows whichever exists (trips wins
+// when both do, since that's what the device's own landing preference means).
+async function enterOfflineMode(cached) {
   if (_tripsyOfflineEntered) return;
   _tripsyOfflineEntered = true;
-  tripsyDecryptedTrips = cached.trips;
-  tripsyTripsAreOffline = true;
-  tripsyOfflineCacheInfo = { updatedAt: cached.updatedAt, cachedAt: cached.cachedAt };
+  appOfflineMode = true;
   // Minimal shape so the Store's readers don't throw on a null driveData --
   // nothing offline writes, and every list it can ask for is legitimately empty.
   if (!driveData) driveData = { invoices: [], report: null, reservations: [], psBalanceDeductions: [], syncTimestamps: {} };
   tripsyPsReservations = [];
+  if (cached.trips) {
+    tripsyDecryptedTrips = cached.trips.trips;
+    tripsyTripsAreOffline = true;
+    tripsyOfflineCacheInfo = { updatedAt: cached.trips.updatedAt, cachedAt: cached.trips.cachedAt };
+  }
+  if (cached.tripInsurance) driveData.tripInsuranceDocs = cached.tripInsurance.docs;
+  // Hide every rail item outside the offline-safe set -- normally done inside
+  // completeSignIn for the (unrelated) trips-only tier, but offline mode never
+  // runs that function at all, so it needs its own sweep here.
+  document.querySelectorAll('.rail-item[data-view]').forEach(el => {
+    if (!OFFLINE_ALLOWED_VIEWS.has(el.dataset.view)) el.style.display = 'none';
+  });
+  document.querySelectorAll('.rail-item[data-submenu-toggle], #passengers-submenu, #psreservations-submenu, #utilities-submenu, #ambiguities-submenu, #storage-health-banner').forEach(el => { el.style.display = 'none'; });
   document.getElementById('splash-screen').style.display = 'none';
   document.getElementById('signin-gate').style.display = 'none';
   document.getElementById('app-root').style.display = '';
-  try { await navigate('travelview'); } catch (e) { console.error('Offline Travel View failed:', e); }
+  try { await navigate(cached.trips ? 'travelview' : 'tripinsurance'); } catch (e) { console.error('Offline entry failed:', e); }
 }
-async function maybeOfferOfflineTravelView(force = false) {
+async function maybeOfferOfflineMode(force = false) {
   try {
     if (_tripsyOfflineEntered || _tripsySignedInDone) return;
     if (!force && navigator.onLine) return;
-    const cached = await loadTripsyOfflineTrips();
-    if (!cached) return;
+    const [tripsCache, tripInsuranceCache] = await Promise.all([
+      loadTripsyOfflineTrips(),
+      loadTripInsuranceOfflineDocs(),
+    ]);
+    if (!tripsCache && !tripInsuranceCache) return;
+    const cached = { trips: tripsCache, tripInsurance: tripInsuranceCache };
     // A device whose saved landing is Travel View (the travelers' phones/iPads)
     // doesn't get a button to tap -- it gets the schedule. "The app is supposed
     // to SHOW the last used version of travel view" (2026-08-17): on a REAL
-    // failure (force), auto-open the cached Travel View outright, since Travel
-    // View is exactly where sign-in was about to land anyway. Devices that land
-    // on the normal app keep the explicit offer -- their owner may well prefer
-    // to retry sign-in.
-    if (force && loadTravelViewPref()) { await enterOfflineTravelView(cached); return; }
+    // failure (force), auto-open the cached view outright, since that's exactly
+    // where sign-in was about to land anyway. Only applies when trips are
+    // actually cached -- a device with only Trip Insurance docs falls through
+    // to the button below instead, since there's no "last used view" signal
+    // pointing anywhere else. Devices that land on the normal app keep the
+    // explicit offer -- their owner may well prefer to retry sign-in.
+    if (force && loadTravelViewPref() && tripsCache) { await enterOfflineMode(cached); return; }
     const gate = document.getElementById('signin-gate');
     if (!gate || document.getElementById('signin-offline-btn')) return;
-    const when = formatSyncTimestamp(cached.cachedAt || cached.updatedAt) || 'earlier';
+    const when = formatSyncTimestamp(
+      (tripsCache && (tripsCache.cachedAt || tripsCache.updatedAt)) || (tripInsuranceCache && tripInsuranceCache.cachedAt)
+    ) || 'earlier';
     const box = document.createElement('div');
     box.style.cssText = 'display:flex; flex-direction:column; align-items:center; gap:8px; margin-top:4px; padding:12px 16px; border:1px solid var(--amber); border-radius:10px; background:rgba(227,164,56,0.10); max-width:420px;';
     // Wording matches how we actually know this: a REAL failure (force) doesn't claim
@@ -33803,14 +35064,14 @@ async function maybeOfferOfflineTravelView(force = false) {
     const sub = force ? 'probably a weak or no connection —' : 'so';
     box.innerHTML = `
       <div style="font-size:13px; color:var(--text); text-align:center; line-height:1.5;">
-        📴 <b style="color:var(--amber);">${headline}</b>, ${sub} signing in isn't possible right now — but your saved schedule is on this device.
+        📴 <b style="color:var(--amber);">${headline}</b>, ${sub} signing in isn't possible right now — but what's saved on this device still is.
         <br><span style="color:var(--muted);">Last refreshed ${esc(when)}.</span>
       </div>
-      <button id="signin-offline-btn" class="btn" style="padding:10px 20px; font-size:14px;">Open Travel View (offline)</button>`;
+      <button id="signin-offline-btn" class="btn" style="padding:10px 20px; font-size:14px;">No Internet Connection Available — Open Without Internet</button>`;
     gate.appendChild(box);
-    document.getElementById('signin-offline-btn').addEventListener('click', () => enterOfflineTravelView(cached));
+    document.getElementById('signin-offline-btn').addEventListener('click', () => enterOfflineMode(cached));
   } catch (e) {
-    console.error('maybeOfferOfflineTravelView failed (non-fatal):', e);
+    console.error('maybeOfferOfflineMode failed (non-fatal):', e);
   }
 }
 
@@ -33841,16 +35102,22 @@ if ('serviceWorker' in navigator) {
     // all, Google's own externally-hosted GIS script (accounts.google.com/gsi/client)
     // never loads, so window.google never appears -- this branch fires BEFORE
     // initGoogleAuth() or completeSignIn() ever run, meaning neither of their own
-    // maybeOfferOfflineTravelView() calls is ever reached either. This is the FIRST
+    // maybeOfferOfflineMode() calls is ever reached either. This is the FIRST
     // thing that fails offline, so it's the one that actually matters most in
     // practice; offering it here too closes the last gap. force:true for the same
     // weak-signal reason as completeSignIn's catch -- 50 straight failed poll
     // attempts is real evidence, whatever navigator.onLine happens to claim.
-    maybeOfferOfflineTravelView(true);
+    maybeOfferOfflineMode(true);
   }
 })();
 
-document.getElementById('signout-btn').addEventListener('click', () => {
+document.getElementById('signout-btn').addEventListener('click', async () => {
+  // Revoke the persistent credential FIRST -- clearing only the ~1h token cache
+  // would leave the device able to mint new tokens from the Worker on the next
+  // load, i.e. signing out wouldn't actually sign out. Best-effort and awaited
+  // briefly: authWorkerRevoke never throws and clears the local id regardless, so
+  // a down Worker still signs this device out locally.
+  await authWorkerRevoke();
   clearCachedToken();
   driveAccessToken = null;
   location.reload();
