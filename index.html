@@ -3979,6 +3979,92 @@ async function gmailApiFetch(url) {
   return res.json();
 }
 
+// Write-side counterpart to gmailApiFetch (labels.create, threads.modify).
+// Goes through fetchWithRetry for the same error shape, but POST is
+// deliberately non-retryable there, so a flaky call fails cleanly rather
+// than, e.g., creating the "Parsed" label twice.
+async function gmailApiPost(url, body) {
+  const res = await fetchWithRetry(() => fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${driveAccessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  }), { method: 'POST' });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Gmail API error ${res.status}: ${text.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
+// Once a forwarded travel email is FULLY parsed, mark it done in the owner's
+// own mailbox: its whole Gmail thread (the forward and the original it sits
+// with) gets the "Travel Tracker/Parsed" label and is archived out of the
+// inbox. "Fully parsed" = the intake entry is stamped parsedAt AND none of
+// that email's own attachments still has parseStatus 'pending' -- an email
+// whose body parsed locally but whose .docx is still waiting on the cloud run
+// is not done yet, and labeling it would say it was. Each entry is stamped
+// labeledAt so it is labeled exactly once; a failed entry simply stays
+// unstamped and is retried on the next sweep. The label id is cached per
+// session (created on first need). A 403 means this device's token was
+// granted under the old gmail.readonly scope -- labeling is impossible until
+// the owner signs in again and consents to gmail.modify -- so one toast says
+// exactly that and the session stops trying rather than erroring per email.
+// The alias account's own mailbox is deliberately untouched: nothing signs in
+// as it, and it just accumulates copies as a backup archive.
+const TRIPSY_PARSED_LABEL_NAME = 'Travel Tracker/Parsed';
+let tripsyParsedLabelId = null;
+let tripsyGmailLabelingUnavailable = false;
+async function labelParsedIntakeEmails() {
+  if (!isOwner || tripsyGmailLabelingUnavailable) return 0;
+  const attachmentsStillPending = emailId => ((driveData.tripsyAttachments || []))
+    .some(a => a && a.sourceEmailId === emailId && a.purpose === 'parse' && a.parseStatus === 'pending');
+  const entries = ((driveData.tripsyEmailIntake || []))
+    .filter(e => e && e.id && e.parsedAt && !e.labeledAt && !attachmentsStillPending(e.id));
+  if (!entries.length) return 0;
+  const scopeMissing = err => /Gmail API error 403/.test(err && err.message || '');
+  const giveUpThisSession = () => {
+    tripsyGmailLabelingUnavailable = true;
+    toast('Labeling parsed travel emails needs a new Gmail permission — sign out and back in to grant it.', 'error');
+  };
+  let labeled = 0;
+  try {
+    if (!tripsyParsedLabelId) {
+      const list = await gmailApiFetch('https://gmail.googleapis.com/gmail/v1/users/me/labels');
+      const found = (list.labels || []).find(l => l.name === TRIPSY_PARSED_LABEL_NAME);
+      tripsyParsedLabelId = found ? found.id
+        : (await gmailApiPost('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
+            name: TRIPSY_PARSED_LABEL_NAME, labelListVisibility: 'labelShow', messageListVisibility: 'show',
+          })).id;
+    }
+    for (const e of entries) {
+      try {
+        const msg = await gmailApiFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${e.id}?format=minimal`);
+        await gmailApiPost(`https://gmail.googleapis.com/gmail/v1/users/me/threads/${msg.threadId}/modify`, {
+          addLabelIds: [tripsyParsedLabelId],
+          removeLabelIds: ['INBOX'],
+        });
+        e.labeledAt = new Date().toISOString();
+        labeled++;
+      } catch (err) {
+        if (scopeMissing(err)) { giveUpThisSession(); break; }
+        // A single message can also 404 (deleted from Gmail since the scan) --
+        // stamp it so a gone email isn't retried forever; anything else stays
+        // unstamped for the next sweep.
+        if (/Gmail API error 404/.test(err.message || '')) { e.labeledAt = new Date().toISOString(); labeled++; }
+        else console.error('Could not label parsed intake email (will retry next sweep):', e.id, err);
+      }
+    }
+  } catch (err) {
+    if (scopeMissing(err)) giveUpThisSession();
+    else console.error('labelParsedIntakeEmails failed:', err);
+  }
+  if (labeled) {
+    try { await persistDriveData(); }
+    catch (err) { console.error('labelParsedIntakeEmails persist failed (labels applied; stamps retry next sweep):', err); }
+  }
+  return labeled;
+}
+
 // Fetches one Gmail message by id and parses it into a reservation
 // record. Shared by both syncing new messages and re-parsing existing
 // ones (e.g. after a parsing bug fix, so previously-imported entries can
@@ -4547,6 +4633,9 @@ async function drainTripsyDocProposals() {
 // race each other's Drive PATCH write-backs -- a second caller while one is
 // running just no-ops, since the running one will refresh the badge anyway.
 let tripsyRelaySyncInFlight = false;
+// Startup auto-parse runs at most once per app session (syncTripsyRelays is
+// also re-entered by relay polls, which must not re-fire it).
+let tripsyStartupAutoParseDone = false;
 async function syncTripsyRelays() {
   if (!isOwner) return;
   if (tripsyRelaySyncInFlight) return;
@@ -4567,6 +4656,26 @@ async function syncTripsyRelays() {
     await drainTripsyEmailProposals();
     await drainTripsyDocProposals();
     await scanTripsyEmailIntake();
+    // Startup auto-parse ("have claude review all of those emails to make sure
+    // they are parsed on startup"): once per session, right after the scan so a
+    // freshly-found forward parses immediately, and ONLY when something is
+    // actually awaiting parsing -- runTripsyParseNow with nothing pending would
+    // fire a needless cloud run (its press-the-button-anyway semantics). Runs
+    // the exact button path: local parse in seconds, cloud fallback for what
+    // the browser can't do (.docx/.heic, overflow, failures, or no API key on
+    // this device). Later relay polls re-enter this function but the flag makes
+    // them skip straight past. Best-effort -- a failure leaves everything
+    // pending for the badge/button/scheduled runs exactly as before.
+    if (!tripsyStartupAutoParseDone) {
+      tripsyStartupAutoParseDone = true;
+      const awaitingParse =
+        (driveData.tripsyEmailIntake || []).some(e => e && !e.parsedAt && e.body) ||
+        (driveData.tripsyAttachments || []).some(a => a && a.purpose === 'parse' && a.parseStatus === 'pending');
+      if (awaitingParse) {
+        try { await runTripsyParseNow(null); }
+        catch (e) { console.error('Startup auto-parse failed (items stay pending):', e); }
+      }
+    }
     // computeTripsyStatus can only spot a per-trip parse conflict if the
     // decrypted trips are there to date-match proposals against -- with
     // tripsyDecryptedTrips still null it finds none, so the badge sits green
@@ -4581,6 +4690,11 @@ async function syncTripsyRelays() {
     // before the badge refresh so an all-duplicates drain never even flashes
     // a review badge. Best-effort, same as the decrypt above.
     try { await tripsyAutoIgnoreDuplicateProposals(); } catch (e) { console.error('duplicate-proposal sweep failed:', e); }
+    // Label + archive any intake email that is now FULLY parsed (body drained
+    // or locally parsed above, and no attachment of its own still pending) --
+    // after the drains/auto-parse so a run that just finished gets its emails
+    // labeled in this same pass, not the next app open.
+    try { await labelParsedIntakeEmails(); } catch (e) { console.error('parsed-email labeling failed:', e); }
     await updateTripsyStatusBadge();
     const relayStateAfter = JSON.stringify([
       driveData.tripsyPendingChanges || [],
@@ -13772,6 +13886,12 @@ async function runTripsyLocalParse() {
     try { staged = Math.max(0, staged - await tripsyAutoIgnoreDuplicateProposals()); }
     catch (e) { console.error('duplicate-proposal sweep failed after local parse:', e); }
   }
+  // Emails whose parse just completed here get labeled + archived right away
+  // (Run Parse Now and the startup auto-parse both come through this path);
+  // anything not yet fully parsed is caught by syncTripsyRelays' own sweep
+  // once the cloud run's results drain.
+  try { await labelParsedIntakeEmails(); }
+  catch (e) { console.error('parsed-email labeling failed after local parse:', e); }
   return { attempted: emailBatch.length + docBatch.length, staged, failed, leftovers: baseLeftovers + failed };
 }
 // The button handler: local parse first (seconds), cloud fallback only for what
@@ -33209,7 +33329,13 @@ const DRIVE_SCOPE_BASE = 'https://www.googleapis.com/auth/drive https://www.goog
 // utility page (Store.gmailCalendarAccessEmails). Requesting this from
 // every visitor regardless (the old behavior) meant every read-only viewer
 // had to consent to Gmail access they'd never actually use.
-const DRIVE_SCOPE_EXTRA = 'https://www.googleapis.com/auth/gmail.readonly';
+// gmail.modify (a superset of the old gmail.readonly) so the intake pipeline
+// can LABEL + ARCHIVE a forwarded travel email in the owner's own mailbox once
+// it has been parsed (see labelParsedIntakeEmails). Only the extra-scope tier
+// (owner + opted-in users) ever requests this; a device still holding a
+// readonly-scoped token keeps working read-only until its next sign-in
+// re-consents, and the labeling step just skips until then.
+const DRIVE_SCOPE_EXTRA = 'https://www.googleapis.com/auth/gmail.modify';
 const DRIVE_SCOPE_FULL = `${DRIVE_SCOPE_BASE} ${DRIVE_SCOPE_EXTRA}`;
 // OAuth scope has to be picked before we know who's signing in (Google
 // doesn't let you find out identity first, then choose scope), so we can't

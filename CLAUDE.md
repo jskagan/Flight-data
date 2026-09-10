@@ -288,6 +288,29 @@ step 4; git history has it if ever needed.
   in the photo) doesn't arrive with `bodyLen=0` and get marked `empty`. `scope:'email'` keeps
   these off trip cards; they show on the Parsing Docs page as "from a forwarded email". Only *new*
   forwards benefit — an already-scanned email id isn't re-fetched.
+  **The pipeline now closes its own loop in the owner's mailbox** ("make sure they are parsed on
+  startup … label them as having been parsed (and archive them)," 2026-09-10). Three pieces:
+  **(1) scope**: `DRIVE_SCOPE_EXTRA` is `gmail.modify` now (a superset of the old `gmail.readonly`
+  — extra-scope-tier accounts see one beefier consent screen on their next sign-in; a device still
+  holding a readonly token keeps working read-only until then). **(2) startup auto-parse**:
+  `syncTripsyRelays`, right after `scanTripsyEmailIntake`, runs `runTripsyParseNow(null)` — the
+  exact button path, local parse first, cloud fallback — once per session
+  (`tripsyStartupAutoParseDone`; relay polls re-enter this function and must not re-fire it) and
+  ONLY when something actually awaits parsing, since the button's press-anyway semantics would
+  otherwise fire a needless cloud run on every clean open. **(3) label + archive**:
+  `labelParsedIntakeEmails` (next to `gmailApiFetch`, with the new write helper `gmailApiPost`)
+  labels a FULLY-parsed intake email's whole Gmail thread `Travel Tracker/Parsed` and removes
+  `INBOX` (archiving the forward AND the original it threads with, in the OWNER's mailbox — the
+  alias account is deliberately untouched: nothing ever signs in as it; it just accumulates copies
+  as a backup archive). "Fully parsed" = `parsedAt` stamped AND none of that email's own
+  attachments still `parseStatus:'pending'` — a body parsed locally while its `.docx` waits on the
+  cloud run is not done yet. Each entry is stamped `labeledAt` (labeled exactly once; failures
+  retry next sweep; a 404 — email deleted from Gmail — is stamped rather than retried forever);
+  the label id is cached per session and created on first need; one persist per sweep. A 403
+  (token granted under old readonly) sets a session flag and toasts ONCE to sign out/in for the
+  new permission, rather than erroring per email. Called from `syncTripsyRelays` (after the
+  drains/auto-parse, before the badge refresh) and from `runTripsyLocalParse` (so Run Parse Now
+  labels immediately).
   Both sources stage their finds into the exact same queue, `driveData.tripsyParseProposals`
   (`Store.saveTripsyParseProposal`, `index.html:1760`) — **nothing extracted becomes a real Tripsy
   change until the owner explicitly reviews it** on the "Review Parsed Docs" page
