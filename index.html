@@ -26596,7 +26596,9 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
         <div class="tripsy-attire-dressguide-event" data-tripsy-attire-event-row="${esc(ev.id)}">
           <div class="tripsy-attire-col-time">${esc(timeRange)}</div>
           <div class="tripsy-attire-dressguide-event-main">
-            <button type="button" class="tripsy-attire-event-title-link" data-tripsy-attire-goto-event data-trip-key="${esc(guide.tripKey)}" data-event-id="${esc(ev.id)}">${esc(ev.name || '')}</button>
+            ${ev.freeDay
+              ? `<span style="color:var(--muted); font-style:italic;">${esc(ev.name || TRIPSY_ATTIRE_FREE_DAY_NAME)}</span>`
+              : `<button type="button" class="tripsy-attire-event-title-link" data-tripsy-attire-goto-event data-trip-key="${esc(guide.tripKey)}" data-event-id="${esc(ev.id)}">${esc(ev.name || '')}</button>`}
           </div>
           <div class="tripsy-attire-dressguide-badge">${tripsyAttireEventBadgeHtml(day.dayKey, ev)}</div>
         </div>
@@ -27289,6 +27291,34 @@ async function handleTripsyUpdateDelete(row, btn) {
 // expandMultiDayTripsyEvents) over the underlying raw's tripsyEventKey, so
 // a checkin/checkout pair stays two distinct rows instead of colliding on
 // one shared id.
+// Days INSIDE the trip's span with no scheduled events still need clothes
+// ("use casual as the default for those days and show them on all packing
+// plans and summaries — include the date and say 'No events planned',"
+// 2026-09-15). Each such day gets ONE synthetic placeholder event rather
+// than a special empty-day shape, so everything downstream works unchanged:
+// it forms its own time-block (defaulting to Casual via the category apply
+// loops' existing fallback — it is kept OUT of the model prompt, and the
+// athletic name rule cannot match this name), counts as a Casual occasion
+// in the guidance sizing (the "account for clothing" half), renders under
+// its date in the Daily Dress Guide / review dialog / tier drill-downs, is
+// overridable like any event (the id is stable per day, so an override
+// sticks across refreshes), and gets an outfit composed. `freeDay: true`
+// is what render sites key on to keep it from acting like a jumpable real
+// event; the id prefix never collides with the real `<resource>-<id>` space.
+const TRIPSY_ATTIRE_FREE_DAY_NAME = 'No events planned';
+function tripsyAttireFreeDayEvent(dayKey) {
+  return {
+    id: `freeday-${dayKey}`,
+    resource: 'activity',
+    category: null,
+    name: TRIPSY_ATTIRE_FREE_DAY_NAME,
+    date: dayKey,
+    startTime: null,
+    endTime: null,
+    address: null,
+    freeDay: true,
+  };
+}
 async function tripsyAttireBuildDays(trip) {
   const { effectiveTrip, dayKeys, byDay } = await buildTripsyPrintDayData(trip);
   const days = [];
@@ -27314,6 +27344,17 @@ async function tripsyAttireBuildDays(trip) {
       })
       .filter(Boolean);
     if (dayEvents.length) days.push({ dayKey, events: dayEvents });
+  }
+  // Fill the gaps: dayKeys above only lists days that HAVE events, so walk
+  // the full first-to-last span (the same earliest-event → latest-event rule
+  // the itinerary's day ranges use) and give every missing day its free-day
+  // placeholder. A trip with no dated events at all stays empty as before.
+  if (days.length) {
+    const have = new Map(days.map(d => [d.dayKey, d]));
+    const range = tripsyDayKeyRange(days[0].dayKey, days[days.length - 1].dayKey);
+    if (range.length > days.length) {
+      return { effectiveTrip, days: range.map(k => have.get(k) || { dayKey: k, events: [tripsyAttireFreeDayEvent(k)] }) };
+    }
   }
   return { effectiveTrip, days };
 }
@@ -27363,7 +27404,14 @@ async function generateTripsyAttireGuide(tripKey, { onStage } = {}) {
   if (!trip) throw new Error('Trip not found.');
 
   const { effectiveTrip, days } = await tripsyAttireBuildDays(trip);
-  const currentEventsForPrompt = days.flatMap(d => d.events);
+  // The fingerprint (staleness + eventsUnchanged detection) covers EVERY guide
+  // event including the synthetic free-day placeholders -- the two staleness
+  // readers hash days.flatMap too, and the sets must agree or a guide reads
+  // stale forever. The MODEL prompt gets only the real events: a free day has
+  // nothing to judge, and the category apply loops below default an unmatched
+  // event to 'casual', which is exactly the free-day rule.
+  const allGuideEvents = days.flatMap(d => d.events);
+  const currentEventsForPrompt = allGuideEvents.filter(e => !e.freeDay);
   if (!currentEventsForPrompt.length) throw new Error('This trip has no events to generate an attire guide for.');
   console.log(`[attire timing] buildDays: ${Math.round(performance.now() - genStart)}ms (${currentEventsForPrompt.length} events)`);
 
@@ -27409,7 +27457,7 @@ async function generateTripsyAttireGuide(tripKey, { onStage } = {}) {
   if (preservePacking) console.log('[attire] trip has started -- preserving packing list, garment counts and laundry days');
   const priorById = new Map();
   if (existing && Array.isArray(existing.days)) existing.days.forEach(d => (d.events || []).forEach(e => priorById.set(e.id, e)));
-  const fingerprint = tripsyAttireFingerprint(currentEventsForPrompt);
+  const fingerprint = tripsyAttireFingerprint(allGuideEvents);
   const eventsUnchanged = !!(existing && existing.eventFingerprint
     && existing.eventFingerprint.hash === fingerprint.hash
     && existing.eventFingerprint.count === fingerprint.count
@@ -27581,7 +27629,7 @@ async function generateTripsyAttireGuide(tripKey, { onStage } = {}) {
   const guide = {
     tripKey,
     generatedAt: new Date().toISOString(),
-    eventFingerprint: tripsyAttireFingerprint(currentEventsForPrompt),
+    eventFingerprint: tripsyAttireFingerprint(allGuideEvents),
     // What the packing guidance was sized from (tier counts + tiered blocks) --
     // lets the next Refresh skip the slow guidance call when these are unchanged
     // (see runGuidancePhase above). Carried through a reuse, so the chain holds.

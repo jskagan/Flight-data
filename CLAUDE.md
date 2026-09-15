@@ -1399,6 +1399,22 @@ step 4; git history has it if ever needed.
   which also retired the old casual↔formal count-elevation edge (a non-itemized event no longer
   breaks a run). Since `computeTripsyAttireBlocks` no longer calls `tripsyAttireContinuesPrevious`,
   that function is now unused (kept as documentation of the older continuity-first grouping).
+- **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
+  events planned"** ("on days with no scheduled events you still need to account for clothing,"
+  2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day
+  (the itinerary's own day-range rule, via `tripsyDayKeyRange`) with ONE synthetic placeholder
+  event (`tripsyAttireFreeDayEvent`: name `No events planned`, `freeDay: true`, stable
+  `freeday-<dayKey>` id). One synthetic event rather than a special empty-day shape means
+  everything downstream works unchanged: its own Casual time-block, a Casual occasion in the
+  guidance sizing, dated rows in the Daily Dress Guide / review dialog / tier drill-downs, an
+  outfit composed for it, and normal overrides (the stable id makes an override stick across
+  refreshes — a free beach day can be re-tiered Athletic). The MODEL prompt gets only real events
+  (`currentEventsForPrompt` filters `freeDay`; both category apply loops already default an
+  unmatched event to `'casual'`, which IS the rule, and the athletic name regex can't match the
+  placeholder); the fingerprint deliberately hashes the FULL list (`allGuideEvents`) at both
+  generation sites, since the staleness readers hash `days.flatMap` — a filtered fingerprint
+  would read stale forever. The Daily Dress Guide renders a free day as plain italic text, never
+  the jump-to-My-Trips title button (there is no real event to jump to). `freedays_test.js`.
 - **Physical-activity events are always Athletic** ("for events that involve hikes, biking,
   climbing, running, jogging or anything similar, set the dress category as 'athletic',"
   2026-09-15). Two layers: the events-categorization prompt states the rule (nuance lives with the
