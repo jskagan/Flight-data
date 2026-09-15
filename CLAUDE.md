@@ -1451,6 +1451,14 @@ they agree by construction rather than by two implementations staying in step:
 | Plan Packing List | `tripsyWardrobePackForTrip` | pick which garments cover each need line |
 | Packing Status | `tripsyWardrobePackingList` | mark what's physically packed; Selected/Packed per line |
 
+**Both are gated on a saved attire guide** ("there should be nothing to show until the attire list
+is generated," 2026-09-15): their need lines derive from `guide.packingList`, so before a guide
+exists they opened onto an empty page. The trip card's 👔 Attire menu now requires
+`isOwner && attireHasGuide` for both items (matching Clothing Summary / Daily Dress Guide's
+existing gate), leaving a guide-less owner's menu exactly one item — Generate; the other entry
+point (the Attire summary's per-person card buttons) was already inside a `personGuidance`-gated
+block. `attiremenugate_test.js`.
+
 Each has a header button opening the other, passing an `onClose` callback so closing the second
 reopens the first with fresh numbers. **Opened from a garment page, either button hands the current
 need LINE across** (`initialLine` = `{tier, lineName}`, resolved by NAME since a regenerated guide
