@@ -968,7 +968,13 @@ step 4; git history has it if ever needed.
   where drift would actually matter. `renderTripsyAttireOverlayContent` lays out the main report
   top-to-bottom as the Him/Her "Packing Summary" cards first, then a "Daily Dress Guide". Dress Code
   Definitions is its own page instead (`showTripsyAttireDefinitions`/
-  `getOrCreateTripsyAttireDefinitionsOverlay`, reached via the toolbar's Definitions button) — a full
+  `getOrCreateTripsyAttireDefinitionsOverlay`, reached via the toolbar's Definitions button; that
+  toolbar, in the overlay's lazily-created static shell — so `isOwner` is settled — also carries an
+  owner-only **Regenerate** button to Definitions' right, 2026-09-15: the same
+  `tripsyRunAttireGenerationSafely` entry the 👔 menu's Refresh fires, against
+  `tripsyAttireOverlayTripKey`, `isRefresh` reflecting whether a guide exists, and a
+  `tripsyAttireGeneratingKeys` guard so a double-press can't run two generations;
+  `regeneratebtn_test.js`) — a full
   reference chart (`TRIPSY_ATTIRE_DRESS_CODE_CHART`, transcribed from an owner-provided "Master Dress
   Code Guide" PDF, White Tie/Business Formal/Business Casual rows dropped since they're not tiers
   this app's own taxonomy uses) with a column each for Suit/Jacket & Neckwear, Bottoms, Footwear
@@ -1393,6 +1399,38 @@ step 4; git history has it if ever needed.
   which also retired the old casual↔formal count-elevation edge (a non-itemized event no longer
   breaks a run). Since `computeTripsyAttireBlocks` no longer calls `tripsyAttireContinuesPrevious`,
   that function is now unused (kept as documentation of the older continuity-first grouping).
+- **Physical-activity events are always Athletic** ("for events that involve hikes, biking,
+  climbing, running, jogging or anything similar, set the dress category as 'athletic',"
+  2026-09-15). Two layers: the events-categorization prompt states the rule (nuance lives with the
+  model), and **`tripsyAttireForceAthleticCategories`** enforces it deterministically over event
+  NAMES right after categories land — in BOTH `generateTripsyAttireGuide` branches, BEFORE the
+  per-tier counts that size the packing guidance, so a forced hike is Athletic in the garment
+  math too, and a guide saved before the rule existed retrofits on any refresh. The keyword regex
+  (`TRIPSY_ATTIRE_ATHLETIC_EVENT_RE`) is deliberately conservative: activity-specific word forms
+  only, word-bounded (the tie rule's `\b` lesson) — `surfing` but never bare `surf` ("Surf &
+  Turf" is dinner), `skiing` but never bare `ski` ("Ski Lodge Dinner" is dinner). A forced event
+  loses its `alternateCategory` (nothing left to pick); a manual override always wins, so a
+  false positive is one tap in the review dialog to fix, permanently. `athleticrule_test.js`.
+- **EVERY generate — first generate AND Refresh — ends in a review dialog of the time-blocks'
+  tiers** ("show the user each of the events/time blocks with your suggested dress category… make
+  the dress category a button… allow the user to select individual events… update the display
+  dynamically," then "also display the review dialog after a user regenerates the attire list,"
+  both 2026-09-15): `showTripsyAttireReviewDialog`, opened by `runTripsyAttireGeneration` when
+  `isOwner && summaryLiveForTrip()` (a dialog popping over an unrelated page after a background
+  generate would be noise; a refresh re-categorizes non-overridden events, so its tiers deserve
+  the same look-over — overridden ones show "(selected)" and are untouched), awaited BEFORE the
+  outfit-recompose offers. Lists each day's blocks (grouped by
+  consecutive constant `displayCategory` — the same rule `tripsyEnumerateAttireBlocks` uses):
+  a BLOCK's badge re-tiers the whole block via **`tripsyAttireOverrideBlockCategory`** (every
+  member's base set + `categoryOverridden`, one save, snapshot rollback on failure, deliberately
+  NO cascade/downgrade dialogs — setting the block IS the cascade, shown live); an EVENT badge
+  inside a multi-event block goes through the exact `tripsyAttireOverrideCategory` mechanism the
+  guide's own badges use, dialogs included. Event badges show each event's own BASE tier (the one
+  screen that deliberately departs from the displayCategory rule — seeing which member drives the
+  block is the point). Every change re-renders the dialog AND the summary behind it via the shared
+  `renderOpts.rerender` convention, so blocks visibly split/merge as tiers move. Z-order 9150 —
+  above the Attire panel (9000), below the category menu (9200), whose click-away close excludes
+  the review badges just like the guide's own. `dressreview_test.js`.
 - **Owner-only manual category override, per event**: in the day-by-day table, each event's badge
   is itself a clickable trigger (`tripsyAttireEventBadgeHtml` — viewers get the same plain,
   non-interactive badge everywhere else in the guide instead) opening a 7-item dropdown

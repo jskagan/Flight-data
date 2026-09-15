@@ -22660,6 +22660,8 @@ ${TRIPSY_ATTIRE_TAXONOMY_GUIDE}
 
 For each event, weigh its venue/address, its own name/category, and the time of day -- and any explicit dress-code wording in the event's own name or notes (e.g. "Black Tie Gala", "Cocktail Reception") should drive the category directly. category is always your single best-guess primary pick.
 
+Any event that is itself a physical activity -- a hike, bike ride, climb, run or jog, swim, kayak or rafting outing, ski or snowboard day, a workout/gym/yoga/tennis session, or anything similar -- is Athletic, regardless of venue or time of day.
+
 alternate_category: most events have a clear single answer -- leave this as an empty string ''. Only set it when an event is GENUINELY ambiguous between two adjacent tiers (not just uncertainty on your part) -- e.g. a private dinner that could reasonably read as either Semi-formal or Cocktail depending on interpretation, with no strong signal pointing either way. In that case set alternate_category to the second plausible tier (from the same list) so the owner can pick between the two themselves; category should still be whichever of the two you'd lean toward.
 
 continues_previous_event is true if this event flows directly from the immediately preceding event ON THE SAME DAY with realistically no opportunity to return to lodging and change outfits -- judge this from the event titles/descriptions and the clock time together, not a fixed time gap: a "Pre-concert Reception" at 5pm followed by a "Concert" at 7pm followed by a "Post-concert Reception" at 9:30pm are obviously one continuous evening (same venue, sequential parts of one occasion) even though an hour or two separates each part -- all three after the first should be true. Two events that are just independently scheduled back-to-back with a real gap and no such connection (different venues, unrelated occasions) should be false even if the gap is short. Always false for the FIRST event of a day (nothing precedes it) and false whenever there's a genuine free block of time to go back and change.
@@ -23053,6 +23055,41 @@ function tripsyAttireOutfitChangeNeeded(prevEvent, ev) {
 // each day's events already
 // sorted by start time (generateTripsyAttireGuide does this before
 // calling in).
+// "For events that involve hikes, biking, climbing, running, jogging or
+// anything similar, set the dress category as 'athletic'" (2026-09-15). Two
+// layers: the events-categorization prompt states the rule (nuance lives
+// there), and this deterministic pass enforces it mechanically over the event
+// NAMES afterward, so a model miss can never leak a hike into Casual. The
+// keyword list is deliberately conservative -- activity-specific word forms
+// only, word-bounded (the tie rule's \b lesson): 'surfing' but never bare
+// 'surf' (a "Surf & Turf" dinner must not go athletic), 'skiing' but never
+// bare 'ski' (a "Ski Lodge Dinner" is dinner). A false positive is visible in
+// the post-generate review dialog and fixable with one tap, after which the
+// manual override wins here forever -- an owner who re-tiered their "sunrise
+// hike" keeps their pick on every later pass.
+const TRIPSY_ATTIRE_ATHLETIC_EVENT_RE = new RegExp('\\b(' + [
+  'hike', 'hikes', 'hiking', 'trek', 'trekking',
+  'bike', 'bikes', 'biking', 'bicycle', 'cycling', 'e-bike',
+  'climb', 'climbs', 'climbing', 'bouldering',
+  'run', 'running', 'jog', 'jogging', 'marathon', '5k', '10k',
+  'workout', 'gym', 'fitness', 'yoga', 'pilates',
+  'swim', 'swimming', 'snorkeling', 'kayak', 'kayaking', 'canoeing', 'paddleboard', 'rafting', 'surfing',
+  'skiing', 'snowboarding',
+  'tennis', 'pickleball', 'zipline', 'zip-line',
+].join('|') + ')\\b', 'i');
+function tripsyAttireForceAthleticCategories(days) {
+  let forced = 0;
+  for (const day of (days || [])) {
+    for (const ev of (day.events || [])) {
+      if (ev.categoryOverridden || ev.category === 'athletic') continue;
+      if (!TRIPSY_ATTIRE_ATHLETIC_EVENT_RE.test(String(ev.name || ''))) continue;
+      ev.category = 'athletic';
+      ev.alternateCategory = ''; // the rule leaves nothing ambiguous
+      forced++;
+    }
+  }
+  return forced;
+}
 function computeTripsyAttireBlocks(days) {
   const rankOf = category => TRIPSY_ATTIRE_CATEGORY_ORDER.indexOf(category);
 
@@ -25125,7 +25162,11 @@ function getOrCreateTripsyAttireCategoryMenu() {
   document.body.appendChild(menu);
   document.addEventListener('click', e => {
     if (menu.style.display === 'none' || !menu.style.display) return;
-    if (menu.contains(e.target) || e.target.closest('[data-tripsy-attire-event-badge]')) return;
+    // The badge that OPENS the menu must not also count as a click-away that
+    // closes it -- one exclusion per badge kind that can open this menu (the
+    // guide's event badges, and the post-generate review dialog's block/event
+    // badges).
+    if (menu.contains(e.target) || e.target.closest('[data-tripsy-attire-event-badge], [data-tripsy-attire-review-block], [data-tripsy-attire-review-event]')) return;
     menu.style.display = 'none';
   });
   return menu;
@@ -25362,6 +25403,159 @@ async function tripsyAttireOverrideCategory(guide, dayKey, eventId, newCategory,
   }
   toast(cascaded.length ? 'Dress level updated across the time-block.' : 'Category updated.', 'success');
 }
+// Sets EVERY event of one time-block to the same base tier in a single action --
+// the block-badge half of the post-generate review dialog. No cascade/downgrade
+// dialogs here on purpose: setting the whole block IS the cascade, and the
+// review dialog repaints live so the effect is visible immediately (the per-
+// event path keeps its dialogs, since a single event's change can surprise).
+// Same shape as tripsyAttireOverrideCategory's apply: mark every member
+// categoryOverridden (it is the owner's own pick), re-derive blocks/counts,
+// repaint optimistically, save once, roll the whole snapshot back on a failed
+// save. Setting a block to a tier adjacent blocks already wear can MERGE them
+// on the re-derive -- that's correct (they'd share one outfit now) and the
+// live repaint is what shows it.
+async function tripsyAttireOverrideBlockCategory(guide, eventIds, newCategory, renderOpts) {
+  const all = [];
+  (guide.days || []).forEach(d => (d.events || []).forEach(e => all.push(e)));
+  const idSet = new Set(eventIds || []);
+  const targets = all.filter(e => idSet.has(e.id));
+  if (!targets.length) return;
+  if (targets.every(e => e.category === newCategory && e.categoryOverridden)) return; // no-op
+  const snapshot = all.map(e => ({ e, category: e.category, overridden: !!e.categoryOverridden }));
+  const restoreAll = () => { snapshot.forEach(s => { s.e.category = s.category; s.e.categoryOverridden = s.overridden; }); return computeTripsyAttireBlocks(guide.days); };
+  targets.forEach(e => { e.category = newCategory; e.categoryOverridden = true; });
+  tripsyAttireApplyRecomputedBlocks(guide, computeTripsyAttireBlocks(guide.days));
+  tripsyAttireRepaint(guide, renderOpts); // paint instantly; the Drive save runs after
+  const saved = await Store.saveTripsyAttireGuide(guide);
+  if (!saved) {
+    const re = restoreAll();
+    guide.blocks = re.blocks; guide.counts = re.counts;
+    tripsyAttireRepaint(guide, renderOpts);
+    toast('Could not save the dress code.', 'error');
+    return;
+  }
+  toast(targets.length === 1 ? 'Dress code set.' : 'Dress level set for the whole block.', 'success');
+}
+// Post-generate review ("when you first generate the attire guide, show the
+// user each of the events/time blocks with your suggested dress category,"
+// 2026-09-15; extended same day to Refresh too -- "also display the review
+// dialog after a user regenerates the attire list"): shown automatically after
+// EVERY generate/refresh, listing every day's
+// time-blocks with the suggested tier. Every badge is a button into the same
+// 7-tier category menu the Daily Dress Guide's badges use: a BLOCK's badge
+// re-tiers the whole block in one tap (tripsyAttireOverrideBlockCategory,
+// dialog-free), an individual EVENT's badge inside a multi-event block goes
+// through the exact tripsyAttireOverrideCategory mechanism the guide's own
+// badges use (cascade/downgrade dialogs included), and the dialog re-renders
+// itself after every change -- blocks can visibly split or merge as tiers
+// move. Event badges deliberately show each event's own BASE tier (with the
+// usual "(selected)" tag), unlike every other screen's displayCategory rule:
+// seeing which member drives the block's level is the whole point of this
+// screen. Z-order: 9150 -- above the Attire panel (9000), below the category
+// menu (9200) and the cascade/downgrade confirms, per the layering note on
+// tripsyWardrobeChoosePackedCount. Owner-only by construction (only the
+// owner's generate path opens it). Resolves when dismissed (Done or
+// click-outside -- nothing to decline, the guide is already saved).
+function getOrCreateTripsyAttireReviewOverlay() {
+  let overlay = document.getElementById('tripsy-attire-review-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-attire-review-overlay';
+  overlay.style.cssText = 'display:none; position:fixed; inset:0; z-index:9150; background:rgba(0,0,0,0.6); align-items:flex-start; justify-content:center; padding:32px 16px; overflow-y:auto; overscroll-behavior:contain;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; max-width:640px; width:100%; padding:24px 26px; color:var(--text);">
+      <h2 style="margin:0 0 6px; font-size:18px;">Review dress codes</h2>
+      <p style="margin:0 0 14px; font-size:13px; color:var(--muted); line-height:1.5;">Each time block below is one outfit, worn at the level shown. Tap a block's badge to change the whole block, or an individual event's badge to change just that event — the list updates as you go.</p>
+      <div id="tripsy-attire-review-content"></div>
+      <div style="display:flex; justify-content:flex-end; margin-top:16px;">
+        <button class="btn primary" data-tripsy-attire-review-done>Done</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+function showTripsyAttireReviewDialog(guide, opts = {}) {
+  return new Promise(resolve => {
+    const overlay = getOrCreateTripsyAttireReviewOverlay();
+    const content = overlay.querySelector('#tripsy-attire-review-content');
+    const renderOpts = { rerender: () => { render(); if (opts.onChanged) opts.onChanged(); } };
+    const openMenuFor = (btn, onPick) => {
+      const menu = getOrCreateTripsyAttireCategoryMenu();
+      positionTripsyFixedMenu(btn, menu);
+      menu.querySelectorAll('.tripsy-attire-category-menu-item').forEach(item => {
+        item.onclick = () => { menu.style.display = 'none'; onPick(item.dataset.category); };
+      });
+    };
+    const render = () => {
+      // Fresh displayCategory stamps so the block grouping below reflects the
+      // latest picks -- the SAME consecutive-constant-displayCategory rule
+      // tripsyEnumerateAttireBlocks uses.
+      computeTripsyAttireBlocks(guide.days || []);
+      content.innerHTML = (guide.days || []).map(day => {
+        const groups = [];
+        let cur = null;
+        for (const ev of (day.events || [])) {
+          const cat = tripsyAttireDisplayCategory(ev);
+          if (!cur || cur.category !== cat) { cur = { category: cat, events: [] }; groups.push(cur); }
+          cur.events.push(ev);
+        }
+        const blocksHtml = groups.map(g => {
+          const ids = g.events.map(e => e.id).join(',');
+          const blockBtn = `<button type="button" class="tripsy-attire-badge-btn" data-tripsy-attire-review-block data-event-ids="${esc(ids)}">${tripsyAttireBadgeHtml(g.category)}</button>`;
+          if (g.events.length === 1) {
+            const ev = g.events[0];
+            return `
+              <div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-top:1px solid var(--line);">
+                <div style="flex:1; min-width:0;">
+                  <div style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(ev.name || 'Event')}</div>
+                  ${ev.startTime ? `<div style="font-size:11px; color:var(--muted);">${esc(ev.startTime)}</div>` : ''}
+                </div>
+                <div style="flex-shrink:0;">${blockBtn}${ev.categoryOverridden ? ` <span class="tripsy-attire-selected-tag">(selected)</span>` : ''}</div>
+              </div>`;
+          }
+          const first = g.events[0], last = g.events[g.events.length - 1];
+          const span = [first.startTime, last.endTime || last.startTime].filter(Boolean).join(' – ');
+          const evRows = g.events.map(ev => `
+            <div style="display:flex; align-items:center; gap:10px; padding:5px 0 5px 18px;">
+              <div style="flex:1; min-width:0; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${ev.startTime ? `<span style="color:var(--muted);">${esc(ev.startTime)}</span> · ` : ''}${esc(ev.name || 'Event')}</div>
+              <div style="flex-shrink:0;">
+                <button type="button" class="tripsy-attire-badge-btn" data-tripsy-attire-review-event data-day-key="${esc(day.dayKey)}" data-event-id="${esc(ev.id)}">${tripsyAttireBadgeHtml(ev.category)}${ev.categoryOverridden ? ` <span class="tripsy-attire-selected-tag">(selected)</span>` : ''}</button>
+              </div>
+            </div>`).join('');
+          return `
+            <div style="padding:8px 0; border-top:1px solid var(--line);">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <div style="flex:1; min-width:0; font-weight:600;">One outfit · ${g.events.length} events${span ? ` <span style="font-weight:400; font-size:11px; color:var(--muted);">${esc(span)}</span>` : ''}</div>
+                <div style="flex-shrink:0;">${blockBtn}</div>
+              </div>
+              ${evRows}
+            </div>`;
+        }).join('');
+        return `
+          <div style="margin-bottom:14px;">
+            <div style="font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:0.04em; color:var(--amber); margin-bottom:2px;">${esc(tripsyDayHeaderLabel(day.dayKey))}</div>
+            ${blocksHtml}
+          </div>`;
+      }).join('') || '<div style="color:var(--muted);">No events on this trip.</div>';
+      content.querySelectorAll('[data-tripsy-attire-review-block]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const ids = (btn.dataset.eventIds || '').split(',').filter(Boolean);
+          openMenuFor(btn, category => tripsyAttireOverrideBlockCategory(guide, ids, category, renderOpts));
+        });
+      });
+      content.querySelectorAll('[data-tripsy-attire-review-event]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          openMenuFor(btn, category => tripsyAttireOverrideCategory(guide, btn.dataset.dayKey, btn.dataset.eventId, category, renderOpts));
+        });
+      });
+    };
+    render();
+    overlay.style.display = 'flex';
+    const close = () => { overlay.style.display = 'none'; resolve(); };
+    overlay.querySelector('[data-tripsy-attire-review-done]').onclick = close;
+    overlay.onclick = e => { if (e.target === overlay) close(); };
+  });
+}
 // One lazily-created, body-level overlay for the Attire feature (My Trips
 // -> Attire button). Same fixed full-screen modal shape/click-outside-to-
 // close pattern as #tripsy-update-overlay, but simpler: no dropdown/upload
@@ -25374,14 +25568,17 @@ function getOrCreateTripsyAttireOverlay() {
   overlay.innerHTML = `
     <!-- The header lives ON the card, not on a bar floating above it: one heading
          ("Clothing Summary — <trip>") instead of the trip name overhead and a separate
-         "Clothing Summary" repeated inside. Definitions and the close X share that line,
-         and they stay in this STATIC shell rather than the re-rendered content, so both
-         are wired once instead of needing a re-bind after every render. -->
+         "Clothing Summary" repeated inside. Definitions, Regenerate (owner-only) and
+         the close X share that line, and they stay in this STATIC shell rather than
+         the re-rendered content, so all are wired once instead of needing a re-bind
+         after every render. The shell is created lazily on first open -- after
+         sign-in -- so isOwner is settled when this template renders. -->
     <div class="tripsy-attire-paper">
       <div class="tripsy-attire-cardhead">
         <h2 class="tripsy-attire-cardtitle" data-tripsy-attire-title></h2>
         <div class="tripsy-attire-toolbar-actions">
           <button class="tripsy-update-btn" id="tripsy-attire-definitions-btn">Definitions</button>
+          ${isOwner ? '<button class="tripsy-update-btn" id="tripsy-attire-regenerate-btn">Regenerate</button>' : ''}
           <button class="tripsy-close-x" id="tripsy-attire-close-btn" aria-label="Close" title="Close">&#10005;</button>
         </div>
       </div>
@@ -25391,11 +25588,27 @@ function getOrCreateTripsyAttireOverlay() {
   document.body.appendChild(overlay);
   // The attire ACTIONS (Clothing Summary / DDG / Pack / Packing List / Outfits /
   // Refresh) now live on each trip card's 👔 menu on My Trips; this overlay is just
-  // the Clothing Summary content (+ its own Definitions button) and a Close.
+  // the Clothing Summary content (+ its own Definitions / Regenerate buttons) and a
+  // Close.
   overlay.querySelector('#tripsy-attire-close-btn').addEventListener('click', () => {
     overlay.style.display = 'none';
   });
   overlay.querySelector('#tripsy-attire-definitions-btn').addEventListener('click', () => showTripsyAttireDefinitions());
+  // Regenerate ("add a 'Regenerate' button to the right of the Definitions button
+  // on the clothing summary screen," 2026-09-15): the exact same safe entry the 👔
+  // menu's Refresh uses, against whichever trip this overlay currently shows.
+  // isRefresh reflects whether a guide actually exists (from the empty state this
+  // is a first generate); the generating-keys guard stops a double-press from
+  // firing two overlapping generations. The post-generate review dialog follows,
+  // same as every other generation path.
+  const regenBtn = overlay.querySelector('#tripsy-attire-regenerate-btn');
+  if (regenBtn) regenBtn.addEventListener('click', () => {
+    const key = tripsyAttireOverlayTripKey;
+    if (!key) return;
+    if (tripsyAttireGeneratingKeys.has(key)) { toast('Already generating — hang tight…'); return; }
+    const hasGuide = !!(driveData.tripsyAttireGuides || []).find(g => g.tripKey === key);
+    tripsyRunAttireGenerationSafely(key, { isRefresh: hasGuide });
+  });
   overlay.addEventListener('click', e => {
     if (e.target === overlay) overlay.style.display = 'none';
   });
@@ -26021,13 +26234,30 @@ async function runTripsyAttireGeneration(tripKey, { isRefresh }) {
     };
     const guide = await generateTripsyAttireGuide(tripKey, { onStage });
     const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+    let attireRenderOpts = null; // kept for the review dialog's live repaints below
     if (summaryLiveForTrip() && trip) {
       const { weatherTargetsByDay, tripStartDayKey } = await tripsyAttireLoadWeatherBar(trip, guide);
-      renderTripsyAttireOverlayContent(guide, { stale: false, weatherTargetsByDay, tripStartDayKey });
+      attireRenderOpts = { stale: false, weatherTargetsByDay, tripStartDayKey };
+      renderTripsyAttireOverlayContent(guide, attireRenderOpts);
     }
     toast(guide && guide.packingFrozen
       ? 'Attire guide refreshed — dress codes updated. Your packing list and counts were kept as-is because the trip has started.'
       : (isRefresh ? 'Attire guide refreshed.' : 'Attire guide generated.'), 'success');
+    // EVERY generate ends in the review dialog — a first generate ("when you
+    // first generate the attire guide, show the user each of the events/time
+    // blocks with your suggested dress category") AND a Refresh ("also display
+    // the review dialog after a user regenerates the attire list," 2026-09-15:
+    // a refresh re-categorizes non-overridden events, so its tiers deserve the
+    // same look-over; overridden events show "(selected)" and are untouched).
+    // Only while the Attire overlay is still up for this trip -- a dialog
+    // popping over an unrelated page minutes after a background generate would
+    // be noise. Each change re-saves the guide and repaints both the dialog
+    // and the summary behind it.
+    if (isOwner && guide && summaryLiveForTrip()) {
+      await showTripsyAttireReviewDialog(guide, {
+        onChanged: () => { if (summaryLiveForTrip()) renderTripsyAttireOverlayContent(guide, attireRenderOpts || { stale: false }); },
+      });
+    }
     // A dress-code refresh can move a block's tier out from under an already-composed
     // outfit (e.g. a block re-categorized Casual -> Smart Casual) -- the success toast
     // above says "dress codes updated" with no hint that outfits are now stale, and
@@ -27233,7 +27463,9 @@ async function generateTripsyAttireGuide(tripKey, { onStage } = {}) {
     }
     // Authoritative per-tier counts (from the finalized categories) drive the
     // guidance call; also stamps displayCategory on each event for the id-linking
-    // reconciliation below.
+    // reconciliation below. The athletic rule runs first so a guide saved
+    // before the rule existed picks it up on any refresh (overrides still win).
+    tripsyAttireForceAthleticCategories(days);
     const authCounts = computeTripsyAttireBlocks(days).counts;
     const tierCounts = {};
     TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(cat => { const n = authCounts[TRIPSY_ATTIRE_CAMEL_KEY[cat]] || 0; if (n) tierCounts[cat] = n; });
@@ -27277,7 +27509,10 @@ async function generateTripsyAttireGuide(tripKey, { onStage } = {}) {
       });
     }
     // Finalized per-tier time-block counts (incl. overrides) drive the guidance
-    // call authoritatively -- same as the eventsUnchanged branch above.
+    // call authoritatively -- same as the eventsUnchanged branch above. The
+    // athletic rule runs BEFORE the counts so a forced hike/ride/run is
+    // athletic in the guidance sizing too, not just on the badges.
+    tripsyAttireForceAthleticCategories(days);
     const authCounts = computeTripsyAttireBlocks(days).counts;
     const tierCounts = {};
     TRIPSY_ATTIRE_CATEGORY_ORDER.forEach(cat => { const n = authCounts[TRIPSY_ATTIRE_CAMEL_KEY[cat]] || 0; if (n) tierCounts[cat] = n; });
