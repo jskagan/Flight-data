@@ -2122,6 +2122,19 @@ data. Note the Claude iPad WebView has no service worker, so offline doesn't app
   fields can't cross rows) and tries `ampm.showPicker()` behind a feature test + try/catch (needs
   user activation, absent on older WebViews — a focused-but-unopened AM/PM is the fallback).
   Nothing is wired to the AM/PM select itself, so choosing AM or PM auto-opens nothing further.
+  **On the iPad Claude-app WebView the pick must ALSO fire at `touchend` with `preventDefault()`**
+  (2026-09-26: "after I select a date and then the hours and minutes the app goes back to the date
+  selection instead of going to the AM/PM indicator" — on the Add-item panel, whose wider
+  un-indented layout keeps date+time on one line so the NEXT row's DATE input sits under the open
+  minute menu): wired to `click` alone, the handler ran on the WebView's SYNTHESIZED click and
+  closed the menu — after which the WebView still applied its native tap default at the same
+  screen point, now that date input, so the calendar popped open BY ITSELF even though the minute
+  was set fine. `preventDefault` on touchend suppresses both the synthesized mouse events and that
+  native default; one shared `pick()` serves touchend and `click` (the mouse/desktop path,
+  unchanged — iOS never fires the click after a prevented touchend, and a stray double-fire is
+  idempotent anyway), and a `touchMoved` flag (passive touchstart/touchmove listeners, reset per
+  touch) keeps a scroll that merely starts on an option from counting as a pick.
+  `mintouchpick_test.js`.
 - Everything — HTML, CSS, and JS — lives in this one file by design (it's distributed/opened as a
   single artifact). Don't split it into separate files/modules unless explicitly asked.
 - **FOP-BP branding easter egg**: clicking either logo (`#fopbp-logo-splash`/`#fopbp-logo-signin`,
