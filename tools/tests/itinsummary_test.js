@@ -34,8 +34,7 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 
 // ---- the builder's summary-only mode ----
 const build = extractFn('buildTripsyPrintHtml');
-assert(/async function buildTripsyPrintHtml\(tripKey, \{ summaryOnly = false \} = \{\} \)?/.test(build.replace(/\s+/g, ' ')) ||
-       /\{ summaryOnly = false \} = \{\}/.test(build),
+assert(/\{ summaryOnly = false(, partialKeys = null)? \} = \{\}/.test(build),
   'summaryOnly defaults to false, so every pre-existing caller behaves exactly as before');
 const iSummary = build.indexOf('const summaryHtml =');
 const iReturn = build.indexOf('if (summaryOnly) return');
@@ -126,7 +125,7 @@ assert(/e\.target === overlay/.test(overlay), 'click-outside closes it, same rul
 }
 
 // ---- print isolation: this overlay must not print alongside the print root ----
-assert(/#tripsy-preview-overlay, #tripsy-summary-overlay \{ display: none !important; \}/.test(html),
+assert(/#tripsy-preview-overlay, #tripsy-summary-overlay(, #tripsy-partial-overlay)? \{ display: none !important; \}/.test(html),
   'the Summary overlay is hidden in @media print, or it would print on top of #tripsy-print-root');
 
 // ---- printing started BY THE BROWSER also prints the summary ----

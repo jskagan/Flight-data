@@ -791,6 +791,42 @@ step 4; git history has it if ever needed.
   `TRIPSY_MAILTO_SAFE_LENGTH` (1800) it copies the full text to the clipboard and opens an EMPTY
   draft — a silently truncated itinerary would be worse than no prefill. A refused clipboard
   (permissions, insecure context, old WebView) is caught and says so, pointing at Save as PDF.
+- **Itinerary → Create Partial is a saved FILTER over the full itinerary, never a second
+  document** ("create a partial itinerary that does not include all events… identical to the items
+  on the full itinerary, except that it should include less items," 2026-09-26). The 🧭 menu's
+  owner-only **Create Partial** item opens its own picker panel (`data-tripsy-partial-panel`,
+  registered in every list the Generate panel is: `TRIPSY_TRIP_PANEL_SELECTORS`, the trigger list,
+  `freshlyRenderedEachTime`, the header-toggle collapse guard, the phone max-width rule) built
+  from the SAME `tripsyGeneratePanelSections` rows the Create/Generate panel shows — one builder,
+  so the two panels can never list different sections — but with its own include/exclude
+  checkmarks (`data-tripsy-partial-checkbox`; same `tp-generate-panel-check` styling, different
+  attribute so the Generate panel's listeners never fire). Everything starts INCLUDED (a partial
+  is made by removing); a DAY row's checkbox carries that day's write-up AND toggles its events
+  with it (each re-toggleable individually); the panel's delegated listener is wired ONCE per
+  node (`tripsyPartialWired` — re-wiring per open stacked listeners and made every tap a
+  double-toggle no-op). "View Partial Itinerary" (top and bottom) refuses a zero-event selection,
+  saves the keys optimistically to `driveData.tripsyPartialItineraries`
+  (`Store.getTripsyPartialItinerary`/`saveTripsyPartialItinerary`, one entry per trip, pruned in
+  `pruneDriveDataInMemory` when its trip disappears — the new-key prune rule) so reopening the
+  picker resumes it, and opens `showTripsyPartialItinerary` — a read-only overlay
+  (`#tripsy-partial-overlay`, the Summary overlay's exact shell/print-isolation pattern, body
+  class `tripsy-partial-open`, Save as PDF via `openTripsyItineraryPrintView({partialKeys})`).
+  The document itself is `buildTripsyPrintHtml(tripKey, {partialKeys})` —
+  `tripsyFilterPrintDayDataForPartial` filters the day data at render time, so "copy the
+  narratives from the already generated full itinerary" falls out of reading the SAME narrative
+  cache (Overview/day narratives are read-if-included, `eventblurb`s ride their cards; nothing is
+  ever generated, copied, or deleted, and the full itinerary is untouched). Selection keys are
+  the Generate panel's section keys; events match on the BASE id
+  (`tripsyPartialBaseEventId` strips the `-checkin`/`-checkout`/`-begin`/`-end` split suffixes,
+  so keeping a hotel's check-in row — the only half the picker lists — keeps its check-out row:
+  they are one event); a P/S row is independently selectable by its `ps:` key; a layover survives
+  only between two KEPT flights (it describes a connection that no longer exists on paper when
+  either side is excluded). Day NUMBERS stay date-derived and identical to the full itinerary,
+  but the calendar SPAN is bounded to the kept days (`partialDatedKeys`) — an excluded day
+  outside the span must not render as a fake "No events scheduled" block, while interior gaps
+  between kept days still do (nothing in THIS document happens there). The cover header keeps
+  describing the WHOLE trip (`headerPlaceEvents`, captured before filtering) — a partial is a cut
+  of the same itinerary, not a different trip. `partialitinerary_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS

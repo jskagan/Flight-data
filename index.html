@@ -458,6 +458,7 @@
   @media (max-width: 500px) {
     [data-tripsy-document-menu], [data-tripsy-attachments-menu], [data-tripsy-itinerary-menu],
     [data-tripsy-trip-menu], [data-tripsy-sort-menu], [data-tripsy-generate-panel],
+    [data-tripsy-partial-panel],
     [data-tripsy-add-item-menu] { min-width: 0 !important; max-width: calc(100vw - 16px) !important; }
   }
 
@@ -642,6 +643,11 @@
        still works via .tripsy-printing above; this covers every other way in. */
     body.tripsy-summary-open > *:not(#tripsy-print-root) { display: none !important; }
     body.tripsy-summary-open #tripsy-print-root { display: block !important; }
+    /* Same rule for the read-only Partial Itinerary view (Itinerary -> Create
+       Partial), which loads its filtered document into #tripsy-print-root the
+       same way the Summary does. */
+    body.tripsy-partial-open > *:not(#tripsy-print-root) { display: none !important; }
+    body.tripsy-partial-open #tripsy-print-root { display: block !important; }
     /* Chrome (and other browsers) drop background colors/images from
        printed output by default to save ink, unless a page opts in --
        without this, the photo-fallback icon's light-gray background
@@ -929,12 +935,12 @@
   /* The read-only Summary view (Itinerary -> Summary) shares the preview's shell
      exactly -- same backdrop, toolbar and paper -- so it must also be hidden while
      printing, or it would print alongside #tripsy-print-root. */
-  #tripsy-preview-overlay, #tripsy-summary-overlay {
+  #tripsy-preview-overlay, #tripsy-summary-overlay, #tripsy-partial-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9000;
     overflow-y: auto; padding: 32px 16px; flex-direction: column; align-items: center;
   }
   @media print {
-    #tripsy-preview-overlay, #tripsy-summary-overlay { display: none !important; }
+    #tripsy-preview-overlay, #tripsy-summary-overlay, #tripsy-partial-overlay { display: none !important; }
   }
   .tripsy-preview-toolbar {
     max-width: 800px; width: 100%; display: flex; justify-content: flex-end; gap: 10px; margin-bottom: 12px;
@@ -2762,6 +2768,11 @@ function pruneDriveDataInMemory(trips) {
           if (!keys.has(k.split('::')[0])) delete cache[k];
         }
       }
+      // A partial-itinerary selection for a trip that no longer exists has
+      // nothing left to filter.
+      if (Array.isArray(driveData.tripsyPartialItineraries)) {
+        driveData.tripsyPartialItineraries = driveData.tripsyPartialItineraries.filter(p => keys.has(p.tripKey));
+      }
     }
   } catch (e) {
     console.error('pruneDriveDataInMemory failed (non-fatal):', e);
@@ -3230,6 +3241,29 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.deleteTripsyUpdatePage failed:', e);
+      return false;
+    }
+  },
+  // Partial itinerary (Itinerary -> Create Partial): the owner's saved pick of
+  // which sections a cut-down copy of the itinerary includes -- the Generate
+  // panel's own section keys ('overview', 'day:<dayKey>', 'event:<rowKey>').
+  // One small entry per trip, replaced outright on every save. The partial
+  // itself stores NO narrative text: it is a render-time filter over the same
+  // day data + narrative cache the full itinerary reads (buildTripsyPrintHtml's
+  // partialKeys option), which is what makes it "identical to the full
+  // itinerary, just with fewer items" by construction.
+  async getTripsyPartialItinerary(tripKey) {
+    return (driveData.tripsyPartialItineraries || []).find(p => p.tripKey === tripKey) || null;
+  },
+  async saveTripsyPartialItinerary(tripKey, keys) {
+    try {
+      if (!driveData.tripsyPartialItineraries) driveData.tripsyPartialItineraries = [];
+      driveData.tripsyPartialItineraries = driveData.tripsyPartialItineraries.filter(p => p.tripKey !== tripKey);
+      driveData.tripsyPartialItineraries.push({ tripKey, keys: [...keys], updatedAt: new Date().toISOString() });
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.saveTripsyPartialItinerary failed:', e);
       return false;
     }
   },
@@ -23792,10 +23826,71 @@ async function tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, 
 // slow part of a full build. Used by the Itinerary menu's read-only Summary view and
 // by its Save as PDF, so both render from this one builder rather than a second
 // implementation that could drift from what Print produces.
-async function buildTripsyPrintHtml(tripKey, { summaryOnly = false } = {}) {
+// ---- Itinerary -> Create Partial: a render-time FILTER over the full print
+// day data. The partial itinerary is the SAME document as the full one --
+// same day numbering (date-derived, so dropping days never renumbers), same
+// narrative cache (so it "copies the narratives from the already generated
+// full itinerary" simply by reading the same entries), same cards -- minus
+// the rows the owner unchecked in the Create Partial picker, so the two can
+// never drift apart on content. Selection keys are the Generate panel's own
+// section keys ('overview', 'day:<dayKey>', 'event:<rowKey>'). The picker
+// only lists the HEAD half of a split multi-day event (same as the Generate
+// panel), so events match on the BASE id -- keeping a hotel's check-in row
+// keeps its check-out row too, since they are one event. A layover row is
+// kept only between two kept flights (it describes a connection that no
+// longer exists on paper when either side is excluded), and a day with
+// nothing left drops out entirely -- it renders as part of a "No events
+// scheduled" gap, and days outside the kept span are cut rather than shown
+// as a long run of empty blocks (see tripsyFullDayKeys below).
+function tripsyPartialBaseEventId(id) {
+  return String(id).replace(/-(checkin|checkout|begin|end)$/, '');
+}
+function tripsyFilterPrintDayDataForPartial(data, keys) {
+  const keptBaseIds = new Set();
+  for (const k of keys) {
+    if (k.startsWith('event:ev:')) keptBaseIds.add(tripsyPartialBaseEventId(k.slice('event:ev:'.length)));
+  }
+  const itemKept = item => {
+    if (item.isLayover) return false; // resolved against its neighbors below
+    if (item.psReservation) return keys.has(`event:${tripsySummaryRowKey(item)}`);
+    return !!(item.ev && item.ev.id != null && keptBaseIds.has(tripsyPartialBaseEventId(item.ev.id)));
+  };
+  const summaryByDay = new Map();
+  const dayKeys = [];
+  for (const dayKey of data.dayKeys) {
+    const items = data.summaryByDay.get(dayKey) || [];
+    const flags = items.map(itemKept);
+    items.forEach((item, i) => {
+      if (!item.isLayover) return;
+      let prev = i - 1; while (prev >= 0 && items[prev].isLayover) prev--;
+      let next = i + 1; while (next < items.length && items[next].isLayover) next++;
+      flags[i] = prev >= 0 && next < items.length && flags[prev] && flags[next];
+    });
+    const kept = items.filter((_, i) => flags[i]);
+    if (!kept.length) continue;
+    summaryByDay.set(dayKey, kept);
+    dayKeys.push(dayKey);
+  }
+  const placeEvents = data.placeEvents.filter(ev => keptBaseIds.has(tripsyPartialBaseEventId(ev.id)));
+  const placesByDay = new Map();
+  for (const [k, evs] of data.placesByDay) {
+    const keptEvs = evs.filter(ev => keptBaseIds.has(tripsyPartialBaseEventId(ev.id)));
+    if (keptEvs.length) placesByDay.set(k, keptEvs);
+  }
+  return { dayKeys, byDay: data.byDay, placesByDay, placeEvents, summaryByDay };
+}
+
+async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys = null } = {}) {
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return null;
-  const { effectiveTrip, dayKeys, byDay, placesByDay, placeEvents, summaryByDay } = await buildTripsyPrintDayData(trip);
+  let { effectiveTrip, dayKeys, byDay, placesByDay, placeEvents, summaryByDay } = await buildTripsyPrintDayData(trip);
+  // The cover header keeps describing the WHOLE trip (destination line,
+  // date range, background photo) even for a partial -- the document is a
+  // cut of the same itinerary, not a different trip.
+  const headerPlaceEvents = placeEvents;
+  if (partialKeys) {
+    ({ dayKeys, byDay, placesByDay, placeEvents, summaryByDay } = tripsyFilterPrintDayDataForPartial({ dayKeys, byDay, placesByDay, placeEvents, summaryByDay }, partialKeys));
+  }
 
   // Fetched once up front and shared by both Part 1 (summary blurbs) and
   // Part 2 (trip intro / day narrative) below -- see tripsyGenerateNarrativeSections
@@ -23835,9 +23930,9 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false } = {}) {
   // domestic>" plus the trip's date range, derived from the same place
   // addresses Part 2's photo search already parses (tripsyGuessCityFromAddress's
   // siblings tripsyGuessCountryFromAddress/tripsyGuessStateFromAddress).
-  const headerDestination = tripsyTripGeographySummary(placeEvents, effectiveTrip.location);
+  const headerDestination = tripsyTripGeographySummary(headerPlaceEvents, effectiveTrip.location);
   const headerDateRange = formatTripDateRange(effectiveTrip.start, effectiveTrip.end);
-  const headerBackgroundPhotoUrl = await tripsyHeaderBackgroundPhotoUrl(placeEvents);
+  const headerBackgroundPhotoUrl = await tripsyHeaderBackgroundPhotoUrl(headerPlaceEvents);
   const headerHtml = tripsyCoverHeaderHtml(headerDestination, headerDateRange, 'Summary', headerBackgroundPhotoUrl);
 
   // ---- Part 1: summary, grouped by day. Each row is a single line (star
@@ -23859,7 +23954,18 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false } = {}) {
   const tripStartDayKey = tripsyItineraryStartDayKey(effectiveTrip);
   const tripEndDayKey = tripsyItineraryEndDayKey(effectiveTrip);
   const eventDayKeySet = new Set(dayKeys.filter(k => k !== 'undated'));
-  const tripsyFullDayKeys = tripsyDayKeyRange(tripStartDayKey, tripEndDayKey);
+  // Day NUMBERS always come from tripStartDayKey (date-derived), so a partial
+  // shows the same "Day 7" the full itinerary does. The calendar SPAN, though,
+  // is bounded to the kept days in partial mode: an excluded day outside that
+  // span would otherwise render as a "No events scheduled" block, which is
+  // wrong (its events exist -- they're just not in this document) and would
+  // pad a one-leg partial with a wall of empty blocks. Interior gaps between
+  // kept days still render as gaps, which reads correctly: nothing in THIS
+  // document happens there.
+  const partialDatedKeys = partialKeys ? [...eventDayKeySet].sort() : null;
+  const tripsyFullDayKeys = partialDatedKeys && partialDatedKeys.length
+    ? tripsyDayKeyRange(partialDatedKeys[0], partialDatedKeys[partialDatedKeys.length - 1])
+    : tripsyDayKeyRange(tripStartDayKey, tripEndDayKey);
 
   const tripsySummaryDayTileDate = dayKey => tripPartsToUtcDate({
     year: Number(dayKey.slice(0, 4)), month: Number(dayKey.slice(5, 7)), day: Number(dayKey.slice(8, 10)),
@@ -23983,9 +24089,14 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false } = {}) {
   // free and works the same for owner and non-owner alike. If nothing at
   // all is cached for this trip, narrative stays null and Part 2 falls
   // back to the plain photo-grid layout below.
-  const introEntry = narrativeCache[`${tripKey}::intro`];
+  // In partial mode the Overview (trip intro) and each day's narrative are
+  // themselves selectable sections: unchecked ones are simply not read from
+  // the cache, so nothing is ever deleted or regenerated -- the full
+  // itinerary keeps every narrative untouched.
+  const introEntry = (partialKeys && !partialKeys.has('overview')) ? null : narrativeCache[`${tripKey}::intro`];
   const cachedDays = dayKeys
     .map(dayKey => {
+      if (partialKeys && !partialKeys.has(`day:${dayKey}`)) return null;
       const entry = narrativeCache[`${tripKey}::day::${dayKey}`];
       return entry ? { day_key: dayKey, ...entry.content, approved: !!entry.approved } : null;
     })
@@ -24662,8 +24773,8 @@ async function openTripsyDiaryPrintView(tripKey) {
   await triggerTripsyPrint(printRoot);
 }
 
-async function openTripsyItineraryPrintView(tripKey, { summaryOnly = false } = {}) {
-  const html = await buildTripsyPrintHtml(tripKey, { summaryOnly });
+async function openTripsyItineraryPrintView(tripKey, { summaryOnly = false, partialKeys = null } = {}) {
+  const html = await buildTripsyPrintHtml(tripKey, { summaryOnly, partialKeys });
   if (html == null) return;
   const printRoot = getOrCreateTripsyPrintRoot();
   printRoot.innerHTML = html;
@@ -24826,6 +24937,174 @@ async function buildTripsyItinerarySummaryText(tripKey) {
     }
   }
   return out.join('\n');
+}
+
+// ---- Itinerary → Create Partial: a cut-down copy of the itinerary ----
+// The picker panel (data-tripsy-partial-panel, opened by the menu's Create
+// Partial item) lists the SAME sections as the Generate panel -- Overview,
+// each day, each event, via the same tripsyGeneratePanelSections builder, so
+// the two panels can never disagree about what the itinerary contains -- but
+// its checkmarks mean INCLUDE/EXCLUDE rather than generate/delete, so the
+// rows use their own data attribute (data-tripsy-partial-checkbox) and never
+// touch the Generate panel's listeners. Ticking a DAY row carries its whole
+// day (each event can then be re-toggled individually); "View Partial
+// Itinerary" saves the selection (Store.saveTripsyPartialItinerary -- so
+// reopening the picker resumes it) and opens the filtered document. The
+// document itself is buildTripsyPrintHtml with partialKeys (see
+// tripsyFilterPrintDayDataForPartial): the same narrative cache, cards and
+// day numbering as the full itinerary, just fewer rows -- nothing is ever
+// generated, copied or deleted, so the full itinerary is untouched.
+function tripsyPartialCheckboxHtml(sectionKey, checked, extraAttrs) {
+  const cls = ['tp-generate-panel-check', 'tp-generate-panel-check-interactive', checked ? 'tp-generate-panel-check-on' : ''].filter(Boolean).join(' ');
+  return `<span class="${cls}" data-tripsy-partial-checkbox="${esc(sectionKey)}"${extraAttrs ? ` ${extraAttrs}` : ''} role="checkbox" aria-checked="${checked}" tabindex="0" title="${checked ? 'Included — click to exclude' : 'Excluded — click to include'}">${checked ? '✓' : ''}</span>`;
+}
+function tripsyPartialPanelRowHtml(label, sectionKey, checked, indented, extraAttrs) {
+  const labelClass = ['tp-generate-panel-label', indented ? '' : 'tp-generate-panel-label-bold'].filter(Boolean).join(' ');
+  return `
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:5px 4px; ${indented ? 'padding-left:22px;' : ''}">
+      <span class="${labelClass}" title="${esc(label)}">${esc(label)}</span>
+      ${tripsyPartialCheckboxHtml(sectionKey, checked, extraAttrs)}
+    </div>
+  `;
+}
+const TRIPSY_PARTIAL_PANEL_VIEW_BTN_HTML = `
+  <div style="padding:6px 4px 10px;">
+    <button type="button" class="btn primary" data-tripsy-partial-view style="width:100%;">View Partial Itinerary</button>
+  </div>
+`;
+function tripsyPartialPanelHtml(trip, sections, savedKeys) {
+  // No saved selection yet -> everything starts INCLUDED (a partial is made
+  // by removing, not by rebuilding from nothing); a saved one resumes as-is.
+  const isChecked = key => (savedKeys ? savedKeys.has(key) : true);
+  const titleHtml = `<div style="padding:4px 4px 8px; font-size:13px; font-weight:700; color:var(--text); border-bottom:1px solid var(--line); margin-bottom:4px;">${esc(trip.name)} — Partial Itinerary</div>`;
+  const hintHtml = `<div style="padding:0 4px 6px; font-size:11.5px; color:var(--muted);">Checked items are included. A day's own checkmark carries that day's write-up (and toggles its events with it).</div>`;
+  const overviewHtml = tripsyPartialPanelRowHtml('Overview', 'overview', isChecked('overview'), false, '');
+  const daysHtml = sections.days.length
+    ? sections.days.map(day => {
+        // The DAY checkbox carries data-partial-daykey (the toggle-my-events
+        // trigger); each event carries data-partial-day, so the day toggle
+        // can find exactly its own rows.
+        const dayRow = tripsyPartialPanelRowHtml(day.label, `day:${day.dayKey}`, isChecked(`day:${day.dayKey}`), false, `data-partial-daykey="${esc(day.dayKey)}"`);
+        const eventRows = day.events
+          .filter(ev => ev.rowKey)
+          .map(ev => tripsyPartialPanelRowHtml(ev.label, `event:${ev.rowKey}`, isChecked(`event:${ev.rowKey}`), true, `data-partial-day="${esc(day.dayKey)}"`))
+          .join('');
+        return dayRow + eventRows;
+      }).join('')
+    : `<div style="padding:10px; font-size:12px; color:var(--muted); font-style:italic;">No events in this itinerary yet.</div>`;
+  return titleHtml + hintHtml + TRIPSY_PARTIAL_PANEL_VIEW_BTN_HTML + overviewHtml + daysHtml + TRIPSY_PARTIAL_PANEL_VIEW_BTN_HTML;
+}
+function wireTripsyPartialPanel(panel, tripKey) {
+  // The panel NODE persists across open/close within one My Trips render
+  // (only its innerHTML is re-rendered per open), so wiring on every open
+  // would stack duplicate listeners -- and two toggles per tap reads as a
+  // checkbox that does nothing. One delegated listener per node lifetime.
+  if (panel.dataset.tripsyPartialWired) return;
+  panel.dataset.tripsyPartialWired = '1';
+  const setChecked = (cb, on) => {
+    cb.classList.toggle('tp-generate-panel-check-on', on);
+    cb.setAttribute('aria-checked', String(on));
+    cb.textContent = on ? '✓' : '';
+    cb.title = on ? 'Included — click to exclude' : 'Excluded — click to include';
+  };
+  panel.addEventListener('click', e => {
+    const cb = e.target.closest('[data-tripsy-partial-checkbox]');
+    if (cb) {
+      e.stopPropagation();
+      const on = !cb.classList.contains('tp-generate-panel-check-on');
+      setChecked(cb, on);
+      const dayKey = cb.dataset.partialDaykey;
+      if (dayKey != null) {
+        panel.querySelectorAll(`[data-tripsy-partial-checkbox][data-partial-day="${CSS.escape(dayKey)}"]`).forEach(evCb => setChecked(evCb, on));
+      }
+      return;
+    }
+    const viewBtn = e.target.closest('[data-tripsy-partial-view]');
+    if (!viewBtn) return;
+    e.stopPropagation();
+    const keys = [...panel.querySelectorAll('[data-tripsy-partial-checkbox]')]
+      .filter(x => x.classList.contains('tp-generate-panel-check-on'))
+      .map(x => x.dataset.tripsyPartialCheckbox);
+    if (!keys.some(k => k.startsWith('event:'))) {
+      toast('Select at least one event to include.', 'error');
+      return;
+    }
+    // Save in the background (optimistic -- the view renders from the
+    // in-memory selection either way; a failed save only costs resuming the
+    // same picks later, and says so).
+    Store.saveTripsyPartialItinerary(tripKey, keys).then(ok => {
+      if (!ok) toast('Could not save the partial itinerary selection.', 'error');
+    });
+    closeAllTripsyTripPanels();
+    showTripsyPartialItinerary(tripKey, new Set(keys));
+  });
+}
+
+// The read-only view itself -- same shell/pattern as the Summary overlay
+// (render the print HTML into an overlay of its own, nothing interactive to
+// suppress), same print-root loading so Cmd+P / Share->Print prints the
+// partial while it's open, and Save as PDF rebuilds through the same
+// openTripsyItineraryPrintView path Print uses. Separate overlay node and
+// body class so it can never fight the Summary's.
+function getOrCreateTripsyPartialOverlay() {
+  let overlay = document.getElementById('tripsy-partial-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-partial-overlay';
+  overlay.innerHTML = `
+    <div class="tripsy-preview-toolbar">
+      <button class="btn" id="tripsy-partial-close-btn">Close</button>
+      <button class="btn primary tripsy-preview-action" id="tripsy-partial-pdf-btn">Save as PDF</button>
+    </div>
+    <div class="tripsy-preview-paper" id="tripsy-partial-content"></div>
+  `;
+  document.body.appendChild(overlay);
+  const close = () => {
+    overlay.style.display = 'none';
+    document.body.classList.remove('tripsy-partial-open');
+    const printRoot = document.getElementById('tripsy-print-root');
+    if (printRoot) printRoot.innerHTML = '';
+  };
+  overlay.querySelector('#tripsy-partial-close-btn').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  overlay.querySelector('#tripsy-partial-pdf-btn').addEventListener('click', async () => {
+    const btn = overlay.querySelector('#tripsy-partial-pdf-btn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Preparing…';
+    try {
+      await openTripsyItineraryPrintView(overlay.dataset.tripKey || '', { partialKeys: overlay._partialKeys || new Set() });
+    } catch (e) {
+      console.error('Partial itinerary PDF failed:', e);
+      toast('Could not prepare the partial itinerary for printing. Please try again.', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+  return overlay;
+}
+async function showTripsyPartialItinerary(tripKey, keysSet = null) {
+  const overlay = getOrCreateTripsyPartialOverlay();
+  const content = overlay.querySelector('#tripsy-partial-content');
+  overlay.dataset.tripKey = tripKey;
+  content.innerHTML = `<div style="padding:24px; color:var(--muted);">Building partial itinerary…</div>`;
+  overlay.style.display = 'flex';
+  let keys = keysSet;
+  if (!keys) {
+    const saved = await Store.getTripsyPartialItinerary(tripKey);
+    keys = new Set(saved ? saved.keys : []);
+  }
+  overlay._partialKeys = keys;
+  const html = await buildTripsyPrintHtml(tripKey, { partialKeys: keys });
+  if (html == null) {
+    content.innerHTML = `<div style="padding:24px; color:var(--muted);">This trip could not be loaded.</div>`;
+    return;
+  }
+  content.innerHTML = html;
+  content.scrollTop = 0;
+  getOrCreateTripsyPrintRoot().innerHTML = html;
+  document.body.classList.add('tripsy-partial-open');
 }
 async function showTripsyItinerarySummary(tripKey) {
   const overlay = getOrCreateTripsySummaryOverlay();
@@ -29760,6 +30039,7 @@ const TRIPSY_TRIP_PANEL_SELECTORS = [
   '[data-tripsy-document-menu]',
   '[data-tripsy-itinerary-menu]',
   '[data-tripsy-generate-panel]',
+  '[data-tripsy-partial-panel]',
   '[data-tripsy-trip-menu]',
   '[data-tripsy-attire-menu]',
   '[data-tripsy-sort-menu]',
@@ -29777,6 +30057,7 @@ const TRIPSY_TRIP_PANEL_TRIGGER_SELECTORS = [
   '[data-tripsy-document-menu-toggle]',
   '[data-tripsy-itinerary-menu-toggle]',
   '[data-tripsy-generate-panel-toggle]',
+  '[data-tripsy-partial-itinerary]',
   '[data-tripsy-trip-menu-toggle]',
   '[data-tripsy-attire-menu-toggle]',
   '[data-tripsy-add-doc-menu-item]',
@@ -29790,7 +30071,7 @@ function closeAllTripsyTripPanels() {
   // render would recreate anyway, so only panels that get their innerHTML
   // freshly rendered on open (add-item menu, edit-trip panel, attach
   // panel) need clearing here.
-  const freshlyRenderedEachTime = new Set(['[data-tripsy-attachments-menu]', '[data-tripsy-document-menu]', '[data-tripsy-itinerary-menu]', '[data-tripsy-generate-panel]', '[data-tripsy-trip-menu]', '[data-tripsy-attire-menu]', '[data-tripsy-sort-menu]']);
+  const freshlyRenderedEachTime = new Set(['[data-tripsy-attachments-menu]', '[data-tripsy-document-menu]', '[data-tripsy-itinerary-menu]', '[data-tripsy-generate-panel]', '[data-tripsy-partial-panel]', '[data-tripsy-trip-menu]', '[data-tripsy-attire-menu]', '[data-tripsy-sort-menu]']);
   TRIPSY_TRIP_PANEL_SELECTORS.forEach(sel => {
     card.querySelectorAll(sel).forEach(el => {
       el.style.display = "none";
@@ -30457,6 +30738,7 @@ async function renderTripsyEventsListImpl() {
               ${hasGeneratedNarrative ? '' : createOrDelete}
               ${showPreviewItem ? menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '✏️', isOwner ? 'Edit' : 'Preview', `<span data-tripsy-itin-warning="${esc(trip.key)}" title="Events changed since this itinerary was generated" style="display:none; margin-left:auto; color:#e02424; font-size:13px; line-height:1;">▲</span>`) : ''}
               ${menuListButtonHtml(`data-tripsy-summary-itinerary data-key="${esc(trip.key)}"`, '📅', 'Summary')}
+              ${isOwner ? menuListButtonHtml(`data-tripsy-partial-itinerary data-key="${esc(trip.key)}"`, '✂️', 'Create Partial') : ''}
               ${menuListButtonHtml(`data-tripsy-status-itinerary data-key="${esc(trip.key)}"`, '📋', 'Status')}
               ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
               ${hasGeneratedNarrative ? createOrDelete : ''}
@@ -30464,6 +30746,7 @@ async function renderTripsyEventsListImpl() {
           })()}
         </div>
         <div data-tripsy-generate-panel="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:280px; max-width:380px; max-height:70vh; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.4);"></div>
+        <div data-tripsy-partial-panel="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:280px; max-width:380px; max-height:70vh; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.4);"></div>
       </div>
     `, 'Itinerary') : '';
     // 👔 Attire -- a dropdown of all the attire actions (moved here from a menu
@@ -30752,7 +31035,7 @@ async function renderTripsyEventsListImpl() {
   // down the still-open dropdown out from under the user.
   container.querySelectorAll("[data-tripsy-header-toggle]").forEach(el => {
     el.addEventListener("click", e => {
-      if (e.target.closest('button, a, [data-tripsy-add-item-menu], [data-tripsy-attachments-menu], [data-tripsy-document-menu], [data-tripsy-itinerary-menu], [data-tripsy-generate-panel], [data-tripsy-trip-menu], [data-tripsy-sort-menu]')) return;
+      if (e.target.closest('button, a, [data-tripsy-add-item-menu], [data-tripsy-attachments-menu], [data-tripsy-document-menu], [data-tripsy-itinerary-menu], [data-tripsy-generate-panel], [data-tripsy-partial-panel], [data-tripsy-trip-menu], [data-tripsy-sort-menu]')) return;
       toggleTripsyCollapse(el.dataset.tripsyHeaderToggle);
     });
   });
@@ -30811,6 +31094,43 @@ async function renderTripsyEventsListImpl() {
         positionTripsyFixedMenuAtRect(rect, panel);
       } catch (err) {
         console.error('Failed to load itinerary sections for Generate panel:', err);
+        panel.innerHTML = `<div style="padding:8px; font-size:12px; color:#B33;">Could not load itinerary sections. Please try again.</div>`;
+      }
+    });
+  });
+
+  // Create Partial (owner-only) -- opens the include/exclude picker panel
+  // (data-tripsy-partial-panel), built from the SAME tripsyGeneratePanelSections
+  // rows the Generate panel shows so the two can never list different
+  // sections; a saved selection (Store.getTripsyPartialItinerary) resumes
+  // pre-checked, otherwise everything starts included. See
+  // tripsyPartialPanelHtml/wireTripsyPartialPanel/showTripsyPartialItinerary.
+  container.querySelectorAll("[data-tripsy-partial-itinerary]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const tripKey = btn.dataset.key;
+      const panel = container.querySelector(`[data-tripsy-partial-panel="${tripKey}"]`);
+      if (!panel) return;
+      const wasOpen = panel.style.display !== "none";
+      // Same rect-before-close rule as the Generate panel: closing hides the
+      // Itinerary dropdown this item lives inside, collapsing its rect.
+      const rect = btn.getBoundingClientRect();
+      closeAllTripsyTripPanels();
+      if (wasOpen) return;
+      const trip = allTrips.find(t => t.key === tripKey);
+      if (!trip) return;
+      panel.innerHTML = `<div style="padding:8px; font-size:12px; color:var(--muted);">Loading…</div>`;
+      positionTripsyFixedMenuAtRect(rect, panel);
+      try {
+        const { effectiveTrip, dayKeys, summaryByDay } = await buildTripsyPrintDayData(trip);
+        const narrativeCache = await Store.getTripsyNarrativeCache();
+        const sections = tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByDay, narrativeCache);
+        const saved = await Store.getTripsyPartialItinerary(tripKey);
+        panel.innerHTML = tripsyPartialPanelHtml(trip, sections, saved && Array.isArray(saved.keys) ? new Set(saved.keys) : null);
+        positionTripsyFixedMenuAtRect(rect, panel);
+        wireTripsyPartialPanel(panel, tripKey);
+      } catch (err) {
+        console.error('Failed to load itinerary sections for Create Partial panel:', err);
         panel.innerHTML = `<div style="padding:8px; font-size:12px; color:#B33;">Could not load itinerary sections. Please try again.</div>`;
       }
     });
