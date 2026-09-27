@@ -644,6 +644,24 @@ step 4; git history has it if ever needed.
   missing modern APIs before (see the polyfill block), and a silently no-oping `scrollTo(options)`
   is indistinguishable from the settle race from the outside; smooth scrolling still tries
   `scrollTo(options)` for the easing, falling back to the direct assignment if it throws.
+- **Day narratives generate in BATCHES of 4 per API call, and a truncated response names itself**
+  ("Why am I getting this error" — "JSON Parse error: Unexpected EOF", 2026-09-27):
+  `generateTripsyItineraryNarrative`'s non-streamed response is capped at `max_tokens: 4096` —
+  roughly a handful of days' titles + narratives + place blurbs — and an 11-day
+  partial-itinerary generation blew past it, truncating the `json_schema` output mid-stream so
+  `JSON.parse` died with a bare EOF and NOTHING saved; a many-day first-time Create had the same
+  latent bug. Fixed in the SHARED procedure (so partial and full itineraries stay identical):
+  `tripsyGenerateNarrativeSections` chunks `dayKeysToGenerate` into `TRIPSY_NARRATIVE_DAY_BATCH`
+  (4) days per `generateTripsyItineraryNarrative` call — the intro rides the FIRST batch only,
+  and each batch's just-written `place_blurbs` join `existingPlaceBlurbs` for the batches after
+  it (the same don't-repeat context cached days already provide, so a place visited in batch 1
+  and batch 3 still gets two different write-ups); everything still lands in the ONE save at the
+  end, and a small generation (the changes dialog's ordinary case) is still exactly one call.
+  Separately, all four non-streamed generators (`generateTripsyItineraryNarrative`,
+  `generateTripsySummaryBlurbs`, `generateTripsyEventNarrative`, `generateTripsyDiaryDays`) now
+  check `data.stop_reason === 'max_tokens'` and throw "The response hit its length limit…"
+  instead of surfacing an unparseable-JSON error — the two streamed 64000-token Sonnet calls
+  already had their own stop-reason handling. `narrativebatch_test.js`.
 - **A partial itinerary regeneration only rewrites the changed days' SUMMARY rows.**
   `tripsyGenerateNarrativeSections` takes `summaryDayKeys`: when it's an array, only those days'
   rows go to `generateTripsySummaryBlurbs` and the result is MERGED onto the cached set (rows not
@@ -847,21 +865,63 @@ step 4; git history has it if ever needed.
   failed/been interrupted — these are minutes-long Claude calls, and backgrounding the iPad app
   mid-call kills them — and Show never retried, leaving the document bare forever; confirmed
   against the live data: the saved partial existed with mode `full` while the trip's narrative
-  cache held ZERO entries). Only MISSING included sections generate — intro if Overview included,
-  day write-ups for included days, Part-1 blurbs scoped via `summaryDayKeys` to the partial's kept
-  days whose included blurb-wanting rows lack one — through the ONE shared
-  `tripsyGenerateNarrativeSections` machinery, so an already-prepared full itinerary is copied
+  cache held ZERO entries). Only MISSING included sections are asked for — intro if Overview
+  included, day write-ups for included days, Part-1 blurbs scoped to the partial's kept days
+  whose included blurb-wanting rows lack one — so an already-prepared full itinerary is copied
   with zero Claude calls (Show stays instant) and anything generated here benefits the full
-  itinerary too. TWO generation calls (intro+days, then blurbs), each with its own save, so an
-  interruption keeps what already finished; a live `progress()` line reports each phase (and says
-  to keep the app foregrounded), and a failure shows a PERSISTENT `tripsyConfirmDialog` (a toast
-  fired while the app is backgrounded is never seen) then still renders what exists. Photos:
-  the owner's full-mode RENDER itself runs under `_tripsyAllowPhotoFetch` (same gate as the
-  Generate panel's pre-fetch), so missing included places' photos fetch-and-cache on open —
-  self-healing, and free once cached — instead of a second throwaway pre-fetch build.
-  Deliberately NO `tripsyRecordItineraryBaseline` — a side document must not acknowledge event
-  changes the owner hasn't reviewed. Save as PDF honors the stored mode (`overlay._partialMode`);
-  a record saved before modes existed reads as `full`. `partialmode_test.js`.
+  itinerary too (the sections file into the ONE shared narrative cache under the same keys).
+  **The generation itself is HANDED TO THE CLOUD ROUTINE — nothing generates in the foreground**
+  ("I do not want to keep the app open in the foreground in order to generate a partial
+  itinerary," 2026-09-27, and see the dedicated cloud-narrative bullet below): `ensure` QUEUES a
+  request and fires the Worker, the document renders immediately with an in-overlay banner
+  ("being created in the background — you can close the app"; overlay only, never the print
+  root, so a Save as PDF taken meanwhile carries no app status line), and the relay drain
+  repaints the open overlay when the answer lands. A failure to even queue shows a PERSISTENT
+  `tripsyConfirmDialog` (a toast fired while the app is backgrounded is never seen) then still
+  renders what exists. **"Use the exact same rules and procedures" still holds by
+  construction**: the request carries the EXACT prompt strings the in-app generators send —
+  built by `tripsyNarrativePromptText`/`tripsySummaryBlurbsPromptText`, the very builders those
+  generators' own message content comes from — and the drain files the answer with queue-time
+  fingerprints, the scoped summary merge, and the same `tripsyRecordItineraryBaseline`
+  acknowledge step every full-itinerary generate path ends with. Photos: the owner's
+  full-mode RENDER itself runs under `_tripsyAllowPhotoFetch` (same gate as the Generate panel's
+  pre-fetch), so missing included places' photos fetch-and-cache on open — self-healing, and free
+  once cached — instead of a second throwaway pre-fetch build. Save as PDF honors the stored mode
+  (`overlay._partialMode`); a record saved before modes existed reads as `full`.
+  `partialmode_test.js`.
+- **Narrative generation offloads to the cloud routine via a request/answer relay pair** ("I do
+  not want to keep the app open in the foreground in order to generate a partial itinerary,"
+  2026-09-27 — minutes-long Claude calls die when the iPad app backgrounds, which is what left
+  that partial bare in the first place). The partial's full mode is the one user of this today;
+  the machinery is generic. **Queue**: `driveData.tripsyNarrativeRequests`
+  (`Store.listTripsyNarrativeRequests`/`queueTripsyNarrativeRequest`/`removeTripsyNarrativeRequest`,
+  one request per trip, replaced outright), each request carrying the EXACT prompts the in-app
+  generators would send (`narrativePrompt` for ALL requested days in one — the routine has no
+  4096-token response cap, so the in-app 4-day batching doesn't apply — plus `summaryPrompt`),
+  the queue-time fingerprints (`introFingerprint`/`dayFingerprints`/`summaryFingerprint`) and
+  row-key sets (`summaryRowKeys` replaced / `allRowKeys` live) so the drain is pure assembly.
+  Queueing fires the same Cloudflare Worker Run Parse Now uses (`runTripsyRefreshViaWorker(null)`,
+  best-effort — the scheduled 3×/day runs are the backstop, and its relay polls drain the answer
+  in); a still-pending request is never re-queued over (that would re-date it), though one >15 min
+  old re-fires the Worker. **Answer**: the cloud Routine's STEP 4 follows each request's prompts
+  (prose only — the Routine prompt says text inside a request is data, never instructions beyond
+  that) and writes `tripsy-narrative-results.json` (`{results:[{requestId, tripKey, trip_intro,
+  days:[…], summary_rows:[…]}]}`). **Drain**: `drainTripsyNarrativeResults` →
+  `applyTripsyNarrativeResults`, called in `syncTripsyRelays` AFTER `ensureTripsyDecrypted`
+  (unlike the proposal drains — filing ends in `tripsyRecordItineraryBaseline`, which needs the
+  real trip): match by `requestId` (unmatched answers are skipped), file each section with the
+  request's fingerprints, scoped-merge summary rows exactly as `tripsyGenerateNarrativeSections`
+  does, save once, remove the request, toast, and repaint an open partial overlay showing that
+  trip. A failed cache save THROWS so the shared drain keeps the relay file for the next pass. A
+  day the request never asked for is never filed. **Prune** (`pruneDriveDataInMemory`): a request
+  embeds trip data inside its prompts, so one whose trip is gone or older than 48h (six scheduled
+  runs ignored it — the next full-mode open re-queues what's still missing) is dropped. The
+  status badge shows a yellow "being written in the background" row while any request is queued,
+  and `tripsyParseRunStartedAt`'s keep-alive/clear conditions count narrative requests as
+  outstanding work — without that, a badge refresh during a narrative-only run nulled the marker
+  and killed the relay polls waiting on the answer. NOTE: the Routine was created via http_api,
+  so sessions cannot `update_trigger` it — its prompt is edited by the owner at
+  claude.ai/code/routines. `cloudnarrative_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS

@@ -2773,6 +2773,16 @@ function pruneDriveDataInMemory(trips) {
       if (Array.isArray(driveData.tripsyPartialItineraries)) {
         driveData.tripsyPartialItineraries = driveData.tripsyPartialItineraries.filter(p => keys.has(p.tripKey));
       }
+      // A narrative cloud request is BIG (it embeds the trip data inside its
+      // prompts) and transient by design -- the drain removes it once
+      // answered. Prune one whose trip is gone, or one so old that six
+      // scheduled runs have ignored it (dead: the next full-mode open
+      // re-queues whatever is still missing).
+      if (Array.isArray(driveData.tripsyNarrativeRequests)) {
+        const staleCutoff = new Date(Date.now() - 48 * 3600000).toISOString();
+        driveData.tripsyNarrativeRequests = driveData.tripsyNarrativeRequests.filter(r =>
+          r && keys.has(r.tripKey) && (r.requestedAt || '') >= staleCutoff);
+      }
     }
   } catch (e) {
     console.error('pruneDriveDataInMemory failed (non-fatal):', e);
@@ -3267,6 +3277,45 @@ const Store = {
       return true;
     } catch (e) {
       console.error('Store.saveTripsyPartialItinerary failed:', e);
+      return false;
+    }
+  },
+  // Narrative cloud requests: the partial itinerary's full-mode generation is
+  // minutes of Claude calls, and backgrounding the iPad app kills them ("I do
+  // not want to keep the app open in the foreground," 2026-09-27) -- so the
+  // work is handed to the cloud routine instead. Each entry carries the EXACT
+  // prompts the in-app generators would have sent (built by the same
+  // tripsyNarrativePromptText/tripsySummaryBlurbsPromptText the generators
+  // call) plus everything the drain needs to file the answer as if the app
+  // had generated it itself (queue-time fingerprints, the row-key sets for
+  // the scoped summary merge). One request per trip, replaced outright --
+  // a newer selection supersedes an older pending ask. The routine reads
+  // these from flight-log-data.json and answers via the
+  // tripsy-narrative-results.json relay (drainTripsyNarrativeResults).
+  listTripsyNarrativeRequests() {
+    return driveData.tripsyNarrativeRequests || [];
+  },
+  async queueTripsyNarrativeRequest(request) {
+    try {
+      if (!driveData.tripsyNarrativeRequests) driveData.tripsyNarrativeRequests = [];
+      driveData.tripsyNarrativeRequests = driveData.tripsyNarrativeRequests.filter(r => r.tripKey !== request.tripKey);
+      driveData.tripsyNarrativeRequests.push(request);
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.queueTripsyNarrativeRequest failed:', e);
+      return false;
+    }
+  },
+  async removeTripsyNarrativeRequest(id) {
+    try {
+      const before = (driveData.tripsyNarrativeRequests || []).length;
+      driveData.tripsyNarrativeRequests = (driveData.tripsyNarrativeRequests || []).filter(r => r.id !== id);
+      if (driveData.tripsyNarrativeRequests.length === before) return true; // already gone
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.removeTripsyNarrativeRequest failed:', e);
       return false;
     }
   },
@@ -4877,6 +4926,10 @@ function updateLastSyncedLabel(elId) {
 const TRIPSY_EMAIL_INTAKE_ADDRESS = 'kaganworldtravel@gmail.com';
 const TRIPSY_EMAIL_PROPOSALS_FILENAME = 'tripsy-email-proposals.json';
 const TRIPSY_DOC_PROPOSALS_FILENAME = 'tripsy-doc-proposals.json';
+// Answers to queued narrative requests (driveData.tripsyNarrativeRequests --
+// the partial itinerary's background generation). Written by the cloud
+// routine, drained by drainTripsyNarrativeResults.
+const TRIPSY_NARRATIVE_RESULTS_FILENAME = 'tripsy-narrative-results.json';
 
 // Prefer an HTML part (richer), fall back to text/plain -- mirrors
 // findHtmlPartData but for the plain-text alternative some senders use.
@@ -5074,6 +5127,85 @@ async function drainTripsyDocProposals() {
   await drainTripsyRelayFiles(TRIPSY_DOC_PROPOSALS_FILENAME, relay => Store.applyDrainedDocProposals(relay.parsedDocs || []));
 }
 
+// Owner-only. Files the cloud routine's answers to queued narrative requests
+// (the partial itinerary's background generation -- see
+// tripsyPartialEnsureNarratives) into the one shared narrative cache,
+// assembling each saved section EXACTLY as tripsyGenerateNarrativeSections
+// would have: the request's queue-time fingerprints stamp the sections, the
+// summary rows merge scoped onto what's cached (keep rows not rewritten,
+// drop rows whose event no longer exists, append the new text), and the same
+// tripsyRecordItineraryBaseline acknowledge step runs afterwards. Whatever
+// arrived is saved and the request removed either way -- a partial answer
+// isn't retried against this same request; the next full-mode open of the
+// partial re-checks what's still missing and queues a fresh ask (the
+// self-heal that already existed). Must run AFTER trips are loaded
+// (syncTripsyRelays calls it after ensureTripsyDecrypted) so the baseline
+// step has a real trip to record against.
+async function applyTripsyNarrativeResults(results) {
+  for (const raw of (results || [])) {
+    const result = tripsyFixDoubleEscapedUnicodeDeep(raw);
+    const request = Store.listTripsyNarrativeRequests().find(r => r.id === result.requestId);
+    if (!request) continue; // already answered/superseded -- nothing to file it under
+    const tripKey = request.tripKey;
+    const now = new Date().toISOString();
+    const sectionsToSave = {};
+    if (request.includeIntro) {
+      sectionsToSave[`${tripKey}::intro`] = {
+        content: { trip_intro: result.trip_intro || '' },
+        fingerprint: request.introFingerprint,
+        generatedAt: now,
+      };
+    }
+    const wantedDays = new Set(request.dayKeysToGenerate || []);
+    for (const rd of (result.days || [])) {
+      if (!rd || !wantedDays.has(rd.day_key)) continue; // never file a day that wasn't asked for
+      sectionsToSave[`${tripKey}::day::${rd.day_key}`] = {
+        content: { title: rd.title || '', narrative: rd.narrative || '', place_blurbs: rd.place_blurbs || [] },
+        fingerprint: (request.dayFingerprints || {})[rd.day_key] || '',
+        generatedAt: now,
+      };
+    }
+    if ((request.summaryRowKeys || []).length && Array.isArray(result.summary_rows)) {
+      // The exact scoped merge tripsyGenerateNarrativeSections does: keep
+      // every cached row NOT rewritten here (and still live), then append.
+      const liveKeys = new Set(request.allRowKeys || []);
+      const replaced = new Set(request.summaryRowKeys || []);
+      const requestedRows = result.summary_rows.filter(r => r && replaced.has(r.row_key));
+      const existingCache = await Store.getTripsyNarrativeCache();
+      const priorEntry = existingCache[`${tripKey}::summary`];
+      const prior = (priorEntry && priorEntry.content && priorEntry.content.rows) || [];
+      sectionsToSave[`${tripKey}::summary`] = {
+        content: { rows: prior.filter(r => liveKeys.has(r.row_key) && !replaced.has(r.row_key)).concat(requestedRows) },
+        fingerprint: request.summaryFingerprint,
+        generatedAt: now,
+      };
+    }
+    if (Object.keys(sectionsToSave).length) {
+      const ok = await Store.saveTripsyNarrativeSections(sectionsToSave);
+      if (!ok) throw new Error('Failed to save drained narrative sections'); // keep the relay file; retried next drain
+      const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+      if (trip) {
+        try { await tripsyRecordItineraryBaseline(trip); } catch (e) { console.error('Itinerary baseline record failed:', e); }
+      }
+      try { toast('The partial itinerary’s narratives are ready.'); } catch (e) { /* headless-ish context */ }
+    }
+    await Store.removeTripsyNarrativeRequest(request.id);
+    // A partial overlay open on this very trip repaints itself with the
+    // fresh text -- the owner watching the "being written in the background"
+    // notice sees it resolve without reopening anything.
+    try {
+      const overlay = document.getElementById('tripsy-partial-overlay');
+      if (overlay && overlay.style.display !== 'none' && overlay.dataset.tripKey === tripKey) {
+        showTripsyPartialItinerary(tripKey);
+      }
+    } catch (e) { /* repaint is best-effort */ }
+  }
+}
+async function drainTripsyNarrativeResults() {
+  if (!isOwner) return;
+  await drainTripsyRelayFiles(TRIPSY_NARRATIVE_RESULTS_FILENAME, relay => applyTripsyNarrativeResults(relay.results || []));
+}
+
 
 // Runs the app's side of every Drive-relay pipeline on startup:
 // drain applied-change confirmations and parsed email proposals a refresh left,
@@ -5136,6 +5268,10 @@ async function syncTripsyRelays() {
     // ensureTripsyDecrypted reads trips-data.json silently and returns null on
     // failure. Best-effort -- a load failure must never abort the badge refresh.
     try { await ensureTripsyDecrypted(); } catch (e) { /* ignore -- badge falls back to pre-decryption behavior */ }
+    // Narrative answers drain AFTER the trips load, unlike the proposal
+    // drains above: filing one ends in tripsyRecordItineraryBaseline, which
+    // needs the real trip. A failure keeps the relay file for the next pass.
+    try { await drainTripsyNarrativeResults(); } catch (e) { console.error('narrative-results drain failed:', e); }
     // With the trips now loaded, silently drop any freshly-staged proposal
     // event that duplicates an existing tracked event -- the drains above run
     // BEFORE the decrypt (trips may not be loaded yet when they stage), so
@@ -21467,14 +21603,22 @@ async function tripsyFixCachedNarrativeUnicodeForTrip(tripKey, narrativeCache) {
   }
 }
 
-async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList, { includeIntro, dayKeysToGenerate, existingPlaceBlurbs }) {
-  const apiKey = await fetchAnthropicApiKeyFromDrive();
+// The narrative prompt TEXT, factored out of generateTripsyItineraryNarrative
+// so the cloud-offloaded generation (tripsyQueueNarrativeCloudRequest -- the
+// partial itinerary's background path) sends the EXACT prompt the in-app
+// generator sends -- "use the exact same rules and procedures" holds by
+// construction, and a future prompt edit here changes both paths at once.
+function tripsyNarrativePromptText(effectiveTrip, dayPromptDataList, { includeIntro, dayKeysToGenerate, existingPlaceBlurbs }) {
   const tripSummaryForPrompt = {
     name: effectiveTrip.name,
     location: effectiveTrip.location,
     dateRange: formatTripDateRange(effectiveTrip.start, effectiveTrip.end),
     days: dayPromptDataList,
   };
+  return `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. ${includeIntro ? 'Write a short, evocative trip_intro paragraph for the whole trip that sets the scene for the destinations involved.' : 'Set trip_intro to an empty string -- it is not being regenerated right now.'} For each day: a short evocative title (e.g. "Travel Day: First Taste of Palma" -- do NOT prefix it with "Day N" or the date, since the printed page already shows that on its own divider bar directly above the title), 1-3 narrative paragraphs that weave the day's events together AND bring in genuinely interesting, accurate background about the specific places and experiences involved -- a hotel's history or standing, what a landmark, museum, or show actually is and why it's notable, the character of a neighborhood -- so the day reads as a rich guide rather than a list. Also return one place_blurbs entry per named place (hotel/activity) in that day's events -- place_name (exactly matching the place_name given in the data) plus a 2-3 sentence blurb sharing real, interesting background about that specific place (its story, significance, what to expect). Draw on what you actually know about these specific named places, venues, and experiences. Do NOT fabricate specifics you're unsure of -- no invented hours, prices, exact founding years or dates, statistics, or made-up review quotes; speak to reputation only in honest, general terms ("long regarded as", "widely praised") and only when genuinely warranted. For anything you don't actually recognize, or a generic/private event, stay warm and evocative without inventing facts. If the SAME place/location appears more than once across this trip's days (e.g. a venue visited twice, a restaurant repeated, a landmark passed on two different days), do NOT write the same descriptive content for it each time -- vary what you say by drawing on that specific occurrence's own details (what's actually happening there that visit, the occasion, time of day, who's around, what's different about it) rather than re-describing the place itself identically twice. This applies both within the days you're writing now and against any already-written content for other days shown below -- never repeat text that already exists for the same place.${existingPlaceBlurbs && existingPlaceBlurbs.length ? `\n\nText already written for these places on OTHER days of this same trip (already generated, not being rewritten now) -- if any of these same places come up again in the day(s) you're writing, give it a genuinely different angle, not a rehash of this:\n${JSON.stringify(existingPlaceBlurbs)}` : ''} Only include a days[] entry for these day_key values, in this exact set -- do not write entries for any other day: ${JSON.stringify(dayKeysToGenerate)}. If a day has no named places, place_blurbs can be an empty array.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`;
+}
+async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList, { includeIntro, dayKeysToGenerate, existingPlaceBlurbs }) {
+  const apiKey = await fetchAnthropicApiKeyFromDrive();
   const schema = {
     type: 'object',
     properties: {
@@ -21519,7 +21663,7 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{
         role: 'user',
-        content: `Write the narrative copy for a printed travel itinerary, in the warm, concrete, second-person voice of a boutique travel magazine (like a MindTrip-style trip guide) -- NOT a data summary. ${includeIntro ? 'Write a short, evocative trip_intro paragraph for the whole trip that sets the scene for the destinations involved.' : 'Set trip_intro to an empty string -- it is not being regenerated right now.'} For each day: a short evocative title (e.g. "Travel Day: First Taste of Palma" -- do NOT prefix it with "Day N" or the date, since the printed page already shows that on its own divider bar directly above the title), 1-3 narrative paragraphs that weave the day's events together AND bring in genuinely interesting, accurate background about the specific places and experiences involved -- a hotel's history or standing, what a landmark, museum, or show actually is and why it's notable, the character of a neighborhood -- so the day reads as a rich guide rather than a list. Also return one place_blurbs entry per named place (hotel/activity) in that day's events -- place_name (exactly matching the place_name given in the data) plus a 2-3 sentence blurb sharing real, interesting background about that specific place (its story, significance, what to expect). Draw on what you actually know about these specific named places, venues, and experiences. Do NOT fabricate specifics you're unsure of -- no invented hours, prices, exact founding years or dates, statistics, or made-up review quotes; speak to reputation only in honest, general terms ("long regarded as", "widely praised") and only when genuinely warranted. For anything you don't actually recognize, or a generic/private event, stay warm and evocative without inventing facts. If the SAME place/location appears more than once across this trip's days (e.g. a venue visited twice, a restaurant repeated, a landmark passed on two different days), do NOT write the same descriptive content for it each time -- vary what you say by drawing on that specific occurrence's own details (what's actually happening there that visit, the occasion, time of day, who's around, what's different about it) rather than re-describing the place itself identically twice. This applies both within the days you're writing now and against any already-written content for other days shown below -- never repeat text that already exists for the same place.${existingPlaceBlurbs && existingPlaceBlurbs.length ? `\n\nText already written for these places on OTHER days of this same trip (already generated, not being rewritten now) -- if any of these same places come up again in the day(s) you're writing, give it a genuinely different angle, not a rehash of this:\n${JSON.stringify(existingPlaceBlurbs)}` : ''} Only include a days[] entry for these day_key values, in this exact set -- do not write entries for any other day: ${JSON.stringify(dayKeysToGenerate)}. If a day has no named places, place_blurbs can be an empty array.\n\nTrip data:\n${JSON.stringify(tripSummaryForPrompt)}`,
+        content: tripsyNarrativePromptText(effectiveTrip, dayPromptDataList, { includeIntro, dayKeysToGenerate, existingPlaceBlurbs }),
       }],
     }),
   });
@@ -21528,6 +21672,13 @@ async function generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataList
     throw new Error(`Claude API error ${res.status}: ${errBody.slice(0, 500)}`);
   }
   const data = await res.json();
+  // A response truncated at max_tokens is UNPARSEABLE json_schema output --
+  // without this check it surfaced as a bare "JSON Parse error: Unexpected
+  // EOF" (seen live 2026-09-27, an 11-day narrative generation against
+  // max_tokens 4096). The day BATCHING in tripsyGenerateNarrativeSections is
+  // what actually prevents that case; this check turns any recurrence into
+  // an error that names itself.
+  if (data.stop_reason === 'max_tokens') throw new Error('The response hit its length limit and was cut off — asked for too much in one call');
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude API returned no text block');
   return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
@@ -22336,6 +22487,13 @@ ${JSON.stringify(dayDrafts, null, 1)}`,
     throw new Error(`Claude API error ${res.status}: ${errBody.slice(0, 500)}`);
   }
   const data = await res.json();
+  // A response truncated at max_tokens is UNPARSEABLE json_schema output --
+  // without this check it surfaced as a bare "JSON Parse error: Unexpected
+  // EOF" (seen live 2026-09-27, an 11-day narrative generation against
+  // max_tokens 4096). The day BATCHING in tripsyGenerateNarrativeSections is
+  // what actually prevents that case; this check turns any recurrence into
+  // an error that names itself.
+  if (data.stop_reason === 'max_tokens') throw new Error('The response hit its length limit and was cut off — asked for too much in one call');
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude API returned no text block');
   return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
@@ -23611,14 +23769,20 @@ function buildTripsyRowChangePayload(row, matchedRaw) {
 // whole trip at once. `rowPromptDataList` is the output of
 // tripsySummaryRowPromptData for every non-layover row (layover rows are
 // filtered out by the caller, same reasoning as tripsySummaryRowKey).
-async function generateTripsySummaryBlurbs(effectiveTrip, rowPromptDataList) {
-  const apiKey = await fetchAnthropicApiKeyFromDrive();
+// The Part-1 one-liner prompt TEXT, factored out for the same reason as
+// tripsyNarrativePromptText above: the cloud-offloaded generation must send
+// the EXACT prompt this in-app generator sends.
+function tripsySummaryBlurbsPromptText(effectiveTrip, rowPromptDataList) {
   const tripSummaryForPrompt = {
     name: effectiveTrip.name,
     location: effectiveTrip.location,
     dateRange: formatTripDateRange(effectiveTrip.start, effectiveTrip.end),
     rows: rowPromptDataList,
   };
+  return `Write the one-line event descriptions for page 1 (a formal day-by-day summary) of a printed travel itinerary, in the warm but concise voice of a boutique travel magazine -- one short, vivid sentence per row (roughly 4-12 words), NOT a data dump. Return exactly one rows[] entry per row_key given below, in the same order, with row_key copied through unchanged. Only state facts present in the row's own data (title/place_name/address/notes) -- do not invent hours, prices, history, or amenities, and do not repeat the time (it is already shown separately). A P/S Reservation row is airport private-terminal service, not a destination -- describe it as such. If the same place_name appears in more than one row (e.g. the same restaurant or venue visited on different days), do NOT write the same sentence for each -- differentiate using whatever's different about that specific row (its title, notes, or time of day), not the place description itself.\n\nRows:\n${JSON.stringify(tripSummaryForPrompt)}`;
+}
+async function generateTripsySummaryBlurbs(effectiveTrip, rowPromptDataList) {
+  const apiKey = await fetchAnthropicApiKeyFromDrive();
   const schema = {
     type: 'object',
     properties: {
@@ -23649,7 +23813,7 @@ async function generateTripsySummaryBlurbs(effectiveTrip, rowPromptDataList) {
       output_config: { format: { type: 'json_schema', schema } },
       messages: [{
         role: 'user',
-        content: `Write the one-line event descriptions for page 1 (a formal day-by-day summary) of a printed travel itinerary, in the warm but concise voice of a boutique travel magazine -- one short, vivid sentence per row (roughly 4-12 words), NOT a data dump. Return exactly one rows[] entry per row_key given below, in the same order, with row_key copied through unchanged. Only state facts present in the row's own data (title/place_name/address/notes) -- do not invent hours, prices, history, or amenities, and do not repeat the time (it is already shown separately). A P/S Reservation row is airport private-terminal service, not a destination -- describe it as such. If the same place_name appears in more than one row (e.g. the same restaurant or venue visited on different days), do NOT write the same sentence for each -- differentiate using whatever's different about that specific row (its title, notes, or time of day), not the place description itself.\n\nRows:\n${JSON.stringify(tripSummaryForPrompt)}`,
+        content: tripsySummaryBlurbsPromptText(effectiveTrip, rowPromptDataList),
       }],
     }),
   });
@@ -23658,6 +23822,13 @@ async function generateTripsySummaryBlurbs(effectiveTrip, rowPromptDataList) {
     throw new Error(`Claude API error ${res.status}: ${errBody.slice(0, 500)}`);
   }
   const data = await res.json();
+  // A response truncated at max_tokens is UNPARSEABLE json_schema output --
+  // without this check it surfaced as a bare "JSON Parse error: Unexpected
+  // EOF" (seen live 2026-09-27, an 11-day narrative generation against
+  // max_tokens 4096). The day BATCHING in tripsyGenerateNarrativeSections is
+  // what actually prevents that case; this check turns any recurrence into
+  // an error that names itself.
+  if (data.stop_reason === 'max_tokens') throw new Error('The response hit its length limit and was cut off — asked for too much in one call');
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude API returned no text block');
   return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
@@ -23713,6 +23884,13 @@ async function generateTripsyEventNarrative(effectiveTrip, eventPromptData) {
     throw new Error(`Claude API error ${res.status}: ${errBody.slice(0, 500)}`);
   }
   const data = await res.json();
+  // A response truncated at max_tokens is UNPARSEABLE json_schema output --
+  // without this check it surfaced as a bare "JSON Parse error: Unexpected
+  // EOF" (seen live 2026-09-27, an 11-day narrative generation against
+  // max_tokens 4096). The day BATCHING in tripsyGenerateNarrativeSections is
+  // what actually prevents that case; this check turns any recurrence into
+  // an error that names itself.
+  if (data.stop_reason === 'max_tokens') throw new Error('The response hit its length limit and was cut off — asked for too much in one call');
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude API returned no text block');
   return tripsyFixDoubleEscapedUnicodeDeep(JSON.parse(textBlock.text));
@@ -23781,17 +23959,44 @@ async function tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, 
     // 2's version already exists. Passing that already-written text in
     // lets the prompt explicitly tell it to differentiate instead.
     const existingCache = await Store.getTripsyNarrativeCache();
-    const existingPlaceBlurbs = dayKeys
+    let existingPlaceBlurbs = dayKeys
       .filter(dayKey => !dayKeysToGenerate.includes(dayKey))
       .map(dayKey => existingCache[`${tripKey}::day::${dayKey}`])
       .filter(Boolean)
       .flatMap(entry => (entry.content.place_blurbs || []).map(pb => ({ place_name: pb.place_name, blurb: pb.blurb })));
-    const result = await generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataAll, { includeIntro, dayKeysToGenerate, existingPlaceBlurbs });
+    // Days generate in BATCHES, not one call for everything. The response is
+    // capped at max_tokens 4096 -- roughly a handful of days' titles +
+    // narratives + place blurbs -- and asking for more truncates the JSON
+    // mid-stream, failing the WHOLE run with nothing saved (seen live
+    // 2026-09-27: an 11-day partial-itinerary generation died with "JSON
+    // Parse error: Unexpected EOF"; a many-day first-time Create had the
+    // same latent bug). Each batch's just-written place blurbs join the
+    // don't-repeat context for the batches after it, exactly as cached days'
+    // blurbs already do -- so a place visited in batch 1 and batch 3 still
+    // gets two different write-ups. The intro rides the first batch only.
+    const TRIPSY_NARRATIVE_DAY_BATCH = 4;
+    const dayBatches = [];
+    for (let i = 0; i < dayKeysToGenerate.length; i += TRIPSY_NARRATIVE_DAY_BATCH) {
+      dayBatches.push(dayKeysToGenerate.slice(i, i + TRIPSY_NARRATIVE_DAY_BATCH));
+    }
+    if (!dayBatches.length) dayBatches.push([]); // intro-only call
+    let tripIntro = '';
+    const resultDaysByKey = new Map();
+    for (let b = 0; b < dayBatches.length; b++) {
+      const result = await generateTripsyItineraryNarrative(effectiveTrip, dayPromptDataAll, {
+        includeIntro: includeIntro && b === 0,
+        dayKeysToGenerate: dayBatches[b],
+        existingPlaceBlurbs,
+      });
+      if (includeIntro && b === 0) tripIntro = result.trip_intro || '';
+      for (const rd of (result.days || [])) resultDaysByKey.set(rd.day_key, rd);
+      existingPlaceBlurbs = existingPlaceBlurbs.concat(
+        (result.days || []).flatMap(rd => (rd.place_blurbs || []).map(pb => ({ place_name: pb.place_name, blurb: pb.blurb }))));
+    }
     if (includeIntro) {
       const introFingerprintData = { name: effectiveTrip.name, location: effectiveTrip.location, dateRange: formatTripDateRange(effectiveTrip.start, effectiveTrip.end) };
-      sectionsToSave[`${tripKey}::intro`] = { content: { trip_intro: result.trip_intro || '' }, fingerprint: tripsyContentFingerprint(introFingerprintData), generatedAt: new Date().toISOString() };
+      sectionsToSave[`${tripKey}::intro`] = { content: { trip_intro: tripIntro }, fingerprint: tripsyContentFingerprint(introFingerprintData), generatedAt: new Date().toISOString() };
     }
-    const resultDaysByKey = new Map((result.days || []).map(d => [d.day_key, d]));
     for (const dayKey of dayKeysToGenerate) {
       const rd = resultDaysByKey.get(dayKey);
       if (!rd) continue;
@@ -25071,7 +25276,7 @@ function tripsyPartialModeDialog() {
     overlay.innerHTML = `
       <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; max-width:420px; width:100%; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
         <div style="font-size:15px; font-weight:700; color:var(--text); margin-bottom:4px;">How should this partial itinerary read?</div>
-        <div style="font-size:13px; color:var(--muted); margin-bottom:16px;">Summary is the day-by-day event listing. Full Itinerary adds the written narratives and photos — any not yet generated are created first (this can take a couple of minutes).</div>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:16px;">Summary is the day-by-day event listing. Full Itinerary adds the written narratives and photos — any not yet generated are written in the background (you can close the app; they appear automatically, usually within a few minutes).</div>
         <div style="display:flex; flex-direction:column; gap:8px;">
           <button data-mode="summary" class="btn" style="font-size:13px; padding:8px 14px;">Summary</button>
           <button data-mode="full" class="btn primary" style="font-size:13px; padding:8px 14px;">Full Itinerary</button>
@@ -25084,28 +25289,38 @@ function tripsyPartialModeDialog() {
   });
 }
 // Full-itinerary mode's generation step: make sure every INCLUDED section has
-// its narrative, generating only what's missing -- into the one shared
-// narrative cache, exactly where a full Create would put it (the partial is a
-// filter over the full itinerary, so its narratives ARE the full itinerary's;
-// a later full Create finds them already done). Intro when Overview is
-// included, day write-ups for included days, and Part-1 summary blurbs for
-// days that still have an included blurb-wanting row without one (scoped via
-// summaryDayKeys so nothing already written is rewritten). Deliberately does
-// NOT record the itinerary baseline: this is a side document, and
-// acknowledging event changes is the full itinerary's review flow's job.
-// Runs on EVERY full-mode open, not just creation ("there were no generated
-// narratives or photos in the itinerary," 2026-09-27: the one creation-time
-// run had failed/been interrupted -- these are minutes-long Claude calls, and
-// backgrounding the iPad app mid-call kills them -- and Show never retried,
-// so the document stayed bare forever). With nothing missing it's a cheap
-// in-memory check and no API call is made. TWO generation calls rather than
-// one -- intro+days first, then the summary blurbs -- each with its own save,
-// so an interruption keeps what already finished instead of discarding the
-// whole run. Returns true when anything was generated.
+// its narrative -- into the one shared narrative cache, exactly where a full
+// Create would put it (the partial is a filter over the full itinerary, so
+// its narratives ARE the full itinerary's; a later full Create finds them
+// already done). Intro when Overview is included, day write-ups for included
+// days, and Part-1 summary blurbs for days that still have an included
+// blurb-wanting row without one. Runs on EVERY full-mode open, not just
+// creation, so an interrupted creation-time ask self-heals.
+// The generation itself is NOT done here ("I do not want to keep the app
+// open in the foreground in order to generate a partial itinerary,"
+// 2026-09-27 -- these are minutes-long Claude calls, and backgrounding the
+// iPad app mid-call kills them; the same report that made Show self-heal in
+// the first place). Instead the missing sections are QUEUED as a cloud
+// request (driveData.tripsyNarrativeRequests) carrying the EXACT prompts the
+// in-app generators would send -- built by the very same
+// tripsyNarrativePromptText/tripsySummaryBlurbsPromptText those generators
+// call, so "use the exact same rules and procedures" holds by construction
+// -- plus queue-time fingerprints and row-key sets, so the drain
+// (drainTripsyNarrativeResults) can file the answer exactly as
+// tripsyGenerateNarrativeSections would have, tripsyRecordItineraryBaseline
+// step included. The cloud routine (the same one that parses docs/emails)
+// answers via the tripsy-narrative-results.json relay on its next run;
+// queueing also fires it on demand through the Cloudflare Worker
+// (best-effort -- the scheduled 3x/day runs are the backstop). Unlike the
+// in-app generators the routine has no per-response token cap, so ONE
+// narrative prompt covers every requested day (no batching needed).
+// Returns {status}: 'none' (nothing missing -- the document is complete),
+// 'queued' (a new request was just filed), or 'pending' (an earlier request
+// is still awaiting its answer; a stale-looking one re-fires the worker).
 async function tripsyPartialEnsureNarratives(tripKey, keys, onStage) {
   const stage = text => { try { if (onStage) onStage(text); } catch (e) { /* progress is best-effort */ } };
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
-  if (!trip) return false;
+  if (!trip) return { status: 'none' };
   const { effectiveTrip, dayKeys, byDay, summaryByDay } = await buildTripsyPrintDayData(trip);
   const cache = await Store.getTripsyNarrativeCache();
   const includeIntro = keys.has('overview') && !cache[`${tripKey}::intro`];
@@ -25120,27 +25335,66 @@ async function tripsyPartialEnsureNarratives(tripKey, keys, onStage) {
     const rk = tripsySummaryRowKey(item);
     return rk && tripsySummaryRowWantsBlurb(item) && !blurbByKey.get(rk);
   }));
-  let generated = false;
-  if (includeIntro || dayKeysToGenerate.length) {
-    stage(`Writing the day narratives (${dayKeysToGenerate.length || 'overview'}${dayKeysToGenerate.length ? ' days' : ''}) — this can take a couple of minutes. Keep the app open in the foreground.`);
-    await tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, {
-      includeIntro,
-      includeSummary: false,
-      dayKeysToGenerate,
-    });
-    generated = true;
+  if (!includeIntro && !dayKeysToGenerate.length && !summaryDayKeys.length) return { status: 'none' };
+  // An earlier ask still awaiting its answer: don't re-queue over it (the
+  // replace would re-date it, hiding that it's been ignored). A request the
+  // on-demand fire SHOULD have answered by now (the worker run takes a few
+  // minutes) gets the worker re-fired, best-effort -- maybe the first fire
+  // failed silently -- while the scheduled runs remain the backstop either way.
+  const pending = Store.listTripsyNarrativeRequests().find(r => r.tripKey === tripKey);
+  if (pending) {
+    if (Date.now() - new Date(pending.requestedAt || 0).getTime() > 15 * 60000) {
+      try { runTripsyRefreshViaWorker(null); } catch (e) { /* scheduled runs are the backstop */ }
+    }
+    return { status: 'pending', requestedAt: pending.requestedAt };
   }
-  if (summaryDayKeys.length) {
-    stage('Writing the event summary lines…');
-    await tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, {
-      includeIntro: false,
-      includeSummary: true,
-      dayKeysToGenerate: [],
-      summaryDayKeys,
-    });
-    generated = true;
+  stage('Handing the narrative writing to the background run…');
+  // The narrative prompt is built EXACTLY as tripsyGenerateNarrativeSections
+  // builds its calls -- full day list for context, already-written days'
+  // place blurbs as don't-repeat context -- except unbatched (see above).
+  const dayPromptDataAll = dayKeys.map(dayKey => tripsyNarrativeDayPromptData(dayKey, byDay.get(dayKey) || []));
+  const existingPlaceBlurbs = dayKeys
+    .filter(dayKey => !dayKeysToGenerate.includes(dayKey))
+    .map(dayKey => cache[`${tripKey}::day::${dayKey}`])
+    .filter(Boolean)
+    .flatMap(entry => (entry.content.place_blurbs || []).map(pb => ({ place_name: pb.place_name, blurb: pb.blurb })));
+  // Summary rows exactly as the shared procedure scopes them: the rewritten
+  // set is summaryDayKeys' rows over the FULL summaryByDay (so the full
+  // itinerary gains these blurbs too), the live set spans every day.
+  const rowItemsFor = ks => ks.flatMap(dayKey => summaryByDay.get(dayKey) || [])
+    .filter(item => tripsySummaryRowKey(item) && tripsySummaryRowWantsBlurb(item));
+  const allRowItems = rowItemsFor(dayKeys);
+  const targetItems = rowItemsFor(summaryDayKeys);
+  const dayFingerprints = {};
+  for (const dayKey of dayKeysToGenerate) {
+    dayFingerprints[dayKey] = tripsyContentFingerprint(tripsyNarrativeDayPromptData(dayKey, byDay.get(dayKey) || []));
   }
-  return generated;
+  const request = {
+    id: `nreq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    tripKey,
+    requestedAt: new Date().toISOString(),
+    includeIntro,
+    dayKeysToGenerate,
+    narrativePrompt: (includeIntro || dayKeysToGenerate.length)
+      ? tripsyNarrativePromptText(effectiveTrip, dayPromptDataAll, { includeIntro, dayKeysToGenerate, existingPlaceBlurbs })
+      : '',
+    summaryPrompt: targetItems.length ? tripsySummaryBlurbsPromptText(effectiveTrip, targetItems.map(tripsySummaryRowPromptData)) : '',
+    summaryRowKeys: targetItems.map(tripsySummaryRowKey),
+    allRowKeys: allRowItems.map(tripsySummaryRowKey),
+    // Queue-time fingerprints, so the drain stamps each saved section with
+    // exactly what tripsyGenerateNarrativeSections would have.
+    introFingerprint: includeIntro
+      ? tripsyContentFingerprint({ name: effectiveTrip.name, location: effectiveTrip.location, dateRange: formatTripDateRange(effectiveTrip.start, effectiveTrip.end) })
+      : '',
+    dayFingerprints,
+    summaryFingerprint: targetItems.length ? tripsyContentFingerprint(allRowItems.map(tripsySummaryRowPromptData)) : '',
+  };
+  const ok = await Store.queueTripsyNarrativeRequest(request);
+  if (!ok) throw new Error('Could not save the narrative request');
+  // Fire the routine now rather than waiting for its schedule. Best-effort:
+  // a failed fire leaves the request queued for the next scheduled run.
+  try { runTripsyRefreshViaWorker(null); } catch (e) { console.error('Narrative-request worker fire failed (scheduled runs will pick it up):', e); }
+  return { status: 'queued', requestedAt: request.requestedAt };
 }
 
 // The read-only view itself -- same shell/pattern as the Summary overlay
@@ -25204,22 +25458,26 @@ async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null) 
   }
   overlay._partialKeys = keys;
   overlay._partialMode = mode;
-  // Full mode generates any included section still missing its narrative on
-  // EVERY open (owner only) -- Show self-heals a creation-time run that
-  // failed or was interrupted, rather than leaving the document bare forever
-  // (the 2026-09-27 report). With everything already generated this is a
-  // cheap in-memory check that makes no API call, so Show stays instant. A
-  // failure is a PERSISTENT dialog naming the reason (a toast fired while
-  // the iPad app is backgrounded is never seen), and the document still
-  // renders with whatever exists.
+  // Full mode checks for any included section still missing its narrative on
+  // EVERY open (owner only) -- Show self-heals a creation-time ask that never
+  // got answered, rather than leaving the document bare forever (the
+  // 2026-09-27 report). The check is cheap and in-memory when everything is
+  // already written, so Show stays instant. Anything missing is QUEUED for
+  // the cloud routine rather than generated here ("I do not want to keep the
+  // app open in the foreground," 2026-09-27) -- the document renders NOW with
+  // whatever exists, plus a banner saying the rest is being written in the
+  // background; the relay drain repaints this overlay when the answer lands.
+  // A failure to even queue is a PERSISTENT dialog naming the reason (a
+  // toast fired while the iPad app is backgrounded is never seen).
   const ownerFull = mode === 'full' && isOwner;
+  let generation = { status: 'none' };
   if (ownerFull) {
     try {
-      await tripsyPartialEnsureNarratives(tripKey, keys, progress);
+      generation = await tripsyPartialEnsureNarratives(tripKey, keys, progress);
     } catch (e) {
-      console.error('Partial narrative generation failed:', e);
+      console.error('Partial narrative request failed:', e);
       await tripsyConfirmDialog(
-        `Could not generate some of this partial itinerary's narratives — ${(e && e.message) || 'unknown error'}. Showing what exists; open it again to retry. Keep the app open in the foreground while it generates.`,
+        `Could not hand this partial itinerary's narratives to the background run — ${(e && e.message) || 'unknown error'}. Showing what exists; open it again to retry.`,
         { title: '⚠️ Generation incomplete', yes: 'OK', no: null });
     }
     progress('Building partial itinerary…');
@@ -25240,6 +25498,15 @@ async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null) 
     return;
   }
   content.innerHTML = html;
+  // The background-work banner goes into the OVERLAY only, never the print
+  // root -- a Save as PDF taken while narratives are still being written
+  // shouldn't carry an app status line on its cover page.
+  if (generation.status === 'queued' || generation.status === 'pending') {
+    const banner = document.createElement('div');
+    banner.style.cssText = 'margin:0 0 14px; padding:12px 16px; border-radius:10px; background:#fef3c7; border:1px solid #f59e0b; color:#78350f; font-size:13px; line-height:1.5;';
+    banner.textContent = 'The written narratives for this itinerary are being created in the background — you can close the app. They usually land within a few minutes and will appear here automatically (or reopen this page later).';
+    content.prepend(banner);
+  }
   content.scrollTop = 0;
   getOrCreateTripsyPrintRoot().innerHTML = html;
   document.body.classList.add('tripsy-partial-open');
@@ -32894,6 +33161,14 @@ async function computeTripsyStatus() {
   if (docsToParse.length) yellow.push({ label: `${docsToParse.length} document${docsToParse.length === 1 ? '' : 's'} flagged for parsing`, view: 'utilitiesparsingdocs' });
   const emailsToParse = tripsyEmailsAwaitingParseCount();
   if (emailsToParse) yellow.push({ label: `${emailsToParse} forwarded email${emailsToParse === 1 ? '' : 's'} waiting to be parsed`, view: 'utilitiesparsingdocs' });
+  // A queued narrative request (the partial itinerary's background
+  // generation) is the same kind of wait: a cloud run owes an answer. Not
+  // clickable -- there's nothing to do in the app; the Run Parse Now button
+  // the panel renders below fires the very run that answers it.
+  const narrativeRequests = Store.listTripsyNarrativeRequests().length;
+  if (narrativeRequests) {
+    yellow.push({ label: `Itinerary narratives are being written in the background (${narrativeRequests} request${narrativeRequests === 1 ? '' : 's'}) — they'll be pulled in automatically when ready.` });
+  }
   // Says WHEN the wait ends, rather than leaving "waiting for the next scheduled parse
   // run" to imply an unknowable delay ("tell the user the time for the next scheduled
   // parse run and say the document will be parsed then, or give the parse now option").
@@ -32909,7 +33184,11 @@ async function computeTripsyStatus() {
   // runTripsyRefreshViaWorker pull its results in when it lands). Once nothing
   // is left waiting, the run did its job -- drop the marker rather than letting
   // a stale "in progress" line outlive the work it described.
-  if (tripsyParseRunStartedAt && (docsToParse.length || emailsToParse)) {
+  // Narrative requests count as outstanding work here too: a fire made FOR
+  // one must keep its marker (and so its scheduled relay polls -- they check
+  // this marker) alive until the answer drains, not be nulled the moment no
+  // docs/emails happen to be pending.
+  if (tripsyParseRunStartedAt && (docsToParse.length || emailsToParse || narrativeRequests)) {
     const ageMs = Date.now() - tripsyParseRunStartedAt;
     if (ageMs <= TRIPSY_PARSE_RUN_WINDOW_MS) {
       const mins = Math.max(1, Math.round(ageMs / 60000));
@@ -32917,7 +33196,7 @@ async function computeTripsyStatus() {
     } else {
       tripsyParseRunStartedAt = null; // ran long past the window -- stop claiming it
     }
-  } else if (tripsyParseRunStartedAt && !docsToParse.length && !emailsToParse) {
+  } else if (tripsyParseRunStartedAt && !docsToParse.length && !emailsToParse && !narrativeRequests) {
     tripsyParseRunStartedAt = null;
   }
   // Mirror the per-trip yellow ⚠️ flag: while any trip has a still-unresolved

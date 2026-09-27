@@ -44,14 +44,14 @@ assert((fireFn.match(/tripsyParseRunStartedAt = Date\.now\(\)/g) || []).length =
 
 // ---- source-pattern checks: the status panel shows the run while items still wait ----
 const statusFn = extractFn('computeTripsyStatus');
-assert(/if \(tripsyParseRunStartedAt && \(docsToParse\.length \|\| emailsToParse\)\) \{/.test(statusFn),
-  'the in-progress row only shows while something is genuinely still waiting to parse');
+assert(/if \(tripsyParseRunStartedAt && \(docsToParse\.length \|\| emailsToParse \|\| narrativeRequests\)\) \{/.test(statusFn),
+  'the in-progress row only shows while something is genuinely still waiting (docs, emails, or a queued narrative request)');
 assert(/A parse run is in progress \(started \$\{mins\} min ago\) — results are pulled in automatically when it finishes\./.test(statusFn),
   'THE FIX: the panel now says a run is underway instead of reading identically to before the press');
 assert(/if \(ageMs <= TRIPSY_PARSE_RUN_WINDOW_MS\) \{/.test(statusFn),
   'the claim is time-bounded -- a run that never lands stops being claimed after the window');
-assert(/\} else if \(tripsyParseRunStartedAt && !docsToParse\.length && !emailsToParse\) \{\s*\n\s*tripsyParseRunStartedAt = null;/.test(statusFn),
-  'once nothing awaits parsing the marker clears, so a stale "in progress" line cannot outlive the work');
+assert(/\} else if \(tripsyParseRunStartedAt && !docsToParse\.length && !emailsToParse && !narrativeRequests\) \{\s*\n\s*tripsyParseRunStartedAt = null;/.test(statusFn),
+  'once nothing awaits an answer the marker clears, so a stale "in progress" line cannot outlive the work -- but a still-pending narrative request keeps it (its relay polls check this marker)');
 
 // ---- executed: the panel-row decision logic, against fixtures ----
 {
