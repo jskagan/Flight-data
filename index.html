@@ -15448,8 +15448,15 @@ function tripsyTransferSideForLodging(transport, lodging) {
 // the one that leaves. Deliberately a post-sort MOVE rather than another
 // comparator rule -- the sort stays purely chronological (and so always
 // transitive), and this can only relocate the one lodging row it matched.
-// Timeline-only, like insertTripsyFlightArrivals: the itinerary print, Travel
-// View and the attire guide keep their existing order.
+// Applied on every event-ordering surface: the My Trips timeline,
+// buildTripsyPrintDayData (itinerary print/preview/summary/partial, diary,
+// narrative prompts, AND the attire guide's day list -- an existing guide may
+// show its non-blocking "may be out of date" note once, since its
+// eventFingerprint hashes the day order), and Travel View. It was
+// timeline-only at first, until the itinerary showed a hotel's 3:00 PM
+// nominal Check-in above the 5:00 PM flight + 6:20 PM car that actually get
+// you there ("the hotel stay listed before the transportation to the hotel,"
+// 2026-09-27). insertTripsyFlightArrivals remains timeline-only.
 function placeTripsyLodgingNextToTransfers(events) {
   let out = events.slice();
   for (const lodge of events) {
@@ -19850,6 +19857,43 @@ async function tripsyGatherTransportationPhotoCandidates(apiKey, company, catego
   return tripsyGatherPhotoCandidatesForQueries(apiKey, tripsyTransportationPhotoQueryVariants(company, category));
 }
 
+// A transportation photo comes from a Google PLACES listing (searching
+// "Singapore Airlines" matches, say, the airline's LAX ticket office), and a
+// place listing's photos are whatever people uploaded there -- which is
+// exactly how a Singapore Airlines leg ended up illustrated with ANOTHER
+// airline's plane ("The flight on Singapore airlines should show a picture
+// of a plane from Singapore airlines, not a different airlines," 2026-09-27;
+// confirmed in the live cache: "singapore airlines|||transport" pointed at
+// an LA-area place's photo). No query wording can control a listing's photo
+// CONTENT, so the photo itself is checked: one small vision call (Sonnet,
+// thinking off, low effort -- a pure yes/no classification, the attire
+// events-call lesson) judges whether the image shows the company's own
+// aircraft/branding, or at least no RIVAL carrier's. Fails soft in every
+// direction: no Anthropic key on this device, or any error, accepts the
+// photo exactly as before this check existed -- a card must never lose its
+// photo because the verifier hiccuped.
+async function tripsyTransportationPhotoAcceptable(company, blob) {
+  try {
+    const apiKey = await fetchAnthropicApiKeyFromDrive();
+    if (!apiKey) return true;
+    const small = await tripsyResizeImageBlob(blob, 512, 0.8);
+    const data = await tripsyFileToBase64(small);
+    const schema = {
+      type: 'object',
+      properties: { acceptable: { type: 'boolean' } },
+      required: ['acceptable'],
+      additionalProperties: false,
+    };
+    const result = await tripsyAttireClaudeCall(apiKey, schema, [
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } },
+      { type: 'text', text: `This photo will illustrate a trip leg operated by "${company}" on a printed travel itinerary. Answer acceptable=true if the photo shows ${company}'s own aircraft/vehicle, livery, logo, or premises, OR shows nothing identifiably belonging to any carrier (a generic unbranded aircraft or vehicle, an airport or station view, scenery). Answer acceptable=false if it identifiably shows a DIFFERENT airline's or operator's aircraft, livery, or logo.` },
+    ], `transportation photo check (${company})`, { thinking: false, effort: 'low' });
+    return result.acceptable !== false;
+  } catch (e) {
+    console.error('tripsyTransportationPhotoAcceptable failed (accepting photo):', e);
+    return true;
+  }
+}
 // Reuses the SAME driveData.tripsyPlacePhotoCache table fetchTripsyPlacePhoto
 // writes to (via the shared tripsyPlacePhotoCacheKey/Store helpers) --
 // see tripsyTransportationPhotoCacheKey for what's shared vs. distinct.
@@ -19857,7 +19901,31 @@ async function fetchTripsyTransportationPhoto(company, category) {
   const cacheKey = tripsyTransportationPhotoCacheKey(company, category);
   const cached = await Store.getTripsyPlacePhoto(cacheKey);
   if (cached && cached.skipped) return null;
-  if (cached && cached.driveFileId) {
+  // Heal an already-cached wrong-airline photo: an entry cached before the
+  // livery check existed (no liveryChecked stamp) gets its ONE check here,
+  // during a generation-time render only (_tripsyAllowPhotoFetch -- the same
+  // gate that bounds every other fetch-time cost). Pass -> stamped true and
+  // never re-checked; fail -> fall through to the fetch path below with this
+  // photoName remembered as tried, so a different photo gets picked. Note a
+  // manual pick (🔄🗂🔍) writes a fresh entry with no stamp, so it too gets
+  // one re-check on a later generation -- which either agrees (stamped,
+  // done) or replaces it with a better-branded photo, the same outcome the
+  // owner was hunting for manually.
+  let cachedRejected = false;
+  if (cached && cached.driveFileId && company && _tripsyAllowPhotoFetch && cached.liveryChecked === undefined) {
+    try {
+      const blob = await downloadDriveFileBlob(cached.driveFileId);
+      if (await tripsyTransportationPhotoAcceptable(company, blob)) {
+        Store.cacheTripsyPlacePhotoLocal(cacheKey, { ...cached, liveryChecked: true });
+        tripsyPlacePhotoCacheDirty = true;
+      } else {
+        cachedRejected = true;
+      }
+    } catch (e) {
+      console.error('Cached transportation photo livery check failed (keeping photo):', e);
+    }
+  }
+  if (cached && cached.driveFileId && !cachedRejected) {
     const fresh = (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000;
     // Same rule as fetchTripsyPlacePhoto: on a plain open/print always show the
     // cached photo (even past TTL); only refetch a stale one during generation.
@@ -19875,15 +19943,50 @@ async function fetchTripsyTransportationPhoto(company, category) {
   const apiKey = await Store.getPlacesApiKey();
   if (!apiKey) return null;
   try {
-    const photoName = await tripsyFindFirstTransportationPhotoName(apiKey, company, category);
-    if (!photoName) return null;
-    const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
-    if (!blob) return null;
-    const contentHash = await tripsyHashBlob(blob);
-    const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
-    Store.cacheTripsyPlacePhotoLocal(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [photoName] });
+    // With a company on the leg there IS a wrong answer, so walk the
+    // candidate pool (company queries first, generic category queries after
+    // -- tripsyTransportationPhotoQueryVariants' existing order) and take
+    // the first photo the livery check accepts, bounded so a pathological
+    // pool can't burn a call per candidate. Nothing passing keeps the first
+    // fetched photo, stamped liveryChecked:false -- shown (a photo beats a
+    // bare icon), never re-checked by the healing pass (that would re-spend
+    // the same calls every generation); the ordinary TTL refetch re-runs
+    // this loop later, and the owner's 🔄🗂🔍 controls override any time. A
+    // company-less leg keeps the old first-photo path: with no company
+    // there is no rival to show.
+    const tried = new Set([
+      ...((cached && cached.triedPhotoNames) || []),
+      ...(cachedRejected && cached.photoName ? [cached.photoName] : []),
+    ]);
+    const MAX_LIVERY_CHECKS = 4;
+    const candidates = company
+      ? (await tripsyGatherTransportationPhotoCandidates(apiKey, company, category)).filter(n => !tried.has(n)).slice(0, MAX_LIVERY_CHECKS)
+      : [await tripsyFindFirstTransportationPhotoName(apiKey, company, category)].filter(Boolean);
+    let pick = null;
+    let fallback = null;
+    for (const photoName of candidates) {
+      const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
+      if (!blob) continue;
+      if (!fallback) fallback = { photoName, blob };
+      if (!company) { pick = fallback; break; }
+      if (await tripsyTransportationPhotoAcceptable(company, blob)) {
+        pick = { photoName, blob, liveryChecked: true };
+        break;
+      }
+    }
+    if (!pick) pick = fallback;
+    if (!pick) return null;
+    const contentHash = await tripsyHashBlob(pick.blob);
+    const driveFileId = await uploadTripsyPlacePhotoToDrive(pick.blob, pick.blob.type || 'image/jpeg');
+    Store.cacheTripsyPlacePhotoLocal(cacheKey, {
+      driveFileId,
+      photoName: pick.photoName,
+      contentHash,
+      triedPhotoNames: [...tried, pick.photoName],
+      ...(company ? { liveryChecked: !!pick.liveryChecked } : {}),
+    });
     tripsyPlacePhotoCacheDirty = true;
-    return URL.createObjectURL(blob);
+    return URL.createObjectURL(pick.blob);
   } catch (e) {
     console.error('fetchTripsyTransportationPhoto failed:', e);
     return null;
@@ -19910,7 +20013,10 @@ async function tripsyTryAnotherTransportationPhoto(company, category) {
     if (!blob) return null;
     const contentHash = await tripsyHashBlob(blob);
     const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
-    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName: nextPhotoName, contentHash, triedPhotoNames: [...tried, nextPhotoName] });
+    // liveryChecked: the owner is choosing with their own eyes -- the
+    // automatic wrong-airline healing in fetchTripsyTransportationPhoto
+    // must never overrule a manual pick, so stamp it verified.
+    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName: nextPhotoName, contentHash, triedPhotoNames: [...tried, nextPhotoName], liveryChecked: true });
     return URL.createObjectURL(blob);
   } catch (e) {
     console.error('tripsyTryAnotherTransportationPhoto failed:', e);
@@ -19960,7 +20066,8 @@ async function tripsyManualSearchTransportationPhoto(company, category, query) {
     if (!blob) return null;
     const contentHash = await tripsyHashBlob(blob);
     const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
-    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [...tried, photoName] });
+    // Same owner-judgment stamp as tripsyTryAnotherTransportationPhoto.
+    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [...tried, photoName], liveryChecked: true });
     return URL.createObjectURL(blob);
   } catch (e) {
     console.error('tripsyManualSearchTransportationPhoto failed:', e);
@@ -20008,32 +20115,61 @@ async function tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHin
 
 // Fetches a place's photo the same way fetchTripsyPlacePhoto does, but
 // additionally avoids repeating a photo already shown elsewhere in the
-// SAME document -- extracted from tripsyPlaceCardHtml's own inline dedup
-// logic (index.html, the "isDuplicate" block a bit above where that
-// function builds each place card) so a caller with its own
-// usedPlacePhotoNames/usedPlacePhotoHashes Sets (currently: that function's
-// per-print-run Sets, and buildTripsyItineraryPdf's per-PDF Sets) gets the
-// exact same "no duplicate photo" guarantee without duplicating the logic
-// itself. Checks both the candidate's name token (cheap) and its actual
-// downloaded content hash (tripsyHashBlob), since two different Places
-// photo tokens can resolve to byte-for-byte the same image (confirmed in
-// production for two Royal Albert Hall events). Falls back to null (the
-// caller's own placeholder/fallback) if every candidate found for this
-// place is already used. Mutates usedPlacePhotoNames/usedPlacePhotoHashes
-// in place, same as the original inline version did.
+// SAME document. usedPlacePhotoNames/usedPlacePhotoHashes are MAPS of
+// photoName/contentHash -> the cacheKey that first used it in this build
+// (they used to be plain Sets -- Map.has keeps every membership check
+// identical, the value adds WHO owns the photo). Both are checked because
+// two different Places photo tokens can resolve to byte-for-byte the same
+// image (confirmed in production for two Royal Albert Hall events). Falls
+// back to null (the caller's own placeholder/fallback) if every candidate
+// found for this place is already used. Mutates the maps in place.
 async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes) {
   const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle, locationHint);
   const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
   if (cachedEntry && cachedEntry.skipped) return null;
-  // Dedup only ever runs when a photo is fetched for the FIRST time (initial
-  // generation, or a brand-new event). If this place ALREADY has a photo, show
-  // it verbatim -- reopening/editing the itinerary must never swap a photo, and
-  // the owner may deliberately want duplicates. Its name/hash is still recorded
-  // so a genuinely first-time card can dedup around it.
+  // An already-cached photo shows verbatim on a plain open -- reopening the
+  // itinerary must never swap a photo. But DUPLICATES across different
+  // events are no longer left alone ("There are many duplicate photos on
+  // the partial itinerary… we should not re-use a photo unless the event is
+  // exactly the same as the prior event using the photo except on a
+  // different day," 2026-09-27 -- duplicates piled up because the used-sets
+  // only exist per build: two events cached the same photo in different
+  // generations, or concurrently in one, and the old cached branch showed
+  // them verbatim forever). The exemption falls out of the cacheKey itself:
+  // the SAME event recurring on another day has the same
+  // name/address/title/hint, so the same cacheKey and the same cached entry
+  // -- only a photo owned by a DIFFERENT cacheKey counts as a collision.
+  // Swapping needs Places + an upload, so it only runs during a
+  // generation-time render (_tripsyAllowPhotoFetch, the same gate every
+  // fetch-time cost sits behind); a plain open still shows the cached photo
+  // untouched, and is permanently fixed by the next generation's swap.
+  // Transportation and P/S cards never route through here (their repeats
+  // are by design), so the rule's exceptions are structural.
   if (cachedEntry && cachedEntry.driveFileId) {
+    const nameOwner = cachedEntry.photoName ? usedPlacePhotoNames.get(cachedEntry.photoName) : undefined;
+    const hashOwner = cachedEntry.contentHash ? usedPlacePhotoHashes.get(cachedEntry.contentHash) : undefined;
+    const collidesWithOtherEvent =
+      (nameOwner !== undefined && nameOwner !== cacheKey) ||
+      (hashOwner !== undefined && hashOwner !== cacheKey);
+    if (collidesWithOtherEvent && _tripsyAllowPhotoFetch) {
+      const alt = await tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
+      if (alt) {
+        Store.cacheTripsyPlacePhotoLocal(cacheKey, {
+          driveFileId: alt.driveFileId, photoName: alt.photoName, contentHash: alt.contentHash,
+          triedPhotoNames: [...new Set([...(cachedEntry.triedPhotoNames || []), alt.photoName])],
+        });
+        tripsyPlacePhotoCacheDirty = true;
+        usedPlacePhotoNames.set(alt.photoName, cacheKey);
+        if (alt.contentHash) usedPlacePhotoHashes.set(alt.contentHash, cacheKey);
+        return alt.photoDataUrl;
+      }
+      // Every candidate for this place is already used elsewhere: the icon
+      // fallback beats repeating another event's photo.
+      return null;
+    }
     const url = await fetchTripsyPlacePhoto(name, address, eventTitle, locationHint);
-    if (cachedEntry.photoName) usedPlacePhotoNames.add(cachedEntry.photoName);
-    if (cachedEntry.contentHash) usedPlacePhotoHashes.add(cachedEntry.contentHash);
+    if (cachedEntry.photoName && !usedPlacePhotoNames.has(cachedEntry.photoName)) usedPlacePhotoNames.set(cachedEntry.photoName, cacheKey);
+    if (cachedEntry.contentHash && !usedPlacePhotoHashes.has(cachedEntry.contentHash)) usedPlacePhotoHashes.set(cachedEntry.contentHash, cacheKey);
     return url;
   }
   let photoUrl = await fetchTripsyPlacePhoto(name, address, eventTitle, locationHint);
@@ -20055,9 +20191,12 @@ async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHin
       console.error('tripsyDedupedPlacePhotoUrl: failed to hash photo for dedup:', e);
     }
   }
+  // Same owner-aware test as the cached branch: a photo this SAME event
+  // already claimed (same cacheKey) is not a duplicate, one claimed by any
+  // OTHER event is.
   const isDuplicate = photoUrl && (
-    (photoName && usedPlacePhotoNames.has(photoName)) ||
-    (photoHash && usedPlacePhotoHashes.has(photoHash))
+    (photoName && usedPlacePhotoNames.has(photoName) && usedPlacePhotoNames.get(photoName) !== cacheKey) ||
+    (photoHash && usedPlacePhotoHashes.has(photoHash) && usedPlacePhotoHashes.get(photoHash) !== cacheKey)
   );
   if (isDuplicate) {
     const alt = await tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
@@ -20078,8 +20217,8 @@ async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHin
       photoHash = null;
     }
   }
-  if (photoName) usedPlacePhotoNames.add(photoName);
-  if (photoHash) usedPlacePhotoHashes.add(photoHash);
+  if (photoName && !usedPlacePhotoNames.has(photoName)) usedPlacePhotoNames.set(photoName, cacheKey);
+  if (photoHash && !usedPlacePhotoHashes.has(photoHash)) usedPlacePhotoHashes.set(photoHash, cacheKey);
   return photoUrl;
 }
 
@@ -20286,7 +20425,12 @@ async function buildTripsyPrintDayData(trip) {
   });
   const allVisibleEvents = [...visibleEvents, ...pendingCreateEvents];
   const chronologicalEvents = expandMultiDayTripsyEvents(allVisibleEvents).sort(tripsyTimelineSortComparator);
-  const sortedEvents = insertTripsyLayovers(chronologicalEvents);
+  // Same lodging-next-to-its-transfer move the My Trips timeline makes
+  // (after layovers, which it respects) -- without it the itinerary listed a
+  // hotel's 3:00 PM nominal Check-in BEFORE the 5:00 PM flight + 6:20 PM car
+  // that actually get you there ("the hotel stay listed before the
+  // transportation to the hotel," 2026-09-27).
+  const sortedEvents = placeTripsyLodgingNextToTransfers(insertTripsyLayovers(chronologicalEvents));
 
   const dayKeys = [];
   const byDay = new Map();
@@ -24379,21 +24523,50 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
   // rather than a fixed-column layout.
   const TRIPSY_PLACE_CARD_WIDTH = 42;
   // Every photoName/contentHash actually used by a place card so far in
-  // this build -- if a place's chosen photo turns out to be one already
-  // shown elsewhere in the same itinerary, tripsyPlaceCardHtml below
-  // tries to swap in a different candidate from that SAME place's own
-  // pool instead. Checks both: two DIFFERENT Places photo tokens can
-  // resolve to byte-for-byte the same image (confirmed in production for
-  // two Royal Albert Hall events -- same SHA-256, different tokens), so
+  // this build, mapped to the cacheKey that claimed it -- if a place's
+  // chosen photo is one already shown by a DIFFERENT event in the same
+  // itinerary, tripsyPlaceCardHtml (via tripsyDedupedPlacePhotoUrl) swaps
+  // in a different candidate from that SAME place's own pool instead; the
+  // same event recurring on another day shares its cacheKey and keeps its
+  // photo. Checks both: two DIFFERENT Places photo tokens can resolve to
+  // byte-for-byte the same image (confirmed in production for two Royal
+  // Albert Hall events -- same SHA-256, different tokens), so
   // name-matching alone missed real duplicates; contentHash catches those.
-  // Best-effort, not airtight: card-building runs concurrently
+  // Best-effort within one build: card-building runs concurrently
   // (Promise.all across a day's items, and across days), so two cards
-  // whose FIRST choice already collides on a first-ever (fully uncached)
-  // generation could theoretically both claim it before either one's
-  // check runs. Once a pick is made it's cached, though, so every
-  // subsequent print/preview of this trip stays deduped regardless.
-  const usedPlacePhotoNames = new Set();
-  const usedPlacePhotoHashes = new Set();
+  // could theoretically both claim a photo before either one's check runs
+  // -- but the cached-branch collision check (generation-time renders only)
+  // now heals exactly that on the NEXT build, so duplicates can no longer
+  // survive across generations the way they used to.
+  const usedPlacePhotoNames = new Map();
+  const usedPlacePhotoHashes = new Map();
+  // Deterministic ownership pre-pass: claim every place card's ALREADY-CACHED
+  // photo in DOCUMENT order before any card builds. Card building fans out
+  // concurrently (Promise.all across days and within a day), so without this
+  // two cards sharing a cached photo could each check the maps before either
+  // had registered -- both kept the photo, and since both were cached the
+  // duplicate then survived every later build too. Claimed up front, the
+  // first card in document order owns the photo and every later card's
+  // collision is detected no matter how the async builds interleave.
+  // Mirrors tripsyDetailedCardHtml's place-card dispatch exactly: layovers,
+  // P/S rows, transportation (their repeats are by design) and a split
+  // stay's -end half never make a place card, so they claim nothing.
+  for (const preDayKey of dayKeys) {
+    for (const item of (summaryByDay.get(preDayKey) || [])) {
+      if (item.isLayover || item.psReservation) continue;
+      const ev = item.ev;
+      const raw = ev && ev.tripsyRaw;
+      if (!raw || (raw.resource !== 'hosting' && raw.resource !== 'activity')) continue;
+      if (ev._splitHalf === 'end') continue;
+      const preName = raw.name || ev.summary;
+      const preHint = raw.resource === 'hosting' ? '' : tripsyLodgingCityAt(ev.start);
+      const preKey = tripsyPlacePhotoCacheKey(preName, raw.address || '', ev.summary, preHint);
+      const entry = await Store.getTripsyPlacePhoto(preKey);
+      if (!entry || entry.skipped || !entry.driveFileId) continue;
+      if (entry.photoName && !usedPlacePhotoNames.has(entry.photoName)) usedPlacePhotoNames.set(entry.photoName, preKey);
+      if (entry.contentHash && !usedPlacePhotoHashes.has(entry.contentHash)) usedPlacePhotoHashes.set(entry.contentHash, preKey);
+    }
+  }
   const tripsyPlaceCardHtml = async (ev, blurb, rowKey, eventEntry, hasAnyBlurb) => {
     const raw = ev.tripsyRaw;
     const name = raw.name || ev.summary;
@@ -29730,6 +29903,9 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, scrollToId,
           const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
             driveFileId, photoName, contentHash,
             triedPhotoNames: [...new Set([...(existing?.triedPhotoNames || []), photoName])],
+            // A transportation gallery pick is the owner's own judgment --
+            // the automatic wrong-airline healing must never overrule it.
+            ...(isTransportCard ? { liveryChecked: true } : {}),
           });
           if (!ok) toast('Could not save this photo choice. Please try again.', 'error');
         } catch (err) {
@@ -34894,8 +35070,12 @@ async function renderTravelView(chosenTripKey) {
 
   // Split multi-day stays/legs into check-in/check-out halves like My Trips, so
   // each half lands on its own day; group by day; keep day order chronological.
-  const expanded = expandMultiDayTripsyEvents((trip.events || []).filter(ev => ev && ev.start))
-    .sort((a, b) => new Date(a.start || 0) - new Date(b.start || 0));
+  // The lodging-next-to-its-transfer move applies here too, so Travel View's
+  // day order can't disagree with My Trips and the itinerary about whether a
+  // Check-in comes before or after the transfer that gets you there.
+  const expanded = placeTripsyLodgingNextToTransfers(
+    expandMultiDayTripsyEvents((trip.events || []).filter(ev => ev && ev.start))
+      .sort((a, b) => new Date(a.start || 0) - new Date(b.start || 0)));
   // P/S reservations aren't Tripsy events -- weave each matched one in next to its
   // flight (before it for a departure lounge, after it for arrival), same as the
   // My Trips timeline and the printed itinerary do.

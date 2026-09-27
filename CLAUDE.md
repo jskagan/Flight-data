@@ -571,6 +571,49 @@ step 4; git history has it if ever needed.
   naming NEITHER side keeps the lenient old behavior, since tier 3 exists precisely for drifted
   records. Tiers 1–2 are untouched — an exact flight number already pins the right leg.
   `pswrongflight_test.js`.
+- **A transportation card's photo is livery-CHECKED, because Places can't be trusted to show the
+  right airline** ("The flight on Singapore airlines should show a picture of a plane from
+  Singapore airlines, not a different airlines," 2026-09-27): the photo comes from a Google
+  PLACES listing (searching "Singapore Airlines" matches the airline's ticket office) and a
+  listing's photos are whatever people uploaded there — confirmed live: `"singapore
+  airlines|||transport"` pointed at an LA-area place showing another carrier's plane. No query
+  wording controls photo CONTENT, so `tripsyTransportationPhotoAcceptable(company, blob)` asks
+  Claude (one small vision call — `tripsyAttireClaudeCall`, sonnet, `thinking:false`+`low`, image
+  resized to 512px) whether the photo shows the company's own aircraft/branding or at least no
+  rival's; it FAILS SOFT in every direction (no Anthropic key or any error accepts the photo — a
+  card must never lose its picture to a verifier hiccup). `fetchTripsyTransportationPhoto` now,
+  when the leg has a company: walks the candidate pool (`MAX_LIVERY_CHECKS` = 4) and caches the
+  first photo that passes, stamped `liveryChecked:true`; nothing passing keeps the FIRST photo
+  stamped `liveryChecked:false` (shown — a photo beats a bare icon — but never re-healed; the
+  ordinary TTL refetch is its retry). An already-cached UNSTAMPED entry (the live Singapore
+  Airlines case) gets ONE healing check during a generation-time render (`_tripsyAllowPhotoFetch`,
+  the gate that bounds every fetch-time cost): pass → stamped, fail → refetched with the old
+  photoName marked tried. The owner's manual picks (🔄 Try Another, 🔍 manual search, 🗂 gallery
+  pick on a transportation card) stamp `liveryChecked:true` themselves — their own judgment,
+  never overruled by healing. Company-less legs keep the old first-photo path untouched (no
+  company, no wrong airline). `liverycheck_test.js`.
+- **A place-card photo never repeats across DIFFERENT events in one document** ("many duplicate
+  photos on the partial itinerary… we should not re-use a photo unless the event is exactly the
+  same as the prior event using the photo except on a different day," 2026-09-27). Duplicates
+  survived because dedup only ran on a photo's FIRST fetch: `tripsyDedupedPlacePhotoUrl`'s cached
+  branch showed everything verbatim ("the owner may deliberately want duplicates" — a design
+  decision this request reverses), so two events that cached the same photo in different
+  generations — or concurrently in one, the build fans out via `Promise.all` — duplicated forever.
+  Three pieces: **(1)** `usedPlacePhotoNames`/`usedPlacePhotoHashes` are MAPS of name/hash → the
+  owning `cacheKey` (`.has` checks unchanged from the Set days; the value adds WHO owns it). The
+  ask's exemption falls out of the cacheKey itself: the SAME event on another day has the same
+  name/address/title/hint → same key → same cached entry, never a collision; transportation and
+  P/S repeats stay allowed structurally — those cards never route through this helper. **(2)** a
+  document-order PRE-PASS in `buildTripsyPrintHtml` (right after the maps, and after the partial
+  filter, so it walks the rendered document) claims every place card's already-cached photo before
+  any card builds — without it, ownership depended on `Promise.all` interleaving and a duplicate
+  pair could both pass. Mirrors `tripsyDetailedCardHtml`'s dispatch (skips layover/P/S/
+  transportation/`-end` halves). **(3)** the cached branch, on a collision with another event's
+  photo, swaps to an unused candidate from this place's own pool (`tripsyFindUnusedPlacePhoto`,
+  old name kept in `triedPhotoNames`) — but ONLY during a generation-time render
+  (`_tripsyAllowPhotoFetch`; a plain open still never changes a photo, and is permanently fixed by
+  the next generation's swap); no unused candidate left → icon fallback beats repeating. The
+  first-fetch `isDuplicate` check is owner-aware the same way. `photodedup_test.js`.
 - **Categories**: flight / transportation / hotel / dining / concert / tour / spa / reception /
   cooking / other — each event's display `type`, derived from its `tripsyRaw.category` slug
   (`TRIPSY_ACTIVITY_CATEGORY_TO_TYPE`, mirrored in `tools/build_tripsy_snapshot.py`), including the
@@ -715,6 +758,25 @@ step 4; git history has it if ever needed.
   the dialog; a FAILED run shows no destination dialog at all (`workSucceeded` guard) — the error
   message stays visible in the changes dialog with Continue re-enabled. The zero-checked path's
   stage line reads `Saving…` now, not the retired `Opening itinerary…`.
+- **A lodging row sorts next to the transfer that serves it, on EVERY ordering surface** ("the
+  hotel stay listed before the transportation to the hotel. That is not supposed to happen,"
+  2026-09-27): a hotel's stored check-in time is the property's NOMINAL hour (3:00 PM), which can
+  predate the very flights/car that get you there — the real Oct 12 read Check-out 12:00, flight
+  12:25, **Check-in 3:00 PM**, flight 5:00, car-to-the-hotel 6:20. `placeTripsyLodgingNextToTransfers`
+  (a deliberate post-sort MOVE, so `tripsyTimelineSortComparator` stays purely chronological and
+  transitive) puts a Check-in directly BELOW the first same-day transport ARRIVING at the lodging
+  and a Check-out directly ABOVE the one departing it, judged by `tripsyTransferSideForLodging` —
+  the lodging's NAME against the transport's endpoint descriptions first (a private transfer says
+  "Four Seasons Tented Camp", which the city test can't see; 10-char floor, either-direction
+  containment), city match as fallback. It ran on the My Trips timeline only until this report;
+  now it also runs in `buildTripsyPrintDayData` (itinerary print/preview/summary/partial, diary,
+  narrative prompts, and the attire guide's day list — an existing guide may show its non-blocking
+  "may be out of date" note once, since `eventFingerprint` hashes the day order) and in Travel
+  View's own sort, so no surface disagrees. With no evidence tying a transport to the lodging
+  (airport codes never match a city name), time order is kept — the pass never invents a move; the
+  FIRST arriving match wins, so a dinner-return car naming the hotel can't drag the Check-in to
+  the end of the evening; layover glue is respected. `insertTripsyFlightArrivals` remains
+  timeline-only. `lodgingorder_test.js`.
 - **Itinerary/day views start from the earliest event, not the trip's `start_date`**: the day
   ranges, "Day N" numbering, and empty-day span all derive their first day from
   `tripsyItineraryStartDayKey(trip)` — the earliest day any visible, dated event falls on — rather
