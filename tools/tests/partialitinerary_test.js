@@ -72,7 +72,7 @@ assert(/data-partial-day="\$\{CSS\.escape\(dayKey\)\}"/.test(wirePanel),
 assert(/if \(!keys\.some\(k => k\.startsWith\('event:'\)\)\)/.test(wirePanel),
   'a selection with zero events is refused rather than rendering an empty document');
 assert(/Store\.saveTripsyPartialItinerary\(tripKey, keys, \{ mode, title, startDayKey, endDayKey \}\)\.then/.test(wirePanel)
-  && /closeAllTripsyTripPanels\(\);\s*\n\s*showTripsyPartialItinerary\(tripKey, new Set\(keys\), mode, \{ generateFirst: mode === 'full' && isOwner \}\);/.test(wirePanel),
+  && /closeAllTripsyTripPanels\(\);\s*\n\s*showTripsyPartialItinerary\(tripKey, new Set\(keys\), mode\);/.test(wirePanel),
   'View saves in the background (optimistic, with mode/title/span) and opens the document immediately');
 
 // ---- separate, read-only view; narratives come from the same cache ----

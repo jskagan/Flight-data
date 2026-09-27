@@ -839,21 +839,29 @@ step 4; git history has it if ever needed.
   (`Store.saveTripsyPartialItinerary`'s `extra` arg), and a successful save re-renders My Trips so
   the 🧭 menu's new **"Show <title>"** item (`data-tripsy-show-partial`, any viewer — read-only
   like Summary/Print; gated on `savedPartial.title`, so pre-title records just don't list) appears
-  immediately; Show reopens `showTripsyPartialItinerary(tripKey)` from the stored selection+mode
-  with no regeneration ever. **Summary mode** renders the Part-1-only build
-  (`{partialKeys, summaryOnly:true}` — the filter runs before the summary early-return, so the two
-  options compose); **full mode**, on creation only (`generateFirst`, owner),
-  first runs `tripsyPartialEnsureNarratives`: only MISSING included sections generate — intro if
-  Overview included, day write-ups for included days, Part-1 blurbs scoped via `summaryDayKeys` to
-  the partial's kept days whose included blurb-wanting rows lack one — through the ONE shared
+  immediately; Show reopens `showTripsyPartialItinerary(tripKey)` from the stored selection+mode.
+  **Summary mode** renders the Part-1-only build (`{partialKeys, summaryOnly:true}` — the filter
+  runs before the summary early-return, so the two options compose); **full mode runs
+  `tripsyPartialEnsureNarratives` on EVERY owner open, not just creation** ("there were no
+  generated narratives or photos in the itinerary," 2026-09-27: the one creation-time run had
+  failed/been interrupted — these are minutes-long Claude calls, and backgrounding the iPad app
+  mid-call kills them — and Show never retried, leaving the document bare forever; confirmed
+  against the live data: the saved partial existed with mode `full` while the trip's narrative
+  cache held ZERO entries). Only MISSING included sections generate — intro if Overview included,
+  day write-ups for included days, Part-1 blurbs scoped via `summaryDayKeys` to the partial's kept
+  days whose included blurb-wanting rows lack one — through the ONE shared
   `tripsyGenerateNarrativeSections` machinery, so an already-prepared full itinerary is copied
-  with zero Claude calls and anything generated here benefits the full itinerary too; then the
-  photo pre-fetch runs through the FILTERED build (`_tripsyAllowPhotoFetch` gate, same as the
-  Generate panel's) so only included places' photos are fetched. Deliberately NO
-  `tripsyRecordItineraryBaseline` — a side document must not acknowledge event changes the owner
-  hasn't reviewed. A failed generation toasts and still shows the document from whatever exists.
-  Save as PDF honors the stored mode (`overlay._partialMode`); a record saved before modes existed
-  reads as `full`. `partialmode_test.js`.
+  with zero Claude calls (Show stays instant) and anything generated here benefits the full
+  itinerary too. TWO generation calls (intro+days, then blurbs), each with its own save, so an
+  interruption keeps what already finished; a live `progress()` line reports each phase (and says
+  to keep the app foregrounded), and a failure shows a PERSISTENT `tripsyConfirmDialog` (a toast
+  fired while the app is backgrounded is never seen) then still renders what exists. Photos:
+  the owner's full-mode RENDER itself runs under `_tripsyAllowPhotoFetch` (same gate as the
+  Generate panel's pre-fetch), so missing included places' photos fetch-and-cache on open —
+  self-healing, and free once cached — instead of a second throwaway pre-fetch build.
+  Deliberately NO `tripsyRecordItineraryBaseline` — a side document must not acknowledge event
+  changes the owner hasn't reviewed. Save as PDF honors the stored mode (`overlay._partialMode`);
+  a record saved before modes existed reads as `full`. `partialmode_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS

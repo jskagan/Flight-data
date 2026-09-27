@@ -25054,7 +25054,7 @@ function wireTripsyPartialPanel(panel, tripKey) {
         else if (typeof renderTripsyEventsList === 'function') { try { renderTripsyEventsList(); } catch (e) { /* menu refreshes next render */ } }
       });
       closeAllTripsyTripPanels();
-      showTripsyPartialItinerary(tripKey, new Set(keys), mode, { generateFirst: mode === 'full' && isOwner });
+      showTripsyPartialItinerary(tripKey, new Set(keys), mode);
     })();
   });
 }
@@ -25090,15 +25090,22 @@ function tripsyPartialModeDialog() {
 // a later full Create finds them already done). Intro when Overview is
 // included, day write-ups for included days, and Part-1 summary blurbs for
 // days that still have an included blurb-wanting row without one (scoped via
-// summaryDayKeys so nothing already written is rewritten). Then the photo
-// pre-fetch, through the same filtered build the view renders -- so only the
-// included places' photos are fetched -- with the same _tripsyAllowPhotoFetch
-// gate the Generate panel's pre-fetch uses. Deliberately does NOT record the
-// itinerary baseline: this is a side document, and acknowledging event
-// changes is the full itinerary's review flow's job.
-async function tripsyPartialEnsureNarratives(tripKey, keys) {
+// summaryDayKeys so nothing already written is rewritten). Deliberately does
+// NOT record the itinerary baseline: this is a side document, and
+// acknowledging event changes is the full itinerary's review flow's job.
+// Runs on EVERY full-mode open, not just creation ("there were no generated
+// narratives or photos in the itinerary," 2026-09-27: the one creation-time
+// run had failed/been interrupted -- these are minutes-long Claude calls, and
+// backgrounding the iPad app mid-call kills them -- and Show never retried,
+// so the document stayed bare forever). With nothing missing it's a cheap
+// in-memory check and no API call is made. TWO generation calls rather than
+// one -- intro+days first, then the summary blurbs -- each with its own save,
+// so an interruption keeps what already finished instead of discarding the
+// whole run. Returns true when anything was generated.
+async function tripsyPartialEnsureNarratives(tripKey, keys, onStage) {
+  const stage = text => { try { if (onStage) onStage(text); } catch (e) { /* progress is best-effort */ } };
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
-  if (!trip) return;
+  if (!trip) return false;
   const { effectiveTrip, dayKeys, byDay, summaryByDay } = await buildTripsyPrintDayData(trip);
   const cache = await Store.getTripsyNarrativeCache();
   const includeIntro = keys.has('overview') && !cache[`${tripKey}::intro`];
@@ -25113,16 +25120,27 @@ async function tripsyPartialEnsureNarratives(tripKey, keys) {
     const rk = tripsySummaryRowKey(item);
     return rk && tripsySummaryRowWantsBlurb(item) && !blurbByKey.get(rk);
   }));
-  if (includeIntro || dayKeysToGenerate.length || summaryDayKeys.length) {
+  let generated = false;
+  if (includeIntro || dayKeysToGenerate.length) {
+    stage(`Writing the day narratives (${dayKeysToGenerate.length || 'overview'}${dayKeysToGenerate.length ? ' days' : ''}) — this can take a couple of minutes. Keep the app open in the foreground.`);
     await tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, {
       includeIntro,
-      includeSummary: summaryDayKeys.length > 0,
+      includeSummary: false,
       dayKeysToGenerate,
+    });
+    generated = true;
+  }
+  if (summaryDayKeys.length) {
+    stage('Writing the event summary lines…');
+    await tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, {
+      includeIntro: false,
+      includeSummary: true,
+      dayKeysToGenerate: [],
       summaryDayKeys,
     });
+    generated = true;
   }
-  _tripsyAllowPhotoFetch = true;
-  try { await buildTripsyPrintHtml(tripKey, { partialKeys: keys }); } catch (err) { console.error('Partial photo pre-fetch failed:', err); } finally { _tripsyAllowPhotoFetch = false; }
+  return generated;
 }
 
 // The read-only view itself -- same shell/pattern as the Summary overlay
@@ -25169,11 +25187,12 @@ function getOrCreateTripsyPartialOverlay() {
   });
   return overlay;
 }
-async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null, { generateFirst = false } = {}) {
+async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null) {
   const overlay = getOrCreateTripsyPartialOverlay();
   const content = overlay.querySelector('#tripsy-partial-content');
+  const progress = text => { content.innerHTML = `<div style="padding:24px; color:var(--muted);">${esc(text)}</div>`; };
   overlay.dataset.tripKey = tripKey;
-  content.innerHTML = `<div style="padding:24px; color:var(--muted);">Building partial itinerary…</div>`;
+  progress('Building partial itinerary…');
   overlay.style.display = 'flex';
   let keys = keysSet;
   if (!keys || !mode) {
@@ -25185,25 +25204,39 @@ async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null, 
   }
   overlay._partialKeys = keys;
   overlay._partialMode = mode;
-  // Full mode's creation path generates the included sections' missing
-  // narratives + photos first (an explicit choice in the mode dialog, real
-  // Claude calls) -- a later "Show" never regenerates: everything is already
-  // in the shared narrative cache, so it renders instantly from there. A
-  // failed generation still shows the document with whatever exists, rather
-  // than eating the click.
-  if (generateFirst) {
-    content.innerHTML = `<div style="padding:24px; color:var(--muted);">Generating narratives and photos for the included events — this can take a couple of minutes…</div>`;
+  // Full mode generates any included section still missing its narrative on
+  // EVERY open (owner only) -- Show self-heals a creation-time run that
+  // failed or was interrupted, rather than leaving the document bare forever
+  // (the 2026-09-27 report). With everything already generated this is a
+  // cheap in-memory check that makes no API call, so Show stays instant. A
+  // failure is a PERSISTENT dialog naming the reason (a toast fired while
+  // the iPad app is backgrounded is never seen), and the document still
+  // renders with whatever exists.
+  const ownerFull = mode === 'full' && isOwner;
+  if (ownerFull) {
     try {
-      await tripsyPartialEnsureNarratives(tripKey, keys);
+      await tripsyPartialEnsureNarratives(tripKey, keys, progress);
     } catch (e) {
       console.error('Partial narrative generation failed:', e);
-      toast(`Could not generate some narratives — showing what exists. (${(e && e.message) || 'unknown error'})`, 'error');
+      await tripsyConfirmDialog(
+        `Could not generate some of this partial itinerary's narratives — ${(e && e.message) || 'unknown error'}. Showing what exists; open it again to retry. Keep the app open in the foreground while it generates.`,
+        { title: '⚠️ Generation incomplete', yes: 'OK', no: null });
     }
-    content.innerHTML = `<div style="padding:24px; color:var(--muted);">Building partial itinerary…</div>`;
+    progress('Building partial itinerary…');
   }
-  const html = await buildTripsyPrintHtml(tripKey, { partialKeys: keys, summaryOnly: mode === 'summary' });
+  // For the owner's full view, the render itself may fetch (and cache)
+  // place photos -- same _tripsyAllowPhotoFetch gate the Generate panel's
+  // pre-fetch uses -- so missing photos self-heal on open too, without a
+  // second throwaway build. Already-cached photos make this free.
+  let html = null;
+  if (ownerFull) _tripsyAllowPhotoFetch = true;
+  try {
+    html = await buildTripsyPrintHtml(tripKey, { partialKeys: keys, summaryOnly: mode === 'summary' });
+  } finally {
+    if (ownerFull) _tripsyAllowPhotoFetch = false;
+  }
   if (html == null) {
-    content.innerHTML = `<div style="padding:24px; color:var(--muted);">This trip could not be loaded.</div>`;
+    progress('This trip could not be loaded.');
     return;
   }
   content.innerHTML = html;

@@ -49,10 +49,14 @@ assert(/summaryOnly: mode === 'summary'/.test(show),
   'THE ASK: summary mode renders just the summary itinerary (the Part-1-only build), full renders the whole document');
 assert(/mode = \(saved && saved\.mode\) \|\| 'full';/.test(show),
   'a record saved before modes existed reads as full -- exactly the pre-feature behavior');
-assert(/if \(generateFirst\) \{/.test(show) && /await tripsyPartialEnsureNarratives\(tripKey, keys\);/.test(show),
-  'THE ASK: full mode generates the missing narratives/photos FIRST, then shows the document');
-assert(/Could not generate some narratives — showing what exists/.test(show),
-  'a failed generation still shows the document rather than eating the click');
+assert(/const ownerFull = mode === 'full' && isOwner;/.test(show)
+  && /await tripsyPartialEnsureNarratives\(tripKey, keys, progress\);/.test(show),
+  'THE ASK: full mode generates the missing narratives FIRST (on EVERY owner open, so an interrupted creation run self-heals), then shows the document');
+assert(/Generation incomplete', yes: 'OK', no: null/.test(show),
+  'a failed generation shows a PERSISTENT dialog (a toast fired while the iPad app is backgrounded is never seen) and still renders what exists');
+assert(/if \(ownerFull\) _tripsyAllowPhotoFetch = true;/.test(show)
+  && /finally \{\s*\n\s*if \(ownerFull\) _tripsyAllowPhotoFetch = false;/.test(show),
+  'THE ASK: the owner\'s full render may fetch photos itself, so missing photos self-heal on open (cached ones are free)');
 const ensure = extractFn('tripsyPartialEnsureNarratives');
 assert(/keys\.has\('overview'\) && !cache\[`\$\{tripKey\}::intro`\]/.test(ensure)
   && /keys\.has\(`day:\$\{k\}`\) && !cache\[`\$\{tripKey\}::day::\$\{k\}`\]/.test(ensure),
@@ -60,8 +64,8 @@ assert(/keys\.has\('overview'\) && !cache\[`\$\{tripKey\}::intro`\]/.test(ensure
 assert(/tripsyGenerateNarrativeSections\(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, \{/.test(ensure)
   && /summaryDayKeys,/.test(ensure),
   'generation goes through the ONE shared narrative machinery, summary rows scoped to the partial\'s days -- the full itinerary gains these sections too');
-assert(/_tripsyAllowPhotoFetch = true;/.test(ensure) && /buildTripsyPrintHtml\(tripKey, \{ partialKeys: keys \}\)/.test(ensure),
-  'THE ASK: photos pre-fetch through the same FILTERED build the view renders, so only included places\' photos are fetched');
+assert((ensure.match(/tripsyGenerateNarrativeSections\(/g) || []).length === 2,
+  'TWO generation calls (intro+days, then summary blurbs), each with its own save -- an interruption keeps what already finished');
 assert(!/tripsyRecordItineraryBaseline/.test(ensure),
   'deliberately no baseline record -- a side document must not acknowledge event changes the owner has not reviewed');
 // The Save as PDF button honors the mode too.
@@ -91,7 +95,7 @@ assert(/savedPartial && savedPartial\.title\s*\n\s*\? menuListButtonHtml/.test(h
   eval(extractFn('tripsyFilterPrintDayDataForPartial').replace(/^function /, 'var tripsyFilterPrintDayDataForPartial = function '));
 
   const run = async (keys, cache) => {
-    const calls = { gen: null, photo: 0 };
+    const calls = { gen: [], stages: [] };
     const dayData = {
       effectiveTrip: { name: 'T' },
       dayKeys: ['d1', 'd2'],
@@ -101,42 +105,42 @@ assert(/savedPartial && savedPartial\.title\s*\n\s*\? menuListButtonHtml/.test(h
         ['d2', [{ dayKey: 'd2', ev: { id: 'b1', tripsyRaw: { resource: 'activity' } } }]],
       ]),
     };
-    const f = new Function('tripKey', 'keys',
+    const f = new Function('tripKey', 'keys', 'onStageArg',
       'tripsyDecryptedTrips', 'buildTripsyPrintDayData', 'Store', 'tripsyFilterPrintDayDataForPartial',
-      'tripsySummaryRowKey', 'tripsySummaryRowWantsBlurb', 'tripsyGenerateNarrativeSections', 'buildTripsyPrintHtml', 'console',
-      src + '\nreturn tripsyPartialEnsureNarratives(tripKey, keys);');
-    await f('t1', keys,
+      'tripsySummaryRowKey', 'tripsySummaryRowWantsBlurb', 'tripsyGenerateNarrativeSections',
+      src + '\nreturn tripsyPartialEnsureNarratives(tripKey, keys, onStageArg);');
+    const generated = await f('t1', keys, s => calls.stages.push(s),
       [{ key: 't1' }], async () => dayData,
       { getTripsyNarrativeCache: async () => cache },
       tripsyFilterPrintDayDataForPartial, tripsySummaryRowKey, () => true,
-      async (tk, et, dk, bd, sbd, opts) => { calls.gen = opts; },
-      async () => { calls.photo++; return ''; },
-      console);
+      async (tk, et, dk, bd, sbd, opts) => { calls.gen.push(opts); });
+    calls.generated = generated;
     return calls;
   };
 
-  // Nothing generated yet, everything included: intro + both days + both days' summary rows.
+  // Nothing generated yet, everything included: intro + both days, then both days' summary rows.
   let calls = await run(new Set(['overview', 'day:d1', 'day:d2', 'event:ev:a1', 'event:ev:b1']), {});
-  assert(calls.gen && calls.gen.includeIntro === true
-    && calls.gen.dayKeysToGenerate.join(',') === 'd1,d2'
-    && calls.gen.summaryDayKeys.join(',') === 'd1,d2' && calls.gen.includeSummary === true,
-    'THE ASK: full mode generates narratives for every included section that lacks one');
-  assert(calls.photo === 1, 'and pre-fetches photos through the filtered build');
+  assert(calls.gen.length === 2
+    && calls.gen[0].includeIntro === true && calls.gen[0].dayKeysToGenerate.join(',') === 'd1,d2' && calls.gen[0].includeSummary === false
+    && calls.gen[1].includeSummary === true && calls.gen[1].summaryDayKeys.join(',') === 'd1,d2',
+    'THE ASK: full mode generates narratives for every included section that lacks one -- days first, blurbs second, separately saved');
+  assert(calls.generated === true && calls.stages.length === 2,
+    'the run reports progress per phase and says it generated');
 
-  // Full itinerary already prepared: nothing regenerates, photos still warm the cache.
+  // Full itinerary already prepared: nothing regenerates.
   const fullCache = {
     't1::intro': { content: {} },
     't1::day::d1': { content: {} }, 't1::day::d2': { content: {} },
     't1::summary': { content: { rows: [{ row_key: 'ev:a1', blurb: 'x' }, { row_key: 'ev:b1', blurb: 'y' }] } },
   };
   calls = await run(new Set(['overview', 'day:d1', 'day:d2', 'event:ev:a1', 'event:ev:b1']), fullCache);
-  assert(calls.gen === null,
-    'an already-generated full itinerary is copied, never re-generated -- zero Claude calls');
+  assert(calls.gen.length === 0 && calls.generated === false,
+    'an already-generated full itinerary is copied, never re-generated -- zero Claude calls, so Show stays instant');
 
   // Only day 2's event included, overview excluded: generation is scoped to it.
   calls = await run(new Set(['day:d2', 'event:ev:b1']), { 't1::intro': { content: {} } });
-  assert(calls.gen && calls.gen.includeIntro === false
-    && calls.gen.dayKeysToGenerate.join(',') === 'd2'
-    && calls.gen.summaryDayKeys.join(',') === 'd2',
+  assert(calls.gen.length === 2
+    && calls.gen[0].includeIntro === false && calls.gen[0].dayKeysToGenerate.join(',') === 'd2'
+    && calls.gen[1].summaryDayKeys.join(',') === 'd2',
     'excluded sections (and the excluded day) are never generated -- the partial only pays for what it shows');
 })();
