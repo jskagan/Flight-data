@@ -57,11 +57,11 @@ assert(/Generation incomplete', yes: 'OK', no: null/.test(show),
 assert(/generation\.status === 'queued' \|\| generation\.status === 'pending'/.test(show)
   && /being created in the background — you can close the app/.test(show),
   'THE 2026-09-27 ASK: missing narratives are written in the BACKGROUND -- the document renders now, with a banner saying the app can be closed');
-assert(/content\.prepend\(banner\)/.test(show) && show.indexOf('content.prepend(banner)') < show.indexOf('getOrCreateTripsyPrintRoot().innerHTML = html'),
+assert(/content\.prepend\(banner\)/.test(show) && /getOrCreateTripsyPrintRoot\(\)\.innerHTML = freshHtml;/.test(show),
   'the banner lives in the overlay only -- the print root gets the bare document, so Save as PDF never carries an app status line');
-assert(/if \(ownerFull\) _tripsyAllowPhotoFetch = true;/.test(show)
-  && /finally \{\s*\n\s*if \(ownerFull\) _tripsyAllowPhotoFetch = false;/.test(show),
-  'THE ASK: the owner\'s full render may fetch photos itself, so missing photos self-heal on open (cached ones are free)');
+assert(!/_tripsyAllowPhotoFetch = true/.test(show)
+  && /if \(ownerFull\) \{\s*\n\s*tripsyBackgroundPhotoMaintenance\(tripKey/.test(show),
+  '"Why is there a delay when I open my partial itinerary?" (2026-09-27): the first paint is pure cache -- photo fetching/healing runs in the BACKGROUND maintenance pass, which repaints only if it changed something');
 const ensure = extractFn('tripsyPartialEnsureNarratives');
 assert(/keys\.has\('overview'\) && !cache\[`\$\{tripKey\}::intro`\]/.test(ensure)
   && /keys\.has\(`day:\$\{k\}`\) && !cache\[`\$\{tripKey\}::day::\$\{k\}`\]/.test(ensure),

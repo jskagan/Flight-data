@@ -615,13 +615,30 @@ step 4; git history has it if ever needed.
   pair could both pass. Mirrors `tripsyDetailedCardHtml`'s dispatch (skips layover/P/S/
   transportation/`-end` halves). **(3)** the cached branch, on a collision with another event's
   photo, swaps to an unused candidate from this place's own pool (`tripsyFindUnusedPlacePhoto`,
-  old name kept in `triedPhotoNames`) — on any OWNER render, not just generation-time ones
-  (follow-up "There are still duplicate photos in the itinerary," 2026-09-27: a fully-generated
-  itinerary's plain Preview never runs under `_tripsyAllowPhotoFetch`, so a generation-gated heal
-  never fired for it — a duplicate is a defect to fix on sight, not a photo choice to preserve; a
-  VIEWER's open stays verbatim, they have no Places key anyway); no unused candidate left → icon
-  fallback beats repeating. The first-fetch `isDuplicate` check is owner-aware the same way.
-  `photodedup_test.js`.
+  old name kept in `triedPhotoNames`) — under `_tripsyAllowPhotoFetch` ONLY, which the owner's
+  opens now reach via **`tripsyBackgroundPhotoMaintenance`**: Preview and the partial overlay
+  paint instantly from pure cache, then rebuild the same document once in the background under
+  the gate (duplicate swaps, livery healing, TTL refetches, first-time fetches) and repaint in
+  place only if it changed — the string compare is a real signal because
+  `tripsyPlacePhotoDisplayUrl` memoizes object URLs per driveFileId, so an untouched document
+  rebuilds byte-identical. This shape resolved two dueling same-day reports: "There are still
+  duplicate photos in the itinerary" (a plain Preview never healed under a generation-only gate)
+  and "Why is there a delay when I open my partial itinerary? There should be nothing to generate
+  on an open" (an interim `|| isOwner` gate put every search, Claude livery call and TTL refetch
+  in front of the first paint). One maintenance run per tripKey+options at a time; a failure
+  leaves the first paint standing; a VIEWER's open stays verbatim (no Places key anyway). No
+  unused candidate left → icon fallback beats repeating, and the exhaustion is remembered per
+  session (`_tripsyDedupExhausted`) so no rebuild re-pays the fruitless search. The first-fetch
+  `isDuplicate` check is owner-aware the same way.
+  **(4)** every NEW-photo claim — a collision swap, or a first-fetch's duplicate decision — runs
+  one at a time through `tripsyClaimPlacePhotoSerially` (`_tripsyPhotoClaimChain`), and the
+  first-fetch duplicate TEST is evaluated inside the chain, not before (third report, "There are
+  still duplicate photos in the itinerary," 2026-09-27: five Four Seasons Tented Camp activities
+  shared one contentHash in the live cache — the heal ran, but the swaps raced under
+  `Promise.all` card building, all scanned the same map snapshot, and all picked the same "first
+  unused" candidate, so the duplicates just moved to a new photo on every open). Serialized, each
+  claim sees every earlier claim's registration; the common case (cached, no collision) stays
+  fully parallel. `photodedup_test.js`.
 - **Categories**: flight / transportation / hotel / dining / concert / tour / spa / reception /
   cooking / other — each event's display `type`, derived from its `tripsyRaw.category` slug
   (`TRIPSY_ACTIVITY_CATEGORY_TO_TYPE`, mirrored in `tools/build_tripsy_snapshot.py`), including the
@@ -953,10 +970,12 @@ step 4; git history has it if ever needed.
   built by `tripsyNarrativePromptText`/`tripsySummaryBlurbsPromptText`, the very builders those
   generators' own message content comes from — and the drain files the answer with queue-time
   fingerprints, the scoped summary merge, and the same `tripsyRecordItineraryBaseline`
-  acknowledge step every full-itinerary generate path ends with. Photos: the owner's
-  full-mode RENDER itself runs under `_tripsyAllowPhotoFetch` (same gate as the Generate panel's
-  pre-fetch), so missing included places' photos fetch-and-cache on open — self-healing, and free
-  once cached — instead of a second throwaway pre-fetch build. Save as PDF honors the stored mode
+  acknowledge step every full-itinerary generate path ends with. Photos: the full-mode
+  open paints instantly from pure cache, then runs `tripsyBackgroundPhotoMaintenance` (fetch
+  gate on) in the background and repaints in place only if something changed — missing photos
+  still self-heal on open, but never in front of the first paint ("Why is there a delay when I
+  open my partial itinerary?", 2026-09-27); the repaint restores the generation banner via
+  `overlay._partialGenPending`. Save as PDF honors the stored mode
   (`overlay._partialMode`); a record saved before modes existed reads as `full`.
   **The cards' 🔄🗂🔍📋🚫 photo controls work here too** ("The buttons on the photos in the
   itinerary are not working," 2026-09-27): that wiring used to live inline in

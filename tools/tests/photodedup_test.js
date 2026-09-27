@@ -44,14 +44,27 @@ assert(/for \(const preDayKey of dayKeys\) \{/.test(html)
   && /if \(ev\._splitHalf === 'end'\) continue;/.test(html),
   'THE FIX: a document-order pre-pass claims cached photos before the concurrent card builds -- skipping layovers, P/S rows, transportation (repeats by design) and split -end halves, exactly like the card dispatch');
 const dedup = extractFn('tripsyDedupedPlacePhotoUrl');
-assert(/collidesWithOtherEvent && \(_tripsyAllowPhotoFetch \|\| isOwner\)/.test(dedup),
-  'a cached duplicate swaps on any OWNER render -- "There are still duplicate photos" came from the plain Preview open, which never runs under the generation gate; a viewer\'s open stays untouched');
+assert(/collidesWithOtherEvent && _tripsyAllowPhotoFetch\) \{/.test(dedup) && !/_tripsyAllowPhotoFetch \|\| isOwner/.test(dedup),
+  'the swap runs ONLY under the fetch gate -- the owner\'s opens get it via the BACKGROUND maintenance rebuild (tripsyBackgroundPhotoMaintenance), never in front of the first paint ("Why is there a delay when I open my partial itinerary?")');
+assert(/_tripsyDedupExhausted\.has\(cacheKey\)\) return null;/.test(dedup) && /_tripsyDedupExhausted\.add\(cacheKey\);/.test(dedup),
+  'an exhausted candidate pool is remembered for the session -- the icon stays without re-running the fruitless search on every rebuild');
+assert(/async function tripsyBackgroundPhotoMaintenance\(tripKey, buildOpts, firstHtml, applyRepaint\)/.test(html)
+  && /tripsyBackgroundPhotoMaintenance\(tripKey, undefined, html, freshHtml => \{/.test(html)
+  && /tripsyBackgroundPhotoMaintenance\(tripKey, \{ partialKeys: keys, summaryOnly: false \}, html, freshHtml => \{/.test(html),
+  'both owner surfaces (Preview and the partial overlay) run the maintenance rebuild AFTER their cached fast paint, repainting only if it changed something');
+assert(/let _tripsyPhotoClaimChain = Promise\.resolve\(\);/.test(html)
+  && (dedup.match(/tripsyClaimPlacePhotoSerially\(async \(\) => \{/g) || []).length === 2,
+  'THE THIRD-REPORT FIX: both claim paths (collision swap AND first-fetch decision) run through ONE serial chain -- parallel siblings were all picking the same "first unused" candidate');
 assert(/\(nameOwner !== undefined && nameOwner !== cacheKey\)/.test(dedup),
   'THE ASK\'s exemption: a photo owned by this SAME event (same cacheKey -- same name/title/address, any day) is never a collision');
 
 // ---- executed: the cached-branch collision logic ----
 (async () => {
   const src = extractFn('tripsyDedupedPlacePhotoUrl').replace(/^async function /, 'var tripsyDedupedPlacePhotoUrl = async function ');
+  // The claim chain the function routes its swaps/decisions through.
+  const chainHelperSrc = html.match(/let _tripsyPhotoClaimChain = Promise\.resolve\(\);[\s\S]*?\n\}/)[0]
+    .replace('let _tripsyPhotoClaimChain', 'var _tripsyPhotoClaimChain')
+    .replace('function tripsyClaimPlacePhotoSerially', 'var tripsyClaimPlacePhotoSerially = function ');
 
   const run = async ({ cached, names = [], hashes = [], allowFetch = true, owner = true, alt = null, fresh = null }) => {
     const calls = { recached: [], altSearches: 0 };
@@ -61,7 +74,7 @@ assert(/\(nameOwner !== undefined && nameOwner !== cacheKey\)/.test(dedup),
     const f = new Function('nameArg', 'usedNames', 'usedHashes', 'calls', 'entryRef', 'altArg', 'freshArg',
       '_tripsyAllowPhotoFetch', 'isOwner', 'tripsyPlacePhotoCacheKey', 'Store', 'fetchTripsyPlacePhoto',
       'tripsyFindUnusedPlacePhoto', 'tripsyHashBlob', 'console',
-      'var tripsyPlacePhotoCacheDirty = false;\n' + src
+      'var tripsyPlacePhotoCacheDirty = false;\nvar _tripsyDedupExhausted = new Set();\n' + chainHelperSrc + '\n' + src
       + '\nreturn tripsyDedupedPlacePhotoUrl(nameArg, "addr", "title", "", usedNames, usedHashes);');
     const url = await f('Place', usedNames, usedHashes, calls, null, alt, fresh,
       allowFetch, owner,
@@ -106,16 +119,65 @@ assert(/\(nameOwner !== undefined && nameOwner !== cacheKey\)/.test(dedup),
   assert(r.url === null && r.calls.recached.length === 0,
     'with no unused candidate left, the card falls back to its icon rather than repeat another event\'s photo');
 
-  // The OWNER's plain open (no fetch gate) swaps too -- the live "still
-  // duplicate photos" report was the fully-generated itinerary's Preview,
-  // which never runs under the generation gate.
-  r = await run({ cached, names: [['P1', 'key:OTHER']], allowFetch: false, owner: true, alt: altPhoto });
-  assert(r.url === 'alt-url' && r.calls.recached.length === 1,
-    'THE FIX (round 2): the owner\'s plain Preview open heals a duplicate too -- no generation required');
-
-  // A VIEWER's open never swaps: they have no Places key to find an
-  // alternative with, and the owner\'s next open fixes it for everyone.
-  r = await run({ cached, names: [['P1', 'key:OTHER']], allowFetch: false, owner: false, alt: altPhoto });
+  // With the gate off (a FAST cached paint -- the owner's, or any viewer's)
+  // the duplicate shows verbatim and costs nothing; the owner's background
+  // maintenance rebuild (gate on) is where it heals, off the critical path.
+  r = await run({ cached, names: [['P1', 'key:OTHER']], allowFetch: false, alt: altPhoto });
   assert(r.url === 'cached-url' && r.calls.altSearches === 0,
-    'a viewer\'s open shows the cached photo untouched');
+    'the fast first paint never pays for a swap -- "There should be nothing to generate on an open"');
+})();
+
+// ---- executed: CONCURRENT colliding cards take DIFFERENT alternatives ----
+// The live third-report shape: five Four Seasons Tented Camp activities all
+// cached with one photo; the heal ran, but the swaps raced (Promise.all card
+// building) and every one picked the same "first unused" candidate -- the
+// duplicates just moved to a new photo. Serialized claims fix it: each swap
+// sees every earlier swap's registration.
+(async () => {
+  const chainSrc = html.match(/let _tripsyPhotoClaimChain = Promise\.resolve\(\);[\s\S]*?\n\}/)[0]
+    .replace('let _tripsyPhotoClaimChain', 'var _tripsyPhotoClaimChain')
+    .replace('function tripsyClaimPlacePhotoSerially', 'var tripsyClaimPlacePhotoSerially = function ');
+  const dedupSrc = extractFn('tripsyDedupedPlacePhotoUrl').replace(/^async function /, 'var tripsyDedupedPlacePhotoUrl = async function ');
+  const factory = new Function('deps',
+    'var { tripsyPlacePhotoCacheKey, Store, fetchTripsyPlacePhoto, tripsyFindUnusedPlacePhoto, tripsyHashBlob } = deps;\n'
+    + 'var _tripsyAllowPhotoFetch = true, isOwner = true, tripsyPlacePhotoCacheDirty = false;\nvar _tripsyDedupExhausted = new Set();\n'
+    + 'var console = deps.console;\n'
+    + chainSrc + '\n' + dedupSrc + '\nreturn tripsyDedupedPlacePhotoUrl;');
+
+  const entries = {
+    'key:hike|camp|hike|': { driveFileId: 'd2', photoName: 'SHARED', contentHash: 'H-SHARED', fetchedAt: new Date().toISOString() },
+    'key:dinner|camp|dinner|': { driveFileId: 'd3', photoName: 'SHARED', contentHash: 'H-SHARED', fetchedAt: new Date().toISOString() },
+    'key:tour|camp|tour|': { driveFileId: 'd4', photoName: 'SHARED', contentHash: 'H-SHARED', fetchedAt: new Date().toISOString() },
+  };
+  const pool = ['ALT-A', 'ALT-B', 'ALT-C']; // the camp listing's other photos
+  const usedNames = new Map([['SHARED', 'key:first|camp|first|']]); // pre-pass: the first card owns the shared photo
+  const usedHashes = new Map([['H-SHARED', 'key:first|camp|first|']]);
+  const dedup = factory({
+    tripsyPlacePhotoCacheKey: (n, a, t, h) => `key:${n}|${a}|${t}|${h}`,
+    Store: {
+      getTripsyPlacePhoto: async k => entries[k] || null,
+      cacheTripsyPlacePhotoLocal: (k, fields) => { entries[k] = fields; },
+    },
+    fetchTripsyPlacePhoto: async () => 'cached-url',
+    // Mimics the real pool walk against the LIVE maps, with a real await so
+    // the race is genuine: without serialization all three see the same
+    // snapshot and all return ALT-A.
+    tripsyFindUnusedPlacePhoto: async (n, a, t, h, names, hashes) => {
+      await new Promise(res => setTimeout(res, 5));
+      const pick = pool.find(p => !names.has(p) && !hashes.has('H-' + p));
+      return pick ? { photoName: pick, contentHash: 'H-' + pick, driveFileId: 'D-' + pick, photoDataUrl: 'url-' + pick } : null;
+    },
+    tripsyHashBlob: async () => 'h-x',
+    console,
+  });
+  const [u1, u2, u3] = await Promise.all([
+    dedup('hike', 'camp', 'hike', '', usedNames, usedHashes),
+    dedup('dinner', 'camp', 'dinner', '', usedNames, usedHashes),
+    dedup('tour', 'camp', 'tour', '', usedNames, usedHashes),
+  ]);
+  const got = [u1, u2, u3].sort().join(',');
+  assert(got === 'url-ALT-A,url-ALT-B,url-ALT-C',
+    `THE THIRD-REPORT FIX: three concurrent colliding cards take three DIFFERENT alternatives (got: ${got})`);
+  assert(usedNames.get('ALT-A') !== usedNames.get('ALT-B') && usedNames.get('ALT-B') !== usedNames.get('ALT-C'),
+    'each alternative is claimed by its own event, so later builds keep the assignment stable');
 })();

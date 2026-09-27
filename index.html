@@ -20140,6 +20140,61 @@ async function tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHin
 // image (confirmed in production for two Royal Albert Hall events). Falls
 // back to null (the caller's own placeholder/fallback) if every candidate
 // found for this place is already used. Mutates the maps in place.
+// Every NEW-photo claim -- a collision swap, or a first-time fetch's
+// duplicate decision -- runs ONE AT A TIME through this chain. Card
+// building fans out concurrently (Promise.all across days and within a
+// day), and the used-photo maps are shared mutable state: when several
+// colliding cards hunted for an alternative IN PARALLEL, they all scanned
+// the same map snapshot and all picked the same "first unused" candidate
+// -- five Four Seasons Tented Camp activities kept converging on one photo
+// no matter how many times the heal ran ("There are still duplicate photos
+// in the itinerary," 2026-09-27, third report; confirmed in the live
+// cache: five activity entries sharing one contentHash). Serialized, each
+// claim sees every earlier claim's registration, so successive cards take
+// successive candidates. Only the claim paths pay the serialization --
+// the common case (cached photo, no collision) stays fully parallel.
+let _tripsyPhotoClaimChain = Promise.resolve();
+function tripsyClaimPlacePhotoSerially(work) {
+  const run = _tripsyPhotoClaimChain.then(work, work);
+  _tripsyPhotoClaimChain = run.then(() => {}, () => {});
+  return run;
+}
+// Places whose duplicate-heal search came up empty this session -- see the
+// exhaustion note in tripsyDedupedPlacePhotoUrl's collision branch.
+const _tripsyDedupExhausted = new Set();
+// The owner's Preview and partial overlays paint INSTANTLY from cache, then
+// run the SAME build once more in the background under _tripsyAllowPhotoFetch
+// -- TTL refetches, wrong-airline livery healing, duplicate-photo swaps,
+// first-time photo fetches -- and repaint only if the result differs ("Why is
+// there a delay when I open my partial itinerary? There should be nothing to
+// generate on an open," 2026-09-27: all of that maintenance used to run in
+// front of the first paint). The stale-while-revalidate shape the app's data
+// syncs already use, applied to photos. The html string compare is a real
+// change signal because tripsyPlacePhotoDisplayUrl memoizes object URLs per
+// driveFileId: an untouched document rebuilds byte-identical. One run per
+// tripKey+options at a time; a failure is logged and the first paint simply
+// stands.
+const _tripsyPhotoMaintenanceInFlight = new Set();
+async function tripsyBackgroundPhotoMaintenance(tripKey, buildOpts, firstHtml, applyRepaint) {
+  if (!isOwner) return;
+  const key = `${tripKey}|${JSON.stringify(buildOpts || {})}`;
+  if (_tripsyPhotoMaintenanceInFlight.has(key)) return;
+  _tripsyPhotoMaintenanceInFlight.add(key);
+  try {
+    _tripsyAllowPhotoFetch = true;
+    let html;
+    try {
+      html = await buildTripsyPrintHtml(tripKey, buildOpts);
+    } finally {
+      _tripsyAllowPhotoFetch = false;
+    }
+    if (html != null && html !== firstHtml) applyRepaint(html);
+  } catch (e) {
+    console.error('Background photo maintenance failed (first paint stands):', e);
+  } finally {
+    _tripsyPhotoMaintenanceInFlight.delete(key);
+  }
+}
 async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes) {
   const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle, locationHint);
   const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
@@ -20156,15 +20211,17 @@ async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHin
   // the SAME event recurring on another day has the same
   // name/address/title/hint, so the same cacheKey and the same cached entry
   // -- only a photo owned by a DIFFERENT cacheKey counts as a collision.
-  // The swap runs on any OWNER render, not just generation-time ones
-  // ("There are still duplicate photos in the itinerary," 2026-09-27: a
-  // fully-generated itinerary's plain Preview open never runs under
-  // _tripsyAllowPhotoFetch, so a generation-gated heal never fired for it
-  // and the duplicates just stayed). A duplicate is a defect to fix on
-  // sight, not a photo choice to preserve; a VIEWER's open still shows the
-  // cached photo untouched -- they have no Places key to find an
-  // alternative with anyway, and the owner's next open fixes it for
-  // everyone. Transportation and P/S cards never route through here (their
+  // The swap runs ONLY under _tripsyAllowPhotoFetch -- which is no longer
+  // just the generation passes: the owner's plain Preview/partial opens run
+  // a BACKGROUND maintenance rebuild under the same gate
+  // (tripsyBackgroundPhotoMaintenance below) right after their fast cached
+  // first paint, so duplicates still heal on sight ("There are still
+  // duplicate photos in the itinerary," 2026-09-27) without the searches,
+  // TTL refetches and livery checks ever blocking an open ("Why is there a
+  // delay when I open my partial itinerary?", same day -- an earlier
+  // version gated on `|| isOwner`, which put all that work in front of the
+  // first paint). A viewer's open shows the cached photo untouched either
+  // way. Transportation and P/S cards never route through here (their
   // repeats are by design), so the rule's exceptions are structural.
   if (cachedEntry && cachedEntry.driveFileId) {
     const nameOwner = cachedEntry.photoName ? usedPlacePhotoNames.get(cachedEntry.photoName) : undefined;
@@ -20172,21 +20229,34 @@ async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHin
     const collidesWithOtherEvent =
       (nameOwner !== undefined && nameOwner !== cacheKey) ||
       (hashOwner !== undefined && hashOwner !== cacheKey);
-    if (collidesWithOtherEvent && (_tripsyAllowPhotoFetch || isOwner)) {
-      const alt = await tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
-      if (alt) {
-        Store.cacheTripsyPlacePhotoLocal(cacheKey, {
-          driveFileId: alt.driveFileId, photoName: alt.photoName, contentHash: alt.contentHash,
-          triedPhotoNames: [...new Set([...(cachedEntry.triedPhotoNames || []), alt.photoName])],
-        });
-        tripsyPlacePhotoCacheDirty = true;
-        usedPlacePhotoNames.set(alt.photoName, cacheKey);
-        if (alt.contentHash) usedPlacePhotoHashes.set(alt.contentHash, cacheKey);
-        return alt.photoDataUrl;
-      }
-      // Every candidate for this place is already used elsewhere: the icon
-      // fallback beats repeating another event's photo.
-      return null;
+    // A place whose whole candidate pool was already exhausted this session
+    // keeps its icon fallback without re-running the search on every
+    // rebuild -- the searches are the expensive part, and the answer can't
+    // change until something else releases a photo.
+    if (collidesWithOtherEvent && _tripsyDedupExhausted.has(cacheKey)) return null;
+    if (collidesWithOtherEvent && _tripsyAllowPhotoFetch) {
+      // Serialized: a parallel sibling's swap may claim candidates while we
+      // wait, and the alt search must see those claims (see
+      // tripsyClaimPlacePhotoSerially above).
+      return await tripsyClaimPlacePhotoSerially(async () => {
+        const alt = await tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
+        if (alt) {
+          Store.cacheTripsyPlacePhotoLocal(cacheKey, {
+            driveFileId: alt.driveFileId, photoName: alt.photoName, contentHash: alt.contentHash,
+            triedPhotoNames: [...new Set([...(cachedEntry.triedPhotoNames || []), alt.photoName])],
+          });
+          tripsyPlacePhotoCacheDirty = true;
+          usedPlacePhotoNames.set(alt.photoName, cacheKey);
+          if (alt.contentHash) usedPlacePhotoHashes.set(alt.contentHash, cacheKey);
+          return alt.photoDataUrl;
+        }
+        // Every candidate for this place is already used elsewhere: the icon
+        // fallback beats repeating another event's photo, and the exhaustion
+        // is remembered for the session so no later rebuild pays for the
+        // same fruitless search again.
+        _tripsyDedupExhausted.add(cacheKey);
+        return null;
+      });
     }
     const url = await fetchTripsyPlacePhoto(name, address, eventTitle, locationHint);
     if (cachedEntry.photoName && !usedPlacePhotoNames.has(cachedEntry.photoName)) usedPlacePhotoNames.set(cachedEntry.photoName, cacheKey);
@@ -20212,35 +20282,42 @@ async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHin
       console.error('tripsyDedupedPlacePhotoUrl: failed to hash photo for dedup:', e);
     }
   }
-  // Same owner-aware test as the cached branch: a photo this SAME event
-  // already claimed (same cacheKey) is not a duplicate, one claimed by any
-  // OTHER event is.
-  const isDuplicate = photoUrl && (
-    (photoName && usedPlacePhotoNames.has(photoName) && usedPlacePhotoNames.get(photoName) !== cacheKey) ||
-    (photoHash && usedPlacePhotoHashes.has(photoHash) && usedPlacePhotoHashes.get(photoHash) !== cacheKey)
-  );
-  if (isDuplicate) {
-    const alt = await tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
-    if (alt) {
-      photoUrl = alt.photoDataUrl;
-      photoName = alt.photoName;
-      photoHash = alt.contentHash;
-      Store.cacheTripsyPlacePhotoLocal(cacheKey, {
-        driveFileId: alt.driveFileId, photoName, contentHash: photoHash,
-        triedPhotoNames: [...new Set([...(cachedEntry?.triedPhotoNames || []), photoName])],
-      });
-      tripsyPlacePhotoCacheDirty = true;
-    } else {
-      // No unused candidate left for this place -- caller falls back to
-      // its own placeholder rather than repeat a photo already shown.
-      photoUrl = null;
-      photoName = null;
-      photoHash = null;
+  // The duplicate DECISION and the claim run inside the serial chain (see
+  // tripsyClaimPlacePhotoSerially above): the test is evaluated in there,
+  // not before, because a parallel sibling may have claimed this very
+  // photo while we awaited our own fetch -- deciding on a stale snapshot
+  // is exactly how two first-time cards both kept one photo. The test is
+  // owner-aware like the cached branch: a photo this SAME event already
+  // claimed (same cacheKey) is not a duplicate, one claimed by any OTHER
+  // event is.
+  return await tripsyClaimPlacePhotoSerially(async () => {
+    const isDuplicate = photoUrl && (
+      (photoName && usedPlacePhotoNames.has(photoName) && usedPlacePhotoNames.get(photoName) !== cacheKey) ||
+      (photoHash && usedPlacePhotoHashes.has(photoHash) && usedPlacePhotoHashes.get(photoHash) !== cacheKey)
+    );
+    if (isDuplicate) {
+      const alt = await tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
+      if (alt) {
+        photoUrl = alt.photoDataUrl;
+        photoName = alt.photoName;
+        photoHash = alt.contentHash;
+        Store.cacheTripsyPlacePhotoLocal(cacheKey, {
+          driveFileId: alt.driveFileId, photoName, contentHash: photoHash,
+          triedPhotoNames: [...new Set([...(cachedEntry?.triedPhotoNames || []), photoName])],
+        });
+        tripsyPlacePhotoCacheDirty = true;
+      } else {
+        // No unused candidate left for this place -- caller falls back to
+        // its own placeholder rather than repeat a photo already shown.
+        photoUrl = null;
+        photoName = null;
+        photoHash = null;
+      }
     }
-  }
-  if (photoName && !usedPlacePhotoNames.has(photoName)) usedPlacePhotoNames.set(photoName, cacheKey);
-  if (photoHash && !usedPlacePhotoHashes.has(photoHash)) usedPlacePhotoHashes.set(photoHash, cacheKey);
-  return photoUrl;
+    if (photoName && !usedPlacePhotoNames.has(photoName)) usedPlacePhotoNames.set(photoName, cacheKey);
+    if (photoHash && !usedPlacePhotoHashes.has(photoHash)) usedPlacePhotoHashes.set(photoHash, cacheKey);
+    return photoUrl;
+  });
 }
 
 // Three overlapping squares, increasing opacity toward the front -- the
@@ -25680,34 +25757,45 @@ async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null) 
     }
     progress('Building partial itinerary…');
   }
-  // For the owner's full view, the render itself may fetch (and cache)
-  // place photos -- same _tripsyAllowPhotoFetch gate the Generate panel's
-  // pre-fetch uses -- so missing photos self-heal on open too, without a
-  // second throwaway build. Already-cached photos make this free.
-  let html = null;
-  if (ownerFull) _tripsyAllowPhotoFetch = true;
-  try {
-    html = await buildTripsyPrintHtml(tripKey, { partialKeys: keys, summaryOnly: mode === 'summary' });
-  } finally {
-    if (ownerFull) _tripsyAllowPhotoFetch = false;
-  }
+  // FAST PAINT, pure cache ("Why is there a delay when I open my partial
+  // itinerary? There should be nothing to generate on an open," 2026-09-27):
+  // this build runs with NO fetch gate, so TTL refetches, livery checks (a
+  // Claude call per airline) and duplicate-heal searches -- which an earlier
+  // version ran in front of the first paint -- never delay the open. The
+  // maintenance still happens, in tripsyBackgroundPhotoMaintenance below,
+  // which repaints in place only if it actually changed something.
+  const html = await buildTripsyPrintHtml(tripKey, { partialKeys: keys, summaryOnly: mode === 'summary' });
   if (html == null) {
     progress('This trip could not be loaded.');
     return;
   }
-  content.innerHTML = html;
   // The background-work banner goes into the OVERLAY only, never the print
   // root -- a Save as PDF taken while narratives are still being written
-  // shouldn't carry an app status line on its cover page.
-  if (generation.status === 'queued' || generation.status === 'pending') {
-    const banner = document.createElement('div');
-    banner.style.cssText = 'margin:0 0 14px; padding:12px 16px; border-radius:10px; background:#fef3c7; border:1px solid #f59e0b; color:#78350f; font-size:13px; line-height:1.5;';
-    banner.textContent = 'The written narratives for this itinerary are being created in the background — you can close the app. They usually land within a few minutes and will appear here automatically (or reopen this page later).';
-    content.prepend(banner);
-  }
+  // shouldn't carry an app status line on its cover page. Remembered on the
+  // overlay so the maintenance repaint below can restore it.
+  overlay._partialGenPending = generation.status === 'queued' || generation.status === 'pending';
+  const paint = freshHtml => {
+    content.innerHTML = freshHtml;
+    if (overlay._partialGenPending) {
+      const banner = document.createElement('div');
+      banner.style.cssText = 'margin:0 0 14px; padding:12px 16px; border-radius:10px; background:#fef3c7; border:1px solid #f59e0b; color:#78350f; font-size:13px; line-height:1.5;';
+      banner.textContent = 'The written narratives for this itinerary are being created in the background — you can close the app. They usually land within a few minutes and will appear here automatically (or reopen this page later).';
+      content.prepend(banner);
+    }
+    getOrCreateTripsyPrintRoot().innerHTML = freshHtml;
+  };
+  paint(html);
   content.scrollTop = 0;
-  getOrCreateTripsyPrintRoot().innerHTML = html;
   document.body.classList.add('tripsy-partial-open');
+  if (ownerFull) {
+    tripsyBackgroundPhotoMaintenance(tripKey, { partialKeys: keys, summaryOnly: false }, html, freshHtml => {
+      // Repaint only if this overlay is still showing this same trip.
+      if (overlay.style.display === 'none' || overlay.dataset.tripKey !== tripKey) return;
+      const st = content.scrollTop;
+      paint(freshHtml);
+      content.scrollTop = st;
+    });
+  }
 }
 async function showTripsyItinerarySummary(tripKey) {
   const overlay = getOrCreateTripsySummaryOverlay();
@@ -30568,6 +30656,18 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, scrollToId,
   if (overlay._tpRerunSearch) overlay._tpRerunSearch();
   // Jump to a specific section (from the Itinerary Status page).
   if (scrollToId) { const target = content.querySelector(`#${CSS.escape(scrollToId)}`); if (target) target.scrollIntoView({ block: 'start' }); }
+  // Photo maintenance (duplicate healing, livery checks, TTL refetches) runs
+  // in the background AFTER the paint, same as the partial overlay -- see
+  // tripsyBackgroundPhotoMaintenance. A repaint preserves scroll and refreshes
+  // the session HTML cache so the next reopen shows the healed document.
+  tripsyBackgroundPhotoMaintenance(tripKey, undefined, html, freshHtml => {
+    if (overlay.style.display !== 'flex' || overlay.dataset.tripKey !== tripKey) return;
+    const st = content.scrollTop;
+    content.innerHTML = freshHtml;
+    content.scrollTop = st;
+    if (overlay._tpRerunSearch) overlay._tpRerunSearch();
+    if (fp != null) tripsyBuiltItineraryCache.set(tripKey, { html: freshHtml, fingerprint: fp });
+  });
 }
 
 // First-time Preview flow (owner only): shown instead of the (as yet
