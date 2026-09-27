@@ -17,7 +17,7 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 // The menu's markup block, from the Create/Delete comment to the end of the template.
 const start = html.indexOf('// Create/Delete are the two states of one owner-only button:');
 assert(start > -1, 'sanity: found the itinerary menu markup');
-const block = html.slice(start, start + 3000);
+const block = html.slice(start, start + 6000);
 
 // ---- the gate exists and is the right condition ----
 assert(/const showPreviewItem = hasGeneratedNarrative \|\| !isOwner;/.test(block),

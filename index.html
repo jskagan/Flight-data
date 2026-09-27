@@ -3255,11 +3255,14 @@ const Store = {
   async getTripsyPartialItinerary(tripKey) {
     return (driveData.tripsyPartialItineraries || []).find(p => p.tripKey === tripKey) || null;
   },
-  async saveTripsyPartialItinerary(tripKey, keys) {
+  // `extra` carries the record's display fields: mode ('summary'|'full'),
+  // title ("Partial Itinerary <start> – <end>" -- what the 🧭 menu's Show
+  // item is labeled with), and startDayKey/endDayKey.
+  async saveTripsyPartialItinerary(tripKey, keys, extra = {}) {
     try {
       if (!driveData.tripsyPartialItineraries) driveData.tripsyPartialItineraries = [];
       driveData.tripsyPartialItineraries = driveData.tripsyPartialItineraries.filter(p => p.tripKey !== tripKey);
-      driveData.tripsyPartialItineraries.push({ tripKey, keys: [...keys], updatedAt: new Date().toISOString() });
+      driveData.tripsyPartialItineraries.push({ tripKey, keys: [...keys], ...extra, updatedAt: new Date().toISOString() });
       await persistDriveData();
       return true;
     } catch (e) {
@@ -25022,22 +25025,104 @@ function wireTripsyPartialPanel(panel, tripKey) {
     const viewBtn = e.target.closest('[data-tripsy-partial-view]');
     if (!viewBtn) return;
     e.stopPropagation();
-    const keys = [...panel.querySelectorAll('[data-tripsy-partial-checkbox]')]
-      .filter(x => x.classList.contains('tp-generate-panel-check-on'))
-      .map(x => x.dataset.tripsyPartialCheckbox);
+    const checked = [...panel.querySelectorAll('[data-tripsy-partial-checkbox]')]
+      .filter(x => x.classList.contains('tp-generate-panel-check-on'));
+    const keys = checked.map(x => x.dataset.tripsyPartialCheckbox);
     if (!keys.some(k => k.startsWith('event:'))) {
       toast('Select at least one event to include.', 'error');
       return;
     }
-    // Save in the background (optimistic -- the view renders from the
-    // in-memory selection either way; a failed save only costs resuming the
-    // same picks later, and says so).
-    Store.saveTripsyPartialItinerary(tripKey, keys).then(ok => {
-      if (!ok) toast('Could not save the partial itinerary selection.', 'error');
-    });
-    closeAllTripsyTripPanels();
-    showTripsyPartialItinerary(tripKey, new Set(keys));
+    (async () => {
+      // Summary or Full? Asked BEFORE anything closes or saves, so a
+      // dismissed dialog leaves the picker exactly as it was.
+      const mode = await tripsyPartialModeDialog();
+      if (!mode) return;
+      // The saved record's NAME: "Partial Itinerary <start> – <end>", the
+      // span being the days of the INCLUDED events (each event checkbox
+      // carries its day) -- this is also what the 🧭 menu's Show item reads.
+      const evDays = checked.map(x => x.dataset.partialDay).filter(Boolean).sort();
+      const startDayKey = evDays[0] || '';
+      const endDayKey = evDays[evDays.length - 1] || '';
+      const title = `Partial Itinerary ${formatTripDateRange(startDayKey, endDayKey)}`.trim();
+      // Save in the background (optimistic -- the view renders from the
+      // in-memory selection either way; a failed save only costs the Show
+      // menu item / resuming the picks later, and says so). On success,
+      // re-render My Trips so the 🧭 menu's "Show <title>" item appears
+      // without waiting for the next visit.
+      Store.saveTripsyPartialItinerary(tripKey, keys, { mode, title, startDayKey, endDayKey }).then(ok => {
+        if (!ok) toast('Could not save the partial itinerary selection.', 'error');
+        else if (typeof renderTripsyEventsList === 'function') { try { renderTripsyEventsList(); } catch (e) { /* menu refreshes next render */ } }
+      });
+      closeAllTripsyTripPanels();
+      showTripsyPartialItinerary(tripKey, new Set(keys), mode, { generateFirst: mode === 'full' && isOwner });
+    })();
   });
+}
+
+// After View Partial Itinerary: Summary (Part 1 only) or Full Itinerary
+// (narratives + photos generated for the included sections, then the whole
+// document)? Resolves 'summary' | 'full' | null (dismissed -- the picker
+// panel stays open, nothing saved). Same simple promise-overlay shape as
+// tripsyConflictOtherActionDialog.
+function tripsyPartialModeDialog() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10004; display:flex; align-items:center; justify-content:center; padding:20px;';
+    overlay.innerHTML = `
+      <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; max-width:420px; width:100%; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+        <div style="font-size:15px; font-weight:700; color:var(--text); margin-bottom:4px;">How should this partial itinerary read?</div>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:16px;">Summary is the day-by-day event listing. Full Itinerary adds the written narratives and photos — any not yet generated are created first (this can take a couple of minutes).</div>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          <button data-mode="summary" class="btn" style="font-size:13px; padding:8px 14px;">Summary</button>
+          <button data-mode="full" class="btn primary" style="font-size:13px; padding:8px 14px;">Full Itinerary</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const done = result => { overlay.remove(); resolve(result); };
+    overlay.querySelectorAll('[data-mode]').forEach(btn => btn.addEventListener('click', () => done(btn.dataset.mode)));
+    overlay.addEventListener('click', e => { if (e.target === overlay) done(null); });
+  });
+}
+// Full-itinerary mode's generation step: make sure every INCLUDED section has
+// its narrative, generating only what's missing -- into the one shared
+// narrative cache, exactly where a full Create would put it (the partial is a
+// filter over the full itinerary, so its narratives ARE the full itinerary's;
+// a later full Create finds them already done). Intro when Overview is
+// included, day write-ups for included days, and Part-1 summary blurbs for
+// days that still have an included blurb-wanting row without one (scoped via
+// summaryDayKeys so nothing already written is rewritten). Then the photo
+// pre-fetch, through the same filtered build the view renders -- so only the
+// included places' photos are fetched -- with the same _tripsyAllowPhotoFetch
+// gate the Generate panel's pre-fetch uses. Deliberately does NOT record the
+// itinerary baseline: this is a side document, and acknowledging event
+// changes is the full itinerary's review flow's job.
+async function tripsyPartialEnsureNarratives(tripKey, keys) {
+  const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
+  if (!trip) return;
+  const { effectiveTrip, dayKeys, byDay, summaryByDay } = await buildTripsyPrintDayData(trip);
+  const cache = await Store.getTripsyNarrativeCache();
+  const includeIntro = keys.has('overview') && !cache[`${tripKey}::intro`];
+  const dayKeysToGenerate = dayKeys.filter(k => k !== 'undated' && keys.has(`day:${k}`) && !cache[`${tripKey}::day::${k}`]);
+  // Which included rows still need a Part-1 blurb -- judged over the SAME
+  // filtered view the document renders, so split halves / P/S rows / layovers
+  // are treated identically to the filter itself.
+  const filtered = tripsyFilterPrintDayDataForPartial({ dayKeys, byDay, placesByDay: new Map(), placeEvents: [], summaryByDay }, keys);
+  const summaryEntry = cache[`${tripKey}::summary`];
+  const blurbByKey = new Map(((summaryEntry && summaryEntry.content && summaryEntry.content.rows) || []).map(r => [r.row_key, r.blurb]));
+  const summaryDayKeys = filtered.dayKeys.filter(k => (filtered.summaryByDay.get(k) || []).some(item => {
+    const rk = tripsySummaryRowKey(item);
+    return rk && tripsySummaryRowWantsBlurb(item) && !blurbByKey.get(rk);
+  }));
+  if (includeIntro || dayKeysToGenerate.length || summaryDayKeys.length) {
+    await tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, byDay, summaryByDay, {
+      includeIntro,
+      includeSummary: summaryDayKeys.length > 0,
+      dayKeysToGenerate,
+      summaryDayKeys,
+    });
+  }
+  _tripsyAllowPhotoFetch = true;
+  try { await buildTripsyPrintHtml(tripKey, { partialKeys: keys }); } catch (err) { console.error('Partial photo pre-fetch failed:', err); } finally { _tripsyAllowPhotoFetch = false; }
 }
 
 // The read-only view itself -- same shell/pattern as the Summary overlay
@@ -25073,7 +25158,7 @@ function getOrCreateTripsyPartialOverlay() {
     btn.disabled = true;
     btn.textContent = 'Preparing…';
     try {
-      await openTripsyItineraryPrintView(overlay.dataset.tripKey || '', { partialKeys: overlay._partialKeys || new Set() });
+      await openTripsyItineraryPrintView(overlay.dataset.tripKey || '', { partialKeys: overlay._partialKeys || new Set(), summaryOnly: overlay._partialMode === 'summary' });
     } catch (e) {
       console.error('Partial itinerary PDF failed:', e);
       toast('Could not prepare the partial itinerary for printing. Please try again.', 'error');
@@ -25084,19 +25169,39 @@ function getOrCreateTripsyPartialOverlay() {
   });
   return overlay;
 }
-async function showTripsyPartialItinerary(tripKey, keysSet = null) {
+async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null, { generateFirst = false } = {}) {
   const overlay = getOrCreateTripsyPartialOverlay();
   const content = overlay.querySelector('#tripsy-partial-content');
   overlay.dataset.tripKey = tripKey;
   content.innerHTML = `<div style="padding:24px; color:var(--muted);">Building partial itinerary…</div>`;
   overlay.style.display = 'flex';
   let keys = keysSet;
-  if (!keys) {
+  if (!keys || !mode) {
     const saved = await Store.getTripsyPartialItinerary(tripKey);
-    keys = new Set(saved ? saved.keys : []);
+    if (!keys) keys = new Set(saved && Array.isArray(saved.keys) ? saved.keys : []);
+    // A record saved before modes existed reads as 'full' -- it renders the
+    // whole filtered document exactly as before this option existed.
+    if (!mode) mode = (saved && saved.mode) || 'full';
   }
   overlay._partialKeys = keys;
-  const html = await buildTripsyPrintHtml(tripKey, { partialKeys: keys });
+  overlay._partialMode = mode;
+  // Full mode's creation path generates the included sections' missing
+  // narratives + photos first (an explicit choice in the mode dialog, real
+  // Claude calls) -- a later "Show" never regenerates: everything is already
+  // in the shared narrative cache, so it renders instantly from there. A
+  // failed generation still shows the document with whatever exists, rather
+  // than eating the click.
+  if (generateFirst) {
+    content.innerHTML = `<div style="padding:24px; color:var(--muted);">Generating narratives and photos for the included events — this can take a couple of minutes…</div>`;
+    try {
+      await tripsyPartialEnsureNarratives(tripKey, keys);
+    } catch (e) {
+      console.error('Partial narrative generation failed:', e);
+      toast(`Could not generate some narratives — showing what exists. (${(e && e.message) || 'unknown error'})`, 'error');
+    }
+    content.innerHTML = `<div style="padding:24px; color:var(--muted);">Building partial itinerary…</div>`;
+  }
+  const html = await buildTripsyPrintHtml(tripKey, { partialKeys: keys, summaryOnly: mode === 'summary' });
   if (html == null) {
     content.innerHTML = `<div style="padding:24px; color:var(--muted);">This trip could not be loaded.</div>`;
     return;
@@ -30972,6 +31077,16 @@ async function renderTripsyEventsListImpl() {
               ${showPreviewItem ? menuListButtonHtml(`data-tripsy-preview-itinerary data-key="${esc(trip.key)}"`, '✏️', isOwner ? 'Edit' : 'Preview', `<span data-tripsy-itin-warning="${esc(trip.key)}" title="Events changed since this itinerary was generated" style="display:none; margin-left:auto; color:#e02424; font-size:13px; line-height:1;">▲</span>`) : ''}
               ${menuListButtonHtml(`data-tripsy-summary-itinerary data-key="${esc(trip.key)}"`, '📅', 'Summary')}
               ${isOwner ? menuListButtonHtml(`data-tripsy-partial-itinerary data-key="${esc(trip.key)}"`, '✂️', 'Create Partial') : ''}
+              ${(() => {
+                // A generated partial (Create Partial -> View) is a saved,
+                // named document -- offer it back by name. Any viewer gets it
+                // (Show is read-only, like Summary/Print); records saved
+                // before titles existed just don't list until re-created.
+                const savedPartial = (driveData.tripsyPartialItineraries || []).find(p => p.tripKey === trip.key);
+                return savedPartial && savedPartial.title
+                  ? menuListButtonHtml(`data-tripsy-show-partial data-key="${esc(trip.key)}"`, '👁️', `Show ${savedPartial.title}`)
+                  : '';
+              })()}
               ${menuListButtonHtml(`data-tripsy-status-itinerary data-key="${esc(trip.key)}"`, '📋', 'Status')}
               ${menuListButtonHtml(`data-tripsy-print-itinerary data-key="${esc(trip.key)}"`, '🖨️', 'Print')}
               ${hasGeneratedNarrative ? createOrDelete : ''}
@@ -31512,6 +31627,23 @@ async function renderTripsyEventsListImpl() {
       await tripsyRunGeneratePanelUpdate(panel, tripKey);
     });
   }
+
+  // Show <saved partial's title> -- reopens the generated partial itinerary
+  // (Create Partial -> View) from its saved selection + mode, read-only, for
+  // any viewer. Never regenerates anything: it renders from the shared
+  // narrative cache exactly as it was left.
+  container.querySelectorAll("[data-tripsy-show-partial]").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      closeAllTripsyTripPanels();
+      try {
+        await showTripsyPartialItinerary(btn.dataset.key);
+      } catch (err) {
+        console.error('showTripsyPartialItinerary failed:', err);
+        toast('Could not open the partial itinerary. Please try again.', 'error');
+      }
+    });
+  });
 
   container.querySelectorAll("[data-tripsy-summary-itinerary]").forEach(btn => {
     btn.addEventListener("click", async e => {

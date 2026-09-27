@@ -71,13 +71,13 @@ assert(/data-partial-day="\$\{CSS\.escape\(dayKey\)\}"/.test(wirePanel),
   'toggling a DAY checkbox carries its own events with it');
 assert(/if \(!keys\.some\(k => k\.startsWith\('event:'\)\)\)/.test(wirePanel),
   'a selection with zero events is refused rather than rendering an empty document');
-assert(/Store\.saveTripsyPartialItinerary\(tripKey, keys\)\.then/.test(wirePanel)
-  && /closeAllTripsyTripPanels\(\);\s*\n\s*showTripsyPartialItinerary\(tripKey, new Set\(keys\)\);/.test(wirePanel),
-  'View saves in the background (optimistic) and opens the filtered document immediately');
+assert(/Store\.saveTripsyPartialItinerary\(tripKey, keys, \{ mode, title, startDayKey, endDayKey \}\)\.then/.test(wirePanel)
+  && /closeAllTripsyTripPanels\(\);\s*\n\s*showTripsyPartialItinerary\(tripKey, new Set\(keys\), mode, \{ generateFirst: mode === 'full' && isOwner \}\);/.test(wirePanel),
+  'View saves in the background (optimistic, with mode/title/span) and opens the document immediately');
 
 // ---- separate, read-only view; narratives come from the same cache ----
 const show = extractFn('showTripsyPartialItinerary');
-assert(/buildTripsyPrintHtml\(tripKey, \{ partialKeys: keys \}\)/.test(show),
+assert(/buildTripsyPrintHtml\(tripKey, \{ partialKeys: keys, summaryOnly: mode === 'summary' \}\)/.test(show),
   'THE ASK: the partial renders through the SAME print build as the full itinerary, filtered -- its narratives are the full itinerary\'s, by construction');
 const buildStart = html.indexOf('async function buildTripsyPrintHtml(');
 const buildSlice = html.slice(buildStart, buildStart + 4000);
@@ -96,7 +96,7 @@ assert(/openTripsyItineraryPrintView\(tripKey, \{ summaryOnly = false, partialKe
   'Save as PDF goes through the same print path with the same filter');
 
 // ---- storage + prune ----
-assert(/async getTripsyPartialItinerary\(tripKey\)/.test(html) && /async saveTripsyPartialItinerary\(tripKey, keys\)/.test(html),
+assert(/async getTripsyPartialItinerary\(tripKey\)/.test(html) && /async saveTripsyPartialItinerary\(tripKey, keys, extra = \{\}\)/.test(html),
   'selection persists per trip in driveData.tripsyPartialItineraries');
 assert(/driveData\.tripsyPartialItineraries = driveData\.tripsyPartialItineraries\.filter\(p => keys\.has\(p\.tripKey\)\);/.test(html),
   'pruneDriveDataInMemory drops a selection whose trip no longer exists (every new driveData key needs its prune rule)');
