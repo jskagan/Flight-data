@@ -48,13 +48,21 @@ assert(/const MAX_LIVERY_CHECKS = 4;/.test(fetchFn),
   'the candidate walk is bounded so a pathological pool cannot burn a call per candidate');
 assert(/\.\.\.\(company \? \{ liveryChecked: !!pick\.liveryChecked \} : \{\}\)/.test(fetchFn),
   'a passed pick stamps true, an exhausted fallback stamps FALSE (shown, but never re-healed -- the TTL refetch is its retry), a company-less entry stays unstamped');
-// The owner's manual picks are their own judgment -- never overruled by healing.
-assert(/triedPhotoNames: \[\.\.\.tried, nextPhotoName\], liveryChecked: true/.test(html),
-  '🔄 Try Another stamps the owner\'s pick verified');
-assert(/triedPhotoNames: \[\.\.\.tried, photoName\], liveryChecked: true/.test(html),
-  '🔍 manual search stamps the owner\'s pick verified');
-assert(/\.\.\.\(isTransportCard \? \{ liveryChecked: true \} : \{\}\)/.test(html),
-  '🗂 a gallery pick on a transportation card stamps verified (place cards are untouched)');
+// The owner's manual picks are their own judgment -- never overruled by
+// healing, and PINNED ("can I just pick one for each airline and have the
+// app use that everytime that airline is used in any itinerary,"
+// 2026-09-27): ownerPinned makes the pick permanent -- no TTL refetch, no
+// healing, shared across every trip via the per-company cache entry.
+assert(/triedPhotoNames: \[\.\.\.tried, nextPhotoName\], liveryChecked: true, ownerPinned: true/.test(html),
+  '🔄 Try Another stamps the owner\'s pick verified AND pinned');
+assert(/triedPhotoNames: \[\.\.\.tried, photoName\], liveryChecked: true, ownerPinned: true/.test(html),
+  '🔍 manual search stamps the owner\'s pick verified AND pinned');
+assert((html.match(/\.\.\.\(isTransportCard \? \{ liveryChecked: true, ownerPinned: true \} : \{\}\)/g) || []).length === 2,
+  '🗂 gallery picks and 📋 pasted photos on a transportation card stamp verified AND pinned (place cards are untouched)');
+const fetchSrc = extractFn('fetchTripsyTransportationPhoto');
+assert(/if \(cached && cached\.driveFileId && cached\.ownerPinned\) \{/.test(fetchSrc)
+  && fetchSrc.indexOf('cached.ownerPinned') < fetchSrc.indexOf('liveryChecked === undefined'),
+  'THE ASK: a pinned photo returns VERBATIM before the TTL/healing logic can ever touch it -- one pick per airline, used every time');
 
 // ---- executed: the fetch/heal decision logic against stubs ----
 (async () => {
@@ -129,6 +137,17 @@ assert(/\.\.\.\(isTransportCard \? \{ liveryChecked: true \} : \{\}\)/.test(html
   r = await run('Singapore Airlines', { cache: { ...staleCache, liveryChecked: false } });
   assert(r.url === 'display-url' && r.calls.verified.length === 0,
     'a stamped entry costs zero verifier calls on every later render');
+
+  // THE ASK: an owner-PINNED photo is untouchable -- shown verbatim even
+  // during a generation-time render, with the verifier, the candidate walk,
+  // and the TTL refetch all skipped. (No liveryChecked stamp needed: the
+  // pin check runs before healing even looks.)
+  r = await run('Singapore Airlines', {
+    cache: { driveFileId: 'drive-pin', photoName: 'MINE', ownerPinned: true, fetchedAt: '2020-01-01T00:00:00Z' },
+    candidates: ['p2'], verdicts: { 'CACHED-BYTES': false, p2: true },
+  });
+  assert(r.url === 'display-url' && r.calls.verified.length === 0 && r.calls.uploads === 0,
+    'a hand-picked airline photo is pinned: no re-check, no refetch, ever -- the same pick serves every itinerary');
 
   // Outside a generation-time render the cached photo shows untouched --
   // healing never runs on a plain open/print.

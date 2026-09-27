@@ -19901,6 +19901,23 @@ async function fetchTripsyTransportationPhoto(company, category) {
   const cacheKey = tripsyTransportationPhotoCacheKey(company, category);
   const cached = await Store.getTripsyPlacePhoto(cacheKey);
   if (cached && cached.skipped) return null;
+  // The owner picked this photo BY HAND ("For airline photos, can I just
+  // pick one for each airline and have the app use that everytime that
+  // airline is used in any itinerary," 2026-09-27 -- every manual pick on a
+  // transportation card stamps ownerPinned): pinned means VERBATIM, forever
+  // -- no TTL refetch, no livery healing, no replacement except another
+  // manual pick or 🚫 skip. The cache entry is per COMPANY and shared
+  // across every trip, so one pick covers every itinerary the airline
+  // appears in. Only a broken Drive file falls through to the ordinary
+  // path (a permanently iconless card would be worse than replacing a pin
+  // whose picture is already gone).
+  if (cached && cached.driveFileId && cached.ownerPinned) {
+    try {
+      return await tripsyPlacePhotoDisplayUrl(cached.driveFileId);
+    } catch (e) {
+      console.error('Loading pinned transportation photo failed (falling back to refetch):', e);
+    }
+  }
   // Heal an already-cached wrong-airline photo: an entry cached before the
   // livery check existed (no liveryChecked stamp) gets its ONE check here,
   // during a generation-time render only (_tripsyAllowPhotoFetch -- the same
@@ -20016,7 +20033,7 @@ async function tripsyTryAnotherTransportationPhoto(company, category) {
     // liveryChecked: the owner is choosing with their own eyes -- the
     // automatic wrong-airline healing in fetchTripsyTransportationPhoto
     // must never overrule a manual pick, so stamp it verified.
-    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName: nextPhotoName, contentHash, triedPhotoNames: [...tried, nextPhotoName], liveryChecked: true });
+    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName: nextPhotoName, contentHash, triedPhotoNames: [...tried, nextPhotoName], liveryChecked: true, ownerPinned: true });
     return URL.createObjectURL(blob);
   } catch (e) {
     console.error('tripsyTryAnotherTransportationPhoto failed:', e);
@@ -20067,7 +20084,7 @@ async function tripsyManualSearchTransportationPhoto(company, category, query) {
     const contentHash = await tripsyHashBlob(blob);
     const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
     // Same owner-judgment stamp as tripsyTryAnotherTransportationPhoto.
-    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [...tried, photoName], liveryChecked: true });
+    await Store.saveTripsyPlacePhoto(cacheKey, { driveFileId, photoName, contentHash, triedPhotoNames: [...tried, photoName], liveryChecked: true, ownerPinned: true });
     return URL.createObjectURL(blob);
   } catch (e) {
     console.error('tripsyManualSearchTransportationPhoto failed:', e);
@@ -20139,19 +20156,23 @@ async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHin
   // the SAME event recurring on another day has the same
   // name/address/title/hint, so the same cacheKey and the same cached entry
   // -- only a photo owned by a DIFFERENT cacheKey counts as a collision.
-  // Swapping needs Places + an upload, so it only runs during a
-  // generation-time render (_tripsyAllowPhotoFetch, the same gate every
-  // fetch-time cost sits behind); a plain open still shows the cached photo
-  // untouched, and is permanently fixed by the next generation's swap.
-  // Transportation and P/S cards never route through here (their repeats
-  // are by design), so the rule's exceptions are structural.
+  // The swap runs on any OWNER render, not just generation-time ones
+  // ("There are still duplicate photos in the itinerary," 2026-09-27: a
+  // fully-generated itinerary's plain Preview open never runs under
+  // _tripsyAllowPhotoFetch, so a generation-gated heal never fired for it
+  // and the duplicates just stayed). A duplicate is a defect to fix on
+  // sight, not a photo choice to preserve; a VIEWER's open still shows the
+  // cached photo untouched -- they have no Places key to find an
+  // alternative with anyway, and the owner's next open fixes it for
+  // everyone. Transportation and P/S cards never route through here (their
+  // repeats are by design), so the rule's exceptions are structural.
   if (cachedEntry && cachedEntry.driveFileId) {
     const nameOwner = cachedEntry.photoName ? usedPlacePhotoNames.get(cachedEntry.photoName) : undefined;
     const hashOwner = cachedEntry.contentHash ? usedPlacePhotoHashes.get(cachedEntry.contentHash) : undefined;
     const collidesWithOtherEvent =
       (nameOwner !== undefined && nameOwner !== cacheKey) ||
       (hashOwner !== undefined && hashOwner !== cacheKey);
-    if (collidesWithOtherEvent && _tripsyAllowPhotoFetch) {
+    if (collidesWithOtherEvent && (_tripsyAllowPhotoFetch || isOwner)) {
       const alt = await tripsyFindUnusedPlacePhoto(name, address, eventTitle, locationHint, usedPlacePhotoNames, usedPlacePhotoHashes);
       if (alt) {
         Store.cacheTripsyPlacePhotoLocal(cacheKey, {
@@ -25597,6 +25618,10 @@ function getOrCreateTripsyPartialOverlay() {
   };
   overlay.querySelector('#tripsy-partial-close-btn').addEventListener('click', close);
   overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  // Full mode renders the same cards Preview does, photo controls included --
+  // wire the same shared handler, or every 🔄🗂🔍📋🚫 button here is dead
+  // (which is exactly how it shipped at first; reported 2026-09-27).
+  wireTripsyPhotoCardControls(overlay.querySelector('#tripsy-partial-content'));
   overlay.querySelector('#tripsy-partial-pdf-btn').addEventListener('click', async () => {
     const btn = overlay.querySelector('#tripsy-partial-pdf-btn');
     const original = btn.textContent;
@@ -29541,6 +29566,305 @@ async function tripsyReadImageFromClipboard() {
 function tripsySetPreviewActionsVisible(overlay, visible) {
   overlay.querySelectorAll('.tripsy-preview-action').forEach(btn => { btn.style.display = visible ? '' : 'none'; });
 }
+// The 🔄🗂🔍📋🚫 photo controls on every place/transportation card are ONE
+// delegated listener on the containing overlay's content node -- factored out
+// of previewTripsyItinerary ("The buttons on the photos in the itinerary are
+// not working," 2026-09-27: the partial itinerary's full mode renders the very
+// same cards, buttons included, but its own overlay never had this wiring, so
+// every photo button there was dead). Wired once per content node -- Preview
+// at its creation, the partial overlay at getOrCreateTripsyPartialOverlay --
+// and everything inside resolves per CARD from data- attributes, so one
+// implementation serves any container that shows print-built cards.
+function wireTripsyPhotoCardControls(contentEl) {
+  const swapCardPhoto = (card, name, photoDataUrl) => {
+    const wrap = card.querySelector('.tp-place-card-photo-wrap');
+    let img = wrap.querySelector('img.tp-place-card-photo');
+    const fallback = wrap.querySelector('.tp-place-card-photo-fallback');
+    if (!img) {
+      img = document.createElement('img');
+      img.className = 'tp-place-card-photo';
+      img.alt = name;
+      wrap.insertBefore(img, wrap.firstChild);
+    }
+    img.src = photoDataUrl;
+    if (fallback) fallback.remove();
+    // Hide (don't remove) the manual-search box on success -- it's a
+    // permanent part of every card now, reopenable via 🔍 at any time,
+    // not a one-shot fallback.
+    const searchBox = wrap.querySelector('[data-tripsy-photo-manual-search]');
+    if (searchBox) searchBox.style.display = 'none';
+    const galleryPanel = wrap.querySelector('[data-tripsy-photo-gallery-panel]');
+    if (galleryPanel) galleryPanel.style.display = 'none';
+  };
+
+  // Backs the 🗂 gallery button: cacheKey -> Promise<[{photoName,dataUrl}]>
+  // from tripsyGatherPlacePhotoThumbnails, so opening the gallery for the
+  // same card twice in one preview session reuses the first fetch
+  // (candidates AND their image bytes) instead of re-running the Places
+  // search -- exactly the "without... re-run the search" requirement.
+  // Session-scoped (this Map, not driveData), same reasoning as
+  // isTripCollapsed's localStorage-only state: it's a browsing
+  // convenience, not data worth persisting or syncing.
+  const galleryCandidatesCache = new Map();
+
+  contentEl.addEventListener('click', async e => {
+    const refreshBtn = e.target.closest('[data-tripsy-photo-refresh]');
+    const galleryBtn = e.target.closest('[data-tripsy-photo-gallery-btn]');
+    const galleryCloseBtn = e.target.closest('[data-tripsy-photo-gallery-close-btn]');
+    const galleryThumb = e.target.closest('.tp-photo-gallery-thumb');
+    const searchToggleBtn = e.target.closest('[data-tripsy-photo-search-toggle]');
+    const searchBtn = e.target.closest('[data-tripsy-photo-search-btn]');
+    const searchCloseBtn = e.target.closest('[data-tripsy-photo-search-close-btn]');
+    const skipBtn = e.target.closest('[data-tripsy-photo-skip-btn]');
+    const pasteBtn = e.target.closest('[data-tripsy-photo-paste-btn]');
+    if (!refreshBtn && !galleryBtn && !galleryCloseBtn && !galleryThumb && !searchToggleBtn && !searchBtn && !searchCloseBtn && !skipBtn && !pasteBtn) return;
+
+    const card = e.target.closest('.tp-place-card');
+    if (!card) return;
+    // Transportation cards (tripsyTransportationCardHtml) share this same
+    // .tp-place-card markup/controls but are keyed by company+category
+    // rather than name/address/eventTitle/locationHint -- data-tripsy-photo-kind
+    // picks which set of fetch/cache functions below applies.
+    const isTransportCard = card.dataset.tripsyPhotoKind === 'transportation';
+    const name = card.dataset.tripsyPlaceName;
+    const address = card.dataset.tripsyPlaceAddress;
+    const title = card.dataset.tripsyPlaceTitle;
+    const locationHint = card.dataset.tripsyPlaceLocationHint;
+    const transportCompany = card.dataset.tripsyTransportCompany || '';
+    const transportCategory = card.dataset.tripsyTransportCategory || '';
+    const cardCacheKey = () => isTransportCard
+      ? tripsyTransportationPhotoCacheKey(transportCompany, transportCategory)
+      : tripsyPlacePhotoCacheKey(name, address, title, locationHint);
+
+    if (refreshBtn) {
+      const originalText = refreshBtn.textContent;
+      refreshBtn.disabled = true;
+      refreshBtn.textContent = '⏳';
+      try {
+        const photoDataUrl = isTransportCard
+          ? await tripsyTryAnotherTransportationPhoto(transportCompany, transportCategory)
+          : await tripsyTryAnotherPlacePhoto(name, address, title, locationHint);
+        if (!photoDataUrl) {
+          toast('No more automatic photos found for this place -- try a manual search below.', 'error');
+          const searchBox = card.querySelector('[data-tripsy-photo-manual-search]');
+          if (searchBox) searchBox.style.display = 'flex';
+          return;
+        }
+        swapCardPhoto(card, name, photoDataUrl);
+      } catch (err) {
+        console.error('tripsyTryAnotherPlacePhoto failed:', err);
+        toast('Could not fetch another photo. Please try again.', 'error');
+      } finally {
+        refreshBtn.disabled = false;
+        refreshBtn.textContent = originalText;
+      }
+      return;
+    }
+
+    if (pasteBtn) {
+      // Drop in an image the owner copied anywhere (e.g. a browser image
+      // search) -- no download/upload dance. Reads the OS clipboard, shows it
+      // immediately, then persists it through the SAME conflict-resilient
+      // store the gallery/manual picks use, so it's a normal saved photo:
+      // honored on every reopen, offline, and in the PDF. A pasted photo is a
+      // deliberate user pick, so it's never de-duped/swapped away on open.
+      const originalText = pasteBtn.textContent;
+      pasteBtn.disabled = true;
+      pasteBtn.textContent = '⏳';
+      try {
+        const blob = await tripsyReadImageFromClipboard();
+        if (!blob) {
+          toast('No image on the clipboard. Copy a picture first (right-click it → Copy Image), then tap 📋.', 'error');
+          return;
+        }
+        swapCardPhoto(card, name, URL.createObjectURL(blob)); // show it now
+        const cacheKey = cardCacheKey();
+        const contentHash = await tripsyHashBlob(blob);
+        const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/png');
+        const existing = await Store.getTripsyPlacePhoto(cacheKey);
+        const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
+          driveFileId, photoName: `user-pasted-${Date.now()}`, contentHash,
+          triedPhotoNames: [...(existing?.triedPhotoNames || [])],
+          ...(isTransportCard ? { liveryChecked: true, ownerPinned: true } : {}),
+        });
+        if (ok) toast('Photo pasted in.', 'success');
+        else toast('Image shown, but saving it to Drive failed — please try again.', 'error');
+      } catch (err) {
+        console.error('Paste photo failed:', err);
+        if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+          toast('Clipboard access was blocked. Allow clipboard permission in your browser, then tap 📋 again.', 'error');
+        } else {
+          toast('Could not read an image from the clipboard. Copy the picture again and retry.', 'error');
+        }
+      } finally {
+        pasteBtn.disabled = false;
+        pasteBtn.textContent = originalText;
+      }
+      return;
+    }
+
+    if (galleryBtn) {
+      const wrap = card.querySelector('.tp-place-card-photo-wrap');
+      const panel = wrap?.querySelector('[data-tripsy-photo-gallery-panel]');
+      if (!panel) return;
+      if (panel.style.display === 'flex') { panel.style.display = 'none'; return; }
+      const searchBox = wrap.querySelector('[data-tripsy-photo-manual-search]');
+      if (searchBox) searchBox.style.display = 'none';
+      panel.style.display = 'flex';
+      const cacheKey = cardCacheKey();
+      if (!galleryCandidatesCache.has(cacheKey)) {
+        panel.innerHTML = `<div class="tp-photo-gallery-empty">Loading other photos…</div>`;
+        galleryCandidatesCache.set(cacheKey, isTransportCard
+          ? tripsyGatherTransportationPhotoThumbnails(transportCompany, transportCategory)
+          : tripsyGatherPlacePhotoThumbnails(name, address, title, locationHint));
+      }
+      let thumbs;
+      try {
+        thumbs = await galleryCandidatesCache.get(cacheKey);
+      } catch (err) {
+        console.error('tripsyGatherPlacePhotoThumbnails failed:', err);
+        galleryCandidatesCache.delete(cacheKey);
+        thumbs = [];
+      }
+      // Re-check the panel is still the one open -- the user could have
+      // closed it (or switched cards) while the fetch above was in flight.
+      if (panel.style.display !== 'flex') return;
+      panel.innerHTML = `
+        <button type="button" class="btn" data-tripsy-photo-gallery-close-btn>Close</button>
+        ${thumbs.length
+          ? `<div class="tp-photo-gallery-grid">${thumbs.map(t => `<img class="tp-photo-gallery-thumb" src="${esc(t.dataUrl)}" data-photo-name="${esc(t.photoName)}" alt="Alternative photo">`).join('')}</div>`
+          : `<div class="tp-photo-gallery-empty">No other photos found for this place.</div>`}
+      `;
+      return;
+    }
+
+    if (galleryCloseBtn) {
+      const panel = card.querySelector('[data-tripsy-photo-gallery-panel]');
+      if (panel) panel.style.display = 'none';
+      return;
+    }
+
+    if (galleryThumb) {
+      const photoDataUrl = galleryThumb.getAttribute('src');
+      const photoName = galleryThumb.dataset.photoName;
+      swapCardPhoto(card, name, photoDataUrl);
+      try {
+        const cacheKey = cardCacheKey();
+        // The gallery only fetched thumbnail blobs for browsing (see
+        // tripsyGatherPlacePhotoThumbnails) -- only the ONE actually
+        // picked gets uploaded to its own Drive file here, not every
+        // candidate the grid happened to show. Re-reading the same
+        // (already-resolved) promise from galleryCandidatesCache costs
+        // no extra network call.
+        const thumbs = await galleryCandidatesCache.get(cacheKey);
+        const picked = (thumbs || []).find(t => t.photoName === photoName);
+        if (!picked) throw new Error('Picked thumbnail no longer available');
+        const contentHash = await tripsyHashBlob(picked.blob);
+        const driveFileId = await uploadTripsyPlacePhotoToDrive(picked.blob, picked.blob.type || 'image/jpeg');
+        const existing = await Store.getTripsyPlacePhoto(cacheKey);
+        const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
+          driveFileId, photoName, contentHash,
+          triedPhotoNames: [...new Set([...(existing?.triedPhotoNames || []), photoName])],
+          // A transportation gallery pick is the owner's own judgment --
+          // the automatic wrong-airline healing must never overrule it.
+          ...(isTransportCard ? { liveryChecked: true, ownerPinned: true } : {}),
+        });
+        if (!ok) toast('Could not save this photo choice. Please try again.', 'error');
+      } catch (err) {
+        console.error('Failed to save gallery photo pick:', err);
+        toast('Could not save this photo choice. Please try again.', 'error');
+      }
+      return;
+    }
+
+    if (searchToggleBtn) {
+      const searchBox = card.querySelector('[data-tripsy-photo-manual-search]');
+      if (!searchBox) return;
+      const isVisible = searchBox.style.display !== 'none';
+      searchBox.style.display = isVisible ? 'none' : 'flex';
+      if (!isVisible) {
+        const galleryPanel = card.querySelector('[data-tripsy-photo-gallery-panel]');
+        if (galleryPanel) galleryPanel.style.display = 'none';
+        searchBox.querySelector('[data-tripsy-photo-search-input]')?.focus();
+      }
+      return;
+    }
+
+    if (searchCloseBtn) {
+      const searchBox = card.querySelector('[data-tripsy-photo-manual-search]');
+      if (searchBox) searchBox.style.display = 'none';
+      return;
+    }
+
+    if (searchBtn) {
+      const input = card.querySelector('[data-tripsy-photo-search-input]');
+      const query = (input?.value || '').trim();
+      if (!query) { toast('Enter search terms first.', 'error'); return; }
+      const originalText = searchBtn.textContent;
+      searchBtn.disabled = true;
+      searchBtn.textContent = '…';
+      try {
+        if (isTransportCard) {
+          const photoDataUrl = await tripsyManualSearchTransportationPhoto(transportCompany, transportCategory, query);
+          if (!photoDataUrl) { toast('No photo found for that search -- try different terms.', 'error'); return; }
+          swapCardPhoto(card, name, photoDataUrl);
+          return;
+        }
+        // Place cards: show a GRID of every result for the typed query (a broad,
+        // no-location search) in the gallery panel, so several can be compared
+        // and picked -- reusing the gallery's own thumbnail-pick handler below.
+        const thumbs = await tripsyGatherPlacePhotoThumbnailsForQuery(query);
+        if (!thumbs.length) { toast('No photos found for that search -- try different terms.', 'error'); return; }
+        galleryCandidatesCache.set(cardCacheKey(), Promise.resolve(thumbs));
+        const searchBox = card.querySelector('[data-tripsy-photo-manual-search]');
+        if (searchBox) searchBox.style.display = 'none';
+        const panel = card.querySelector('[data-tripsy-photo-gallery-panel]');
+        if (panel) {
+          panel.style.display = 'flex';
+          panel.innerHTML = `
+            <button type="button" class="btn" data-tripsy-photo-gallery-close-btn>Close</button>
+            <div class="tp-photo-gallery-grid">${thumbs.map(t => `<img class="tp-photo-gallery-thumb" src="${esc(t.dataUrl)}" data-photo-name="${esc(t.photoName)}" alt="Search result photo">`).join('')}</div>`;
+        }
+      } catch (err) {
+        console.error('manual photo search failed:', err);
+        toast('Could not search for a photo. Please try again.', 'error');
+      } finally {
+        searchBtn.disabled = false;
+        searchBtn.textContent = originalText;
+      }
+      return;
+    }
+
+    if (skipBtn) {
+      skipBtn.disabled = true;
+      try {
+        const ok = isTransportCard
+          ? await tripsySkipTransportationPhoto(transportCompany, transportCategory)
+          : await tripsySkipPlacePhoto(name, address, title, locationHint);
+        if (!ok) { toast('Could not skip this photo. Please try again.', 'error'); return; }
+        card.querySelector('.tp-place-card-photo-wrap')?.remove();
+        card.classList.remove('tp-place-card-float-left', 'tp-place-card-float-right');
+        card.classList.add('tp-place-card-no-photo');
+      } catch (err) {
+        console.error('tripsySkipPlacePhoto failed:', err);
+        toast('Could not skip this photo. Please try again.', 'error');
+      } finally {
+        skipBtn.disabled = false;
+      }
+    }
+  });
+
+  // Enter in the manual-search input triggers the same search as
+  // clicking its Search button, without submitting any surrounding form
+  // (there isn't one -- this just simulates the button click).
+  contentEl.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    if (!e.target.closest('[data-tripsy-photo-search-input]')) return;
+    e.preventDefault();
+    e.target.closest('.tp-place-card')?.querySelector('[data-tripsy-photo-search-btn]')?.click();
+  });
+}
+
 async function previewTripsyItinerary(tripKey, { forceGeneratedView, scrollToId, onExit } = {}) {
   _tripsyPreviewExitCallback = onExit || null;
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
@@ -29715,292 +30039,7 @@ async function previewTripsyItinerary(tripKey, { forceGeneratedView, scrollToId,
       if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
 
-    const swapCardPhoto = (card, name, photoDataUrl) => {
-      const wrap = card.querySelector('.tp-place-card-photo-wrap');
-      let img = wrap.querySelector('img.tp-place-card-photo');
-      const fallback = wrap.querySelector('.tp-place-card-photo-fallback');
-      if (!img) {
-        img = document.createElement('img');
-        img.className = 'tp-place-card-photo';
-        img.alt = name;
-        wrap.insertBefore(img, wrap.firstChild);
-      }
-      img.src = photoDataUrl;
-      if (fallback) fallback.remove();
-      // Hide (don't remove) the manual-search box on success -- it's a
-      // permanent part of every card now, reopenable via 🔍 at any time,
-      // not a one-shot fallback.
-      const searchBox = wrap.querySelector('[data-tripsy-photo-manual-search]');
-      if (searchBox) searchBox.style.display = 'none';
-      const galleryPanel = wrap.querySelector('[data-tripsy-photo-gallery-panel]');
-      if (galleryPanel) galleryPanel.style.display = 'none';
-    };
-
-    // Backs the 🗂 gallery button: cacheKey -> Promise<[{photoName,dataUrl}]>
-    // from tripsyGatherPlacePhotoThumbnails, so opening the gallery for the
-    // same card twice in one preview session reuses the first fetch
-    // (candidates AND their image bytes) instead of re-running the Places
-    // search -- exactly the "without... re-run the search" requirement.
-    // Session-scoped (this Map, not driveData), same reasoning as
-    // isTripCollapsed's localStorage-only state: it's a browsing
-    // convenience, not data worth persisting or syncing.
-    const galleryCandidatesCache = new Map();
-
-    previewContent.addEventListener('click', async e => {
-      const refreshBtn = e.target.closest('[data-tripsy-photo-refresh]');
-      const galleryBtn = e.target.closest('[data-tripsy-photo-gallery-btn]');
-      const galleryCloseBtn = e.target.closest('[data-tripsy-photo-gallery-close-btn]');
-      const galleryThumb = e.target.closest('.tp-photo-gallery-thumb');
-      const searchToggleBtn = e.target.closest('[data-tripsy-photo-search-toggle]');
-      const searchBtn = e.target.closest('[data-tripsy-photo-search-btn]');
-      const searchCloseBtn = e.target.closest('[data-tripsy-photo-search-close-btn]');
-      const skipBtn = e.target.closest('[data-tripsy-photo-skip-btn]');
-      const pasteBtn = e.target.closest('[data-tripsy-photo-paste-btn]');
-      if (!refreshBtn && !galleryBtn && !galleryCloseBtn && !galleryThumb && !searchToggleBtn && !searchBtn && !searchCloseBtn && !skipBtn && !pasteBtn) return;
-
-      const card = e.target.closest('.tp-place-card');
-      if (!card) return;
-      // Transportation cards (tripsyTransportationCardHtml) share this same
-      // .tp-place-card markup/controls but are keyed by company+category
-      // rather than name/address/eventTitle/locationHint -- data-tripsy-photo-kind
-      // picks which set of fetch/cache functions below applies.
-      const isTransportCard = card.dataset.tripsyPhotoKind === 'transportation';
-      const name = card.dataset.tripsyPlaceName;
-      const address = card.dataset.tripsyPlaceAddress;
-      const title = card.dataset.tripsyPlaceTitle;
-      const locationHint = card.dataset.tripsyPlaceLocationHint;
-      const transportCompany = card.dataset.tripsyTransportCompany || '';
-      const transportCategory = card.dataset.tripsyTransportCategory || '';
-      const cardCacheKey = () => isTransportCard
-        ? tripsyTransportationPhotoCacheKey(transportCompany, transportCategory)
-        : tripsyPlacePhotoCacheKey(name, address, title, locationHint);
-
-      if (refreshBtn) {
-        const originalText = refreshBtn.textContent;
-        refreshBtn.disabled = true;
-        refreshBtn.textContent = '⏳';
-        try {
-          const photoDataUrl = isTransportCard
-            ? await tripsyTryAnotherTransportationPhoto(transportCompany, transportCategory)
-            : await tripsyTryAnotherPlacePhoto(name, address, title, locationHint);
-          if (!photoDataUrl) {
-            toast('No more automatic photos found for this place -- try a manual search below.', 'error');
-            const searchBox = card.querySelector('[data-tripsy-photo-manual-search]');
-            if (searchBox) searchBox.style.display = 'flex';
-            return;
-          }
-          swapCardPhoto(card, name, photoDataUrl);
-        } catch (err) {
-          console.error('tripsyTryAnotherPlacePhoto failed:', err);
-          toast('Could not fetch another photo. Please try again.', 'error');
-        } finally {
-          refreshBtn.disabled = false;
-          refreshBtn.textContent = originalText;
-        }
-        return;
-      }
-
-      if (pasteBtn) {
-        // Drop in an image the owner copied anywhere (e.g. a browser image
-        // search) -- no download/upload dance. Reads the OS clipboard, shows it
-        // immediately, then persists it through the SAME conflict-resilient
-        // store the gallery/manual picks use, so it's a normal saved photo:
-        // honored on every reopen, offline, and in the PDF. A pasted photo is a
-        // deliberate user pick, so it's never de-duped/swapped away on open.
-        const originalText = pasteBtn.textContent;
-        pasteBtn.disabled = true;
-        pasteBtn.textContent = '⏳';
-        try {
-          const blob = await tripsyReadImageFromClipboard();
-          if (!blob) {
-            toast('No image on the clipboard. Copy a picture first (right-click it → Copy Image), then tap 📋.', 'error');
-            return;
-          }
-          swapCardPhoto(card, name, URL.createObjectURL(blob)); // show it now
-          const cacheKey = cardCacheKey();
-          const contentHash = await tripsyHashBlob(blob);
-          const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/png');
-          const existing = await Store.getTripsyPlacePhoto(cacheKey);
-          const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
-            driveFileId, photoName: `user-pasted-${Date.now()}`, contentHash,
-            triedPhotoNames: [...(existing?.triedPhotoNames || [])],
-          });
-          if (ok) toast('Photo pasted in.', 'success');
-          else toast('Image shown, but saving it to Drive failed — please try again.', 'error');
-        } catch (err) {
-          console.error('Paste photo failed:', err);
-          if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
-            toast('Clipboard access was blocked. Allow clipboard permission in your browser, then tap 📋 again.', 'error');
-          } else {
-            toast('Could not read an image from the clipboard. Copy the picture again and retry.', 'error');
-          }
-        } finally {
-          pasteBtn.disabled = false;
-          pasteBtn.textContent = originalText;
-        }
-        return;
-      }
-
-      if (galleryBtn) {
-        const wrap = card.querySelector('.tp-place-card-photo-wrap');
-        const panel = wrap?.querySelector('[data-tripsy-photo-gallery-panel]');
-        if (!panel) return;
-        if (panel.style.display === 'flex') { panel.style.display = 'none'; return; }
-        const searchBox = wrap.querySelector('[data-tripsy-photo-manual-search]');
-        if (searchBox) searchBox.style.display = 'none';
-        panel.style.display = 'flex';
-        const cacheKey = cardCacheKey();
-        if (!galleryCandidatesCache.has(cacheKey)) {
-          panel.innerHTML = `<div class="tp-photo-gallery-empty">Loading other photos…</div>`;
-          galleryCandidatesCache.set(cacheKey, isTransportCard
-            ? tripsyGatherTransportationPhotoThumbnails(transportCompany, transportCategory)
-            : tripsyGatherPlacePhotoThumbnails(name, address, title, locationHint));
-        }
-        let thumbs;
-        try {
-          thumbs = await galleryCandidatesCache.get(cacheKey);
-        } catch (err) {
-          console.error('tripsyGatherPlacePhotoThumbnails failed:', err);
-          galleryCandidatesCache.delete(cacheKey);
-          thumbs = [];
-        }
-        // Re-check the panel is still the one open -- the user could have
-        // closed it (or switched cards) while the fetch above was in flight.
-        if (panel.style.display !== 'flex') return;
-        panel.innerHTML = `
-          <button type="button" class="btn" data-tripsy-photo-gallery-close-btn>Close</button>
-          ${thumbs.length
-            ? `<div class="tp-photo-gallery-grid">${thumbs.map(t => `<img class="tp-photo-gallery-thumb" src="${esc(t.dataUrl)}" data-photo-name="${esc(t.photoName)}" alt="Alternative photo">`).join('')}</div>`
-            : `<div class="tp-photo-gallery-empty">No other photos found for this place.</div>`}
-        `;
-        return;
-      }
-
-      if (galleryCloseBtn) {
-        const panel = card.querySelector('[data-tripsy-photo-gallery-panel]');
-        if (panel) panel.style.display = 'none';
-        return;
-      }
-
-      if (galleryThumb) {
-        const photoDataUrl = galleryThumb.getAttribute('src');
-        const photoName = galleryThumb.dataset.photoName;
-        swapCardPhoto(card, name, photoDataUrl);
-        try {
-          const cacheKey = cardCacheKey();
-          // The gallery only fetched thumbnail blobs for browsing (see
-          // tripsyGatherPlacePhotoThumbnails) -- only the ONE actually
-          // picked gets uploaded to its own Drive file here, not every
-          // candidate the grid happened to show. Re-reading the same
-          // (already-resolved) promise from galleryCandidatesCache costs
-          // no extra network call.
-          const thumbs = await galleryCandidatesCache.get(cacheKey);
-          const picked = (thumbs || []).find(t => t.photoName === photoName);
-          if (!picked) throw new Error('Picked thumbnail no longer available');
-          const contentHash = await tripsyHashBlob(picked.blob);
-          const driveFileId = await uploadTripsyPlacePhotoToDrive(picked.blob, picked.blob.type || 'image/jpeg');
-          const existing = await Store.getTripsyPlacePhoto(cacheKey);
-          const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
-            driveFileId, photoName, contentHash,
-            triedPhotoNames: [...new Set([...(existing?.triedPhotoNames || []), photoName])],
-            // A transportation gallery pick is the owner's own judgment --
-            // the automatic wrong-airline healing must never overrule it.
-            ...(isTransportCard ? { liveryChecked: true } : {}),
-          });
-          if (!ok) toast('Could not save this photo choice. Please try again.', 'error');
-        } catch (err) {
-          console.error('Failed to save gallery photo pick:', err);
-          toast('Could not save this photo choice. Please try again.', 'error');
-        }
-        return;
-      }
-
-      if (searchToggleBtn) {
-        const searchBox = card.querySelector('[data-tripsy-photo-manual-search]');
-        if (!searchBox) return;
-        const isVisible = searchBox.style.display !== 'none';
-        searchBox.style.display = isVisible ? 'none' : 'flex';
-        if (!isVisible) {
-          const galleryPanel = card.querySelector('[data-tripsy-photo-gallery-panel]');
-          if (galleryPanel) galleryPanel.style.display = 'none';
-          searchBox.querySelector('[data-tripsy-photo-search-input]')?.focus();
-        }
-        return;
-      }
-
-      if (searchCloseBtn) {
-        const searchBox = card.querySelector('[data-tripsy-photo-manual-search]');
-        if (searchBox) searchBox.style.display = 'none';
-        return;
-      }
-
-      if (searchBtn) {
-        const input = card.querySelector('[data-tripsy-photo-search-input]');
-        const query = (input?.value || '').trim();
-        if (!query) { toast('Enter search terms first.', 'error'); return; }
-        const originalText = searchBtn.textContent;
-        searchBtn.disabled = true;
-        searchBtn.textContent = '…';
-        try {
-          if (isTransportCard) {
-            const photoDataUrl = await tripsyManualSearchTransportationPhoto(transportCompany, transportCategory, query);
-            if (!photoDataUrl) { toast('No photo found for that search -- try different terms.', 'error'); return; }
-            swapCardPhoto(card, name, photoDataUrl);
-            return;
-          }
-          // Place cards: show a GRID of every result for the typed query (a broad,
-          // no-location search) in the gallery panel, so several can be compared
-          // and picked -- reusing the gallery's own thumbnail-pick handler below.
-          const thumbs = await tripsyGatherPlacePhotoThumbnailsForQuery(query);
-          if (!thumbs.length) { toast('No photos found for that search -- try different terms.', 'error'); return; }
-          galleryCandidatesCache.set(cardCacheKey(), Promise.resolve(thumbs));
-          const searchBox = card.querySelector('[data-tripsy-photo-manual-search]');
-          if (searchBox) searchBox.style.display = 'none';
-          const panel = card.querySelector('[data-tripsy-photo-gallery-panel]');
-          if (panel) {
-            panel.style.display = 'flex';
-            panel.innerHTML = `
-              <button type="button" class="btn" data-tripsy-photo-gallery-close-btn>Close</button>
-              <div class="tp-photo-gallery-grid">${thumbs.map(t => `<img class="tp-photo-gallery-thumb" src="${esc(t.dataUrl)}" data-photo-name="${esc(t.photoName)}" alt="Search result photo">`).join('')}</div>`;
-          }
-        } catch (err) {
-          console.error('manual photo search failed:', err);
-          toast('Could not search for a photo. Please try again.', 'error');
-        } finally {
-          searchBtn.disabled = false;
-          searchBtn.textContent = originalText;
-        }
-        return;
-      }
-
-      if (skipBtn) {
-        skipBtn.disabled = true;
-        try {
-          const ok = isTransportCard
-            ? await tripsySkipTransportationPhoto(transportCompany, transportCategory)
-            : await tripsySkipPlacePhoto(name, address, title, locationHint);
-          if (!ok) { toast('Could not skip this photo. Please try again.', 'error'); return; }
-          card.querySelector('.tp-place-card-photo-wrap')?.remove();
-          card.classList.remove('tp-place-card-float-left', 'tp-place-card-float-right');
-          card.classList.add('tp-place-card-no-photo');
-        } catch (err) {
-          console.error('tripsySkipPlacePhoto failed:', err);
-          toast('Could not skip this photo. Please try again.', 'error');
-        } finally {
-          skipBtn.disabled = false;
-        }
-      }
-    });
-
-    // Enter in the manual-search input triggers the same search as
-    // clicking its Search button, without submitting any surrounding form
-    // (there isn't one -- this just simulates the button click).
-    previewContent.addEventListener('keydown', e => {
-      if (e.key !== 'Enter') return;
-      if (!e.target.closest('[data-tripsy-photo-search-input]')) return;
-      e.preventDefault();
-      e.target.closest('.tp-place-card')?.querySelector('[data-tripsy-photo-search-btn]')?.click();
-    });
+    wireTripsyPhotoCardControls(previewContent);
 
     // Owner-only Generate/Regenerate/Delete/Custom Narrative controls
     // (tripsyNarrativeDayControlsHtml) -- a second, separate delegated

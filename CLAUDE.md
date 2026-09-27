@@ -588,10 +588,15 @@ step 4; git history has it if ever needed.
   ordinary TTL refetch is its retry). An already-cached UNSTAMPED entry (the live Singapore
   Airlines case) gets ONE healing check during a generation-time render (`_tripsyAllowPhotoFetch`,
   the gate that bounds every fetch-time cost): pass → stamped, fail → refetched with the old
-  photoName marked tried. The owner's manual picks (🔄 Try Another, 🔍 manual search, 🗂 gallery
-  pick on a transportation card) stamp `liveryChecked:true` themselves — their own judgment,
-  never overruled by healing. Company-less legs keep the old first-photo path untouched (no
-  company, no wrong airline). `liverycheck_test.js`.
+  photoName marked tried. **The owner's manual picks (🔄 Try Another, 🔍 manual search, 🗂
+  gallery pick, 📋 paste, on a transportation card) stamp `liveryChecked:true` AND
+  `ownerPinned:true`** ("can I just pick one for each airline and have the app use that everytime
+  that airline is used in any itinerary," 2026-09-27): `fetchTripsyTransportationPhoto` returns a
+  pinned entry VERBATIM before the TTL/healing logic can touch it — no refetch, no re-check, no
+  replacement except another manual pick or 🚫 skip; only a broken Drive file falls through. The
+  cache entry was already per COMPANY and shared across every trip, so one pick covers every
+  itinerary that airline appears in — pinning is what makes it permanent. Company-less legs keep
+  the old first-photo path untouched (no company, no wrong airline). `liverycheck_test.js`.
 - **A place-card photo never repeats across DIFFERENT events in one document** ("many duplicate
   photos on the partial itinerary… we should not re-use a photo unless the event is exactly the
   same as the prior event using the photo except on a different day," 2026-09-27). Duplicates
@@ -610,10 +615,13 @@ step 4; git history has it if ever needed.
   pair could both pass. Mirrors `tripsyDetailedCardHtml`'s dispatch (skips layover/P/S/
   transportation/`-end` halves). **(3)** the cached branch, on a collision with another event's
   photo, swaps to an unused candidate from this place's own pool (`tripsyFindUnusedPlacePhoto`,
-  old name kept in `triedPhotoNames`) — but ONLY during a generation-time render
-  (`_tripsyAllowPhotoFetch`; a plain open still never changes a photo, and is permanently fixed by
-  the next generation's swap); no unused candidate left → icon fallback beats repeating. The
-  first-fetch `isDuplicate` check is owner-aware the same way. `photodedup_test.js`.
+  old name kept in `triedPhotoNames`) — on any OWNER render, not just generation-time ones
+  (follow-up "There are still duplicate photos in the itinerary," 2026-09-27: a fully-generated
+  itinerary's plain Preview never runs under `_tripsyAllowPhotoFetch`, so a generation-gated heal
+  never fired for it — a duplicate is a defect to fix on sight, not a photo choice to preserve; a
+  VIEWER's open stays verbatim, they have no Places key anyway); no unused candidate left → icon
+  fallback beats repeating. The first-fetch `isDuplicate` check is owner-aware the same way.
+  `photodedup_test.js`.
 - **Categories**: flight / transportation / hotel / dining / concert / tour / spa / reception /
   cooking / other — each event's display `type`, derived from its `tripsyRaw.category` slug
   (`TRIPSY_ACTIVITY_CATEGORY_TO_TYPE`, mirrored in `tools/build_tripsy_snapshot.py`), including the
@@ -950,7 +958,14 @@ step 4; git history has it if ever needed.
   pre-fetch), so missing included places' photos fetch-and-cache on open — self-healing, and free
   once cached — instead of a second throwaway pre-fetch build. Save as PDF honors the stored mode
   (`overlay._partialMode`); a record saved before modes existed reads as `full`.
-  `partialmode_test.js`.
+  **The cards' 🔄🗂🔍📋🚫 photo controls work here too** ("The buttons on the photos in the
+  itinerary are not working," 2026-09-27): that wiring used to live inline in
+  `previewTripsyItinerary`, attached to Preview's content node only, so the same buttons rendered
+  DEAD in this overlay. It is now the top-level `wireTripsyPhotoCardControls(contentEl)` — one
+  delegated click+keydown pair resolving everything per card from data- attributes — called by
+  both Preview and `getOrCreateTripsyPartialOverlay` (once per node; delegation survives every
+  innerHTML re-render). Any future overlay that shows print-built cards must call it too.
+  `photobuttons_test.js`. `partialmode_test.js`.
 - **Narrative generation offloads to the cloud routine via a request/answer relay pair** ("I do
   not want to keep the app open in the foreground in order to generate a partial itinerary,"
   2026-09-27 — minutes-long Claude calls die when the iPad app backgrounds, which is what left

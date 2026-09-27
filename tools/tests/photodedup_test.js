@@ -44,8 +44,8 @@ assert(/for \(const preDayKey of dayKeys\) \{/.test(html)
   && /if \(ev\._splitHalf === 'end'\) continue;/.test(html),
   'THE FIX: a document-order pre-pass claims cached photos before the concurrent card builds -- skipping layovers, P/S rows, transportation (repeats by design) and split -end halves, exactly like the card dispatch');
 const dedup = extractFn('tripsyDedupedPlacePhotoUrl');
-assert(/collidesWithOtherEvent && _tripsyAllowPhotoFetch/.test(dedup),
-  'a cached duplicate only ever swaps during a generation-time render -- a plain open still never changes a photo');
+assert(/collidesWithOtherEvent && \(_tripsyAllowPhotoFetch \|\| isOwner\)/.test(dedup),
+  'a cached duplicate swaps on any OWNER render -- "There are still duplicate photos" came from the plain Preview open, which never runs under the generation gate; a viewer\'s open stays untouched');
 assert(/\(nameOwner !== undefined && nameOwner !== cacheKey\)/.test(dedup),
   'THE ASK\'s exemption: a photo owned by this SAME event (same cacheKey -- same name/title/address, any day) is never a collision');
 
@@ -53,18 +53,18 @@ assert(/\(nameOwner !== undefined && nameOwner !== cacheKey\)/.test(dedup),
 (async () => {
   const src = extractFn('tripsyDedupedPlacePhotoUrl').replace(/^async function /, 'var tripsyDedupedPlacePhotoUrl = async function ');
 
-  const run = async ({ cached, names = [], hashes = [], allowFetch = true, alt = null, fresh = null }) => {
+  const run = async ({ cached, names = [], hashes = [], allowFetch = true, owner = true, alt = null, fresh = null }) => {
     const calls = { recached: [], altSearches: 0 };
     let entry = cached;
     const usedNames = new Map(names);
     const usedHashes = new Map(hashes);
     const f = new Function('nameArg', 'usedNames', 'usedHashes', 'calls', 'entryRef', 'altArg', 'freshArg',
-      '_tripsyAllowPhotoFetch', 'tripsyPlacePhotoCacheKey', 'Store', 'fetchTripsyPlacePhoto',
+      '_tripsyAllowPhotoFetch', 'isOwner', 'tripsyPlacePhotoCacheKey', 'Store', 'fetchTripsyPlacePhoto',
       'tripsyFindUnusedPlacePhoto', 'tripsyHashBlob', 'console',
       'var tripsyPlacePhotoCacheDirty = false;\n' + src
       + '\nreturn tripsyDedupedPlacePhotoUrl(nameArg, "addr", "title", "", usedNames, usedHashes);');
     const url = await f('Place', usedNames, usedHashes, calls, null, alt, fresh,
-      allowFetch,
+      allowFetch, owner,
       (n, a, t, h) => `key:${n}|${a}|${t}|${h}`,
       {
         getTripsyPlacePhoto: async () => (entry && entry.driveFileId ? entry : (fresh || entry)),
@@ -106,9 +106,16 @@ assert(/\(nameOwner !== undefined && nameOwner !== cacheKey\)/.test(dedup),
   assert(r.url === null && r.calls.recached.length === 0,
     'with no unused candidate left, the card falls back to its icon rather than repeat another event\'s photo');
 
-  // Plain open (no photo fetch allowed): the duplicate shows verbatim --
-  // photos never change outside a generation-time render.
-  r = await run({ cached, names: [['P1', 'key:OTHER']], allowFetch: false, alt: altPhoto });
+  // The OWNER's plain open (no fetch gate) swaps too -- the live "still
+  // duplicate photos" report was the fully-generated itinerary's Preview,
+  // which never runs under the generation gate.
+  r = await run({ cached, names: [['P1', 'key:OTHER']], allowFetch: false, owner: true, alt: altPhoto });
+  assert(r.url === 'alt-url' && r.calls.recached.length === 1,
+    'THE FIX (round 2): the owner\'s plain Preview open heals a duplicate too -- no generation required');
+
+  // A VIEWER's open never swaps: they have no Places key to find an
+  // alternative with, and the owner\'s next open fixes it for everyone.
+  r = await run({ cached, names: [['P1', 'key:OTHER']], allowFetch: false, owner: false, alt: altPhoto });
   assert(r.url === 'cached-url' && r.calls.altSearches === 0,
-    'a plain open never swaps -- the duplicate is healed by the next generation-time render instead');
+    'a viewer\'s open shows the cached photo untouched');
 })();
