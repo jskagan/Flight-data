@@ -2372,7 +2372,13 @@ async function moveDriveFileToFolder(fileId, addParentId, removeParentId) {
 // Every tripsy place/transportation photo goes through here so it lands in the
 // "Photos" subfolder with the canonical `tripsy-place-photo-*` name.
 async function uploadTripsyPlacePhotoToDrive(blob, mimeType = 'image/jpeg') {
-  return uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, mimeType, await getTripsyPhotosFolderId());
+  const driveFileId = await uploadBlobToDrive(blob, `tripsy-place-photo-${Date.now()}`, mimeType, await getTripsyPhotosFolderId());
+  // Seed the persistent photo-blob cache at the ONE choke point every
+  // place/transportation photo upload goes through (fetches, dedup swaps,
+  // manual picks, pastes), so the very next cold app open paints this photo
+  // from disk instead of downloading back the bytes we just uploaded.
+  if (driveFileId) tripsyPutCachedPhotoBlob(driveFileId, blob);
+  return driveFileId;
 }
 
 // One-time (owner) migration: move every existing `tripsy-place-photo-*` file from
@@ -2476,21 +2482,93 @@ const TRIPSY_OFFLINE_STORE = 'tripsyDocs';
 // ('trips' is the only entry today -- the last trips-data.json this device loaded,
 // used ONLY by Travel View when there's no network; see tripsyCacheTripsForOffline).
 const TRIPSY_OFFLINE_APP_STORE = 'appCache';
+// v3 store: place/transportation PHOTO bytes, keyed by driveFileId, so a
+// fresh app session paints the itinerary/partial from disk instead of
+// re-downloading every photo from Drive before the first render ("When I
+// close the app and then re-open, there is still a delay when I try to open
+// the partial itinerary," 2026-09-27 -- the in-memory object-URL cache dies
+// with the session, and the build awaits every photo before returning HTML).
+// A photo edit always mints a NEW driveFileId (uploadBlobToDrive), so an
+// entry can never go stale under its key -- only unreferenced, which the age
+// prune (tripsyPruneCachedPhotoBlobs) and the orphan-delete hook in
+// cacheTripsyPlacePhotoLocal clean up.
+const TRIPSY_OFFLINE_PHOTO_STORE = 'photoBlobs';
 const TRIPSY_OFFLINE_PURGE_DAYS_AFTER_TRIP = 7;
 function openTripsyOfflineDb() {
   return new Promise((resolve, reject) => {
     if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
-    const req = indexedDB.open(TRIPSY_OFFLINE_DB_NAME, 2);
+    const req = indexedDB.open(TRIPSY_OFFLINE_DB_NAME, 3);
     // Guarded creates, not an else-branch on oldVersion: a device upgrading from
-    // v1 needs only appCache, a fresh device needs both, and this covers each.
+    // v1 needs only the newer stores, a fresh device needs all, and this covers each.
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(TRIPSY_OFFLINE_STORE)) db.createObjectStore(TRIPSY_OFFLINE_STORE, { keyPath: 'driveFileId' });
       if (!db.objectStoreNames.contains(TRIPSY_OFFLINE_APP_STORE)) db.createObjectStore(TRIPSY_OFFLINE_APP_STORE, { keyPath: 'key' });
+      if (!db.objectStoreNames.contains(TRIPSY_OFFLINE_PHOTO_STORE)) db.createObjectStore(TRIPSY_OFFLINE_PHOTO_STORE, { keyPath: 'driveFileId' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
+}
+
+// ---- Persistent photo-blob cache (the v3 store above). All fail soft: a
+// device without IndexedDB just keeps the old download-from-Drive behavior.
+async function tripsyGetCachedPhotoBlob(driveFileId) {
+  try {
+    const db = await openTripsyOfflineDb();
+    const rec = await new Promise((resolve, reject) => {
+      const tx = db.transaction(TRIPSY_OFFLINE_PHOTO_STORE, 'readonly');
+      const req = tx.objectStore(TRIPSY_OFFLINE_PHOTO_STORE).get(driveFileId);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+    return (rec && rec.blob) || null;
+  } catch (e) {
+    return null;
+  }
+}
+function tripsyPutCachedPhotoBlob(driveFileId, blob) {
+  // Fire-and-forget: caching must never block or fail the caller.
+  (async () => {
+    try {
+      const db = await openTripsyOfflineDb();
+      const tx = db.transaction(TRIPSY_OFFLINE_PHOTO_STORE, 'readwrite');
+      tx.objectStore(TRIPSY_OFFLINE_PHOTO_STORE).put({ driveFileId, blob, cachedAt: new Date().toISOString() });
+    } catch (e) { /* non-fatal */ }
+  })();
+}
+function tripsyDeleteCachedPhotoBlob(driveFileId) {
+  (async () => {
+    try {
+      const db = await openTripsyOfflineDb();
+      const tx = db.transaction(TRIPSY_OFFLINE_PHOTO_STORE, 'readwrite');
+      tx.objectStore(TRIPSY_OFFLINE_PHOTO_STORE).delete(driveFileId);
+    } catch (e) { /* non-fatal */ }
+  })();
+}
+// Entries not touched in ~180 days are unreferenced with overwhelming
+// likelihood (a live photo is re-put on every fresh download, and a replaced
+// one is deleted by the orphan hook) -- prune once per session, lazily on
+// first photo use, so the store can't grow without bound.
+let _tripsyPhotoBlobPruneDone = false;
+function tripsyPruneCachedPhotoBlobs() {
+  if (_tripsyPhotoBlobPruneDone) return;
+  _tripsyPhotoBlobPruneDone = true;
+  (async () => {
+    try {
+      const cutoff = new Date(Date.now() - 180 * 86400000).toISOString();
+      const db = await openTripsyOfflineDb();
+      const tx = db.transaction(TRIPSY_OFFLINE_PHOTO_STORE, 'readwrite');
+      const store = tx.objectStore(TRIPSY_OFFLINE_PHOTO_STORE);
+      const req = store.openCursor();
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return;
+        if ((cursor.value.cachedAt || '') < cutoff) cursor.delete();
+        cursor.continue();
+      };
+    } catch (e) { /* non-fatal */ }
+  })();
 }
 
 // ---- Offline trip cache (Travel View only) ----
@@ -4039,6 +4117,8 @@ const Store = {
     // trades for.
     if (prior && prior.driveFileId && prior.driveFileId !== fields.driveFileId) {
       deleteDriveFile(prior.driveFileId).catch(e => console.error('Failed to delete orphaned place photo:', e));
+      // Its local blob copy (the photoBlobs store) is dead weight now too.
+      tripsyDeleteCachedPhotoBlob(prior.driveFileId);
     }
   },
   // Reports how many cache entries exist and how many still carry the old
@@ -19657,7 +19737,20 @@ function tripsyPlacePhotoDisplayUrl(driveFileId) {
   // tripsyOutfitPhotoCache.
   const memo = tripsyPhotoObjectUrlCache.get(driveFileId);
   if (memo) return memo;
-  const p = downloadDriveFileBlob(driveFileId).then(blob => URL.createObjectURL(blob));
+  // Disk first, Drive second ("When I close the app and then re-open, there
+  // is still a delay," 2026-09-27): this memo dies with the session, so a
+  // fresh app open used to re-download EVERY photo from Drive before the
+  // itinerary/partial could paint. The persistent photoBlobs store makes a
+  // cold open read from local disk instead; only a photo this device has
+  // never shown costs a Drive round trip (and is cached for next time).
+  const p = (async () => {
+    tripsyPruneCachedPhotoBlobs();
+    const cached = await tripsyGetCachedPhotoBlob(driveFileId);
+    if (cached) return URL.createObjectURL(cached);
+    const blob = await downloadDriveFileBlob(driveFileId);
+    tripsyPutCachedPhotoBlob(driveFileId, blob);
+    return URL.createObjectURL(blob);
+  })();
   p.catch(() => { if (tripsyPhotoObjectUrlCache.get(driveFileId) === p) tripsyPhotoObjectUrlCache.delete(driveFileId); });
   tripsyPhotoObjectUrlCache.set(driveFileId, p);
   return p;
@@ -24638,6 +24731,27 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
   // survive across generations the way they used to.
   const usedPlacePhotoNames = new Map();
   const usedPlacePhotoHashes = new Map();
+  // The COVER header's background photo is claimed before anything else --
+  // it has its own cache entry (unsplit hero-event title, no hint) that the
+  // pre-pass below never walks, which is how the cover and the Mandarin
+  // Oriental's own card carried the SAME photo ("There are still duplicate
+  // photos in the itinerary," 2026-09-27, fourth report). Claimed first, the
+  // cover -- the most prominent image in the document -- keeps the photo and
+  // the hotel's CARD is the one that swaps to a different shot of the same
+  // place during the maintenance pass.
+  if (headerBackgroundPhotoUrl) {
+    const heroEvent = headerPlaceEvents.find(ev => ev.tripsyRaw && ev.tripsyRaw.resource === 'hosting')
+      || headerPlaceEvents.find(ev => ev.tripsyRaw && ev.tripsyRaw.resource === 'activity');
+    if (heroEvent) {
+      const hr = heroEvent.tripsyRaw;
+      const coverKey = tripsyPlacePhotoCacheKey(hr.name || heroEvent.summary, hr.address || '', heroEvent.summary, '');
+      const coverEntry = await Store.getTripsyPlacePhoto(coverKey);
+      if (coverEntry && coverEntry.driveFileId && !coverEntry.skipped) {
+        if (coverEntry.photoName && !usedPlacePhotoNames.has(coverEntry.photoName)) usedPlacePhotoNames.set(coverEntry.photoName, coverKey);
+        if (coverEntry.contentHash && !usedPlacePhotoHashes.has(coverEntry.contentHash)) usedPlacePhotoHashes.set(coverEntry.contentHash, coverKey);
+      }
+    }
+  }
   // Deterministic ownership pre-pass: claim every place card's ALREADY-CACHED
   // photo in DOCUMENT order before any card builds. Card building fans out
   // concurrently (Promise.all across days and within a day), so without this
@@ -24784,7 +24898,56 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
     const cacheKey = tripsyTransportationPhotoCacheKey(company, category);
     const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
     const isSkipped = !!(cachedEntry && cachedEntry.skipped);
-    const photoDataUrl = isSkipped ? null : await fetchTripsyTransportationPhoto(company, category);
+    let photoDataUrl = isSkipped ? null : await fetchTripsyTransportationPhoto(company, category);
+    // A transportation photo must not repeat a PLACE's photo in the same
+    // document ("we should not re-use a photo [already] used for an event
+    // other than a transportation event," and the fourth "still duplicate
+    // photos" report, 2026-09-27: the Mandarin Oriental's own transfer van
+    // searches Places under the HOTEL's name and landed on the very photo
+    // the hotel's card shows). Same-company repeats ACROSS legs stay by
+    // design (one shared entry); this only fires when the entry's photo is
+    // OWNED by a place card or the cover, only during the maintenance pass,
+    // never over a pinned pick, serialized like every other claim, and
+    // remembered when exhausted.
+    if (photoDataUrl && _tripsyAllowPhotoFetch && !_tripsyDedupExhausted.has(cacheKey)) {
+      const entryNow = await Store.getTripsyPlacePhoto(cacheKey);
+      const ownedByPlace = entryNow && !entryNow.ownerPinned && (
+        (entryNow.photoName && usedPlacePhotoNames.has(entryNow.photoName)) ||
+        (entryNow.contentHash && usedPlacePhotoHashes.has(entryNow.contentHash)));
+      if (ownedByPlace) {
+        photoDataUrl = await tripsyClaimPlacePhotoSerially(async () => {
+          try {
+            const apiKey = await Store.getPlacesApiKey();
+            if (!apiKey) return photoDataUrl;
+            const candidates = (await tripsyGatherTransportationPhotoCandidates(apiKey, company, category))
+              .filter(n => n !== entryNow.photoName && !usedPlacePhotoNames.has(n))
+              .slice(0, 4);
+            for (const cand of candidates) {
+              const blob = await tripsyFetchPlacePhotoBlob(apiKey, cand);
+              if (!blob) continue;
+              const hash = await tripsyHashBlob(blob);
+              if (usedPlacePhotoHashes.has(hash)) continue;
+              if (company && !(await tripsyTransportationPhotoAcceptable(company, blob))) continue;
+              const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
+              Store.cacheTripsyPlacePhotoLocal(cacheKey, {
+                driveFileId, photoName: cand, contentHash: hash,
+                triedPhotoNames: [...new Set([...(entryNow.triedPhotoNames || []), cand])],
+                ...(company ? { liveryChecked: true } : {}),
+              });
+              tripsyPlacePhotoCacheDirty = true;
+              return URL.createObjectURL(blob);
+            }
+            // Nothing distinct left for this company: the icon beats
+            // repeating the place's photo, and the session remembers.
+            _tripsyDedupExhausted.add(cacheKey);
+            return null;
+          } catch (e) {
+            console.error('Transportation place-collision swap failed (keeping photo):', e);
+            return photoDataUrl;
+          }
+        });
+      }
+    }
     // ev.location is the departure/arrival description line ("LAX → JFK")
     // -- only present when the event actually has one. It governs whether the
     // company name is surfaced as its own meta line (below) and whether the

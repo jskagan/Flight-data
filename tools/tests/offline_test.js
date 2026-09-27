@@ -38,7 +38,7 @@ global.indexedDB = {
 };
 `;
 const src = ['openTripsyOfflineDb','tripsyCacheTripsForOffline','loadTripsyOfflineTrips'].map(extractFn).join('\n');
-const consts = "const TRIPSY_OFFLINE_DB_NAME='travel-tracker-offline';const TRIPSY_OFFLINE_STORE='tripsyDocs';const TRIPSY_OFFLINE_APP_STORE='appCache';";
+const consts = "const TRIPSY_OFFLINE_DB_NAME='travel-tracker-offline';const TRIPSY_OFFLINE_STORE='tripsyDocs';const TRIPSY_OFFLINE_APP_STORE='appCache';const TRIPSY_OFFLINE_PHOTO_STORE='photoBlobs';";
 const body = `
 // Synthetic stand-in for trips-data.json: the original scratchpad version read
 // the owner's REAL trip file, which must never be committed to this public

@@ -629,7 +629,16 @@ step 4; git history has it if ever needed.
   leaves the first paint standing; a VIEWER's open stays verbatim (no Places key anyway). No
   unused candidate left → icon fallback beats repeating, and the exhaustion is remembered per
   session (`_tripsyDedupExhausted`) so no rebuild re-pays the fruitless search. The first-fetch
-  `isDuplicate` check is owner-aware the same way.
+  `isDuplicate` check is owner-aware the same way. **(5)** two surfaces never routed through the
+  maps at all and kept duplicating (fourth report, verified live: the Mandarin Oriental's cover
+  header, hotel card and its transfer-van card all shared one contentHash): the COVER header's
+  background photo (its own cache entry -- unsplit hero title, no hint) is claimed FIRST, before
+  the pre-pass, so on a collision the event card swaps and the cover keeps the shot; and a
+  TRANSPORTATION card whose photo is OWNED by a place/cover (a hotel's own transfer service
+  searches Places under the hotel's name) swaps to a different company candidate inside
+  `tripsyTransportationCardHtml` -- maintenance-gated, serialized, livery-checked per candidate,
+  never over an `ownerPinned` pick, exhaustion remembered in `_tripsyDedupExhausted`; SAME-company
+  repeats across legs still stand (one shared entry, by design).
   **(4)** every NEW-photo claim — a collision swap, or a first-fetch's duplicate decision — runs
   one at a time through `tripsyClaimPlacePhotoSerially` (`_tripsyPhotoClaimChain`), and the
   first-fetch duplicate TEST is evaluated inside the chain, not before (third report, "There are
@@ -639,6 +648,22 @@ step 4; git history has it if ever needed.
   unused" candidate, so the duplicates just moved to a new photo on every open). Serialized, each
   claim sees every earlier claim's registration; the common case (cached, no collision) stays
   fully parallel. `photodedup_test.js`.
+- **Photo bytes persist on-device (IndexedDB `photoBlobs`, offline DB v3)** ("When I close the
+  app and then re-open, there is still a delay when I try to open the partial itinerary,"
+  2026-09-27): `tripsyPhotoObjectUrlCache` (the object-URL memo) dies with the session, so a COLD
+  open re-downloaded every photo in the document from Drive before `buildTripsyPrintHtml` could
+  return -- the one cost the fast-paint restructure couldn't remove, since the paint needs the
+  bytes. `tripsyPlacePhotoDisplayUrl` is now disk-first (`tripsyGetCachedPhotoBlob` →
+  `downloadDriveFileBlob`, caching on miss); `uploadTripsyPlacePhotoToDrive` -- the ONE choke
+  point every place/transportation photo upload goes through -- seeds the cache so a photo just
+  uploaded is never downloaded back; the orphan-delete hook in `cacheTripsyPlacePhotoLocal` drops
+  the replaced photo's local blob; and `tripsyPruneCachedPhotoBlobs` (lazy, once per session)
+  evicts entries older than 180 days. Staleness is impossible by construction -- a photo edit
+  always mints a NEW driveFileId -- and everything fails soft (no IndexedDB → the old
+  download-from-Drive behavior). The store rides `openTripsyOfflineDb` (bumped to v3, guarded
+  creates as before -- and note `tools/tests/offline_test.js`'s fake defines the store-name
+  consts by hand, so a new store means updating its `consts` line or its generated half crashes
+  at upgrade). `photoblobcache_test.js`.
 - **Categories**: flight / transportation / hotel / dining / concert / tour / spa / reception /
   cooking / other — each event's display `type`, derived from its `tripsyRaw.category` slug
   (`TRIPSY_ACTIVITY_CATEGORY_TO_TYPE`, mirrored in `tools/build_tripsy_snapshot.py`), including the

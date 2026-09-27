@@ -48,6 +48,16 @@ assert(/collidesWithOtherEvent && _tripsyAllowPhotoFetch\) \{/.test(dedup) && !/
   'the swap runs ONLY under the fetch gate -- the owner\'s opens get it via the BACKGROUND maintenance rebuild (tripsyBackgroundPhotoMaintenance), never in front of the first paint ("Why is there a delay when I open my partial itinerary?")');
 assert(/_tripsyDedupExhausted\.has\(cacheKey\)\) return null;/.test(dedup) && /_tripsyDedupExhausted\.add\(cacheKey\);/.test(dedup),
   'an exhausted candidate pool is remembered for the session -- the icon stays without re-running the fruitless search on every rebuild');
+// The fourth report's two structural holes: the cover header and
+// transportation cards, whose photos never routed through the dedup maps.
+assert(/const coverKey = tripsyPlacePhotoCacheKey\(hr\.name \|\| heroEvent\.summary, hr\.address \|\| '', heroEvent\.summary, ''\);/.test(html)
+  && html.indexOf('const coverKey = tripsyPlacePhotoCacheKey') < html.indexOf('// Deterministic ownership pre-pass'),
+  'the COVER header claims its photo before the pre-pass -- the most prominent image keeps it, and the hotel\'s own card is the one that swaps');
+assert(/const ownedByPlace = entryNow && !entryNow\.ownerPinned && \(/.test(html)
+  && /Transportation place-collision swap failed \(keeping photo\)/.test(html),
+  'a transportation card whose photo is OWNED by a place/cover swaps to a different company candidate (livery-checked, serialized, never over a pinned pick) -- same-company repeats across legs stay by design');
+assert(/if \(photoDataUrl && _tripsyAllowPhotoFetch && !_tripsyDedupExhausted\.has\(cacheKey\)\)/.test(html),
+  'the transport collision check runs only in the maintenance pass and honors the session exhaustion memory');
 assert(/async function tripsyBackgroundPhotoMaintenance\(tripKey, buildOpts, firstHtml, applyRepaint\)/.test(html)
   && /tripsyBackgroundPhotoMaintenance\(tripKey, undefined, html, freshHtml => \{/.test(html)
   && /tripsyBackgroundPhotoMaintenance\(tripKey, \{ partialKeys: keys, summaryOnly: false \}, html, freshHtml => \{/.test(html),
