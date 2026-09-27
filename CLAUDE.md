@@ -1451,6 +1451,39 @@ step 4; git history has it if ever needed.
   generation sites, since the staleness readers hash `days.flatMap` — a filtered fingerprint
   would read stale forever. The Daily Dress Guide renders a free day as plain italic text, never
   the jump-to-My-Trips title button (there is no real event to jump to). `freedays_test.js`.
+- **New itinerary events ASK their dress codes instead of demanding a full Refresh — and
+  matching-tier newcomers just wear the outfits already composed** ("rather than regenerate the
+  entire attire guide automatically, ask the user what the dress code is for the new events. And
+  if those dress codes are identical or similar to dress codes for the events that are
+  immediately before or after…, regenerate the attire guide by using the selected outfits for
+  the new events," 2026-09-27). When the owner opens a Clothing Summary whose guide is stale AND
+  the itinerary has real events the guide has never seen (`tripsyAttireFindNewGuideEvents` —
+  free-day placeholders excluded, they're Casual by rule), `showTripsyAttireNewEventsDialog`
+  (own overlay, z 9150 like the review dialog; its badges are in the category menu's click-away
+  exclusion list) lists just those events, each with a pickable 7-tier badge pre-suggested from
+  the athletic name rule first, else the nearest guide-known neighbor in the same day (BEFORE
+  wins over after — you're already dressed for what came before), else Casual. Confirming runs
+  `tripsyAttireApplyNewEvents` — a purely MECHANICAL merge, no Claude call: the current build's
+  day list becomes the guide's structure, existing events carry their saved
+  tier/override/ambiguity verbatim by id, new events take the picks (stamped
+  `categoryOverridden` — the owner just confirmed them, so no future refresh re-judges),
+  blocks/counts re-derive via `computeTripsyAttireBlocks`, the `eventFingerprint` moves to the
+  merged list (stale note clears), and `personGuidance`/`packingList`/`laundryDays`/
+  `guidanceFingerprint` are deliberately untouched (a changed per-tier count is what makes the
+  NEXT real Refresh re-run the guidance sizing); a failed save rolls back in memory. Then
+  `tripsyAttireAdoptNewEventsIntoOutfits`: "identical or similar to the neighbors" IS the
+  existing block-folding rule, so a folded newcomer's block matches a saved composed outfit by
+  the same greedy `dayKey|tier` multiset rule `tripsyOutfitsUncoveredBlocks` uses, and that
+  saved block's `eventIds`/label refresh to the current block's (the incremental recompose's own
+  refresh — without it the 👔 glyph/"See outfit"/wear-day math would not see the newcomer
+  wearing the outfit); identical ids write nothing. Only a person left with an UNCOVERED block
+  (a new event at a genuinely different level from its neighbors) gets the usual
+  Regenerate-outfits confirm — an offer, never a silent recompose. The prompt fires once per
+  session per itinerary STATE (`tripsyAttireNewEventsPrompted`, keyed tripKey+fingerprint hash —
+  declining stays declined until the itinerary actually changes again), never while a generation
+  is running, and a dialog answered after the owner switched trips writes nothing
+  (`tripsyAttireOverlayTripKey` re-check). The full Refresh path is unchanged and still
+  available. `neweventtiers_test.js`.
 - **Physical-activity events are always Athletic** ("for events that involve hikes, biking,
   climbing, running, jogging or anything similar, set the dress category as 'athletic',"
   2026-09-15). Two layers: the events-categorization prompt states the rule (nuance lives with the

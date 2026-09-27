@@ -63,7 +63,7 @@ assert(/z-index:9150;/.test(ov),
   'layered above the Attire panel (9000) and below the category menu (9200) / cascade confirms, per the z-order rule');
 // The category menu's click-away close must not swallow the very tap that opens it.
 const menuFn = extractFn('getOrCreateTripsyAttireCategoryMenu');
-assert(/closest\('\[data-tripsy-attire-event-badge\], \[data-tripsy-attire-review-block\], \[data-tripsy-attire-review-event\]'\)/.test(menuFn),
+assert(/closest\('\[data-tripsy-attire-event-badge\], \[data-tripsy-attire-review-block\], \[data-tripsy-attire-review-event\](, \[data-tripsy-attire-newevent-pick\])?'\)/.test(menuFn),
   'the menu\'s click-away handler excludes the review dialog\'s badges, same as the guide\'s own');
 
 // ---- executed: the block override against a stubbed store ----

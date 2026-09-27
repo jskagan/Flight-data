@@ -25466,7 +25466,7 @@ function getOrCreateTripsyAttireCategoryMenu() {
     // closes it -- one exclusion per badge kind that can open this menu (the
     // guide's event badges, and the post-generate review dialog's block/event
     // badges).
-    if (menu.contains(e.target) || e.target.closest('[data-tripsy-attire-event-badge], [data-tripsy-attire-review-block], [data-tripsy-attire-review-event]')) return;
+    if (menu.contains(e.target) || e.target.closest('[data-tripsy-attire-event-badge], [data-tripsy-attire-review-block], [data-tripsy-attire-review-event], [data-tripsy-attire-newevent-pick]')) return;
     menu.style.display = 'none';
   });
   return menu;
@@ -25856,6 +25856,197 @@ function showTripsyAttireReviewDialog(guide, opts = {}) {
     overlay.onclick = e => { if (e.target === overlay) close(); };
   });
 }
+
+// ---- New itinerary events: ask their dress codes, never auto-regenerate ----
+// ("when new events are added to the itinerary... rather than regenerate the
+// entire attire guide automatically, ask the user what the dress code is for
+// the new events. And if those dress codes are identical or similar to dress
+// codes for the events that are immediately before or after..., regenerate
+// the attire guide by using the selected outfits for the new events,"
+// 2026-09-27.) When the owner opens a Clothing Summary whose guide is stale
+// AND the itinerary has events the guide has never seen, a dialog lists just
+// those events, each with a pickable tier badge (the same 7-tier menu as
+// everywhere else), pre-suggested from its NEIGHBOR's tier (or forced
+// Athletic by the name rule). Confirming merges them into the saved guide
+// MECHANICALLY -- categories re-derived by computeTripsyAttireBlocks, no
+// Claude call, personGuidance/packingList/laundryDays untouched -- and then
+// adopts each new event into the composed outfit already dressing its time
+// block: "identical or similar to the neighbors" is exactly the existing
+// block-folding rule, so a folded event's block matches a saved outfit by
+// dayKey|tier and simply gains the event's id (the same eventIds refresh the
+// incremental recompose does). Only a new event whose tier does NOT fold in
+// (a genuinely new block) triggers the usual Regenerate-outfits offer, and a
+// full Refresh (which re-sizes the packing guidance) stays available as
+// before.
+//
+// The real (non-free-day) events present in the CURRENT itinerary build but
+// absent from the saved guide, each with a suggested tier: the athletic name
+// rule first (same regex generation enforces), else the nearest neighbor
+// already IN the guide on the same day (before wins over after -- you're
+// already dressed for what came before), else casual.
+function tripsyAttireFindNewGuideEvents(guide, currentDays) {
+  const prior = new Map();
+  (guide.days || []).forEach(d => (d.events || []).forEach(e => prior.set(e.id, e)));
+  const found = [];
+  for (const day of currentDays) {
+    const events = day.events || [];
+    events.forEach((ev, i) => {
+      if (ev.freeDay || prior.has(ev.id)) return;
+      let suggested = null;
+      if (TRIPSY_ATTIRE_ATHLETIC_EVENT_RE.test(ev.name || '')) suggested = 'athletic';
+      if (!suggested) {
+        for (let j = i - 1; j >= 0 && !suggested; j--) { const p = prior.get(events[j].id); if (p && p.category) suggested = p.category; }
+        for (let j = i + 1; j < events.length && !suggested; j++) { const p = prior.get(events[j].id); if (p && p.category) suggested = p.category; }
+      }
+      found.push({ ev, dayKey: day.dayKey, suggested: suggested || 'casual' });
+    });
+  }
+  return found;
+}
+function getOrCreateTripsyAttireNewEventsOverlay() {
+  let overlay = document.getElementById('tripsy-attire-newevents-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'tripsy-attire-newevents-overlay';
+  // Same z-tier as the review dialog: above the Attire panel (9000), below
+  // the category menu (9200).
+  overlay.style.cssText = 'display:none; position:fixed; inset:0; z-index:9150; background:rgba(0,0,0,0.6); align-items:flex-start; justify-content:center; padding:32px 16px; overflow-y:auto; overscroll-behavior:contain;';
+  overlay.innerHTML = `
+    <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; max-width:640px; width:100%; padding:24px 26px; color:var(--text);">
+      <h2 style="margin:0 0 6px; font-size:18px;">New events since the attire guide was made</h2>
+      <p style="margin:0 0 14px; font-size:13px; color:var(--muted); line-height:1.5;">Set each new event's dress code (suggested from its neighbors). Events matching the dress level around them share the outfit already planned for that time — no regeneration needed.</p>
+      <div id="tripsy-attire-newevents-content"></div>
+      <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+        <button class="btn" data-tripsy-attire-newevents-later>Not Now</button>
+        <button class="btn primary" data-tripsy-attire-newevents-apply>Add to Guide</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+// Resolves to Map(eventId -> picked tier), or null on Not Now / click-outside.
+function showTripsyAttireNewEventsDialog(newEvents) {
+  return new Promise(resolve => {
+    const overlay = getOrCreateTripsyAttireNewEventsOverlay();
+    const content = overlay.querySelector('#tripsy-attire-newevents-content');
+    const picks = new Map(newEvents.map(n => [n.ev.id, n.suggested]));
+    const render = () => {
+      let lastDay = null;
+      content.innerHTML = newEvents.map((n, idx) => {
+        const dayHeader = n.dayKey !== lastDay
+          ? `<div style="font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:0.04em; color:var(--amber); margin:10px 0 2px;">${esc(tripsyDayHeaderLabel(n.dayKey))}</div>`
+          : '';
+        lastDay = n.dayKey;
+        return `
+          ${dayHeader}
+          <div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-top:1px solid var(--line);">
+            <div style="flex:1; min-width:0;">
+              <div style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(n.ev.name || 'Event')}</div>
+              ${n.ev.startTime ? `<div style="font-size:11px; color:var(--muted);">${esc(n.ev.startTime)}</div>` : ''}
+            </div>
+            <div style="flex-shrink:0;">
+              <button type="button" class="tripsy-attire-badge-btn" data-tripsy-attire-newevent-pick data-idx="${idx}">${tripsyAttireBadgeHtml(picks.get(n.ev.id))}</button>
+            </div>
+          </div>`;
+      }).join('');
+      content.querySelectorAll('[data-tripsy-attire-newevent-pick]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const menu = getOrCreateTripsyAttireCategoryMenu();
+          positionTripsyFixedMenu(btn, menu);
+          menu.querySelectorAll('.tripsy-attire-category-menu-item').forEach(item => {
+            item.onclick = () => {
+              menu.style.display = 'none';
+              picks.set(newEvents[Number(btn.dataset.idx)].ev.id, item.dataset.category);
+              render();
+            };
+          });
+        });
+      });
+    };
+    render();
+    overlay.style.display = 'flex';
+    const close = result => { overlay.style.display = 'none'; resolve(result); };
+    overlay.querySelector('[data-tripsy-attire-newevents-apply]').onclick = () => close(picks);
+    overlay.querySelector('[data-tripsy-attire-newevents-later]').onclick = () => close(null);
+    overlay.onclick = e => { if (e.target === overlay) close(null); };
+  });
+}
+// Merges the current itinerary's day list into the saved guide with NO Claude
+// call: existing events carry their saved tier/override/ambiguity verbatim
+// (matched by id), new real events take the owner's picks (marked
+// categoryOverridden -- the owner just confirmed them, so no future refresh
+// second-guesses them), and new free-day placeholders default Casual as
+// always. Blocks/counts re-derive mechanically; the event fingerprint moves
+// to the current list so the stale note clears; personGuidance / packingList
+// / laundryDays / guidanceFingerprint are deliberately untouched (a changed
+// per-tier count is exactly what makes the NEXT real Refresh re-run the
+// guidance sizing). Rolls back in memory on a failed save.
+async function tripsyAttireApplyNewEvents(guide, currentDays, picks) {
+  const prior = new Map();
+  (guide.days || []).forEach(d => (d.events || []).forEach(e => prior.set(e.id, e)));
+  const snapshot = { days: guide.days, blocks: guide.blocks, counts: guide.counts, eventFingerprint: guide.eventFingerprint };
+  const mergedDays = currentDays.map(day => ({
+    ...day,
+    events: (day.events || []).map(ev => {
+      const p = prior.get(ev.id);
+      if (p) return { ...ev, category: p.category, categoryOverridden: !!p.categoryOverridden, alternateCategory: p.alternateCategory || '' };
+      if (ev.freeDay) return { ...ev, category: 'casual', categoryOverridden: false, alternateCategory: '' };
+      return { ...ev, category: picks.get(ev.id) || 'casual', categoryOverridden: picks.has(ev.id), alternateCategory: '' };
+    }),
+  }));
+  guide.days = mergedDays;
+  tripsyAttireApplyRecomputedBlocks(guide, computeTripsyAttireBlocks(guide.days));
+  guide.eventFingerprint = tripsyAttireFingerprint(mergedDays.flatMap(d => d.events));
+  const saved = await Store.saveTripsyAttireGuide(guide);
+  if (!saved) {
+    guide.days = snapshot.days; guide.blocks = snapshot.blocks; guide.counts = snapshot.counts; guide.eventFingerprint = snapshot.eventFingerprint;
+    return false;
+  }
+  return true;
+}
+// After the merge: hand each new event to the outfit already composed for its
+// time block. Saved outfit blocks are matched to the guide's CURRENT blocks
+// by the same greedy dayKey|tier multiset rule tripsyOutfitsUncoveredBlocks
+// judges staleness with, and a matched block's eventIds/label refresh to the
+// current block's (the same refresh the incremental recompose does) -- so the
+// 👔 glyph, "See outfit" and the wear-day math all see the newcomer wearing
+// the existing outfit. Returns the persons whose outfits still have an
+// UNCOVERED block afterwards (a new event at a genuinely different dress
+// level from its neighbors), for the caller's Regenerate offer.
+async function tripsyAttireAdoptNewEventsIntoOutfits(tripKey, guide) {
+  const currentBlocks = tripsyEnumerateAttireBlocks(guide);
+  const needRecompose = [];
+  for (const person of ['him', 'her']) {
+    const outfits = await Store.getTripsyTripOutfits(tripKey, person);
+    if (!outfits || !(outfits.blocks || []).some(b => (b.garmentIds || []).length)) continue;
+    const pools = new Map(); // dayKey|tier -> saved blocks not yet claimed
+    for (const b of (outfits.blocks || [])) {
+      const k = `${b.dayKey}|${b.category}`;
+      if (!pools.has(k)) pools.set(k, []);
+      pools.get(k).push(b);
+    }
+    let changed = false;
+    for (const cur of currentBlocks) {
+      const pool = pools.get(`${cur.dayKey}|${cur.category}`);
+      const saved = pool && pool.shift();
+      if (!saved) continue;
+      const same = saved.eventIds && saved.eventIds.length === cur.eventIds.length && saved.eventIds.every((id, i) => id === cur.eventIds[i]);
+      if (same) continue;
+      saved.eventIds = [...cur.eventIds];
+      if (cur.label) saved.label = cur.label;
+      changed = true;
+    }
+    if (changed) {
+      const ok = await Store.saveTripsyTripOutfits(outfits);
+      if (!ok) console.error(`Could not save adopted outfit eventIds for ${person} (non-fatal).`);
+    }
+    if (tripsyOutfitsUncoveredBlocks(guide, outfits).length) needRecompose.push(person);
+  }
+  return needRecompose;
+}
+// Once per session per (trip, itinerary state) -- declining must not re-nag
+// on every overlay open, while genuinely NEWER additions prompt again.
+const tripsyAttireNewEventsPrompted = new Set();
 // One lazily-created, body-level overlay for the Attire feature (My Trips
 // -> Attire button). Same fixed full-screen modal shape/click-outside-to-
 // close pattern as #tripsy-update-overlay, but simpler: no dropdown/upload
@@ -26457,15 +26648,57 @@ async function showTripsyAttireOverlay(tripKey) {
   // now; this overlay just shows the Clothing Summary content.)
   if (saved) {
     let stale = false;
+    let currentDays = null;
+    let currentFingerprint = null;
     try {
-      const { days } = await tripsyAttireBuildDays(trip);
-      const currentFingerprint = tripsyAttireFingerprint(days.flatMap(d => d.events));
+      ({ days: currentDays } = await tripsyAttireBuildDays(trip));
+      currentFingerprint = tripsyAttireFingerprint(currentDays.flatMap(d => d.events));
       stale = !saved.eventFingerprint || currentFingerprint.hash !== saved.eventFingerprint.hash || currentFingerprint.count !== saved.eventFingerprint.count;
     } catch (e) {
       console.error('Attire staleness check failed (non-fatal):', e);
     }
     const { weatherTargetsByDay, tripStartDayKey } = await tripsyAttireLoadWeatherBar(trip, saved);
     renderTripsyAttireOverlayContent(saved, { stale, weatherTargetsByDay, tripStartDayKey });
+    // The itinerary gained events the guide has never seen: ask their dress
+    // codes instead of leaving only the "Refresh" note (which regenerates the
+    // whole guide via Claude). Once per session per itinerary state -- a
+    // declined dialog stays declined until the itinerary actually changes
+    // again -- and never while a generation is already running for this trip.
+    if (isOwner && stale && currentDays && !tripsyAttireGeneratingKeys.has(tripKey)) {
+      const promptKey = `${tripKey}::${currentFingerprint ? currentFingerprint.hash : ''}`;
+      const newEvents = tripsyAttireFindNewGuideEvents(saved, currentDays);
+      if (newEvents.length && !tripsyAttireNewEventsPrompted.has(promptKey)) {
+        tripsyAttireNewEventsPrompted.add(promptKey);
+        const picks = await showTripsyAttireNewEventsDialog(newEvents);
+        if (picks && tripsyAttireOverlayTripKey === tripKey) {
+          const ok = await tripsyAttireApplyNewEvents(saved, currentDays, picks);
+          if (!ok) {
+            toast('Could not save the new events into the attire guide.', 'error');
+          } else {
+            const fresh = await tripsyAttireLoadWeatherBar(trip, saved);
+            renderTripsyAttireOverlayContent(saved, { stale: false, weatherTargetsByDay: fresh.weatherTargetsByDay, tripStartDayKey: fresh.tripStartDayKey });
+            const needRecompose = await tripsyAttireAdoptNewEventsIntoOutfits(tripKey, saved);
+            if (!needRecompose.length) {
+              toast('New events added to the attire guide — they share the outfits already planned for their time blocks.', 'success');
+            } else {
+              toast('New events added to the attire guide.', 'success');
+              // Only a new event at a genuinely DIFFERENT dress level from its
+              // neighbors lands here (a new uncovered block) -- the same offer
+              // a Refresh makes, never a silent recompose (a real Claude call).
+              for (const p of needRecompose) {
+                const regen = await tripsyConfirmDialog(
+                  `${p === 'her' ? 'Her' : 'His'} outfits don't cover a new event's time block — its dress level differs from the events around it. Regenerate outfits to dress it?`,
+                  { title: '⚠️ New time block has no outfit', yes: 'Regenerate', no: 'Ignore' });
+                if (regen) {
+                  const hideSpinner = tripsyShowOutfitComposingSpinner(p);
+                  try { await runTripsyOutfitComposition(tripKey, p); } finally { hideSpinner(); }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   } else if (isOwner) {
     content.innerHTML = `
       <div style="padding:60px 20px; text-align:center; color:var(--muted); font-size:15px;">
