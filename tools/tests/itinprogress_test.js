@@ -58,8 +58,11 @@ assert(/data-itin-progress-ok/.test(dlg) && !/data-confirm-no/.test(dlg),
 // index -- a bare indexOf produced a backwards (empty) slice and passed nothing.
 const runStart = html.indexOf('const checkedDayKeys = [...new Set(');
 const run = html.slice(runStart, html.indexOf('document.body.appendChild(overlay);', runStart));
-assert(/const setStage = text => \{[\s\S]*?status\.textContent = text;[\s\S]*?tripsySetItineraryGeneratingStatus\(trip\.key, text\)/.test(run),
-  'one helper writes both the dialog line and the shared status');
+// Since 2026-09-28 the dialog closes on Continue, so there is no dialog line
+// left -- the one helper feeds the SHARED status (the glyph's progress
+// dialog) alone.
+assert(/const setStage = text => \{ if \(checkedDayKeys\.length\) tripsySetItineraryGeneratingStatus\(trip\.key, text\); \};/.test(run),
+  'one helper publishes the stage to the shared status the progress dialog reads');
 for (const [stage, label] of [
   ['Generating write-ups for', 'generating'],
   ['Fetching photos', 'photos'],
@@ -70,8 +73,8 @@ for (const [stage, label] of [
 // Close / Itinerary View / Trips View dialog instead of an unconditional jump.
 // See itindonedialog_test.js for that dialog's own coverage.
 assert(!run.includes('Opening itinerary…'), 'no auto-open stage remains');
-assert(/setStage\(`\$\{checkedDayKeys\.length \? 'Could not generate' : 'Could not save'\}: \$\{detail\}/.test(run),
-  'a failure is reported through the same channel, not just in the dialog');
+assert(/toast\(`Could not update the itinerary: \$\{detail\}`, 'error'\)/.test(run),
+  'an unrecoverable failure is reported as a toast (the dialog is already closed)');
 assert(!/status\.textContent = 'Generating…'/.test(run), 'the old fixed "Generating…" line is gone');
 // Only a real regeneration publishes: "Opening itinerary…" with nothing checked must not
 // make the glyph claim a run is happening.

@@ -465,6 +465,13 @@ step 4; git history has it if ever needed.
   "fully reviewed"); only the label disappears, where the old clear also downgraded the record to
   `purpose:'reference'`. That utility page's "Flags Explained" legend was updated to match.
   `parsedlabel_test.js`.
+- **The + Add menu's "Doc" item opens ONLY the attach form** ("When a user selects add and then a
+  new document, do not bring up the trip details card or the add doc button," 2026-09-28): the
+  handler used to also render and show the Edit Trip panel — whose own "Add Doc" button then sat
+  beside the very form it opens — purely because Add Doc historically lived inside that panel.
+  The attach panel is self-contained (its Save/Cancel close only itself), so the Edit Trip render
+  is simply dropped from this path; the Edit panel's own "Add Doc" button flow is unchanged.
+  `adddocpanel_test.js`.
 - **Review Parsed Docs: creating a trip asks for DATES, any trip is pickable, and clusters span
   proposals** (reported 2026-09-08: "Create a new trip only lets me pick a name, not the dates, and
   I cannot add later flights imported at the same time to that trip"). One gap, two compounding
@@ -880,26 +887,39 @@ step 4; git history has it if ever needed.
   **(3)** the prefetch itself is best-effort: wrapped in its own try/catch and raced against a
   45s cap — past it the flow moves on while the build finishes behind (its gate flips off
   mid-run, degrading remaining fetches to cached-only), since photos self-heal on any open via
-  `tripsyBackgroundPhotoMaintenance` anyway. **And a generation failure names its REAL reason in
-  the dialog's status line** (same-day follow-up, "I got an error message when I was trying to
-  update the itinerary": the catch said only "see console for details," useless on the iPad,
-  where there is no console — investigated live as almost certainly a transient API failure
-  after three generation runs in 30 minutes, but unknowable from the device) — `e.message`
-  bounded to 300 chars, plus "press Continue to retry." `continuestall_test.js`.
-- **The changes dialog's Continue no longer auto-opens the Itinerary view.** Per explicit request
-  (2026-08-17: "do not automatically open the itinerary view. Instead, display 3 buttons: close,
-  itinerary view, or trips view"): after the checked days regenerate (or, with everything
-  unchecked, the changes are just marked reviewed), `showTripsyItineraryChangesDialog`'s Continue
-  handler now ends in **`tripsyItineraryDoneDialog`** — Close / Itinerary View / Trips View, with
-  an outside click meaning Close (there's nothing to decline, only somewhere to go). The dialog is
-  shown AFTER the handler's `finally` cleanup, so the 🧭 glyph's blink and any open progress dialog
-  have already settled to "Finished." while the owner decides — awaiting it inside the `try` would
-  have left them claiming a run in progress. Itinerary View runs the exact code the old auto-jump
-  did (`previewTripsyItinerary` wrapped in the `_tripsyAllowNewPlacePhotoFetch` first-photo
-  allowance); Trips View navigates to My Trips, or re-renders it when it's already the page behind
-  the dialog; a FAILED run shows no destination dialog at all (`workSucceeded` guard) — the error
-  message stays visible in the changes dialog with Continue re-enabled. The zero-checked path's
-  stage line reads `Saving…` now, not the retired `Opening itinerary…`.
+  `tripsyBackgroundPhotoMaintenance` anyway. **And a failure names its REAL reason** (same-day follow-up, "I got an
+  error message when I was trying to update the itinerary": the catch said only "see console for
+  details," useless on the iPad, where there is no console) — `e.message` bounded to 300 chars.
+  Since the same-day backgrounding change (see the fire-and-forget bullet above), that report is
+  an error TOAST reserved for the genuinely unrecoverable case; an in-app generation failure
+  falls back to the cloud relay silently instead. `continuestall_test.js`.
+- **The changes dialog's Continue is fire-and-forget: the dialog closes INSTANTLY and the run
+  happens in the background, with the cloud relay as the no-errors fallback** ("The dialog box
+  should disappear as soon as I hit continue, and there should be no errors," 2026-09-28 — the
+  regeneration is minutes of Claude calls that ran in the foreground behind a frozen dialog, and
+  on the iPad the direct browser API call often can't get through at all: Safari's generic
+  "Load failed", seen live twice that day). `overlay.remove()` runs synchronously in the click
+  handler; everything else runs in a background async block — the 🧭 glyph blinks for the
+  duration (`setStage` now feeds ONLY the shared status the glyph's progress dialog reads; there
+  is no dialog line left), and completion is a TOAST sized to what happened ("Itinerary updated —
+  write-ups regenerated for N days." / "Changes marked as reviewed."). **An in-app generation
+  failure hands the SAME checked days to the cloud routine** via
+  `tripsyQueueItineraryChangesCloudRequest` — riding the partial itinerary's request/answer relay
+  through the SHARED `tripsyBuildNarrativeCloudRequest` (factored out of
+  `tripsyPartialEnsureNarratives`, so both callers' prompts are identical by construction;
+  `includeIntro:false`, day write-ups + summary rows scoped to exactly the checked days) — and
+  announces it as background work, never an error; the drain files the answer and records the
+  baseline itself, so the ▲ clears when the rewrite lands. An already-pending request is never
+  re-queued over (that would re-date it) — just a fresh best-effort worker fire. Only the
+  genuinely unrecoverable case (couldn't even queue to Drive) surfaces, as an error toast naming
+  the real reason. While a cloud rewrite is pending, "Review changes" reports "already being
+  rewritten in the background" (single-OK `tripsyConfirmDialog`) instead of reopening the dialog
+  and inviting a duplicate ask. **`tripsyItineraryDoneDialog` (the 2026-08-17 three-way Close /
+  Itinerary View / Trips View dialog) is RETIRED with the backgrounding** — there is no
+  foreground moment left to ask it in, and a modal popping up minutes later over whatever the
+  owner is doing would be noise; don't re-add it. The generate → record-baseline → time-boxed
+  photo-prefetch order survives unchanged (the stall lesson below). `itindonedialog_test.js`
+  (rewritten for this — the filename survives from the dialog it used to cover).
 - **A lodging row sorts next to the transfer that serves it, on EVERY ordering surface** ("the
   hotel stay listed before the transportation to the hotel. That is not supposed to happen,"
   2026-09-27): a hotel's stored check-in time is the property's NOMINAL hour (3:00 PM), which can
@@ -1121,8 +1141,8 @@ step 4; git history has it if ever needed.
 - **Narrative generation offloads to the cloud routine via a request/answer relay pair** ("I do
   not want to keep the app open in the foreground in order to generate a partial itinerary,"
   2026-09-27 — minutes-long Claude calls die when the iPad app backgrounds, which is what left
-  that partial bare in the first place). The partial's full mode is the one user of this today;
-  the machinery is generic. **Queue**: `driveData.tripsyNarrativeRequests`
+  that partial bare in the first place). Two users today: the partial's full mode, and the changes dialog's
+  background fallback (2026-09-28 — both build through the one shared `tripsyBuildNarrativeCloudRequest`). **Queue**: `driveData.tripsyNarrativeRequests`
   (`Store.listTripsyNarrativeRequests`/`queueTripsyNarrativeRequest`/`removeTripsyNarrativeRequest`,
   one request per trip, replaced outright), each request carrying the EXACT prompts the in-app
   generators would send (`narrativePrompt` for ALL requested days in one — the routine has no

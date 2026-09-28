@@ -21929,39 +21929,50 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
     </div>`;
   overlay.addEventListener('click', e => { e.stopPropagation(); if (e.target === overlay) overlay.remove(); });
   overlay.querySelector('[data-icd-cancel]').addEventListener('click', () => overlay.remove());
-  overlay.querySelector('[data-icd-continue]').addEventListener('click', async () => {
-    const contBtn = overlay.querySelector('[data-icd-continue]');
-    const status = overlay.querySelector('[data-icd-status]');
-    contBtn.disabled = true;
-    // WHAT'S ACTUALLY HAPPENING, decided BEFORE the label is written. With every box
-    // unchecked nothing is generated at all -- the only work left is marking the events
-    // seen and opening the itinerary -- yet this said "Generating…" and blinked the
-    // glyph's red ▲ regardless, so an unavoidable few seconds of Drive write + preview
-    // build read as a regeneration the owner had explicitly declined.
+  overlay.querySelector('[data-icd-continue]').addEventListener('click', () => {
     const checkedDayKeys = [...new Set([...overlay.querySelectorAll('[data-tripsy-itin-change]:checked')].map(cb => cb.dataset.dayKey))];
-    // One helper so this dialog's own line and the glyph's progress dialog can never
-    // describe different stages -- they read the same string.
-    const setStage = text => {
-      status.textContent = text;
-      if (checkedDayKeys.length) tripsySetItineraryGeneratingStatus(trip.key, text);
-    };
-    setStage(checkedDayKeys.length
-      ? `Generating write-ups for ${checkedDayKeys.length} day${checkedDayKeys.length === 1 ? '' : 's'}…`
-      : 'Saving…');
-    // Blink the 🧭 glyph's red ▲ for the duration, so the wait is visible on My Trips
-    // behind this dialog. Cleared in the `finally` below, so a failure can't strand it.
-    // Only when something is genuinely being regenerated.
+    // THE DIALOG CLOSES NOW, not when the work finishes ("The dialog box
+    // should disappear as soon as I hit continue, and there should be no
+    // errors," 2026-09-28). The regeneration is minutes of Claude calls that
+    // used to run in the FOREGROUND behind a frozen dialog -- and on the iPad
+    // the in-browser API call often can't get through at all ("Load failed"),
+    // so the dialog just sat there erroring. Everything below runs in the
+    // background: the 🧭 glyph blinks while it does (its progress dialog
+    // reports the stage), and an in-app failure falls back to the CLOUD
+    // narrative relay (tripsyQueueItineraryChangesCloudRequest -- the partial
+    // itinerary's machinery, built precisely because long browser calls die
+    // on the iPad) instead of surfacing an error.
+    overlay.remove();
+    // Feeds the glyph's progress dialog (the dialog's own status line is gone
+    // with the dialog). Only meaningful while something is generating.
+    const setStage = text => { if (checkedDayKeys.length) tripsySetItineraryGeneratingStatus(trip.key, text); };
     if (checkedDayKeys.length) {
+      setStage(`Generating write-ups for ${checkedDayKeys.length} day${checkedDayKeys.length === 1 ? '' : 's'}…`);
       tripsyItineraryGeneratingKeys.add(trip.key);
       tripsyRefreshItineraryGeneratingBadges();
     }
-    let workSucceeded = false;
+    (async () => {
     try {
       if (checkedDayKeys.length) {
-        const { effectiveTrip, dayKeys, byDay: pdByDay, summaryByDay } = await buildTripsyPrintDayData(trip);
-        await tripsyGenerateNarrativeSections(trip.key, effectiveTrip, dayKeys, pdByDay, summaryByDay,
-          // Only the checked days' summary rows are rewritten; the rest are kept from cache.
-          { includeIntro: false, includeSummary: true, dayKeysToGenerate: checkedDayKeys, summaryDayKeys: checkedDayKeys });
+        try {
+          const { effectiveTrip, dayKeys, byDay: pdByDay, summaryByDay } = await buildTripsyPrintDayData(trip);
+          await tripsyGenerateNarrativeSections(trip.key, effectiveTrip, dayKeys, pdByDay, summaryByDay,
+            // Only the checked days' summary rows are rewritten; the rest are kept from cache.
+            { includeIntro: false, includeSummary: true, dayKeysToGenerate: checkedDayKeys, summaryDayKeys: checkedDayKeys });
+        } catch (genErr) {
+          // In-app generation failed (a network-blocked iPad WebView reads
+          // "Load failed"; a rate limit or API hiccup lands here too). Hand
+          // the SAME days to the cloud routine rather than erroring: the
+          // drain files the answer and records the baseline itself, so the
+          // ▲ clears when the rewrite actually lands.
+          console.error('In-app itinerary generation failed — handing to the cloud routine:', genErr);
+          setStage('Handing the rewrite to the background run…');
+          if (await tripsyQueueItineraryChangesCloudRequest(trip, checkedDayKeys)) {
+            toast('The itinerary rewrite is being finished in the background — it will file in on its own.');
+            return;
+          }
+          throw genErr; // couldn't even queue (Drive write failed) — the one genuinely unrecoverable case
+        }
       }
       // PART 1's SUMMARY ROWS, when nothing was regenerated. Those one-line blurbs are
       // cached per event id, which is stable across an edit -- so a retitled or relocated
@@ -21993,20 +22004,25 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       // Acknowledge every listed event (checked ones regenerated, unchecked left
       // as-is), so the warning clears until something changes again. This runs
       // BEFORE the photo prefetch below, deliberately: the expensive narrative
-      // work is already SAVED at this point, and when the baseline reset used to
-      // come after the photo pass, a photo-phase hang left the run's whole result
-      // unacknowledged -- ▲ still up, dialog still open, Continue permanently
-      // disabled ("when I press the continue button, nothing happens," 2026-09-28:
-      // confirmed in the live data as a run whose day narratives saved at 05:23
-      // while the baseline never moved off the previous day's).
+      // work is already SAVED at this point, so a photo-phase failure can never
+      // strand it unacknowledged (the 2026-09-28 stall lesson).
       setStage('Saving…');
       await tripsyRecordItineraryBaseline(trip);
-      // Pre-fetch photos for the (re)generated days -- pure best-effort warm-up
-      // now: photos self-heal on any open via tripsyBackgroundPhotoMaintenance,
-      // so a failure OR overrun here must not fail (or stall) the flow. Bounded
-      // because the wait is UI: past the cap the flow moves on and the build
-      // keeps running behind it, its photo gate flipped off mid-run at worst
-      // (remaining fetches degrade to cached-only, exactly like a plain open).
+      const warnEl = document.querySelector(`[data-tripsy-itin-warning="${CSS.escape(trip.key)}"]`);
+      if (warnEl) warnEl.style.display = 'none'; // clear the ▲ now (no timeline re-render happens here)
+      // The done word, since there is no dialog left to show it in. (The old
+      // three-way Close / Itinerary View / Trips View done-dialog is retired
+      // with the backgrounding -- a modal popping up minutes later over
+      // whatever the owner is doing now would be noise, not an answer.)
+      toast(checkedDayKeys.length
+        ? `Itinerary updated — write-ups regenerated for ${checkedDayKeys.length} day${checkedDayKeys.length === 1 ? '' : 's'}.`
+        : 'Changes marked as reviewed.');
+      // Pre-fetch photos for the (re)generated days -- pure best-effort warm-up:
+      // photos self-heal on any open via tripsyBackgroundPhotoMaintenance, so a
+      // failure OR overrun here must not fail the flow. Bounded so the blinking
+      // glyph settles even if the build dawdles; past the cap the build keeps
+      // running behind with its photo gate flipped off (remaining fetches
+      // degrade to cached-only, exactly like a plain open).
       if (checkedDayKeys.length) {
         setStage('Fetching photos for the new places…');
         _tripsyAllowPhotoFetch = true; // this pass MAY fetch new photos (it's a regeneration)
@@ -22019,25 +22035,16 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
           console.error('Photo prefetch failed (continuing -- photos self-heal on open):', e);
         } finally { _tripsyAllowPhotoFetch = false; }
       }
-      const warnEl = document.querySelector(`[data-tripsy-itin-warning="${CSS.escape(trip.key)}"]`);
-      if (warnEl) warnEl.style.display = 'none'; // clear the ▲ now (no timeline re-render happens here)
-      overlay.remove();
-      workSucceeded = true;
     } catch (e) {
-      console.error('Itinerary changes generation failed:', e);
-      // The real reason, IN the dialog -- pointing at the console is useless
-      // on the iPad, where there is no console to see ("I got an error message
-      // when I was trying to update the itinerary," 2026-09-28: the owner could
-      // never learn that the underlying failure was e.g. a transient API rate
-      // limit worth simply retrying).
+      console.error('Itinerary changes update failed:', e);
+      // The dialog is long gone, so the report is a toast -- with the REAL
+      // reason (never "see console": the iPad has no console to see).
       const detail = String((e && (e.message || e)) || 'unknown error').slice(0, 300);
-      setStage(`${checkedDayKeys.length ? 'Could not generate' : 'Could not save'}: ${detail} — you can press Continue to retry.`);
-      contBtn.disabled = false;
+      toast(`Could not update the itinerary: ${detail}`, 'error');
     } finally {
-      // The baseline was just reset, so there are no changed events left and the glyph's
-      // steady state is "none" -- the sweep clears the blink outright. On the failure
-      // path the baseline is untouched, and the next My Trips render restores the steady
-      // red ▲ from tripsyItineraryChangedEvents.
+      // Success reset the baseline (nothing changed left, steady state "none");
+      // the cloud-fallback path leaves the steady ▲ up honestly until its
+      // answer drains in; a failure leaves it for the next render to restore.
       tripsyItineraryGeneratingKeys.delete(trip.key);
       tripsyItineraryGeneratingStatus.delete(trip.key);
       tripsyRefreshItineraryGeneratingBadges();
@@ -22045,61 +22052,15 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
       // on the last stage as though the run were still going.
       tripsyItineraryProgressWatchers.forEach(fn => { try { fn(); } catch (e) {} });
     }
-    if (!workSucceeded) return;
-    // WHERE TO GO NEXT IS THE OWNER'S CHOICE, not an automatic jump. This used to
-    // open the full Itinerary view unconditionally -- per explicit request
-    // (2026-08-17: "do not automatically open the itinerary view"), it now asks:
-    // Close (stay put), Itinerary View, or Trips View. Asked AFTER the finally
-    // above so the 🧭 glyph's blink and the progress dialog are already settled
-    // while the owner decides, not still claiming a run in progress.
-    const dest = await tripsyItineraryDoneDialog(checkedDayKeys.length);
-    if (dest === 'itinerary') {
-      // A newly-added event's card would otherwise open picture-less whenever its day
-      // wasn't regenerated -- an added place has no cached photo, and a plain open never
-      // fetches. This IS a deliberate action, so allow a FIRST photo here (the narrow
-      // flag: an existing photo is still shown verbatim, never refetched or swapped).
-      _tripsyAllowNewPlacePhotoFetch = true;
-      try { await previewTripsyItinerary(trip.key, { forceGeneratedView: true }); }
-      finally { _tripsyAllowNewPlacePhotoFetch = false; }
-    } else if (dest === 'trips') {
-      // Usually already the page behind the dialog (the ▲ lives on My Trips) -- a
-      // fresh render there also picks up the cleared badge; from anywhere else,
-      // navigate over.
-      if (currentView !== 'tripsytrips') await navigate('tripsytrips');
-      else renderTripsyEventsList();
-    }
+    })();
   });
   document.body.appendChild(overlay);
   overlay.querySelector('[data-icd-continue]').focus();
 }
-// The three-way "done -- where to?" dialog shown after the changes dialog's Continue
-// finishes. Resolves 'close' | 'itinerary' | 'trips'; clicking outside closes (same as
-// Close -- there is nothing to decline, only somewhere to go).
-function tripsyItineraryDoneDialog(regeneratedCount) {
-  return new Promise(resolve => {
-    let ov = document.getElementById('tripsy-itindone-overlay');
-    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-itindone-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
-    ov.style.zIndex = '2147483100'; // same layer as tripsyConfirmDialog -- nothing else is open now
-    ov.innerHTML = `
-      <div class="tw-modal-paper" style="max-width:420px; text-align:center;">
-        <h2 style="margin:0 0 8px; font-size:19px;">${regeneratedCount ? 'Itinerary updated' : 'Changes reviewed'}</h2>
-        <div style="font-size:14.5px; line-height:1.55; margin-bottom:20px; color:var(--text);">${regeneratedCount
-          ? `Write-ups were regenerated for ${regeneratedCount} day${regeneratedCount === 1 ? '' : 's'}.`
-          : 'The changes were marked as reviewed — nothing was regenerated.'}</div>
-        <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
-          <button class="btn" data-itindone-close>Close</button>
-          <button class="btn primary" data-itindone-itinerary>Itinerary View</button>
-          <button class="btn" data-itindone-trips>Trips View</button>
-        </div>
-      </div>`;
-    ov.style.display = 'flex';
-    const done = v => { ov.style.display = 'none'; ov.onclick = null; resolve(v); };
-    ov.querySelector('[data-itindone-close]').onclick = () => done('close');
-    ov.querySelector('[data-itindone-itinerary]').onclick = () => done('itinerary');
-    ov.querySelector('[data-itindone-trips]').onclick = () => done('trips');
-    ov.onclick = e => { if (e.target === ov) done('close'); };
-  });
-}
+// (tripsyItineraryDoneDialog, the three-way Close / Itinerary View / Trips
+// View dialog Continue used to end in, was retired 2026-09-28 when the work
+// moved to the background -- there is no foreground moment left to ask the
+// question in; completion is a toast.)
 
 // Calls the Claude API directly from the browser (anthropic-dangerous-
 // direct-browser-access) to write the itinerary print view's magazine-
@@ -26040,6 +26001,79 @@ function tripsyPartialModeDialog() {
 // Returns {status}: 'none' (nothing missing -- the document is complete),
 // 'queued' (a new request was just filed), or 'pending' (an earlier request
 // is still awaiting its answer; a stale-looking one re-fires the worker).
+// Builds one cloud narrative request for this trip -- the EXACT prompts the
+// in-app generators would send (tripsyNarrativePromptText /
+// tripsySummaryBlurbsPromptText, full day list for context, already-written
+// days' place blurbs as don't-repeat context, unbatched -- the routine has
+// no 4096-token response cap), plus the queue-time fingerprints and row-key
+// sets that make the drain pure assembly. Factored out of
+// tripsyPartialEnsureNarratives (2026-09-28) so the changes dialog's
+// background fallback builds an IDENTICAL request; `precomputed` lets a
+// caller that already ran buildTripsyPrintDayData pass its results through.
+async function tripsyBuildNarrativeCloudRequest(trip, { includeIntro, dayKeysToGenerate, summaryDayKeys }, precomputed = null) {
+  const tripKey = trip.key;
+  const { effectiveTrip, dayKeys, byDay, summaryByDay } = precomputed || await buildTripsyPrintDayData(trip);
+  const cache = (precomputed && precomputed.cache) || await Store.getTripsyNarrativeCache();
+  const dayPromptDataAll = dayKeys.map(dayKey => tripsyNarrativeDayPromptData(dayKey, byDay.get(dayKey) || []));
+  const existingPlaceBlurbs = dayKeys
+    .filter(dayKey => !dayKeysToGenerate.includes(dayKey))
+    .map(dayKey => cache[`${tripKey}::day::${dayKey}`])
+    .filter(Boolean)
+    .flatMap(entry => (entry.content.place_blurbs || []).map(pb => ({ place_name: pb.place_name, blurb: pb.blurb })));
+  // Summary rows exactly as the shared procedure scopes them: the rewritten
+  // set is summaryDayKeys' rows over the FULL summaryByDay (so the full
+  // itinerary gains these blurbs too), the live set spans every day.
+  const rowItemsFor = ks => ks.flatMap(dayKey => summaryByDay.get(dayKey) || [])
+    .filter(item => tripsySummaryRowKey(item) && tripsySummaryRowWantsBlurb(item));
+  const allRowItems = rowItemsFor(dayKeys);
+  const targetItems = rowItemsFor(summaryDayKeys);
+  const dayFingerprints = {};
+  for (const dayKey of dayKeysToGenerate) {
+    dayFingerprints[dayKey] = tripsyContentFingerprint(tripsyNarrativeDayPromptData(dayKey, byDay.get(dayKey) || []));
+  }
+  return {
+    id: `nreq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    tripKey,
+    requestedAt: new Date().toISOString(),
+    includeIntro,
+    dayKeysToGenerate,
+    narrativePrompt: (includeIntro || dayKeysToGenerate.length)
+      ? tripsyNarrativePromptText(effectiveTrip, dayPromptDataAll, { includeIntro, dayKeysToGenerate, existingPlaceBlurbs })
+      : '',
+    summaryPrompt: targetItems.length ? tripsySummaryBlurbsPromptText(effectiveTrip, targetItems.map(tripsySummaryRowPromptData)) : '',
+    summaryRowKeys: targetItems.map(tripsySummaryRowKey),
+    allRowKeys: allRowItems.map(tripsySummaryRowKey),
+    // Queue-time fingerprints, so the drain stamps each saved section with
+    // exactly what tripsyGenerateNarrativeSections would have.
+    introFingerprint: includeIntro
+      ? tripsyContentFingerprint({ name: effectiveTrip.name, location: effectiveTrip.location, dateRange: formatTripDateRange(effectiveTrip.start, effectiveTrip.end) })
+      : '',
+    dayFingerprints,
+    summaryFingerprint: targetItems.length ? tripsyContentFingerprint(allRowItems.map(tripsySummaryRowPromptData)) : '',
+  };
+}
+// The changes dialog's background fallback ("there should be no errors,"
+// 2026-09-28): when the in-app regeneration fails -- on the iPad the direct
+// browser call to the API often can't get through at all ("Load failed") --
+// the CHECKED days are handed to the cloud routine through the same
+// request/answer relay the partial itinerary uses. The drain files the
+// answer and records the itinerary baseline itself, so the ▲ clears when
+// the rewrite actually lands; until then the status badge's "being written
+// in the background" row reports it. A request already pending for this
+// trip is left in place (re-queuing would re-date it) with just a fresh
+// best-effort worker fire.
+async function tripsyQueueItineraryChangesCloudRequest(trip, checkedDayKeys) {
+  const pending = Store.listTripsyNarrativeRequests().find(r => r.tripKey === trip.key);
+  if (!pending) {
+    const request = await tripsyBuildNarrativeCloudRequest(trip, {
+      includeIntro: false, dayKeysToGenerate: checkedDayKeys, summaryDayKeys: checkedDayKeys,
+    });
+    if (!(await Store.queueTripsyNarrativeRequest(request))) return false;
+  }
+  try { runTripsyRefreshViaWorker(null); } catch (e) { console.error('Worker fire failed (scheduled runs will pick it up):', e); }
+  try { updateTripsyStatusBadge(); } catch (e) { /* badge refresh is best-effort */ }
+  return true;
+}
 async function tripsyPartialEnsureNarratives(tripKey, keys, onStage, savedAt = null) {
   const stage = text => { try { if (onStage) onStage(text); } catch (e) { /* progress is best-effort */ } };
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
@@ -26072,46 +26106,8 @@ async function tripsyPartialEnsureNarratives(tripKey, keys, onStage, savedAt = n
     return { status: 'pending', requestedAt: pending.requestedAt };
   }
   stage('Handing the narrative writing to the background run…');
-  // The narrative prompt is built EXACTLY as tripsyGenerateNarrativeSections
-  // builds its calls -- full day list for context, already-written days'
-  // place blurbs as don't-repeat context -- except unbatched (see above).
-  const dayPromptDataAll = dayKeys.map(dayKey => tripsyNarrativeDayPromptData(dayKey, byDay.get(dayKey) || []));
-  const existingPlaceBlurbs = dayKeys
-    .filter(dayKey => !dayKeysToGenerate.includes(dayKey))
-    .map(dayKey => cache[`${tripKey}::day::${dayKey}`])
-    .filter(Boolean)
-    .flatMap(entry => (entry.content.place_blurbs || []).map(pb => ({ place_name: pb.place_name, blurb: pb.blurb })));
-  // Summary rows exactly as the shared procedure scopes them: the rewritten
-  // set is summaryDayKeys' rows over the FULL summaryByDay (so the full
-  // itinerary gains these blurbs too), the live set spans every day.
-  const rowItemsFor = ks => ks.flatMap(dayKey => summaryByDay.get(dayKey) || [])
-    .filter(item => tripsySummaryRowKey(item) && tripsySummaryRowWantsBlurb(item));
-  const allRowItems = rowItemsFor(dayKeys);
-  const targetItems = rowItemsFor(summaryDayKeys);
-  const dayFingerprints = {};
-  for (const dayKey of dayKeysToGenerate) {
-    dayFingerprints[dayKey] = tripsyContentFingerprint(tripsyNarrativeDayPromptData(dayKey, byDay.get(dayKey) || []));
-  }
-  const request = {
-    id: `nreq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    tripKey,
-    requestedAt: new Date().toISOString(),
-    includeIntro,
-    dayKeysToGenerate,
-    narrativePrompt: (includeIntro || dayKeysToGenerate.length)
-      ? tripsyNarrativePromptText(effectiveTrip, dayPromptDataAll, { includeIntro, dayKeysToGenerate, existingPlaceBlurbs })
-      : '',
-    summaryPrompt: targetItems.length ? tripsySummaryBlurbsPromptText(effectiveTrip, targetItems.map(tripsySummaryRowPromptData)) : '',
-    summaryRowKeys: targetItems.map(tripsySummaryRowKey),
-    allRowKeys: allRowItems.map(tripsySummaryRowKey),
-    // Queue-time fingerprints, so the drain stamps each saved section with
-    // exactly what tripsyGenerateNarrativeSections would have.
-    introFingerprint: includeIntro
-      ? tripsyContentFingerprint({ name: effectiveTrip.name, location: effectiveTrip.location, dateRange: formatTripDateRange(effectiveTrip.start, effectiveTrip.end) })
-      : '',
-    dayFingerprints,
-    summaryFingerprint: targetItems.length ? tripsyContentFingerprint(allRowItems.map(tripsySummaryRowPromptData)) : '',
-  };
+  const request = await tripsyBuildNarrativeCloudRequest(trip, { includeIntro, dayKeysToGenerate, summaryDayKeys },
+    { effectiveTrip, dayKeys, byDay, summaryByDay, cache });
   const ok = await Store.queueTripsyNarrativeRequest(request);
   if (!ok) throw new Error('Could not save the narrative request');
   // Fire the routine now rather than waiting for its schedule. Best-effort:
@@ -32272,9 +32268,9 @@ async function renderTripsyEventsListImpl() {
       activeSortFilter ? 'Reset' : 'Filter'
     ) : '';
     // Only shown once the trip has ANY attachment (trip- or event-scoped).
-    // Adding a doc itself still happens from inside the Edit panel (see
-    // renderTripsyEditTripPanel's "Add Doc" button) rather than its own
-    // top-level icon.
+    // Adding a doc happens from the + Add menu's "Doc" item (attach form
+    // alone, since 2026-09-28) or the Edit Trip panel's "Add Doc" button,
+    // rather than its own top-level icon.
     const tripAttachments = attachments.filter(a => a.scope === 'trip' && a.tripKey === trip.key);
     // Every OTHER doc in the trip, grouped by the owning event's date --
     // one entry per event (not per file), even if that event has several
@@ -32918,6 +32914,17 @@ async function renderTripsyEventsListImpl() {
       tripsySetItineraryGlyphBadge(btn, '');
       return false;
     }
+    // A rewrite already handed to the cloud routine (the changes dialog's
+    // background fallback) covers these very changes -- reopening the dialog
+    // would invite a second, duplicate ask, so report the state instead. The
+    // drain records the baseline when the answer lands, which is what clears
+    // the ▲ and retires this message.
+    if (Store.listTripsyNarrativeRequests().find(r => r.tripKey === tripKey)) {
+      await tripsyConfirmDialog(
+        'This itinerary is already being rewritten in the background — the update will file in on its own, and the ▲ clears when it lands.',
+        { title: '▲ Rewrite in progress', yes: 'OK', no: null });
+      return false;
+    }
     await showTripsyItineraryChangesDialog(trip, changed);
     return false;
   });
@@ -33416,11 +33423,14 @@ async function renderTripsyEventsListImpl() {
       const trip = tripsyDecryptedTrips.find(t => t.key === tripKey);
       if (!trip) return;
       closeAllTripsyTripPanels();
-      const editPanel = container.querySelector(`[data-tripsy-edit-trip-panel="${tripKey}"]`);
+      // ONLY the attach form -- this used to also render and show the Edit
+      // Trip panel (whose own "Add Doc" button then sat beside the very form
+      // it opens), purely because that's where Add Doc historically lived
+      // ("When a user selects add and then a new document, do not bring up
+      // the trip details card or the add doc button," 2026-09-28). The
+      // attach panel is self-contained: its Save/Cancel close only itself.
       const attachPanel = container.querySelector(`[data-tripsy-attach-panel="${tripKey}"]`);
-      if (!editPanel || !attachPanel) return;
-      renderTripsyEditTripPanel(editPanel, trip, getEffectiveTripsyTrip(trip, pendingChanges));
-      editPanel.style.display = "block";
+      if (!attachPanel) return;
       renderTripsyAttachPanel(attachPanel, { scope: 'trip', tripKey, eventKey: null });
       attachPanel.style.display = "block";
       attachPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });

@@ -1,15 +1,22 @@
-// "When there is a yellow triangle on itinerary for the user to review new items, and
-// the user either selects or de-selects to generate a narrative, do not automatically
-// open the itinerary view. Instead, display 3 buttons: close, itinerary view, or trips
-// view." The changes dialog's Continue used to end in an unconditional
-// previewTripsyItinerary() jump; it now ends in tripsyItineraryDoneDialog -- a
-// three-way Close / Itinerary View / Trips View choice, shown AFTER the generating
-// badge/progress cleanup has settled so nothing still claims a run is underway while
-// the owner decides.
+// "When I press continue from the itinerary changes view, I am still
+// getting error messages and the dialog box does not go away. The dialog
+// box should disappear as soon as I hit continue, and there should be no
+// errors" (2026-09-28). Continue is now fire-and-forget: the dialog closes
+// IMMEDIATELY and the whole run happens in the background -- and an in-app
+// generation failure (on the iPad the direct browser API call often can't
+// get through at all: "Load failed") falls back to the CLOUD narrative
+// relay (tripsyQueueItineraryChangesCloudRequest, riding the partial
+// itinerary's request/answer machinery) instead of surfacing an error.
+// This suite used to cover tripsyItineraryDoneDialog, the three-way
+// Close / Itinerary View / Trips View dialog Continue ended in -- retired
+// with the backgrounding (a modal popping up minutes later over whatever
+// the owner is doing would be noise); completion is a toast.
 const fs = require('fs');
-const html = fs.readFileSync(require('path').join(__dirname, '..', '..', 'index.html'), 'utf8');
+const path = require('path');
+const html = fs.readFileSync(path.join(__dirname, '..', '..', 'index.html'), 'utf8');
 function extractFn(name) {
-  const m = html.match(new RegExp(`(async function ${name}\\(|function ${name}\\()`));
+  const m = html.match(new RegExp(`(async )?function ${name}\\(`));
+  if (!m) return null;
   const start = m.index;
   let i = html.indexOf('(', start), paren = 0;
   for (; i < html.length; i++) {
@@ -24,77 +31,52 @@ function extractFn(name) {
 }
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
-// ---- extract the Continue handler slice of showTripsyItineraryChangesDialog ----
-const runStart = html.indexOf('const checkedDayKeys = [...new Set(');
-const run = html.slice(runStart, html.indexOf('document.body.appendChild(overlay);', runStart));
-assert(run.length > 500, 'sanity: found the Continue handler');
+const dlg = extractFn('showTripsyItineraryChangesDialog');
+const handlerStart = dlg.indexOf("[data-icd-continue]').addEventListener");
+const handler = dlg.slice(handlerStart);
 
-// ---- source-pattern checks: no auto-open; the choice dialog instead ----
-assert(/let workSucceeded = false;/.test(html.slice(runStart - 400, runStart)) || /workSucceeded = true;/.test(run),
-  'success is tracked so the choice dialog only shows when the work actually landed');
-assert(/if \(!workSucceeded\) return;/.test(run), 'a failed run shows no destination dialog (the error stays visible in the changes dialog)');
-assert(/const dest = await tripsyItineraryDoneDialog\(checkedDayKeys\.length\);/.test(run),
-  'THE ASK: Continue ends in the three-way choice dialog, not an automatic jump');
-const destIdx = run.indexOf('const dest = await tripsyItineraryDoneDialog');
-const finallyIdx = run.indexOf('tripsyItineraryProgressWatchers.forEach');
-assert(finallyIdx > -1 && destIdx > finallyIdx,
-  'the dialog is asked AFTER the finally cleanup, so the glyph/progress dialog are settled while the owner decides');
-assert(/if \(dest === 'itinerary'\) \{[\s\S]*?await previewTripsyItinerary\(trip\.key, \{ forceGeneratedView: true \}\);/.test(run),
-  'Itinerary View opens the same preview the old auto-jump did (with the same first-photo allowance)');
-const itinBranch = run.slice(run.indexOf("if (dest === 'itinerary')"), run.indexOf("} else if (dest === 'trips')"));
-assert(/_tripsyAllowNewPlacePhotoFetch = true;/.test(itinBranch) && /finally \{ _tripsyAllowNewPlacePhotoFetch = false; \}/.test(itinBranch),
-  'the new-place photo allowance still wraps the preview open, exactly as before');
-assert(/else if \(dest === 'trips'\) \{[\s\S]*?if \(currentView !== 'tripsytrips'\) await navigate\('tripsytrips'\);/.test(run),
-  'Trips View navigates to My Trips (or refreshes it when already there)');
-const previewCalls = (run.match(/previewTripsyItinerary\(/g) || []).length;
-assert(previewCalls === 1, `the preview opens ONLY from the Itinerary View choice -> ${previewCalls} call site`);
+// ---- the dialog closes the instant Continue is pressed ----
+{
+  const iRemove = handler.indexOf('overlay.remove()');
+  const iWork = handler.indexOf('(async () => {');
+  const iGenerate = handler.indexOf('tripsyGenerateNarrativeSections');
+  assert(iRemove !== -1 && iWork !== -1 && iGenerate !== -1 && iRemove < iWork && iWork < iGenerate,
+    'THE ASK: overlay.remove() runs synchronously in the click handler, BEFORE the background async block that does the work');
+  assert(!/contBtn\.disabled/.test(handler) && !/status\.textContent/.test(handler),
+    'no disabled-button wait and no in-dialog status line remain -- there is no dialog left to freeze');
+}
 
-// ---- source-pattern checks: the dialog itself ----
-const dlg = extractFn('tripsyItineraryDoneDialog');
-assert(/data-itindone-close/.test(dlg) && /data-itindone-itinerary/.test(dlg) && /data-itindone-trips/.test(dlg),
-  'THE ASK: exactly the three requested buttons -- Close, Itinerary View, Trips View');
-assert(/>Close<\/button>/.test(dlg) && />Itinerary View<\/button>/.test(dlg) && />Trips View<\/button>/.test(dlg),
-  'labeled as requested');
-assert(/ov\.onclick = e => \{ if \(e\.target === ov\) done\('close'\); \};/.test(dlg),
-  'clicking outside closes -- there is nothing to decline, only somewhere to go');
-assert(/\$\{regeneratedCount \? 'Itinerary updated' : 'Changes reviewed'\}/.test(dlg),
-  'the heading distinguishes a real regeneration from a mark-as-reviewed pass');
-assert(/nothing was regenerated/.test(dlg), 'the de-selected-everything case says so honestly');
+// ---- an in-app generation failure falls back to the cloud relay ----
+{
+  assert(/catch \(genErr\) \{[\s\S]*?tripsyQueueItineraryChangesCloudRequest\(trip, checkedDayKeys\)/.test(handler),
+    'THE NO-ERRORS RULE: a failed in-app generation (iPad "Load failed", rate limit) hands the SAME days to the cloud routine instead of erroring');
+  assert(/being finished in the background/.test(handler),
+    'the hand-off is announced as background work, not an error');
+  const fallback = extractFn('tripsyQueueItineraryChangesCloudRequest');
+  assert(/includeIntro: false, dayKeysToGenerate: checkedDayKeys, summaryDayKeys: checkedDayKeys/.test(fallback),
+    'the cloud request scopes to exactly the checked days, day write-ups and summary rows alike (same scoping as the in-app call)');
+  assert(/if \(!pending\)/.test(fallback) && /runTripsyRefreshViaWorker\(null\)/.test(fallback),
+    'an already-pending request is never re-queued over (that would re-date it) -- just a fresh best-effort worker fire');
+  assert(/tripsyBuildNarrativeCloudRequest\(trip, \{/.test(fallback),
+    'it builds through the SHARED request builder, so its prompts are identical to the partial itinerary’s');
+}
 
-// ---- executed: the dialog resolves the right value per button ----
-(async () => {
-  // Minimal DOM stub: enough for the dialog to build, wire, and resolve.
-  const nodes = {};
-  const makeNode = () => ({
-    style: {}, innerHTML: '', onclick: null,
-    querySelector(sel) {
-      const key = (sel.match(/data-itindone-(\w+)/) || [])[1];
-      if (!key) return null;
-      if (!nodes[key]) nodes[key] = { onclick: null };
-      return nodes[key];
-    },
-  });
-  const ov = makeNode();
-  global.document = {
-    getElementById: () => ov,
-    createElement: () => makeNode(),
-    body: { appendChild: () => {} },
-  };
-  eval(dlg.replace(/^function tripsyItineraryDoneDialog/, 'var tripsyItineraryDoneDialog = function'));
+// ---- completion is a toast; the old done dialog is gone ----
+assert(/toast\(checkedDayKeys\.length\s*\n?\s*\? `Itinerary updated/.test(handler)
+  && /'Changes marked as reviewed\.'/.test(handler),
+  'success reports as a toast, sized to what actually happened');
+assert(!/function tripsyItineraryDoneDialog/.test(html) && !/data-itindone-/.test(html),
+  'RETIRED: tripsyItineraryDoneDialog (Close / Itinerary View / Trips View) is gone -- no foreground moment remains to ask it in');
 
-  let p = tripsyItineraryDoneDialog(2);
-  nodes.itinerary.onclick();
-  assert((await p) === 'itinerary', "the Itinerary View button resolves 'itinerary'");
+// ---- baseline still records before the photo prefetch (the stall lesson) ----
+{
+  const iBaseline = handler.indexOf('tripsyRecordItineraryBaseline(trip)');
+  const iPhotos = handler.indexOf('Fetching photos for the new places');
+  assert(iBaseline !== -1 && iPhotos !== -1 && iBaseline < iPhotos,
+    'generate -> baseline -> photo prefetch order survives the backgrounding');
+}
 
-  p = tripsyItineraryDoneDialog(0);
-  nodes.trips.onclick();
-  assert((await p) === 'trips', "the Trips View button resolves 'trips'");
-
-  p = tripsyItineraryDoneDialog(0);
-  nodes.close.onclick();
-  assert((await p) === 'close', "the Close button resolves 'close'");
-
-  p = tripsyItineraryDoneDialog(1);
-  ov.onclick({ target: ov });
-  assert((await p) === 'close', "clicking outside resolves 'close' too");
-})();
+// ---- "Review changes" while a cloud rewrite is pending reports, not re-asks ----
+assert(/Store\.listTripsyNarrativeRequests\(\)\.find\(r => r\.tripKey === tripKey\)/.test(html)
+  && /already being rewritten in the background/.test(html),
+  'reopening Review changes mid-rewrite explains the pending background run instead of inviting a duplicate ask');

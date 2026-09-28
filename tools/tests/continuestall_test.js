@@ -110,13 +110,15 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 }
 
 // Follow-up, same day: "I got an error message when I was trying to update
-// the itinerary" -- the catch said only "see console for details", which is
-// useless on the iPad (no console). The status line now carries the real
-// error text, and says a retry is one press away.
+// the itinerary" -- errors must name their REAL reason (never "see console":
+// the iPad has no console). Since the dialog now closes on Continue
+// (2026-09-28, second follow-up), the report is a toast -- and only for the
+// genuinely unrecoverable case, since an in-app generation failure falls
+// back to the cloud relay first.
 {
   const src = extractFn('showTripsyItineraryChangesDialog');
   assert(/const detail = String\(\(e && \(e\.message \|\| e\)\) \|\| 'unknown error'\)\.slice\(0, 300\);/.test(src)
-    && /Could not generate' : 'Could not save'\}: \$\{detail\}/.test(src)
+    && /toast\(`Could not update the itinerary: \$\{detail\}`, 'error'\)/.test(src)
     && !/see console for details/.test(src),
-    'a generation failure names its REAL reason in the dialog (bounded), not a console the iPad does not have');
+    'an unrecoverable failure names its REAL reason in a toast (bounded), not a console the iPad does not have');
 }

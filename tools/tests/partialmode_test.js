@@ -69,9 +69,16 @@ assert(/keys\.has\('overview'\) && !cache\[`\$\{tripKey\}::intro`\]/.test(ensure
 assert(!/tripsyGenerateNarrativeSections\(/.test(ensure)
   && /Store\.queueTripsyNarrativeRequest\(request\)/.test(ensure),
   'THE 2026-09-27 ASK: nothing generates in the foreground anymore -- missing sections are QUEUED as a cloud request instead');
-assert(/narrativePrompt: \(includeIntro \|\| dayKeysToGenerate\.length\)\s*\n\s*\? tripsyNarrativePromptText\(effectiveTrip, dayPromptDataAll, \{ includeIntro, dayKeysToGenerate, existingPlaceBlurbs \}\)/.test(ensure)
-  && /summaryPrompt: targetItems\.length \? tripsySummaryBlurbsPromptText\(effectiveTrip, targetItems\.map\(tripsySummaryRowPromptData\)\) : ''/.test(ensure),
-  '"exact same rules and procedures": the request carries the EXACT prompts the in-app generators send, built by the very same prompt builders they call');
+{
+  // The prompt building lives in the SHARED tripsyBuildNarrativeCloudRequest
+  // since 2026-09-28 (the changes dialog's background fallback builds an
+  // identical request through it) -- the exactness guarantee moves with it.
+  const builder = extractFn('tripsyBuildNarrativeCloudRequest');
+  assert(/tripsyBuildNarrativeCloudRequest\(trip, \{ includeIntro, dayKeysToGenerate, summaryDayKeys \}/.test(ensure)
+    && /narrativePrompt: \(includeIntro \|\| dayKeysToGenerate\.length\)\s*\n\s*\? tripsyNarrativePromptText\(effectiveTrip, dayPromptDataAll, \{ includeIntro, dayKeysToGenerate, existingPlaceBlurbs \}\)/.test(builder)
+    && /summaryPrompt: targetItems\.length \? tripsySummaryBlurbsPromptText\(effectiveTrip, targetItems\.map\(tripsySummaryRowPromptData\)\) : ''/.test(builder),
+    '"exact same rules and procedures": the request carries the EXACT prompts the in-app generators send, built by the shared builder both callers use');
+}
 assert(/runTripsyRefreshViaWorker\(null\)/.test(ensure),
   'queueing also fires the cloud routine on demand, so the wait is minutes, not the next scheduled run');
 // The prompt builders really are the generators' own -- each generator's
