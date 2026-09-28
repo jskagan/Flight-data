@@ -8407,11 +8407,49 @@ async function renderUtilitiesUsers() {
   await renderUsersListBody();
 }
 
+// Rows for the Trips-Only page's "Current Trips-Only Viewers" card ("Can you
+// display all users with trips-only access in the trips-only access utilities
+// page," 2026-09-28). Pure HTML builder so it's testable: takes the stored
+// trips-only emails plus the data file's live sharing permissions (the same
+// source of truth the Users page reads) to resolve display names -- and to
+// flag a STALE entry: an email still ticked Trips-only whose Drive share was
+// since removed (harmless -- they can't sign in at all -- but worth showing
+// so the list reflects reality). An EMPTY permissions list means the Drive
+// lookup failed/was skipped, so nothing is flagged rather than everything.
+function tripsOnlyViewerListHtml(tripsOnlyEmails, permissions) {
+  if (!tripsOnlyEmails.length) {
+    return `<div style="color:var(--muted); font-size:14px;">No one has Trips-only access yet — follow the steps below to add someone.</div>`;
+  }
+  const canVerify = permissions.length > 0;
+  const byEmail = new Map(permissions.map(p => [String(p.emailAddress || '').toLowerCase(), p]));
+  let anyStale = false;
+  const rows = tripsOnlyEmails.map(email => {
+    const p = byEmail.get(email);
+    const stale = canVerify && !p;
+    if (stale) anyStale = true;
+    return `
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-top:1px solid var(--line);">
+        <div style="min-width:0;">
+          <div style="font-weight:600; font-size:14px;">${esc((p && p.displayName) || email)}</div>
+          <div style="font-size:12px; color:var(--muted);">${esc(email)} · Trips-only viewer</div>
+        </div>
+        ${stale ? `<div style="flex-shrink:0; font-size:12px; color:var(--amber);">⚠️ No longer shared on the data file</div>` : ''}
+      </div>`;
+  }).join('');
+  return rows + `
+    <p style="color:var(--muted); font-size:12px; margin-top:10px; line-height:1.5;">
+      Manage these on <strong>Utilities → Users</strong> — un-tick <strong>Trips-only</strong> there to make someone a full
+      viewer again.${anyStale ? ` A <strong>⚠️</strong> row's Drive sharing was removed, so the setting currently does
+      nothing — un-tick it on the Users page to tidy up, or re-share <strong>flight-log-data.json</strong> to restore
+      their access.` : ''}
+    </p>`;
+}
+
 // Owner-only step-by-step guide for granting someone "Trips-only" access --
 // a read-only viewer scoped to just My Trips + Travel View (nav hidden,
 // navigate() guarded; see isTripsOnlyUser in completeSignIn). The actual
-// toggle lives on the Users page; this page documents the exact end-to-end
-// procedure and links there.
+// toggle lives on the Users page; this page shows WHO currently has it (the
+// card below the intro) and documents the exact end-to-end procedure.
 async function renderUtilitiesTripsOnly() {
   const step = (n, title, bodyHtml) => `
     <div class="card">
@@ -8435,6 +8473,11 @@ async function renderUtilitiesTripsOnly() {
         Note: this hides the financial pages in the app, but a technically-savvy person with read access to the shared
         data file could still open its raw contents outside the app. Grant Trips-Only access to people you trust.
       </p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Current Trips-Only Viewers</div>
+      <div id="tripsonly-current-list"><div style="color:var(--muted); font-size:13px;">Loading…</div></div>
     </div>
 
     ${step(1, 'Confirm they have a Google Account', p(`They sign in with Google, so they need a Google Account (any email works — it doesn't have to be @gmail.com). If they don't have one, they can make one at <a href="https://accounts.google.com/signup" target="_blank" rel="noopener" style="color:var(--amber);">accounts.google.com/signup</a> using "Use my current email address instead."`))}
@@ -8487,6 +8530,28 @@ async function renderUtilitiesTripsOnly() {
   `;
   const goBtn = document.getElementById('tripsonly-goto-users');
   if (goBtn) goBtn.addEventListener('click', () => navigate('utilitiesusers'));
+  // Fill the "Current Trips-Only Viewers" card AFTER the page paints -- the
+  // emails are an instant in-memory read, but resolving display names /
+  // stale shares needs the Drive permissions.list round trip, and a network
+  // call must never stand in front of a page render (the My Trips weather
+  // lesson, same day). A failed permissions fetch degrades to the bare
+  // email list ([] = can't verify, so nothing gets a stale flag).
+  (async () => {
+    const listEl = document.getElementById('tripsonly-current-list');
+    if (!listEl) return;
+    try {
+      const tripsOnlyEmails = await Store.getTripsOnlyEmails();
+      let permissions = [];
+      if (tripsOnlyEmails.length) {
+        try { permissions = await listDriveFilePermissions(driveFileId); }
+        catch (e) { console.error('Trips-only list: permissions lookup failed (showing bare emails):', e); }
+      }
+      listEl.innerHTML = tripsOnlyViewerListHtml(tripsOnlyEmails, permissions);
+    } catch (e) {
+      console.error('Trips-only viewer list failed:', e);
+      listEl.innerHTML = `<div style="color:var(--muted); font-size:13px;">Could not load the list — reload the page to retry.</div>`;
+    }
+  })();
 }
 
 // Owner-only settings page for the Google Places API key used by the

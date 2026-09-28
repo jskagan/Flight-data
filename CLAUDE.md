@@ -207,6 +207,21 @@ from the Drive file's real sharing permissions (`listDriveFilePermissions()`, `i
 area) via `permissions.list`, which is the same source of truth Step 3 on that page tells the owner
 to edit directly in Drive's own Share dialog.
 
+**Trips-only viewers** (`driveData.tripsOnlyEmails`, `Store.getTripsOnlyEmails`/
+`setTripsOnlyForEmail`; enforced by `isTripsOnlyUser` in `completeSignIn` + a `navigate()` guard
+against `TRIPS_ONLY_ALLOWED_VIEWS`) are read-only viewers scoped to just My Trips + Travel View —
+toggled per user on the Users page, documented end-to-end on the owner-only **Utilities →
+Trips-Only Access** guide page (`renderUtilitiesTripsOnly`). That page also SHOWS who currently
+has the access ("Can you display all users with trips-only access in the trips-only access
+utilities page," 2026-09-28): a "Current Trips-Only Viewers" card built by
+`tripsOnlyViewerListHtml` (pure, testable) — one row per stored email, display name resolved from
+the data file's live sharing permissions (the Users page's own source of truth), and a ⚠️ stale
+flag on an email still ticked Trips-only whose Drive share was since removed (an EMPTY permissions
+list means the lookup failed, so bare emails show with NO stale flags rather than every row wrongly
+flagged). The card fills AFTER the page paints — the permissions fetch is a network round trip,
+and a network call never stands in front of a render (the My Trips weather lesson, same day).
+`tripsonlylist_test.js`.
+
 ### The data pipelines
 
 1. **NetJets invoices** — user uploads a PDF; it's parsed client-side with pdf.js into flight legs,
