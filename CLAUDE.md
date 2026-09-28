@@ -1111,7 +1111,12 @@ step 4; git history has it if ever needed.
   `name`+`startsAt`; `create_trip` is skipped when its key exists; an entry referencing something
   gone, or an unknown type, is skipped rather than blocking the rest; one failed entry still lets
   the rest apply, then throws so the file is retried. Applied edits toast "Applied N itinerary
-  updates from a Claude session." The first real relay (2026-09-28) set the Singapore GP concert
+  updates from a Claude session." **`tripsDataUpdatedAt` rides both of `syncTripsyRelays`' re-render
+  snapshots** ("the start times … do not match with what you reported," 2026-09-28: the drain
+  applied its edits while My Trips was open, but the snapshot only watched the proposal queues —
+  `queueTripsyChange` touches neither — so the page kept the pre-edit render until a manual
+  reload); it moves exactly when `trips-data.json` was rewritten during the sync, so drained trip
+  edits repaint an open page and an unchanged pass still skips the rebuild. The first real relay (2026-09-28) set the Singapore GP concert
   times/stages: 4 `edit_event` (JJ Lin, The Killers, James Arthur, Lana Del Rey — Padang) + 5
   `create_event` (CORTIS, Zara Larsson; Split Enz, Goo Goo Dolls, Janet Jackson — Wharf).
   `tripeditsrelay_test.js`.

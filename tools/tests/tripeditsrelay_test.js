@@ -37,6 +37,19 @@ assert(/try \{ await drainTripsyTripEdits\(\); \} catch/.test(html)
   'syncTripsyRelays drains trip edits AFTER the trips load (queueTripsyChange edits the live array), next to the narrative drain');
 assert(/if \(!isOwner \|\| !tripsyDecryptedTrips\) return;/.test(extractFn('drainTripsyTripEdits')),
   'owner-only, and never before trips-data.json has actually loaded');
+{
+  // "Look at the start times for the concerts. They do not match with what
+  // you reported" (2026-09-28): the drain applied its edits while My Trips
+  // was open, but the sync's re-render snapshot only watched the proposal
+  // queues -- queueTripsyChange touches neither -- so the page kept the
+  // pre-edit render (midnight placeholders) until a manual reload.
+  // tripsDataUpdatedAt now rides BOTH snapshots: it moves exactly when
+  // trips-data.json was rewritten during the sync.
+  const sync = extractFn('syncTripsyRelays');
+  const snaps = sync.match(/JSON\.stringify\(\[[\s\S]*?\]\)/g) || [];
+  assert(snaps.length === 2 && snaps.every(s => /tripsDataUpdatedAt/.test(s)),
+    'THE REPAINT FIX: both re-render snapshots include tripsDataUpdatedAt, so drained trip edits repaint an open My Trips page');
+}
 
 // ---- executed: the apply itself ----
 (async () => {
