@@ -19720,22 +19720,32 @@ async function tripsyFindFirstPhotoNameForQueries(apiKey, queries) {
 // use a geographic restriction on the search," 2026-09-28): with neither
 // locationBias nor locationRestriction, Places' searchText silently
 // IP-BIASES results toward where the request came from -- typing "Marina
-// Bay Sands" from Los Angeles skews toward LA matches. The documented way
-// to neutralize that default is an explicit WORLDWIDE locationBias
-// rectangle, which is what `worldwide: true` sends. Automatic searches are
-// deliberately untouched (default false): their queries embed the trip's
-// own location in the text, and the local skew is what makes a bare venue
-// name resolve to the right city.
-const TRIPSY_WORLDWIDE_LOCATION_BIAS = {
-  rectangle: { low: { latitude: -90, longitude: -180 }, high: { latitude: 90, longitude: 180 } },
-};
+// Bay Sands" from Los Angeles skews toward LA matches. There is no direct
+// "no bias" switch, and a single worldwide rectangle is REJECTED -- Places
+// 400s any rectangle wider than 180° ("Invalid rectangle viewport", found
+// live 2026-09-28 when the first attempt sent one and every manual search
+// silently found nothing: "When I hit the search button ... nothing
+// happened") -- so `worldwide: true` runs the query once per HEMISPHERE
+// (two exactly-180°-wide biases, verified accepted live) and merges the
+// results: each soft bias cancels the IP skew within its half, and
+// together they cover the globe. Automatic searches are deliberately
+// untouched (default false): their queries embed the trip's own location
+// in the text, and the local skew is what makes a bare venue name resolve
+// to the right city.
+const TRIPSY_UNBIASED_LOCATION_BIASES = [
+  { rectangle: { low: { latitude: -90, longitude: -180 }, high: { latitude: 90, longitude: 0 } } },
+  { rectangle: { low: { latitude: -90, longitude: 0 }, high: { latitude: 90, longitude: 180 } } },
+];
 async function tripsyGatherPhotoCandidatesForQueries(apiKey, queries, { worldwide = false } = {}) {
   const photoNames = [];
-  for (const query of queries) {
+  const requests = queries.flatMap(query => (worldwide
+    ? TRIPSY_UNBIASED_LOCATION_BIASES.map(bias => ({ query, bias }))
+    : [{ query, bias: null }]));
+  for (const { query, bias } of requests) {
     const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.photos' },
-      body: JSON.stringify({ textQuery: query, maxResultCount: 5, ...(worldwide ? { locationBias: TRIPSY_WORLDWIDE_LOCATION_BIAS } : {}) }),
+      body: JSON.stringify({ textQuery: query, maxResultCount: 5, ...(bias ? { locationBias: bias } : {}) }),
     });
     if (!res.ok) continue;
     const data = await res.json();
@@ -20387,19 +20397,23 @@ async function tripsyManualSearchTransportationPhoto(company, category, query) {
   try {
     const cached = await Store.getTripsyPlacePhoto(cacheKey);
     const tried = new Set((cached && cached.triedPhotoNames) || []);
-    // Owner-typed search: worldwide bias neutralizes the default IP skew
-    // (see TRIPSY_WORLDWIDE_LOCATION_BIAS above).
-    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.photos' },
-      body: JSON.stringify({ textQuery: query, maxResultCount: 5, locationBias: TRIPSY_WORLDWIDE_LOCATION_BIAS }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
+    // Owner-typed search: one query per hemisphere bias, merged -- the
+    // IP-skew neutralizer that the API actually accepts (see
+    // TRIPSY_UNBIASED_LOCATION_BIASES above; a single worldwide rectangle
+    // is rejected as wider than 180°).
     const photoNames = [];
-    for (const place of data?.places || []) {
-      for (const photo of place?.photos || []) {
-        if (photo?.name && !photoNames.includes(photo.name)) photoNames.push(photo.name);
+    for (const bias of TRIPSY_UNBIASED_LOCATION_BIASES) {
+      const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.photos' },
+        body: JSON.stringify({ textQuery: query, maxResultCount: 5, locationBias: bias }),
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const place of data?.places || []) {
+        for (const photo of place?.photos || []) {
+          if (photo?.name && !photoNames.includes(photo.name)) photoNames.push(photo.name);
+        }
       }
     }
     const photoName = photoNames.find(n => !tried.has(n)) || photoNames[0];
@@ -25225,10 +25239,45 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
   // stays (a multi-day hotel's transfer can land on a different day from
   // its check-in row), so this reads the raw trip events, not the day data.
   const vanTransferLodgings = (trip.events || []).filter(e => e.tripsyRaw && e.tripsyRaw.resource === 'hosting');
+  // DIRECTLY-ADJACENT flight legs on the SAME airline share ONE photo
+  // ("When there are multiple flight legs directly adjacent on the same
+  // airline, use a single photo for all the flight legs on the itinerary,"
+  // 2026-09-28 — a connection is one journey, and the per-company cache
+  // means each leg's card otherwise repeats the identical picture). A
+  // document-order walk over the SAME per-day items the cards render from
+  // marks every follow-on leg of such a chain; those cards render
+  // photo-less (the skipped-card shape). Only a LAYOVER row is glue that
+  // never breaks a chain; a P/S reservation card BREAKS it ("A p/s
+  // reservation between legs should be treated as a break… there should be
+  // three pictures — the first a flight, then the p/s, then another
+  // flight," 2026-09-28 follow-up — the P/S card carries its own picture,
+  // so the legs around it each keep theirs), as does any other row between
+  // two legs. A company-less leg never chains (nothing says it is the same
+  // airline).
+  const adjacentFlightPhotoSuppressed = new Set();
+  {
+    let prevFlightCompany = null;
+    for (const walkDayKey of dayKeys) {
+      for (const item of (summaryByDay.get(walkDayKey) || [])) {
+        if (item.isLayover) continue;
+        const ev = item.ev;
+        const raw = ev && ev.tripsyRaw;
+        const isFlight = raw && raw.resource === 'transportation'
+          && (raw.category === 'airplane' || /^Flight\b/.test(ev.summary || ''));
+        if (!isFlight) { prevFlightCompany = null; continue; }
+        const companyKey = String(raw.company || '').trim().toLowerCase();
+        if (companyKey && companyKey === prevFlightCompany) adjacentFlightPhotoSuppressed.add(String(ev.id));
+        prevFlightCompany = companyKey || null;
+      }
+    }
+  }
   const tripsyTransportationCardHtml = async (ev, rowKey, eventEntry) => {
     const raw = ev.tripsyRaw;
     const company = raw.company || '';
     const category = raw.category || '';
+    // A follow-on leg in an adjacent same-airline chain shows no photo at
+    // all (and fetches none — the first leg's card is the chain's picture).
+    const chainSuppressed = adjacentFlightPhotoSuppressed.has(String(ev.id));
     // A car transfer leg shows a fixed picture instead of whatever a
     // company/category search would find: its PHOTO subject becomes one of
     // the two shared sentinel pseudo-companies -- the AIRPORT subject
@@ -25238,8 +25287,8 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
     // keeps the leg's real operator.
     const photoCompany = tripsyVanTransferPhotoSubject(ev, vanTransferLodgings) || company;
     const cacheKey = tripsyTransportationPhotoCacheKey(photoCompany, category);
-    const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
-    const isSkipped = !!(cachedEntry && cachedEntry.skipped);
+    const cachedEntry = chainSuppressed ? null : await Store.getTripsyPlacePhoto(cacheKey);
+    const isSkipped = chainSuppressed || !!(cachedEntry && cachedEntry.skipped);
     let photoDataUrl = isSkipped ? null : await fetchTripsyTransportationPhoto(photoCompany, category);
     // A transportation photo must not repeat a PLACE's photo in the same
     // document ("we should not re-use a photo [already] used for an event

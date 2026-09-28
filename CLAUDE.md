@@ -670,14 +670,36 @@ step 4; git history has it if ever needed.
   memory, carried by the next ordinary photo-cache flush). `pasterecompress_test.js`. Itinerary
   print cards only, by request — the My Trips timeline and Travel View are untouched.
   `vantransfer_test.js`.
+- **Directly-adjacent flight legs on the SAME airline share ONE photo** ("When there are
+  multiple flight legs directly adjacent on the same airline, use a single photo for all the
+  flight legs on the itinerary," 2026-09-28 — the transportation photo cache is per COMPANY, so a
+  connection's legs each repeated the identical picture). A document-order walk in
+  `buildTripsyPrintHtml` (`adjacentFlightPhotoSuppressed`, over the same post-filter
+  `summaryByDay` items the cards render from, spanning day boundaries) marks every follow-on leg
+  in a chain of consecutive same-airline flights; the card builder renders those photo-less via
+  the existing skipped-card shape (`chainSuppressed` ORs into `isSkipped` — no photo area, no
+  controls, and NOTHING is fetched for the leg). Only a LAYOVER row is glue that never breaks a
+  chain; a P/S reservation card BREAKS it ("If there are two legs separated by a p/s reservation,
+  there should be three pictures - the first a flight, then the p/s, then another flight,"
+  same-day follow-up — the P/S card carries its own picture, so the legs around it each keep
+  theirs), as does any other row between two legs. Company
+  matching is case/spacing-insensitive; a company-less leg never chains. Non-adjacent
+  same-airline repeats elsewhere in the trip still each show the (one shared) photo, as before.
+  `adjacentlegs_test.js`.
 - **An owner-TYPED photo search carries no geographic restriction** ("When the user manually
   inputs a search term for a photo from the itinerary page, do not use a geographic restriction
   on the search," 2026-09-28): with neither `locationBias` nor `locationRestriction`, Places'
-  `searchText` silently IP-BIASES results toward where the request came from. The documented
-  neutralizer is an explicit WORLDWIDE `locationBias` rectangle
-  (`TRIPSY_WORLDWIDE_LOCATION_BIAS`), sent by both manual entry points — the place-card 🔍 grid
-  search (`tripsyGatherPlacePhotoThumbnailsForQuery` → `tripsyGatherPhotoCandidatesForQueries`'s
-  new `{worldwide: true}` option) and `tripsyManualSearchTransportationPhoto`. AUTOMATIC searches
+  `searchText` silently IP-BIASES results toward where the request came from. **There is no
+  direct "no bias" switch, and a single worldwide rectangle is REJECTED** — Places 400s any
+  rectangle wider than 180° ("Invalid rectangle viewport"; the first attempt shipped one and
+  every manual search silently found nothing — "When I hit the search button … nothing
+  happened," same day, root-caused by replaying the exact request against the live API with the
+  app's referer). The accepted neutralizer, verified live: run the typed query once per
+  HEMISPHERE (`TRIPSY_UNBIASED_LOCATION_BIASES`, two exactly-180°-wide soft biases — the bias is
+  soft, so the right venue still surfaces from either half) and merge the deduped candidates.
+  Sent by both manual entry points — the place-card 🔍 grid search
+  (`tripsyGatherPlacePhotoThumbnailsForQuery` → `tripsyGatherPhotoCandidatesForQueries`'s
+  `{worldwide: true}` fan-out) and `tripsyManualSearchTransportationPhoto`. AUTOMATIC searches
   are deliberately untouched (`worldwide` defaults false): their variant queries embed the trip's
   own location in the text, and that local skew is what resolves a bare venue name to the right
   city. `manualsearchbias_test.js`.
