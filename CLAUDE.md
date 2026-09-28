@@ -1059,6 +1059,21 @@ step 4; git history has it if ever needed.
   (per the owner's explicit ask: "I want the line dim when it starts from a grayed out event," 2026-08-14
   — an earlier version required BOTH endpoints past specifically to keep that one boundary segment
   bright as a "now begins here" marker, which read as the wrong half of the line staying lit).
+- **The My Trips render never waits on weather — chips paint from cache and heal in place**
+  ("Sometimes when I open the app and select my trips there is a delay when I select a trip to
+  open," 2026-09-28): expanding/collapsing a trip re-runs `renderTripsyEventsListImpl`, which
+  used to AWAIT `tripsyLoadWeather` for every expanded trip's day bars BEFORE assigning
+  `container.innerHTML` — serial per-city geocoding, forecast fetches, and that function's own
+  whole-file `persistDriveData()` all in front of the paint. Fully-cached renders were instant,
+  which is why the delay read as "sometimes": it bit on the first render/expand after the
+  forecast TTL lapsed, i.e. typically right after opening the app. Now the render computes the
+  targets, paints immediately from cache (`tripsyMyTripsDayWxChipHtml`, the ONE chip builder),
+  and fires `tripsyLoadWeather` in the background; when it lands,
+  `tripsyRefreshMyTripsWeatherChips` refills each day bar's ALWAYS-emitted chip slot span
+  (`data-tripsy-wx-slot`, empty when uncached so the bar's three-child layout never shifts) in
+  place — deliberately NOT a full re-render, which would tear down open panels and yank the
+  scroll mid-read. A slot that still resolves nothing keeps what it shows (a background pass
+  never blanks a chip). `mytripsweather_test.js`.
 - **Past trips render under collapsed YEAR sections, below the current/upcoming cards** (built
   for the 154-trip historical backfill — flat, they'd stack a wall of 2011 above the trip you're
   actually on and pay 150 cards' HTML besides). A trip is "past" once its last day (falling back

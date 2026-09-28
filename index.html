@@ -31756,6 +31756,32 @@ function tripsyScrollMyTripsToToday() {
   requestAnimationFrame(() => requestAnimationFrame(scrollToIt));
   [120, 350, 800].forEach(ms => setTimeout(scrollToIt, ms));
 }
+// The one chip builder both the My Trips day-bar render and the background
+// weather patch below use, so the two can never paint a day differently.
+// Returns '' when nothing is cached for the day (an empty slot span keeps the
+// bar's left/center/right layout).
+function tripsyMyTripsDayWxChipHtml(tripKey, dayKey, weatherByTrip) {
+  const wxTargets = weatherByTrip.get(tripKey);
+  const wxArr = wxTargets && wxTargets.get(dayKey);
+  const wxRec = wxArr && wxArr.length ? tripsyGetWeather(wxArr[0].city, wxArr[0].country, dayKey) : null;
+  if (!wxRec) return '';
+  // Only-typical (no real forecast) days get a thin outline box, same "this
+  // is a climate normal, not a forecast" cue Travel View uses.
+  const wxBox = wxRec.kind === 'typical' ? ' border:1px solid var(--muted); border-radius:5px; padding:1px 6px;' : '';
+  return tripsyWeatherChipHtml(wxRec, wxArr[0].city, wxArr[0].country, dayKey, `color:var(--text); font-weight:600; font-size:12px; letter-spacing:0;${wxBox}`);
+}
+// After a background tripsyLoadWeather lands, refill every day bar's chip
+// slot in place from the (now warmer) cache -- no full re-render, which
+// would tear down open panels and yank the scroll mid-read. A slot that
+// still resolves nothing keeps whatever it shows (never blank a chip), and
+// a render that replaced the container's content in the meantime is fine:
+// the slots are re-queried live and keyed by trip+day.
+function tripsyRefreshMyTripsWeatherChips(container, weatherByTrip) {
+  container.querySelectorAll('[data-tripsy-wx-slot]').forEach(slot => {
+    const html = tripsyMyTripsDayWxChipHtml(slot.getAttribute('data-tripsy-wx-trip'), slot.getAttribute('data-tripsy-wx-day'), weatherByTrip);
+    if (html) slot.innerHTML = html;
+  });
+}
 function renderTripsyEventsList() {
   const run = _tripsyEventsListRenderChain.then(() => renderTripsyEventsListImpl());
   // Once the trip cards (and their per-trip conflict flags) have rendered,
@@ -31862,9 +31888,18 @@ async function renderTripsyEventsListImpl() {
     .filter(c => c.type === 'create_trip')
     .map(c => ({ key: c.tripKey, name: c.name, start: c.start, end: c.end, location: null, events: [], _isPendingCreateTrip: c }));
 
-  // Pre-load weather for the day bars of EXPANDED trips only (collapsed trips
-  // render no timeline). One combined fetch/cache; dayHeaderHtml reads it
-  // synchronously per day from the per-trip targets stashed here.
+  // Weather targets for the day bars of EXPANDED trips only (collapsed trips
+  // render no timeline). dayHeaderHtml reads the CACHE synchronously per day
+  // from the per-trip targets stashed here -- the actual fetch runs in the
+  // BACKGROUND after this render paints ("there is a delay when I select a
+  // trip to open," 2026-09-28: this used to AWAIT the weather load right
+  // here, so the first My Trips render/expand after the forecast TTL lapsed
+  // stood behind serial geocoding + forecast fetches + a whole-file Drive
+  // PATCH before a single card painted; everything-cached renders were
+  // instant, which is exactly why the delay read as "sometimes"). When the
+  // background load lands, tripsyRefreshMyTripsWeatherChips fills the chip
+  // slots in place -- stale-while-revalidate, the same shape every other
+  // startup sync in this app already has.
   const tripsyMyTripsWeather = new Map(); // trip.key -> weatherTargetsByDay
   {
     const allTargets = [];
@@ -31882,7 +31917,9 @@ async function renderTripsyEventsListImpl() {
       tripsyMyTripsWeather.set(t.key, tgts);
       allTargets.push(...tripsyWeatherTargetList(tgts));
     }
-    await tripsyLoadWeather(allTargets);
+    tripsyLoadWeather(allTargets)
+      .then(() => tripsyRefreshMyTripsWeatherChips(container, tripsyMyTripsWeather))
+      .catch(e => console.error('background My Trips weather load failed', e));
   }
   tripsyEnsureWeatherChipHandler();
 
@@ -32202,13 +32239,11 @@ async function renderTripsyEventsListImpl() {
       // Weather glyph line in the middle of the bar (primary/lodging city),
       // tappable for the hourly dialog. With justify-content:space-between the
       // three children land left (date) / center (weather) / right (Day N).
-      const wxTargets = tripsyMyTripsWeather.get(trip.key);
-      const wxArr = wxTargets && wxTargets.get(dayKey);
-      const wxRec = wxArr && wxArr.length ? tripsyGetWeather(wxArr[0].city, wxArr[0].country, dayKey) : null;
-      // Only-typical (no real forecast) days get a thin outline box, same "this
-      // is a climate normal, not a forecast" cue Travel View uses.
-      const wxBox = wxRec && wxRec.kind === 'typical' ? ' border:1px solid var(--muted); border-radius:5px; padding:1px 6px;' : '';
-      const wxHtml = wxRec ? tripsyWeatherChipHtml(wxRec, wxArr[0].city, wxArr[0].country, dayKey, `color:var(--text); font-weight:600; font-size:12px; letter-spacing:0;${wxBox}`) : '';
+      // ALWAYS wrapped in a slot span -- rendered from cache only, then the
+      // background tripsyLoadWeather patches the slot in place when fresher
+      // data lands (see the weather block above); an empty slot keeps the
+      // bar's three-child layout so a chip arriving later shifts nothing.
+      const wxHtml = `<span data-tripsy-wx-slot data-tripsy-wx-trip="${esc(trip.key)}" data-tripsy-wx-day="${esc(dayKey)}">${tripsyMyTripsDayWxChipHtml(trip.key, dayKey, tripsyMyTripsWeather)}</span>`;
       // data-tt-trip/data-tt-day are the scroll anchors the Verify Travel
       // Details report jumps to (tripsyGoToTripDay).
       // 👔 to the right of "Day N": opens the Daily Dress Guide at THIS date. Rendered
