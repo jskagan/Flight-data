@@ -84,7 +84,8 @@ assert(/\(nameOwner !== undefined && nameOwner !== cacheKey\)/.test(dedup),
     const f = new Function('nameArg', 'usedNames', 'usedHashes', 'calls', 'entryRef', 'altArg', 'freshArg',
       '_tripsyAllowPhotoFetch', 'isOwner', 'tripsyPlacePhotoCacheKey', 'Store', 'fetchTripsyPlacePhoto',
       'tripsyFindUnusedPlacePhoto', 'tripsyHashBlob', 'console',
-      'var tripsyPlacePhotoCacheDirty = false;\nvar _tripsyDedupExhausted = new Set();\n' + chainHelperSrc + '\n' + src
+      'var tripsyPlacePhotoCacheDirty = false;\nvar _tripsyDedupExhausted = new Set();\n'
+      + extractFn('tripsyPlacePhotoEntryIsPinned') + '\n' + chainHelperSrc + '\n' + src
       + '\nreturn tripsyDedupedPlacePhotoUrl(nameArg, "addr", "title", "", usedNames, usedHashes);');
     const url = await f('Place', usedNames, usedHashes, calls, null, alt, fresh,
       allowFetch, owner,
@@ -152,6 +153,7 @@ assert(/\(nameOwner !== undefined && nameOwner !== cacheKey\)/.test(dedup),
     'var { tripsyPlacePhotoCacheKey, Store, fetchTripsyPlacePhoto, tripsyFindUnusedPlacePhoto, tripsyHashBlob } = deps;\n'
     + 'var _tripsyAllowPhotoFetch = true, isOwner = true, tripsyPlacePhotoCacheDirty = false;\nvar _tripsyDedupExhausted = new Set();\n'
     + 'var console = deps.console;\n'
+    + extractFn('tripsyPlacePhotoEntryIsPinned') + '\n'
     + chainSrc + '\n' + dedupSrc + '\nreturn tripsyDedupedPlacePhotoUrl;');
 
   const entries = {

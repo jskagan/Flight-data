@@ -57,8 +57,9 @@ assert(/triedPhotoNames: \[\.\.\.tried, nextPhotoName\], liveryChecked: true, ow
   '🔄 Try Another stamps the owner\'s pick verified AND pinned');
 assert(/triedPhotoNames: \[\.\.\.tried, photoName\], liveryChecked: true, ownerPinned: true/.test(html),
   '🔍 manual search stamps the owner\'s pick verified AND pinned');
-assert((html.match(/\.\.\.\(isTransportCard \? \{ liveryChecked: true, ownerPinned: true \} : \{\}\)/g) || []).length === 2,
-  '🗂 gallery picks and 📋 pasted photos on a transportation card stamp verified AND pinned (place cards are untouched)');
+assert((html.match(/\.\.\.\(isTransportCard \? \{ liveryChecked: true, ownerPinned: true \} : \{\}\)/g) || []).length === 1
+  && /ownerPinned: true,\s*\n\s*\.\.\.\(isTransportCard \? \{ liveryChecked: true \} : \{\}\)/.test(html),
+  '🗂 gallery picks on a transportation card stamp verified AND pinned; 📋 pastes pin EVERY card kind with liveryChecked still transport-only (pastedpin_test.js)');
 const fetchSrc = extractFn('fetchTripsyTransportationPhoto');
 assert(/if \(cached && cached\.driveFileId && cached\.ownerPinned\) \{/.test(fetchSrc)
   && fetchSrc.indexOf('cached.ownerPinned') < fetchSrc.indexOf('liveryChecked === undefined'),
@@ -80,7 +81,14 @@ assert(/if \(cached && cached\.driveFileId && cached\.ownerPinned\) \{/.test(fet
       'Store', 'tripsyPlacePhotoDisplayUrl', 'downloadDriveFileBlob', 'tripsyTransportationPhotoAcceptable',
       'tripsyGatherTransportationPhotoCandidates', 'tripsyFindFirstTransportationPhotoName',
       'tripsyFetchPlacePhotoBlob', 'tripsyHashBlob', 'uploadTripsyPlacePhotoToDrive', 'URL', 'console',
-      'var tripsyPlacePhotoCacheDirty = false;\n' + cacheKeySrc + '\n' + src
+      'var tripsyPlacePhotoCacheDirty = false;\n'
+      // The transfer-subject sentinels the exhausted-pool branch consults --
+      // extracted from the real source, since a missing stub here once
+      // crashed this suite mid-run and the runner silently swallowed it.
+      + (html.match(/const TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT = [^;]+;/) || [''])[0] + '\n'
+      + (html.match(/const TRIPSY_HOTEL_TRANSFER_PHOTO_SUBJECT = [^;]+;/) || [''])[0] + '\n'
+      + (html.match(/const TRIPSY_TRANSFER_PHOTO_SUBJECTS = [^;]+;/) || [''])[0] + '\n'
+      + cacheKeySrc + '\n' + src
       + '\nreturn fetchTripsyTransportationPhoto(company, category);');
     const url = await f(company, 'airplane', calls, null, verdicts, candidates,
       allowFetch, false, 30,

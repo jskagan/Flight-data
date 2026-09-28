@@ -105,6 +105,11 @@ assert(/driveData\.tripsyPartialItineraries = driveData\.tripsyPartialItinerarie
 {
   eval(extractFn('tripsyPartialBaseEventId').replace(/^function /, 'var tripsyPartialBaseEventId = function '));
   eval(extractFn('tripsySummaryRowKey').replace(/^function /, 'var tripsySummaryRowKey = function '));
+  // The filter now consults the postdates-save rule (partialnewevents) -- an
+  // unstubbed reference here crashed this block mid-suite, silently, until
+  // the runner learned to flag a crash.
+  eval(extractFn('tripsyPartialEventPostdatesSave').replace(/^function /, 'var tripsyPartialEventPostdatesSave = function '));
+  eval(extractFn('tripsyPartialKeyPostdatesSave').replace(/^function /, 'var tripsyPartialKeyPostdatesSave = function '));
   eval(extractFn('tripsyFilterPrintDayDataForPartial').replace(/^function /, 'var tripsyFilterPrintDayDataForPartial = function '));
 
   assert(tripsyPartialBaseEventId('12345-checkin') === '12345' && tripsyPartialBaseEventId('12345-checkout') === '12345'

@@ -20,8 +20,12 @@ function extractConst(name) {
     else if (c === ';' && depth === 0) return html.slice(start, j + 1);
   }
 }
-const consts = ['TRIPSY_CUBE_BRANDS','TRIPSY_CUBE_SIZES','TRIPSY_CUBE_COLORS'].map(extractConst).join('\n');
-const src = consts + '\n' + ['tripsyCubesForEntry', 'tripsyCubeById', 'tripsyCubeName', 'tripsyCubeLabel', 'tripsyCubesSorted', 'tripsyNormalizeTripSelection'].map(extractFn).join('\n');
+const consts = ['TRIPSY_CUBE_BRANDS','TRIPSY_CUBE_SIZES','TRIPSY_CUBE_COLORS','TRIPSY_CUBE_NONE','TRIPSY_CUBE_FLIGHT_WORN'].map(extractConst).join('\n');
+// tripsyCubeLabel delegates to tripsyCubeSlotLabel since the "No cube"/"Wear
+// on flight" sentinels -- omitting the slot helpers crashed the generated run
+// at its first tripsyCubeLabel call, silently truncating this suite until the
+// runner learned to flag a crash.
+const src = consts + '\n' + ['tripsyCubesForEntry', 'tripsyCubeById', 'tripsyCubeName', 'tripsyCubeSlotLabel', 'tripsyCubeSlotGlyph', 'tripsyCubeLabel', 'tripsyCubesSorted', 'tripsyNormalizeTripSelection'].map(extractFn).join('\n');
 fs.writeFileSync('cubes_run.js', `
 let driveData = { tripsyPackingCubes: [ {id:'c1', color:'Blue', size:'Medium', brand:'Eagle Creek'}, {id:'c2', color:'Black', size:'Small', brand:'Briggs & Riley'} ] };
 ${src}

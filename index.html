@@ -20004,6 +20004,17 @@ let _tripsyAllowNewPlacePhotoFetch = false;
 // narrative generate/approve, photo change/skip, weather >=6h) flips the
 // fingerprint, so there's no manual invalidation to keep in sync.
 const tripsyBuiltItineraryCache = new Map(); // tripKey -> { html, fingerprint }
+// The owner's own pick, held VERBATIM: no TTL refetch, no dedup swap, no
+// healing -- only another manual pick or 🚫 replaces it. Checked by BOTH
+// fetchTripsyPlacePhoto (TTL) and tripsyDedupedPlacePhotoUrl (collision
+// swap). The ownerPinned flag is the real marker; the 'user-pasted-'
+// photoName check covers pastes saved before place-card pastes stamped the
+// flag ("Some of the photos I posted into the itinerary did not save,"
+// 2026-09-28 -- the live cache holds such entries, and a data migration
+// would be a write this read-side check makes unnecessary).
+function tripsyPlacePhotoEntryIsPinned(entry) {
+  return !!(entry && (entry.ownerPinned || String(entry.photoName || '').startsWith('user-pasted-')));
+}
 async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
   const cacheKey = tripsyPlacePhotoCacheKey(name, address, eventTitle, locationHint);
   if (cacheKey === '|||') return null;
@@ -20013,8 +20024,10 @@ async function fetchTripsyPlacePhoto(name, address, eventTitle, locationHint) {
     // A plain open/print NEVER refetches, so ALWAYS show the cached photo there
     // -- even if it's past the TTL -- instead of dropping it. Opening/editing
     // the itinerary must never make a photo disappear. Only a generation (fetch
-    // enabled) treats a stale cache as a reason to refetch a fresher one.
-    if (fresh || !_tripsyAllowPhotoFetch) {
+    // enabled) treats a stale cache as a reason to refetch a fresher one -- and
+    // a PINNED entry (the owner's own paste/pick) has no staleness concept at
+    // all: a refetch could only swap their choice for something else.
+    if (fresh || !_tripsyAllowPhotoFetch || tripsyPlacePhotoEntryIsPinned(cached)) {
       try {
         return await tripsyPlacePhotoDisplayUrl(cached.driveFileId);
       } catch (e) {
@@ -20565,9 +20578,16 @@ async function tripsyDedupedPlacePhotoUrl(name, address, eventTitle, locationHin
   if (cachedEntry && cachedEntry.driveFileId) {
     const nameOwner = cachedEntry.photoName ? usedPlacePhotoNames.get(cachedEntry.photoName) : undefined;
     const hashOwner = cachedEntry.contentHash ? usedPlacePhotoHashes.get(cachedEntry.contentHash) : undefined;
-    const collidesWithOtherEvent =
+    // A PINNED entry (the owner's own paste/pick) is exempt from the
+    // collision swap outright: pasting the SAME image onto several events is
+    // a deliberate choice, not the auto-fetch duplication this dedup exists
+    // for ("Some of the photos I posted into the itinerary did not save,"
+    // 2026-09-28 -- one stage photo pasted onto several concert cards; the
+    // maintenance rebuild swapped the later ones to random Places photos and
+    // the cache-replace hook deleted the pasted bytes from Drive).
+    const collidesWithOtherEvent = !tripsyPlacePhotoEntryIsPinned(cachedEntry) && (
       (nameOwner !== undefined && nameOwner !== cacheKey) ||
-      (hashOwner !== undefined && hashOwner !== cacheKey);
+      (hashOwner !== undefined && hashOwner !== cacheKey));
     // A place whose whole candidate pool was already exhausted this session
     // keeps its icon fallback without re-running the search on every
     // rebuild -- the searches are the expensive part, and the answer can't
@@ -30360,7 +30380,15 @@ function wireTripsyPhotoCardControls(contentEl) {
       // immediately, then persists it through the SAME conflict-resilient
       // store the gallery/manual picks use, so it's a normal saved photo:
       // honored on every reopen, offline, and in the PDF. A pasted photo is a
-      // deliberate user pick, so it's never de-duped/swapped away on open.
+      // deliberate user pick, so it's never de-duped/swapped away on open --
+      // ownerPinned is stamped on EVERY card kind, not just transportation
+      // ("Some of the photos I posted into the itinerary did not save,"
+      // 2026-09-28: the same stage image pasted onto several concert cards
+      // read as forbidden duplicates to the background dedup maintenance,
+      // which swapped the later ones to random Places photos and deleted the
+      // pasted bytes from Drive). tripsyDedupedPlacePhotoUrl and
+      // fetchTripsyPlacePhoto both honor the pin (and, for pastes saved
+      // before this stamp existed, the 'user-pasted-' photoName itself).
       const originalText = pasteBtn.textContent;
       pasteBtn.disabled = true;
       pasteBtn.textContent = '⏳';
@@ -30384,7 +30412,8 @@ function wireTripsyPhotoCardControls(contentEl) {
         const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
           driveFileId, photoName: `user-pasted-${Date.now()}`, contentHash,
           triedPhotoNames: [...(existing?.triedPhotoNames || [])],
-          ...(isTransportCard ? { liveryChecked: true, ownerPinned: true } : {}),
+          ownerPinned: true,
+          ...(isTransportCard ? { liveryChecked: true } : {}),
         });
         if (ok) toast('Photo pasted in.', 'success');
         else toast('Image shown, but saving it to Drive failed — please try again.', 'error');

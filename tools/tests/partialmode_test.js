@@ -107,9 +107,15 @@ assert(/savedPartial && savedPartial\.title\s*\n\s*\? menuListButtonHtml/.test(h
 
 // ---- executed: what full-mode "generation" actually queues for the cloud ----
 (async () => {
-  const src = extractFn('tripsyPartialEnsureNarratives').replace(/^async function /, 'var tripsyPartialEnsureNarratives = async function ');
+  // ensure now builds its request through the SHARED builder (factored out
+  // for the changes dialog's cloud fallback) -- omitting it crashed this
+  // block mid-suite, silently, until the runner learned to flag a crash. Its
+  // own deps are all names this scaffold's Function params already provide.
+  const src = extractFn('tripsyBuildNarrativeCloudRequest').replace(/^async function /, 'var tripsyBuildNarrativeCloudRequest = async function ')
+    + '\n' + extractFn('tripsyPartialEnsureNarratives').replace(/^async function /, 'var tripsyPartialEnsureNarratives = async function ');
   eval(extractFn('tripsyPartialBaseEventId').replace(/^function /, 'var tripsyPartialBaseEventId = function '));
   eval(extractFn('tripsySummaryRowKey').replace(/^function /, 'var tripsySummaryRowKey = function '));
+  eval(extractFn('tripsyPartialEventPostdatesSave').replace(/^function /, 'var tripsyPartialEventPostdatesSave = function '));
   eval(extractFn('tripsyFilterPrintDayDataForPartial').replace(/^function /, 'var tripsyFilterPrintDayDataForPartial = function '));
 
   const run = async (keys, cache, pendingRequests = []) => {

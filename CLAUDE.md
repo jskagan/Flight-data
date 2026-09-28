@@ -754,6 +754,34 @@ step 4; git history has it if ever needed.
   unused" candidate, so the duplicates just moved to a new photo on every open). Serialized, each
   claim sees every earlier claim's registration; the common case (cached, no collision) stays
   fully parallel. `photodedup_test.js`.
+- **A PASTED photo is pinned on EVERY card kind, and pinned place photos are exempt from the
+  dedup swap and the TTL refetch** ("Some of the photos I posted into the itinerary did not
+  save," 2026-09-28 — they saved and were then destroyed: one stage image pasted onto several
+  concert cards read to the dedup maintenance as forbidden duplicates, which swapped the later
+  cards to random Places photos, and `cacheTripsyPlacePhotoLocal`'s orphan cleanup then deleted
+  the pasted bytes from Drive, unrecoverably; confirmed live — James Arthur and Lana Del Rey
+  held Places photos stamped 06:49, minutes after the owner's 06:46/06:48 pastes, while three
+  re-pasted Padang cards still shared one contentHash). Root cause: the 📋 paste handler stamped
+  `ownerPinned` only when `isTransportCard`. Now every paste stamps `ownerPinned: true`
+  (`liveryChecked` stays transport-only), and the shared **`tripsyPlacePhotoEntryIsPinned`**
+  check — the flag, OR a `photoName` starting `user-pasted-`, which retroactively protects
+  pastes saved before the stamp existed with no data migration — is honored in BOTH places that
+  could replace a place photo: `tripsyDedupedPlacePhotoUrl`'s collision test (pasting the SAME
+  image onto several events is a deliberate choice, exactly the duplication the 2026-09-27 dedup
+  was never meant for) and `fetchTripsyPlacePhoto`'s TTL branch (a pinned entry has no staleness
+  concept — same rule as the transport pin). Ordinary auto-fetched duplicates still swap.
+  Place-card 🗂/🔍 picks deliberately stay unpinned (unreported, and they pick from the same
+  Places pool the swap draws from). `pastedpin_test.js`.
+- **`run_all.js` flags a suite that CRASHES (nonzero exit with no printed FAIL line) instead of
+  silently counting only the assertions that managed to run** — found while shipping the pin fix:
+  `liverycheck_test.js` had been dying mid-suite on an unstubbed `TRIPSY_TRANSFER_PHOTO_SUBJECTS`
+  reference and still reporting "ok", and turning the detector on immediately surfaced three more
+  silently-truncated suites (`cubes_run.js` missing the `tripsyCubeSlotLabel`/`tripsyCubeSlotGlyph`
+  the sentinel refactor made `tripsyCubeLabel` delegate to; `partialitinerary_test.js` and
+  `partialmode_test.js` missing `tripsyPartialEventPostdatesSave`/`tripsyPartialKeyPostdatesSave`/
+  `tripsyBuildNarrativeCloudRequest` after their features' refactors). The lesson: a test scaffold
+  that extracts one function must be re-checked whenever that function grows a new dependency, and
+  the runner now enforces it — a crashed suite reads as FAILED, never as a short pass.
 - **Photo bytes persist on-device (IndexedDB `photoBlobs`, offline DB v3)** ("When I close the
   app and then re-open, there is still a delay when I try to open the partial itinerary,"
   2026-09-27): `tripsyPhotoObjectUrlCache` (the object-URL memo) dies with the session, so a COLD

@@ -17,7 +17,15 @@ for (const f of suites) {
   let out = '';
   const run = (file) => {
     try { out += execFileSync(process.execPath, [path.join(dir, file)], { cwd: dir, encoding: 'utf8' }); }
-    catch (e) { out += (e.stdout || '') + (e.stderr || ''); }
+    catch (e) {
+      const got = (e.stdout || '') + (e.stderr || '');
+      out += got;
+      // A nonzero exit WITHOUT any printed FAIL line means the suite CRASHED
+      // (uncaught exception) rather than failing an assertion -- its later
+      // assertions never ran, which must not read as a pass (this silently
+      // hid a real mid-suite crash in liverycheck for a day).
+      if (!/^FAIL /m.test(got)) out += `FAIL ${file} crashed before finishing -- see its own output above\n`;
+    }
   };
   run(f);
   const runFile = f.replace(/_test\.js$/, '_run.js');
