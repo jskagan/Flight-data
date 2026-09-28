@@ -15523,6 +15523,27 @@ function tripsyTransferSideForLodging(transport, lodging) {
   if (depCity === arrCity) return null;
   return arrCity ? 'arriving' : 'departing';
 }
+// "when there is a transportation event involving a car to or from a hotel
+// or a car to and from an airport. In the itinerary, use a picture of a
+// sprinter van that is black instead of whatever image is generated or
+// found by the itinerary" (2026-09-27). This is the DETECTOR: a car-category
+// transportation leg (or an uncategorized one whose summary reads "Car ..."
+// -- the snapshot builder's title shape) that either names an AIRPORT on
+// any endpoint/summary line, or has one of the trip's lodgings on exactly
+// one end -- judged by the very same tripsyTransferSideForLodging the
+// ordering pass above uses, so "what counts as a hotel transfer" can never
+// mean two different things. Matched legs get the fixed black-Sprinter-van
+// photo subject (TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT) in
+// tripsyTransportationCardHtml instead of their own company.
+function tripsyIsVanTransferLeg(ev, lodgings) {
+  if (!ev || !ev.tripsyRaw || ev.tripsyRaw.resource !== 'transportation') return false;
+  const raw = ev.tripsyRaw;
+  const category = String(raw.category || '').toLowerCase();
+  if (category ? category !== 'car' : !/^car\b/i.test(ev.summary || '')) return false;
+  const ends = [raw.departureDescription, raw.arrivalDescription, ev.location, ev.summary];
+  if (ends.some(d => /\bairports?\b/i.test(String(d || '')))) return true;
+  return (lodgings || []).some(l => tripsyTransferSideForLodging(ev, l));
+}
 // Moves a lodging row next to the transfer that serves it: a Check-in goes
 // directly BELOW the transport that arrives there, a Check-out directly ABOVE
 // the one that leaves. Deliberately a post-sort MOVE rather than another
@@ -19914,6 +19935,28 @@ const TRIPSY_TRANSPORTATION_CATEGORY_GENERIC_QUERIES = {
   walk: ['walking trail'],
 };
 
+// The fixed photo subject for a car transfer leg (hotel or airport on an
+// end -- tripsyIsVanTransferLeg): the owner wants every such leg to show a
+// black Sprinter van, "instead of whatever image is generated or found by
+// the itinerary" (2026-09-27). It rides the existing per-COMPANY
+// transportation photo machinery as a pseudo-company, which buys the whole
+// feature set for free: ONE cache entry shared across every transfer on
+// every trip (the airline model -- repeats across legs are the point), the
+// vision check (specialized below to "a black Sprinter-style van, or
+// nothing"), and the card's own 🔄🗂🔍📋🚫 controls -- so a manual pick or
+// paste pins the owner's chosen van picture globally, exactly like a
+// pinned airline photo. Its queries deliberately skip the "logo"/"livery"
+// company wording AND the generic category fallback ('car road trip'): the
+// only acceptable photo is a van, so an off-subject candidate pool would
+// just burn vision checks (or worse, get shown -- see the fallback rule in
+// fetchTripsyTransportationPhoto).
+const TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT = 'Black Sprinter Van';
+const TRIPSY_VAN_TRANSFER_PHOTO_QUERIES = [
+  'black Mercedes Sprinter van',
+  'black Sprinter passenger van',
+  'Mercedes-Benz Sprinter van',
+];
+
 // Query variants for a transportation card's photo (tripsyTransportationCardHtml)
 // -- company-branding queries first ("logo"/"livery" bias the search
 // toward branding images rather than a random photo of, say, an airport
@@ -19923,6 +19966,7 @@ const TRIPSY_TRANSPORTATION_CATEGORY_GENERIC_QUERIES = {
 // company-search-miss) leg still ends up with *some* representative photo
 // of its transport mode rather than no photo at all.
 function tripsyTransportationPhotoQueryVariants(company, category) {
+  if (company === TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT) return [...TRIPSY_VAN_TRANSFER_PHOTO_QUERIES];
   const companyVariants = company ? [`${company} logo`, `${company} livery`, company] : [];
   const genericVariants = TRIPSY_TRANSPORTATION_CATEGORY_GENERIC_QUERIES[category] || [];
   return [...companyVariants, ...genericVariants];
@@ -19977,9 +20021,16 @@ async function tripsyTransportationPhotoAcceptable(company, blob) {
       required: ['acceptable'],
       additionalProperties: false,
     };
+    // The van-transfer sentinel has exactly ONE right answer, so its check
+    // is strict where a real company's is lenient: a wrong-color or
+    // wrong-type vehicle is rejected outright rather than tolerated as
+    // "nothing identifiably wrong".
+    const promptText = company === TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT
+      ? 'This photo will illustrate a private car transfer on a printed travel itinerary, which must show a black Sprinter van. Answer acceptable=true ONLY if the photo clearly shows, as its main subject, the exterior of a black (or very dark) Mercedes Sprinter-style passenger van. Answer acceptable=false for any other vehicle type or color, an interior-only shot, a logo, or anything else.'
+      : `This photo will illustrate a trip leg operated by "${company}" on a printed travel itinerary. Answer acceptable=true if the photo shows ${company}'s own aircraft/vehicle, livery, logo, or premises, OR shows nothing identifiably belonging to any carrier (a generic unbranded aircraft or vehicle, an airport or station view, scenery). Answer acceptable=false if it identifiably shows a DIFFERENT airline's or operator's aircraft, livery, or logo.`;
     const result = await tripsyAttireClaudeCall(apiKey, schema, [
       { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } },
-      { type: 'text', text: `This photo will illustrate a trip leg operated by "${company}" on a printed travel itinerary. Answer acceptable=true if the photo shows ${company}'s own aircraft/vehicle, livery, logo, or premises, OR shows nothing identifiably belonging to any carrier (a generic unbranded aircraft or vehicle, an airport or station view, scenery). Answer acceptable=false if it identifiably shows a DIFFERENT airline's or operator's aircraft, livery, or logo.` },
+      { type: 'text', text: promptText },
     ], `transportation photo check (${company})`, { thinking: false, effort: 'low' });
     return result.acceptable !== false;
   } catch (e) {
@@ -20084,7 +20135,12 @@ async function fetchTripsyTransportationPhoto(company, category) {
         break;
       }
     }
-    if (!pick) pick = fallback;
+    // The van-transfer sentinel is the one subject where a wrong photo is
+    // WORSE than the icon ("use a picture of a sprinter van that is black
+    // instead of whatever image is generated or found"): nothing passing
+    // the check caches nothing, so a later maintenance pass tries again --
+    // or the owner pastes/picks a van picture once, which pins it globally.
+    if (!pick) pick = company === TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT ? null : fallback;
     if (!pick) return null;
     const contentHash = await tripsyHashBlob(pick.blob);
     const driveFileId = await uploadTripsyPlacePhotoToDrive(pick.blob, pick.blob.type || 'image/jpeg');
@@ -24891,14 +24947,25 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
   // wired to the transportation-specific fetch/cache functions above.
   // Reuses Part 1's per-row blurb the same way P/S cards do
   // (summaryBlurbByKey, keyed by tripsySummaryRowKey's `ev:${id}` convention).
+  // Lodgings for the black-van transfer rule, computed once per build --
+  // tripsyIsVanTransferLeg matches a car leg against ANY of the trip's
+  // stays (a multi-day hotel's transfer can land on a different day from
+  // its check-in row), so this reads the raw trip events, not the day data.
+  const vanTransferLodgings = (trip.events || []).filter(e => e.tripsyRaw && e.tripsyRaw.resource === 'hosting');
   const tripsyTransportationCardHtml = async (ev, rowKey, eventEntry) => {
     const raw = ev.tripsyRaw;
     const company = raw.company || '';
     const category = raw.category || '';
-    const cacheKey = tripsyTransportationPhotoCacheKey(company, category);
+    // A car transfer leg (hotel or airport on an end) shows the fixed black
+    // Sprinter van instead of whatever a company/category search would
+    // find: its PHOTO subject becomes the shared sentinel pseudo-company
+    // (see TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT), while the card's TEXT (the
+    // company meta line below) keeps the leg's real operator.
+    const photoCompany = tripsyIsVanTransferLeg(ev, vanTransferLodgings) ? TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT : company;
+    const cacheKey = tripsyTransportationPhotoCacheKey(photoCompany, category);
     const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
     const isSkipped = !!(cachedEntry && cachedEntry.skipped);
-    let photoDataUrl = isSkipped ? null : await fetchTripsyTransportationPhoto(company, category);
+    let photoDataUrl = isSkipped ? null : await fetchTripsyTransportationPhoto(photoCompany, category);
     // A transportation photo must not repeat a PLACE's photo in the same
     // document ("we should not re-use a photo [already] used for an event
     // other than a transportation event," and the fourth "still duplicate
@@ -24919,7 +24986,7 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
           try {
             const apiKey = await Store.getPlacesApiKey();
             if (!apiKey) return photoDataUrl;
-            const candidates = (await tripsyGatherTransportationPhotoCandidates(apiKey, company, category))
+            const candidates = (await tripsyGatherTransportationPhotoCandidates(apiKey, photoCompany, category))
               .filter(n => n !== entryNow.photoName && !usedPlacePhotoNames.has(n))
               .slice(0, 4);
             for (const cand of candidates) {
@@ -24927,12 +24994,12 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
               if (!blob) continue;
               const hash = await tripsyHashBlob(blob);
               if (usedPlacePhotoHashes.has(hash)) continue;
-              if (company && !(await tripsyTransportationPhotoAcceptable(company, blob))) continue;
+              if (photoCompany && !(await tripsyTransportationPhotoAcceptable(photoCompany, blob))) continue;
               const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/jpeg');
               Store.cacheTripsyPlacePhotoLocal(cacheKey, {
                 driveFileId, photoName: cand, contentHash: hash,
                 triedPhotoNames: [...new Set([...(entryNow.triedPhotoNames || []), cand])],
-                ...(company ? { liveryChecked: true } : {}),
+                ...(photoCompany ? { liveryChecked: true } : {}),
               });
               tripsyPlacePhotoCacheDirty = true;
               return URL.createObjectURL(blob);
@@ -24982,7 +25049,7 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
     const photoAreaHtml = isSkipped ? '' : `
       <div class="tp-place-card-photo-wrap">
         ${photoDataUrl
-          ? `<img class="tp-place-card-photo" src="${esc(photoDataUrl)}" alt="${esc(company || ev.summary)}">`
+          ? `<img class="tp-place-card-photo" src="${esc(photoDataUrl)}" alt="${esc(photoCompany || ev.summary)}">`
           : `<div class="tp-place-card-photo-fallback">${esc(tripsyTimelineDotIcon(ev))}</div>`}
         <div class="tp-photo-controls">
           <button type="button" class="tp-photo-refresh-btn" data-tripsy-photo-refresh title="Try another photo">🔄</button>
@@ -24996,7 +25063,7 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
       </div>
     `;
     return `
-      <div class="tp-place-card ${isSkipped ? 'tp-place-card-no-photo' : 'tp-place-card-float-left'}" ${rowKey ? `id="tp-detail-event-${esc(rowKey)}"` : ''} ${isSkipped ? '' : `style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;"`} data-tripsy-photo-kind="transportation" data-tripsy-transport-company="${esc(company)}" data-tripsy-transport-category="${esc(category)}" data-tripsy-place-name="${esc(company || ev.summary)}">
+      <div class="tp-place-card ${isSkipped ? 'tp-place-card-no-photo' : 'tp-place-card-float-left'}" ${rowKey ? `id="tp-detail-event-${esc(rowKey)}"` : ''} ${isSkipped ? '' : `style="--tp-card-width:${TRIPSY_PLACE_CARD_WIDTH}%;"`} data-tripsy-photo-kind="transportation" data-tripsy-transport-company="${esc(photoCompany)}" data-tripsy-transport-category="${esc(category)}" data-tripsy-place-name="${esc(photoCompany || ev.summary)}">
         ${photoAreaHtml}
         <div class="tp-place-card-name">${esc(ev.summary)}</div>
         ${timeMetaLine ? `<div class="tp-place-card-meta" style="font-weight:700;">${esc(timeMetaLine)}</div>` : ''}

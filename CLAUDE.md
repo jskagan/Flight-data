@@ -597,6 +597,29 @@ step 4; git history has it if ever needed.
   cache entry was already per COMPANY and shared across every trip, so one pick covers every
   itinerary that airline appears in — pinning is what makes it permanent. Company-less legs keep
   the old first-photo path untouched (no company, no wrong airline). `liverycheck_test.js`.
+- **A car TRANSFER leg (hotel or airport on an end) always shows a black Sprinter van** ("use a
+  picture of a sprinter van that is black instead of whatever image is generated or found by the
+  itinerary," 2026-09-27). Detection is `tripsyIsVanTransferLeg(ev, lodgings)`: a car-category
+  transportation leg (or an uncategorized one whose summary reads "Car …" — the snapshot builder's
+  title shape; flights/trains never match) with `/\bairports?\b/i` on any endpoint/summary line,
+  OR a trip lodging on exactly one end judged by the SAME `tripsyTransferSideForLodging` the
+  ordering pass uses (lodgings read once per build from the raw `trip.events` hosting rows, since
+  a transfer can land on a different day than its check-in row). Matched legs swap ONLY their
+  PHOTO subject in `tripsyTransportationCardHtml` — `photoCompany = TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT`
+  (`'Black Sprinter Van'`, a pseudo-company) — while the card's TEXT keeps the real operator. Riding
+  the per-company machinery buys everything for free: ONE shared cache entry across every transfer
+  on every trip (repeats are the point, like airlines), van-specific search queries
+  (`TRIPSY_VAN_TRANSFER_PHOTO_QUERIES` — no logo/livery wording, no generic 'car road trip'
+  fallback, since off-subject candidates would burn vision checks or get shown), a STRICT vision
+  check (the `tripsyTransportationPhotoAcceptable` prompt branches on the sentinel: a black/very
+  dark Sprinter-style passenger van as the main subject, or reject — unlike a real company's
+  lenient "no rival's branding" test), and the 🔄🗂🔍📋🚫 controls keyed to the sentinel, so one
+  paste/pick PINS the owner's chosen van picture for every transfer everywhere. One deliberate
+  asymmetry: for the sentinel, nothing passing the check returns the ICON, never the first-fetched
+  fallback photo (`pick = company === TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT ? null : fallback`) — a
+  wrong picture is exactly what the request forbids, and nothing is cached so a later maintenance
+  pass (or a manual pick) simply tries again. Itinerary print cards only, by request — the My Trips
+  timeline and Travel View are untouched. `vantransfer_test.js`.
 - **A place-card photo never repeats across DIFFERENT events in one document** ("many duplicate
   photos on the partial itinerary… we should not re-use a photo unless the event is exactly the
   same as the prior event using the photo except on a different day," 2026-09-27). Duplicates
