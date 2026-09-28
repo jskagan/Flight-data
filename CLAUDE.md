@@ -670,6 +670,17 @@ step 4; git history has it if ever needed.
   memory, carried by the next ordinary photo-cache flush). `pasterecompress_test.js`. Itinerary
   print cards only, by request — the My Trips timeline and Travel View are untouched.
   `vantransfer_test.js`.
+- **An owner-TYPED photo search carries no geographic restriction** ("When the user manually
+  inputs a search term for a photo from the itinerary page, do not use a geographic restriction
+  on the search," 2026-09-28): with neither `locationBias` nor `locationRestriction`, Places'
+  `searchText` silently IP-BIASES results toward where the request came from. The documented
+  neutralizer is an explicit WORLDWIDE `locationBias` rectangle
+  (`TRIPSY_WORLDWIDE_LOCATION_BIAS`), sent by both manual entry points — the place-card 🔍 grid
+  search (`tripsyGatherPlacePhotoThumbnailsForQuery` → `tripsyGatherPhotoCandidatesForQueries`'s
+  new `{worldwide: true}` option) and `tripsyManualSearchTransportationPhoto`. AUTOMATIC searches
+  are deliberately untouched (`worldwide` defaults false): their variant queries embed the trip's
+  own location in the text, and that local skew is what resolves a bare venue name to the right
+  city. `manualsearchbias_test.js`.
 - **A place-card photo never repeats across DIFFERENT events in one document** ("many duplicate
   photos on the partial itinerary… we should not re-use a photo unless the event is exactly the
   same as the prior event using the photo except on a different day," 2026-09-27). Duplicates
@@ -939,6 +950,26 @@ step 4; git history has it if ever needed.
   FIRST arriving match wins, so a dinner-return car naming the hotel can't drag the Check-in to
   the end of the evening; layover glue is respected. `insertTripsyFlightArrivals` remains
   timeline-only. `lodgingorder_test.js`.
+- **A day spent entirely in the air renders as "✈️ In-flight" with the leg's details, not "No
+  events scheduled"** ("When there is a day spent entirely in the air flying, on the itinerary
+  page display that day as 'In-flight' and show the origin, destination, and flight number,"
+  2026-09-28 — the live case: SQ23 departs JFK 22:15 Oct 6 and lands SIN 05:30 Oct 8, so all of
+  Oct 7 is airborne). `tripsyInFlightInfoForDay(dayKey, trip)` judges it from the trip's RAW
+  transportation stamps — a flight (category `airplane`, or summary starting "Flight") whose
+  departure DAY < dayKey < arrival DAY; the expanded timeline rows land only on the endpoint
+  days, which is exactly why the middle day is event-less — returning `{origin, destination,
+  flightLabel}` (endpoints fall back to the summary's "Flight from X to Y" halves, the P/S
+  tier-3 precedent; hidden flights and malformed stamps fail closed).
+  `tripsyInFlightDetailText` renders "JFK → SIN • Singapore Airlines SQ23", degrading gracefully.
+  In `buildTripsyPrintHtml`, ONE shared segmentation (`tripsyDaySegments`: day / inflight /
+  empty run — replacing the two formerly-duplicated walks) feeds BOTH Part 1's day blocks and
+  Part 2's dividers, so an in-flight day breaks an empty RUN and gets its own block in each,
+  same shells as the empty variants (including the `tp-detail-day` anchor and the summaryOnly
+  linkable-class drops — `itinsummary_test.js`'s count moved from 2 to 3 block kinds).
+  `inflightday_test.js`. **And a layover row gets NO star on the Part 1 summary** (same-day
+  follow-up: "When there is a flight layover, do not put a star next to the layover") — it's
+  connective tissue between two starred flights, not an event; the star CELL stays, empty, so
+  the time/text columns keep their alignment (same suite).
 - **Itinerary/day views start from the earliest event, not the trip's `start_date`**: the day
   ranges, "Day N" numbering, and empty-day span all derive their first day from
   `tripsyItineraryStartDayKey(trip)` — the earliest day any visible, dated event falls on — rather

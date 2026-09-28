@@ -47,9 +47,9 @@ assert(/if \(summaryOnly\) return `\$\{headerHtml\}\$\{summaryHtml\}`;/.test(bui
   'it returns exactly the cover header plus the day-by-day listing -- no narrative');
 
 // ---- no dead affordances: nothing to jump to without Part 2 ----
-assert((build.match(/summaryOnly \? '' : ' tp-day-block-linkable'/g) || []).length === 2,
-  'both day-block kinds (with events, and empty ranges) drop the linkable class in summary mode');
-assert((build.match(/summaryOnly \? '' : ` data-tripsy-summary-day-link/g) || []).length === 2,
+assert((build.match(/summaryOnly \? '' : ' tp-day-block-linkable'/g) || []).length === 3,
+  'all three day-block kinds (with events, empty ranges, In-flight days) drop the linkable class in summary mode');
+assert((build.match(/summaryOnly \? '' : ` data-tripsy-summary-day-link/g) || []).length === 3,
   'and drop the jump attribute, so nothing promises a scroll that cannot happen');
 
 // ---- READ-ONLY: the summary-only path emits no interactive markup ----

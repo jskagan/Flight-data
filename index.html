@@ -19715,13 +19715,27 @@ async function tripsyFindFirstPhotoNameForQueries(apiKey, queries) {
 // what hasn't been shown yet -- unlike the initial fetch
 // (tripsyFindFirstPhotoNameForQueries), which only needs one photo and
 // stops as soon as it finds one.
-async function tripsyGatherPhotoCandidatesForQueries(apiKey, queries) {
+// An owner-TYPED search carries no geographic restriction ("When the user
+// manually inputs a search term for a photo from the itinerary page, do not
+// use a geographic restriction on the search," 2026-09-28): with neither
+// locationBias nor locationRestriction, Places' searchText silently
+// IP-BIASES results toward where the request came from -- typing "Marina
+// Bay Sands" from Los Angeles skews toward LA matches. The documented way
+// to neutralize that default is an explicit WORLDWIDE locationBias
+// rectangle, which is what `worldwide: true` sends. Automatic searches are
+// deliberately untouched (default false): their queries embed the trip's
+// own location in the text, and the local skew is what makes a bare venue
+// name resolve to the right city.
+const TRIPSY_WORLDWIDE_LOCATION_BIAS = {
+  rectangle: { low: { latitude: -90, longitude: -180 }, high: { latitude: 90, longitude: 180 } },
+};
+async function tripsyGatherPhotoCandidatesForQueries(apiKey, queries, { worldwide = false } = {}) {
   const photoNames = [];
   for (const query of queries) {
     const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.photos' },
-      body: JSON.stringify({ textQuery: query, maxResultCount: 5 }),
+      body: JSON.stringify({ textQuery: query, maxResultCount: 5, ...(worldwide ? { locationBias: TRIPSY_WORLDWIDE_LOCATION_BIAS } : {}) }),
     });
     if (!res.ok) continue;
     const data = await res.json();
@@ -20373,10 +20387,12 @@ async function tripsyManualSearchTransportationPhoto(company, category, query) {
   try {
     const cached = await Store.getTripsyPlacePhoto(cacheKey);
     const tried = new Set((cached && cached.triedPhotoNames) || []);
+    // Owner-typed search: worldwide bias neutralizes the default IP skew
+    // (see TRIPSY_WORLDWIDE_LOCATION_BIAS above).
     const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.photos' },
-      body: JSON.stringify({ textQuery: query, maxResultCount: 5 }),
+      body: JSON.stringify({ textQuery: query, maxResultCount: 5, locationBias: TRIPSY_WORLDWIDE_LOCATION_BIAS }),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -20681,7 +20697,7 @@ async function tripsyGatherPlacePhotoThumbnailsForQuery(query) {
   const apiKey = await Store.getPlacesApiKey();
   if (!apiKey || !query) return [];
   try {
-    const candidates = await tripsyGatherPhotoCandidatesForQueries(apiKey, [query]);
+    const candidates = await tripsyGatherPhotoCandidatesForQueries(apiKey, [query], { worldwide: true });
     const thumbs = await Promise.all(candidates.map(async photoName => {
       const blob = await tripsyFetchPlacePhotoBlob(apiKey, photoName);
       return blob ? { photoName, blob, dataUrl: URL.createObjectURL(blob) } : null;
@@ -24653,6 +24669,45 @@ function tripsyFilterPrintDayDataForPartial(data, keys, savedAt = null) {
   return { dayKeys, byDay: data.byDay, placesByDay, placeEvents, summaryByDay };
 }
 
+// A calendar day with no events that falls strictly BETWEEN a flight's
+// departure day and arrival day is spent entirely in the air ("When there
+// is a day spent entirely in the air flying, on the itinerary page display
+// that day as 'In-flight' and show the origin, destination, and flight
+// number," 2026-09-28) -- e.g. JFK 22:15 Oct 6 → SIN 05:30 Oct 8 puts all
+// of Oct 7 mid-flight, which used to render as a bare "No events
+// scheduled" block. Judged from the trip's RAW transportation events:
+// their departure/arrival stamps are what actually span days, while the
+// expanded timeline rows land only on the endpoint days -- which is
+// exactly why the middle day is event-less in the first place. Returns
+// {origin, destination, flightLabel} or null; endpoints fall back to the
+// summary's "Flight from X to Y" halves (the P/S tier-3 precedent) when
+// the raw descriptions are absent.
+function tripsyInFlightInfoForDay(dayKey, trip) {
+  for (const ev of (trip && trip.events) || []) {
+    const raw = ev && ev.tripsyRaw;
+    if (!raw || raw.resource !== 'transportation' || ev.hidden) continue;
+    if (!(raw.category === 'airplane' || /^Flight\b/.test(ev.summary || ''))) continue;
+    const depDay = String(raw.departureAt || '').slice(0, 10);
+    const arrDay = String(raw.arrivalAt || '').slice(0, 10);
+    if (depDay.length !== 10 || arrDay.length !== 10) continue;
+    if (depDay < dayKey && dayKey < arrDay) {
+      let origin = raw.departureDescription || '';
+      let destination = raw.arrivalDescription || '';
+      if (!origin || !destination) {
+        const m = /^Flight from (.+?) to (.+?)(?: •|$)/.exec(ev.summary || '');
+        if (m) { origin = origin || m[1]; destination = destination || m[2]; }
+      }
+      return { origin, destination, flightLabel: [raw.company, raw.transportNumber].filter(Boolean).join(' ') };
+    }
+  }
+  return null;
+}
+// The one-line detail an In-flight day shows: "JFK → SIN • Singapore
+// Airlines SQ23", degrading gracefully when a side or the number is unknown.
+function tripsyInFlightDetailText(info) {
+  const route = [info.origin, info.destination].filter(Boolean).join(' → ');
+  return [route, info.flightLabel].filter(Boolean).join(' • ');
+}
 async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys = null, partialSavedAt = null } = {}) {
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return null;
@@ -24759,9 +24814,14 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
       const text = (rowKey && tripsySummaryRowWantsBlurb(item) && !summaryBlurbIsStale(item) && summaryBlurbByKey.get(rowKey))
         || tripsySummaryRowFallbackText(item);
       const timeLabel = tripsySummaryRowTime(item);
+      // A layover row gets NO star ("When there is a flight layover, do not
+      // put a star next to the layover on the summary itinerary,"
+      // 2026-09-28) -- it's connective tissue between two starred flights,
+      // not an event of its own. The star CELL stays (empty) so the
+      // time/text columns keep their alignment.
       return `
         <div class="tp-row">
-          <div class="tp-row-star">★</div>
+          <div class="tp-row-star">${item.isLayover ? '' : '★'}</div>
           <div class="tp-row-time">${esc(timeLabel)}</div>
           <div class="tp-row-text">${esc(text)}</div>
         </div>
@@ -24825,18 +24885,57 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
     `;
   };
 
-  const summaryBlockParts = [];
+  // An event-less day spent mid-flight renders as its OWN "In-flight" block
+  // (origin → destination • flight number) rather than folding into a "No
+  // events scheduled" run -- see tripsyInFlightInfoForDay above. Memoized per
+  // day since the run splitter below asks twice per day.
+  const _inFlightMemo = new Map();
+  const inFlightFor = dayKey => {
+    if (!_inFlightMemo.has(dayKey)) _inFlightMemo.set(dayKey, tripsyInFlightInfoForDay(dayKey, trip));
+    return _inFlightMemo.get(dayKey);
+  };
+  // ONE segmentation shared by Part 1's day blocks and Part 2's day dividers
+  // (which used to run the same walk separately), so the two parts can never
+  // disagree about which days are event days, in-flight days, or empty runs.
+  const tripsyDaySegments = [];
   for (let i = 0; i < tripsyFullDayKeys.length; i++) {
     const dayKey = tripsyFullDayKeys[i];
     if (eventDayKeySet.has(dayKey)) {
-      summaryBlockParts.push(tripsySummaryDayBlockHtml(dayKey));
+      tripsyDaySegments.push({ type: 'day', dayKey });
+      continue;
+    }
+    if (inFlightFor(dayKey)) {
+      tripsyDaySegments.push({ type: 'inflight', dayKey, inFlight: inFlightFor(dayKey) });
       continue;
     }
     let j = i;
-    while (j < tripsyFullDayKeys.length && !eventDayKeySet.has(tripsyFullDayKeys[j])) j++;
-    summaryBlockParts.push(tripsySummaryEmptyRangeBlockHtml(tripsyFullDayKeys.slice(i, j)));
+    while (j < tripsyFullDayKeys.length && !eventDayKeySet.has(tripsyFullDayKeys[j]) && !inFlightFor(tripsyFullDayKeys[j])) j++;
+    tripsyDaySegments.push({ type: 'empty', rangeDayKeys: tripsyFullDayKeys.slice(i, j) });
     i = j - 1;
   }
+
+  // Same shell as a single-day empty block, but labeled with what the day
+  // actually is: airborne between two cities.
+  const tripsySummaryInFlightBlockHtml = (dayKey, info) => {
+    const detail = tripsyInFlightDetailText(info);
+    return `
+      <div class="tp-day-block tp-day-block-empty${summaryOnly ? '' : ' tp-day-block-linkable'}"${summaryOnly ? '' : ` data-tripsy-summary-day-link="${esc(dayKey)}"`}>
+        <div class="tp-day-tile">
+          <div class="tp-day-tile-label">Day</div>
+          <div class="tp-day-tile-num">${esc(String(tripsyDayNumberFromTripStart(dayKey, tripStartDayKey)).padStart(2, '0'))}</div>
+          <div class="tp-day-tile-date">${esc(tripsySummaryDayTileDate(dayKey))}</div>
+        </div>
+        <div class="tp-day-rows">
+          <div class="tp-row-empty">✈️ In-flight${detail ? ` — ${esc(detail)}` : ''}</div>
+        </div>
+      </div>
+    `;
+  };
+
+  const summaryBlockParts = tripsyDaySegments.map(seg =>
+    seg.type === 'day' ? tripsySummaryDayBlockHtml(seg.dayKey)
+    : seg.type === 'inflight' ? tripsySummaryInFlightBlockHtml(seg.dayKey, seg.inFlight)
+    : tripsySummaryEmptyRangeBlockHtml(seg.rangeDayKeys));
   if (dayKeys.includes('undated')) summaryBlockParts.push(tripsySummaryDayBlockHtml('undated'));
   const summaryHtml = summaryBlockParts.join('');
 
@@ -25294,24 +25393,11 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
     return '';
   };
 
-  // Part 2 (Detailed Itinerary) equivalent of Part 1's tripsyFullDayKeys
-  // loop above -- walks every calendar day of the trip, not just the ones
-  // with events, so a free day gets its own "No events scheduled" divider
-  // instead of silently vanishing between two day dividers. One segment
-  // per RUN of consecutive event-less days (merged, same as Part 1),
-  // reused by both the narrative and flat-fallback branches below.
-  const tripsyDetailedDaySegments = [];
-  for (let i = 0; i < tripsyFullDayKeys.length; i++) {
-    const dayKey = tripsyFullDayKeys[i];
-    if (eventDayKeySet.has(dayKey)) {
-      tripsyDetailedDaySegments.push({ type: 'day', dayKey });
-      continue;
-    }
-    let j = i;
-    while (j < tripsyFullDayKeys.length && !eventDayKeySet.has(tripsyFullDayKeys[j])) j++;
-    tripsyDetailedDaySegments.push({ type: 'empty', rangeDayKeys: tripsyFullDayKeys.slice(i, j) });
-    i = j - 1;
-  }
+  // Part 2 (Detailed Itinerary) walks the SAME tripsyDaySegments Part 1's
+  // day blocks were built from (one shared segmentation -- day / inflight /
+  // empty run -- so the two parts can never disagree), reused by both the
+  // narrative and flat-fallback branches below.
+  const tripsyDetailedDaySegments = [...tripsyDaySegments];
   if (dayKeys.includes('undated')) tripsyDetailedDaySegments.push({ type: 'day', dayKey: 'undated' });
 
   // Same merged-range day label/date text as tripsySummaryEmptyRangeBlockHtml
@@ -25331,6 +25417,20 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
         <span class="tp-day-divider-cities"></span>
       </div>
       <div class="tp-row-empty tp-detailed-row-empty">No events scheduled</div>
+    `;
+  };
+  // The In-flight day's Part 2 divider -- same shell as the empty divider
+  // (including the tp-detail-day anchor Part 1's day-block link jumps to),
+  // labeled with the airborne leg instead of "No events scheduled".
+  const tripsyDetailedInFlightBlockHtml = (dayKey, info) => {
+    const detail = tripsyInFlightDetailText(info);
+    return `
+      <div class="tp-day-divider tp-day-divider-empty" id="tp-detail-day-${esc(dayKey)}">
+        <span class="tp-day-divider-num">Day ${esc(String(tripsyDayNumberFromTripStart(dayKey, tripStartDayKey)))}</span>
+        <span class="tp-day-divider-date">${esc(tripsySummaryDayTileDate(dayKey))}</span>
+        <span class="tp-day-divider-cities"></span>
+      </div>
+      <div class="tp-row-empty tp-detailed-row-empty">✈️ In-flight${detail ? ` — ${esc(detail)}` : ''}</div>
     `;
   };
 
@@ -25356,6 +25456,7 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
     // place), so the two parts always agree on which day is "Day N".
     const dayNarrativeHtmlParts = await Promise.all(tripsyDetailedDaySegments.map(async seg => {
       if (seg.type === 'empty') return `<div class="tp-narrative-day">${tripsyDetailedEmptyDayBlockHtml(seg.rangeDayKeys)}</div>`;
+      if (seg.type === 'inflight') return `<div class="tp-narrative-day">${tripsyDetailedInFlightBlockHtml(seg.dayKey, seg.inFlight)}</div>`;
       const dayKey = seg.dayKey;
       const isUndated = dayKey === 'undated';
       const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
@@ -25390,6 +25491,7 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
   } else {
     const dayBlocks = await Promise.all(tripsyDetailedDaySegments.map(async seg => {
       if (seg.type === 'empty') return tripsyDetailedEmptyDayBlockHtml(seg.rangeDayKeys);
+      if (seg.type === 'inflight') return tripsyDetailedInFlightBlockHtml(seg.dayKey, seg.inFlight);
       const dayKey = seg.dayKey;
       const isUndated = dayKey === 'undated';
       const dayNumber = isUndated ? null : tripsyDayNumberFromTripStart(dayKey, tripStartDayKey);
