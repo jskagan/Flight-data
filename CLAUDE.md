@@ -450,6 +450,21 @@ step 4; git history has it if ever needed.
   flashes a badge), `runTripsyLocalParse` after staging (subtracting from the toast count so
   hidden duplicates aren't announced), and the top of `renderTripsyParseReview` as the last line
   of defense before anything renders.
+- **A fully-parsed doc's parse label clears ITSELF — there is no acknowledge click** ("Once an
+  uploaded document that is flagged for parsing has been parsed, remove that label from the
+  document in the document menu," 2026-09-28). Both menu row builders
+  (`tripsyAttachmentMenuRowHtml`/`tripsyDocumentMenuRowHtml`) render the parse badge purely from
+  pipeline state: `pending` → the amber "🏷️ Flagged for parsing" label (unchanged); `staged` →
+  "🏷️ Parsed — awaiting your review" (reworded — nothing already parsed should still read
+  "Flagged for parsing"; still the clickable `data-tripsy-goto-parse-review` jump, and it clears
+  on its own when the last proposal resolves); `done` → NO badge at all, just the plain file row.
+  The old click-the-"(done)"-badge-to-clear step and its whole apparatus are removed
+  (`Store.clearTripsyAttachmentParseFlag`, the `data-tripsy-clear-parse-flag` wiring) — note the
+  DATA is untouched: a done attachment keeps `purpose:'parse'`/`parseStatus:'done'` (several
+  readers key on "advanced past pending", and the Parsing Docs utility page still counts it under
+  "fully reviewed"); only the label disappears, where the old clear also downgraded the record to
+  `purpose:'reference'`. That utility page's "Flags Explained" legend was updated to match.
+  `parsedlabel_test.js`.
 - **Review Parsed Docs: creating a trip asks for DATES, any trip is pickable, and clusters span
   proposals** (reported 2026-09-08: "Create a new trip only lets me pick a name, not the dates, and
   I cannot add later flights imported at the same time to that trip"). One gap, two compounding
@@ -845,6 +860,32 @@ step 4; git history has it if ever needed.
   trip's now-stale ▲ immediately, both the small `data-tripsy-itin-warning` span next to Edit and
   the glyph badge (`tripsySetItineraryGlyphBadge(btn, '')`), rather than leaving a wrong badge to
   self-correct on some future render.
+- **The changes dialog's Continue records its baseline BEFORE the photo prefetch, which is
+  time-boxed — and an IndexedDB open can never hang** ("When I am reviewing new events added to
+  the itinerary page and I press the continue button, nothing happens," 2026-09-28). What
+  actually happened, confirmed against the live data: the run WORKED — the checked days'
+  narratives generated and saved — but the handler then awaited `buildTripsyPrintHtml` (photo
+  prefetch) which hung forever, so `tripsyRecordItineraryBaseline` never ran (▲ stayed up, the
+  paid-for generation unacknowledged), the dialog never closed, and the Continue button sat
+  DISABLED — every later press did literally nothing. The hang's root: `openTripsyOfflineDb` (the
+  disk-first photo-blob path) handled neither `onblocked` nor a stall — an open BLOCKED by
+  another tab/suspended WebView still holding a pre-v3 connection fires NEITHER success NOR
+  error, so the promise never settled and everything awaiting a photo hung with it. Three fixes:
+  **(1)** `openTripsyOfflineDb` settles exactly once — `onblocked` rejects immediately, a 4s
+  timeout rejects a stalled open, and a successful connection installs
+  `db.onversionchange = close` so an old tab can never be the blocker for another context's
+  upgrade (every IDB consumer is fail-soft by design, so rejecting is always right: blob-cache
+  misses fall back to the Drive download). **(2)** the Continue handler runs generate → record
+  baseline → THEN photo prefetch, so a photo-phase failure can't strand a completed generation.
+  **(3)** the prefetch itself is best-effort: wrapped in its own try/catch and raced against a
+  45s cap — past it the flow moves on while the build finishes behind (its gate flips off
+  mid-run, degrading remaining fetches to cached-only), since photos self-heal on any open via
+  `tripsyBackgroundPhotoMaintenance` anyway. **And a generation failure names its REAL reason in
+  the dialog's status line** (same-day follow-up, "I got an error message when I was trying to
+  update the itinerary": the catch said only "see console for details," useless on the iPad,
+  where there is no console — investigated live as almost certainly a transient API failure
+  after three generation runs in 30 minutes, but unknowable from the device) — `e.message`
+  bounded to 300 chars, plus "press Continue to retry." `continuestall_test.js`.
 - **The changes dialog's Continue no longer auto-opens the Itinerary view.** Per explicit request
   (2026-08-17: "do not automatically open the itinerary view. Instead, display 3 buttons: close,
   itinerary view, or trips view"): after the checked days regenerate (or, with everything
@@ -1008,6 +1049,22 @@ step 4; git history has it if ever needed.
   between kept days still do (nothing in THIS document happens there). The cover header keeps
   describing the WHOLE trip (`headerPlaceEvents`, captured before filtering) — a partial is a cut
   of the same itinerary, not a different trip. `partialitinerary_test.js`.
+  **An event CREATED AFTER the partial was saved defaults to INCLUDED** ("The itinerary does not
+  show all of the concerts on the schedule… on October 9 there are three concerts, but only one
+  is mentioned," 2026-09-28 — concerts added a day after the partial was saved were silently
+  absent, but a partial is made by REMOVING, so an event the owner never had the chance to
+  exclude must not read as excluded). No schema change: locally-minted event ids are epoch-millis
+  × 1000 (`tripsyMintLocalId`), so `tripsyPartialEventPostdatesSave(id, savedAtMs)` dates the
+  event against the record's `updatedAt` (Tripsy-era ids are far below any threshold and never
+  trigger; no `savedAt`, or a non-numeric id, falls back to strict keys-only). Self-correcting by
+  construction: unchecking the newcomer in the picker re-saves the record, and the fresh
+  `updatedAt` then postdates the id, so the explicit exclusion sticks. Threaded as
+  `partialSavedAt` through every render of the partial — `buildTripsyPrintHtml` → the filter's
+  `idKept`, Show (stashed as `overlay._partialSavedAt`), Save as PDF
+  (`openTripsyItineraryPrintView`), the background photo-maintenance rebuild (else its repaint
+  would drop the newcomers again), and `tripsyPartialEnsureNarratives`' scoping — and the Create
+  Partial picker resumes such an event as CHECKED (`tripsyPartialKeyPostdatesSave`, event keys
+  only, never `ps:` rows). `partialnewevents_test.js`.
   **View asks Summary or Full, full mode generates what's missing, and the result is a NAMED,
   reopenable document** ("ask the user if he would like to see a summary or a full itinerary… if
   full…, generate narratives and photos for all of the events… save the itinerary with the title

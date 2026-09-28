@@ -60,7 +60,7 @@ assert(/if \(photoDataUrl && _tripsyAllowPhotoFetch && !_tripsyDedupExhausted\.h
   'the transport collision check runs only in the maintenance pass and honors the session exhaustion memory');
 assert(/async function tripsyBackgroundPhotoMaintenance\(tripKey, buildOpts, firstHtml, applyRepaint\)/.test(html)
   && /tripsyBackgroundPhotoMaintenance\(tripKey, undefined, html, freshHtml => \{/.test(html)
-  && /tripsyBackgroundPhotoMaintenance\(tripKey, \{ partialKeys: keys, summaryOnly: false \}, html, freshHtml => \{/.test(html),
+  && /tripsyBackgroundPhotoMaintenance\(tripKey, \{ partialKeys: keys, summaryOnly: false, partialSavedAt: savedAt \}, html, freshHtml => \{/.test(html),
   'both owner surfaces (Preview and the partial overlay) run the maintenance rebuild AFTER their cached fast paint, repainting only if it changed something');
 assert(/let _tripsyPhotoClaimChain = Promise\.resolve\(\);/.test(html)
   && (dedup.match(/tripsyClaimPlacePhotoSerially\(async \(\) => \{/g) || []).length === 2,

@@ -77,11 +77,11 @@ assert(/Store\.saveTripsyPartialItinerary\(tripKey, keys, \{ mode, title, startD
 
 // ---- separate, read-only view; narratives come from the same cache ----
 const show = extractFn('showTripsyPartialItinerary');
-assert(/buildTripsyPrintHtml\(tripKey, \{ partialKeys: keys, summaryOnly: mode === 'summary' \}\)/.test(show),
+assert(/buildTripsyPrintHtml\(tripKey, \{ partialKeys: keys, summaryOnly: mode === 'summary', partialSavedAt: savedAt \}\)/.test(show),
   'THE ASK: the partial renders through the SAME print build as the full itinerary, filtered -- its narratives are the full itinerary\'s, by construction');
 const buildStart = html.indexOf('async function buildTripsyPrintHtml(');
 const buildSlice = html.slice(buildStart, buildStart + 4000);
-assert(/\{ summaryOnly = false, partialKeys = null \}/.test(buildSlice),
+assert(/\{ summaryOnly = false, partialKeys = null, partialSavedAt = null \}/.test(buildSlice),
   'buildTripsyPrintHtml takes partialKeys');
 assert(/tripsyTripGeographySummary\(headerPlaceEvents/.test(html) && /tripsyHeaderBackgroundPhotoUrl\(headerPlaceEvents\)/.test(html),
   'the cover header still describes the WHOLE trip -- a partial is a cut of the same itinerary, not a different trip');
@@ -91,7 +91,7 @@ assert(/if \(partialKeys && !partialKeys\.has\(`day:\$\{dayKey\}`\)\) return nul
   'a day\'s narrative is likewise read-if-included; the full itinerary\'s cache entries are untouched');
 assert(/const partialDatedKeys = partialKeys \? \[\.\.\.eventDayKeySet\]\.sort\(\) : null;/.test(html),
   'the calendar span is bounded to the kept days (excluded days must not render as fake "No events scheduled" blocks), while day NUMBERS stay date-derived and identical to the full itinerary');
-assert(/openTripsyItineraryPrintView\(tripKey, \{ summaryOnly = false, partialKeys = null \}/.test(
+assert(/openTripsyItineraryPrintView\(tripKey, \{ summaryOnly = false, partialKeys = null, partialSavedAt = null \}/.test(
   html.slice(html.indexOf('async function openTripsyItineraryPrintView'), html.indexOf('async function openTripsyItineraryPrintView') + 200).replace(/\n/g, ' ')) || /partialKeys = null \} = \{\}\) \{\s*\n\s*const html = await buildTripsyPrintHtml\(tripKey, \{ summaryOnly, partialKeys \}\);/.test(html),
   'Save as PDF goes through the same print path with the same filter');
 

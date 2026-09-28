@@ -34,7 +34,7 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 
 // ---- the builder's summary-only mode ----
 const build = extractFn('buildTripsyPrintHtml');
-assert(/\{ summaryOnly = false(, partialKeys = null)? \} = \{\}/.test(build),
+assert(/\{ summaryOnly = false(, partialKeys = null(, partialSavedAt = null)?)? \} = \{\}/.test(build),
   'summaryOnly defaults to false, so every pre-existing caller behaves exactly as before');
 const iSummary = build.indexOf('const summaryHtml =');
 const iReturn = build.indexOf('if (summaryOnly) return');

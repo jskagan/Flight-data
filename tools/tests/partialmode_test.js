@@ -50,7 +50,7 @@ assert(/summaryOnly: mode === 'summary'/.test(show),
 assert(/mode = \(saved && saved\.mode\) \|\| 'full';/.test(show),
   'a record saved before modes existed reads as full -- exactly the pre-feature behavior');
 assert(/const ownerFull = mode === 'full' && isOwner;/.test(show)
-  && /generation = await tripsyPartialEnsureNarratives\(tripKey, keys, progress\);/.test(show),
+  && /generation = await tripsyPartialEnsureNarratives\(tripKey, keys, progress, savedAt\);/.test(show),
   'THE ASK: full mode checks for missing narratives on EVERY owner open (so an unanswered creation-time ask self-heals), then shows the document');
 assert(/Generation incomplete', yes: 'OK', no: null/.test(show),
   'a failed hand-off shows a PERSISTENT dialog (a toast fired while the iPad app is backgrounded is never seen) and still renders what exists');

@@ -70,7 +70,7 @@ for (const [stage, label] of [
 // Close / Itinerary View / Trips View dialog instead of an unconditional jump.
 // See itindonedialog_test.js for that dialog's own coverage.
 assert(!run.includes('Opening itinerary…'), 'no auto-open stage remains');
-assert(/setStage\(checkedDayKeys\.length\s*\n?\s*\? 'Could not generate/.test(run),
+assert(/setStage\(`\$\{checkedDayKeys\.length \? 'Could not generate' : 'Could not save'\}: \$\{detail\}/.test(run),
   'a failure is reported through the same channel, not just in the dialog');
 assert(!/status\.textContent = 'Generating…'/.test(run), 'the old fixed "Generating…" line is gone');
 // Only a real regeneration publishes: "Opening itinerary…" with nothing checked must not

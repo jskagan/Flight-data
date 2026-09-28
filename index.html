@@ -2552,8 +2552,28 @@ function openTripsyOfflineDb() {
       if (!db.objectStoreNames.contains(TRIPSY_OFFLINE_APP_STORE)) db.createObjectStore(TRIPSY_OFFLINE_APP_STORE, { keyPath: 'key' });
       if (!db.objectStoreNames.contains(TRIPSY_OFFLINE_PHOTO_STORE)) db.createObjectStore(TRIPSY_OFFLINE_PHOTO_STORE, { keyPath: 'driveFileId' });
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    // NONE of the open outcomes may strand the caller ("when I press the
+    // continue button, nothing happens," 2026-09-28: the changes dialog's
+    // Continue hung forever mid-photo-prefetch with its button disabled --
+    // an open request BLOCKED by another tab/suspended WebView still
+    // holding a pre-v3 connection fires NEITHER success nor error, so the
+    // promise never settled and everything awaiting a photo hung with it).
+    // Every IndexedDB consumer here is fail-soft by design, so rejecting
+    // is always the right answer: blob cache misses fall back to the Drive
+    // download, offline caching just doesn't happen.
+    let settled = false;
+    const settle = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
+    const timer = setTimeout(() => settle(reject, new Error('IndexedDB open timed out')), 4000);
+    req.onblocked = () => settle(reject, new Error('IndexedDB open blocked by another connection'));
+    req.onsuccess = () => {
+      const db = req.result;
+      // And the mirror side: when ANOTHER context needs a version upgrade,
+      // close this connection instead of being the blocker -- the next
+      // openTripsyOfflineDb call simply opens a fresh one.
+      db.onversionchange = () => { try { db.close(); } catch (e) {} };
+      settle(resolve, db);
+    };
+    req.onerror = () => settle(reject, req.error);
   });
 }
 
@@ -3662,25 +3682,9 @@ const Store = {
       return false;
     }
   },
-  // User-facing "clear" step for a fully-reviewed ('done') parse flag --
-  // clicking the "(done)" badge (see tripsyAttachmentMenuRowHtml) calls
-  // this. Downgrades the attachment to a plain reference doc (same shape as
-  // if "Just store for reference" had been picked originally) so the badge
-  // disappears; the file itself stays attached.
-  async clearTripsyAttachmentParseFlag(attachmentId) {
-    try {
-      const a = (driveData.tripsyAttachments || []).find(x => x.id === attachmentId);
-      if (!a) return false;
-      a.purpose = 'reference';
-      a.parseStatus = null;
-      a.parsedAt = null;
-      await persistDriveData();
-      return true;
-    } catch (e) {
-      console.error('Store.clearTripsyAttachmentParseFlag failed:', e);
-      return false;
-    }
-  },
+  // (Store.clearTripsyAttachmentParseFlag lived here until 2026-09-28: a
+  // 'done' attachment no longer renders any parse badge at all, so the
+  // manual acknowledge-and-downgrade step it served has no trigger left.)
   // Proposals staged by the tripsy-doc-parse runbook, one per parsed
   // document -- NOT yet real Tripsy changes. Each event inside only becomes
   // a real Store.queueTripsyChange('create_event', ...) once the owner
@@ -13742,10 +13746,9 @@ async function renderUtilitiesParsingDocs() {
         <ul style="margin:10px 0 0 20px; padding:0;">
           <li><span style="color:var(--amber);">🏷️ Flagged for parsing</span> (no suffix) -- <b>pending</b>: uploaded and flagged, not read yet.
             <div style="margin-top:2px;"><b>To clear:</b> nothing you have to do -- the next scheduled parse run reads it automatically (headless, so it works even if you flagged it on an iPad) and moves it on. Don't want to wait? Trigger a parse yourself (see the card below). It leaves this state on its own once read.</div></li>
-          <li style="margin-top:8px;"><span style="color:var(--amber);">🏷️ Flagged for parsing (staged)</span> -- <b>staged</b>: it's been read and produced one or more <i>draft</i> events, now waiting on the <a href="#" data-nav="tripsyparsereview" style="color:var(--amber);">Review Parsed Docs</a> page. Nothing has been added to your trip yet. (Clicking the label jumps you there.)
-            <div style="margin-top:2px;"><b>To clear:</b> resolve <i>every</i> proposed event from this doc on that page -- <b>Import as-is</b>, <b>Modify then import</b>, or <b>Reject</b> each (and resolve any conflict on a conflicting one). When the last one is resolved, the flag advances to <b>(done)</b> on its own.</div></li>
-          <li style="margin-top:8px;"><span style="color:var(--amber);">🏷️ Flagged for parsing (done)</span> -- <b>done</b>: every proposed event has been resolved, <i>or</i> the doc yielded nothing usable to read (a scan/parse error also lands here). Terminal -- it just needs one acknowledgement.
-            <div style="margin-top:2px;"><b>To clear:</b> click the "(done)" label in the Docs dropdown (owner only). That removes the flag and turns the attachment back into a plain reference file -- the file itself stays attached.</div></li>
+          <li style="margin-top:8px;"><span style="color:var(--amber);">🏷️ Parsed — awaiting your review</span> -- <b>staged</b>: it's been read and produced one or more <i>draft</i> events, now waiting on the <a href="#" data-nav="tripsyparsereview" style="color:var(--amber);">Review Parsed Docs</a> page. Nothing has been added to your trip yet. (Clicking the label jumps you there.)
+            <div style="margin-top:2px;"><b>To clear:</b> resolve <i>every</i> proposed event from this doc on that page -- <b>Import as-is</b>, <b>Modify then import</b>, or <b>Reject</b> each (and resolve any conflict on a conflicting one). When the last one is resolved, the label disappears on its own.</div></li>
+          <li style="margin-top:8px;"><b>Done</b> -- every proposed event has been resolved, <i>or</i> the doc yielded nothing usable to read (a scan/parse error also lands here). Terminal: the label under the file <b>removes itself</b> -- the doc stays attached as a plain reference file with nothing left to click or acknowledge. (It still counts under "fully reviewed" on the card above.)</li>
         </ul>
         <p style="margin-top:10px;">A doc still in <b>pending</b> is also what drives the yellow ⚠️ badge in the top-right corner ("N documents flagged, waiting to be parsed"); that reason clears from the badge the moment the doc is read.</p>
         <p style="margin-top:10px;"><b>On the <a href="#" data-nav="tripsyparsereview" style="color:var(--amber);">Review Parsed Docs</a> page</b>, each proposed event shows its full details grouped by day and which existing trip it falls within (or lets you create a new one for it); if several unmatched events from one doc look like their own trip, it offers to bundle them into a new trip together. For an event with <b>no conflict</b>: <b>Import as-is</b>, <b>Modify then import</b> (edit the extracted fields first), or <b>Reject</b>. If it <b>overlaps in time</b> with an event already on the trip -- or has no date/time of its own -- the row shows a <span style="color:var(--amber);">⚠️ possible conflict</span> instead, listing the existing and new events side by side, with <b>Import with conflict</b>, <b>Modify New Event</b>, <b>Modify Existing Event</b>, <b>Delete Existing Event</b>, or <b>Ignore New Event</b>. Editing either side re-checks the overlap; once they no longer clash it flips to a green <b>Conflict Resolved</b> with a plain <b>Import</b>, and the trip's card badge stays a yellow ⚠️ until every such conflict is resolved.</p>
@@ -17325,18 +17328,20 @@ function renderTripsyEditTripPanel(panel, trip, effectiveTrip) {
 // Row for the trip- or event-header Doc dropdown menu: filename on the
 // left (click to open), View/Edit-name/Copy/Delete on the right.
 function tripsyAttachmentMenuRowHtml(a) {
-  // Once parsing has actually completed, the badge itself is the "clear"
-  // control -- click it to acknowledge and downgrade this attachment back
-  // to a plain reference doc (Store.clearTripsyAttachmentParseFlag). Still-
-  // pending flags aren't clickable; there's nothing to acknowledge yet.
-  // Owner-gated same as rename/delete above -- a non-owner has read-only
-  // Drive access at the real permission level, so the write would just
-  // fail silently for them regardless.
+  // The parse badge tracks the pipeline's own state and never needs an
+  // acknowledge click: 'pending' shows the flag, 'staged' shows a live
+  // link to Review Parsed Docs, and 'done' (fully parsed + reviewed)
+  // shows NOTHING -- the label removes itself the moment parsing/review
+  // completes. (The old click-the-"(done)"-badge-to-clear step, and its
+  // Store.clearTripsyAttachmentParseFlag, were retired 2026-09-28.)
   const badge = a.purpose === 'parse'
-    ? (a.parseStatus === 'done' && isOwner
-        ? `<div data-tripsy-clear-parse-flag data-attachment-id="${esc(a.id)}" style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Review complete -- click to clear this flag (the file stays attached as a reference)">🏷️ Flagged for parsing (done)</div>`
+    ? (a.parseStatus === 'done'
+        // Fully parsed and reviewed: the label clears ITSELF ("Once an
+        // uploaded document that is flagged for parsing has been parsed,
+        // remove that label," 2026-09-28) -- no badge, no acknowledge click.
+        ? ''
         : a.parseStatus === 'staged'
-        ? `<div data-tripsy-goto-parse-review style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Parsed, awaiting your review -- click to open Review Parsed Docs">🏷️ Flagged for parsing (staged)</div>`
+        ? `<div data-tripsy-goto-parse-review style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Parsed, awaiting your review -- click to open Review Parsed Docs">🏷️ Parsed — awaiting your review</div>`
         : `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for parsing -- the next scheduled parse run reads it automatically and stages any events for review">🏷️ Flagged for parsing</div>`)
     : '';
   return `
@@ -17378,10 +17383,13 @@ const TRIPSY_OFFLINE_REMOVE_ICON_SVG = `<svg viewBox="0 0 24 24" width="18" heig
 // not a third icon).
 function tripsyDocumentMenuRowHtml(a, isCachedLocally) {
   const badge = a.purpose === 'parse'
-    ? (a.parseStatus === 'done' && isOwner
-        ? `<div data-tripsy-clear-parse-flag data-attachment-id="${esc(a.id)}" style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Review complete -- click to clear this flag (the file stays attached as a reference)">🏷️ Flagged for parsing (done)</div>`
+    ? (a.parseStatus === 'done'
+        // Fully parsed and reviewed: the label clears ITSELF ("Once an
+        // uploaded document that is flagged for parsing has been parsed,
+        // remove that label," 2026-09-28) -- no badge, no acknowledge click.
+        ? ''
         : a.parseStatus === 'staged'
-        ? `<div data-tripsy-goto-parse-review style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Parsed, awaiting your review -- click to open Review Parsed Docs">🏷️ Flagged for parsing (staged)</div>`
+        ? `<div data-tripsy-goto-parse-review style="color:var(--amber); font-size:11px; margin-top:2px; cursor:pointer; text-decoration:underline dotted;" title="Parsed, awaiting your review -- click to open Review Parsed Docs">🏷️ Parsed — awaiting your review</div>`
         : `<div style="color:var(--amber); font-size:11px; margin-top:2px;" title="Flagged for parsing -- the next scheduled parse run reads it automatically and stages any events for review">🏷️ Flagged for parsing</div>`)
     : '';
   const isOffline = !!a.keepOffline;
@@ -21954,9 +21962,6 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
         await tripsyGenerateNarrativeSections(trip.key, effectiveTrip, dayKeys, pdByDay, summaryByDay,
           // Only the checked days' summary rows are rewritten; the rest are kept from cache.
           { includeIntro: false, includeSummary: true, dayKeysToGenerate: checkedDayKeys, summaryDayKeys: checkedDayKeys });
-        setStage('Fetching photos for the new places…');
-        _tripsyAllowPhotoFetch = true; // this pass MAY fetch new photos (it's a regeneration)
-        try { await buildTripsyPrintHtml(trip.key); } finally { _tripsyAllowPhotoFetch = false; } // pre-fetch photos for the (re)generated days
       }
       // PART 1's SUMMARY ROWS, when nothing was regenerated. Those one-line blurbs are
       // cached per event id, which is stable across an edit -- so a retitled or relocated
@@ -21986,18 +21991,47 @@ async function showTripsyItineraryChangesDialog(trip, changedEvents) {
         }
       }
       // Acknowledge every listed event (checked ones regenerated, unchecked left
-      // as-is), so the warning clears until something changes again.
+      // as-is), so the warning clears until something changes again. This runs
+      // BEFORE the photo prefetch below, deliberately: the expensive narrative
+      // work is already SAVED at this point, and when the baseline reset used to
+      // come after the photo pass, a photo-phase hang left the run's whole result
+      // unacknowledged -- ▲ still up, dialog still open, Continue permanently
+      // disabled ("when I press the continue button, nothing happens," 2026-09-28:
+      // confirmed in the live data as a run whose day narratives saved at 05:23
+      // while the baseline never moved off the previous day's).
       setStage('Saving…');
       await tripsyRecordItineraryBaseline(trip);
+      // Pre-fetch photos for the (re)generated days -- pure best-effort warm-up
+      // now: photos self-heal on any open via tripsyBackgroundPhotoMaintenance,
+      // so a failure OR overrun here must not fail (or stall) the flow. Bounded
+      // because the wait is UI: past the cap the flow moves on and the build
+      // keeps running behind it, its photo gate flipped off mid-run at worst
+      // (remaining fetches degrade to cached-only, exactly like a plain open).
+      if (checkedDayKeys.length) {
+        setStage('Fetching photos for the new places…');
+        _tripsyAllowPhotoFetch = true; // this pass MAY fetch new photos (it's a regeneration)
+        try {
+          await Promise.race([
+            buildTripsyPrintHtml(trip.key),
+            new Promise(resolve => setTimeout(resolve, 45000)),
+          ]);
+        } catch (e) {
+          console.error('Photo prefetch failed (continuing -- photos self-heal on open):', e);
+        } finally { _tripsyAllowPhotoFetch = false; }
+      }
       const warnEl = document.querySelector(`[data-tripsy-itin-warning="${CSS.escape(trip.key)}"]`);
       if (warnEl) warnEl.style.display = 'none'; // clear the ▲ now (no timeline re-render happens here)
       overlay.remove();
       workSucceeded = true;
     } catch (e) {
       console.error('Itinerary changes generation failed:', e);
-      setStage(checkedDayKeys.length
-        ? 'Could not generate — see console for details.'
-        : 'Could not save — see console for details.');
+      // The real reason, IN the dialog -- pointing at the console is useless
+      // on the iPad, where there is no console to see ("I got an error message
+      // when I was trying to update the itinerary," 2026-09-28: the owner could
+      // never learn that the underlying failure was e.g. a transient API rate
+      // limit worth simply retrying).
+      const detail = String((e && (e.message || e)) || 'unknown error').slice(0, 300);
+      setStage(`${checkedDayKeys.length ? 'Could not generate' : 'Could not save'}: ${detail} — you can press Continue to retry.`);
       contBtn.disabled = false;
     } finally {
       // The baseline was just reset, so there are no changed events left and the glyph's
@@ -24596,15 +24630,42 @@ async function tripsyGenerateNarrativeSections(tripKey, effectiveTrip, dayKeys, 
 function tripsyPartialBaseEventId(id) {
   return String(id).replace(/-(checkin|checkout|begin|end)$/, '');
 }
-function tripsyFilterPrintDayDataForPartial(data, keys) {
+// An event CREATED AFTER the partial was last saved defaults to INCLUDED
+// ("The itinerary does not show all of the concerts on the schedule,"
+// 2026-09-28: concerts added to the trip a day after the partial was saved
+// were silently absent from it -- but a partial is made by REMOVING, so an
+// event the owner never had the chance to exclude must not read as
+// excluded). No schema change: locally-minted event ids are epoch-millis
+// * 1000 (tripsyMintLocalId), so the id itself dates the event against the
+// record's updatedAt; Tripsy-era ids are far below any such threshold and
+// never trigger. Self-correcting by construction: the owner unchecking a
+// new event in the picker re-saves the record, and the fresh updatedAt then
+// postdates that event's id, so the explicit exclusion sticks.
+function tripsyPartialEventPostdatesSave(id, savedAtMs) {
+  if (!savedAtMs) return false;
+  const m = /(\d+)$/.exec(tripsyPartialBaseEventId(id));
+  if (!m) return false;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n > savedAtMs * 1000;
+}
+// Same rule keyed by a picker/section key ('event:ev:<id>') rather than a
+// bare event id -- the Create Partial picker resumes these as CHECKED.
+function tripsyPartialKeyPostdatesSave(key, savedAtMs) {
+  return typeof key === 'string' && key.startsWith('event:ev:')
+    && tripsyPartialEventPostdatesSave(key.slice('event:ev:'.length), savedAtMs);
+}
+function tripsyFilterPrintDayDataForPartial(data, keys, savedAt = null) {
+  const savedAtParsed = savedAt ? Date.parse(savedAt) : NaN;
+  const savedAtMs = Number.isFinite(savedAtParsed) ? savedAtParsed : 0;
   const keptBaseIds = new Set();
   for (const k of keys) {
     if (k.startsWith('event:ev:')) keptBaseIds.add(tripsyPartialBaseEventId(k.slice('event:ev:'.length)));
   }
+  const idKept = id => keptBaseIds.has(tripsyPartialBaseEventId(id)) || tripsyPartialEventPostdatesSave(id, savedAtMs);
   const itemKept = item => {
     if (item.isLayover) return false; // resolved against its neighbors below
     if (item.psReservation) return keys.has(`event:${tripsySummaryRowKey(item)}`);
-    return !!(item.ev && item.ev.id != null && keptBaseIds.has(tripsyPartialBaseEventId(item.ev.id)));
+    return !!(item.ev && item.ev.id != null && idKept(item.ev.id));
   };
   const summaryByDay = new Map();
   const dayKeys = [];
@@ -24622,16 +24683,16 @@ function tripsyFilterPrintDayDataForPartial(data, keys) {
     summaryByDay.set(dayKey, kept);
     dayKeys.push(dayKey);
   }
-  const placeEvents = data.placeEvents.filter(ev => keptBaseIds.has(tripsyPartialBaseEventId(ev.id)));
+  const placeEvents = data.placeEvents.filter(ev => idKept(ev.id));
   const placesByDay = new Map();
   for (const [k, evs] of data.placesByDay) {
-    const keptEvs = evs.filter(ev => keptBaseIds.has(tripsyPartialBaseEventId(ev.id)));
+    const keptEvs = evs.filter(ev => idKept(ev.id));
     if (keptEvs.length) placesByDay.set(k, keptEvs);
   }
   return { dayKeys, byDay: data.byDay, placesByDay, placeEvents, summaryByDay };
 }
 
-async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys = null } = {}) {
+async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys = null, partialSavedAt = null } = {}) {
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return null;
   let { effectiveTrip, dayKeys, byDay, placesByDay, placeEvents, summaryByDay } = await buildTripsyPrintDayData(trip);
@@ -24640,7 +24701,7 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
   // cut of the same itinerary, not a different trip.
   const headerPlaceEvents = placeEvents;
   if (partialKeys) {
-    ({ dayKeys, byDay, placesByDay, placeEvents, summaryByDay } = tripsyFilterPrintDayDataForPartial({ dayKeys, byDay, placesByDay, placeEvents, summaryByDay }, partialKeys));
+    ({ dayKeys, byDay, placesByDay, placeEvents, summaryByDay } = tripsyFilterPrintDayDataForPartial({ dayKeys, byDay, placesByDay, placeEvents, summaryByDay }, partialKeys, partialSavedAt));
   }
 
   // Fetched once up front and shared by both Part 1 (summary blurbs) and
@@ -25636,8 +25697,8 @@ async function openTripsyDiaryPrintView(tripKey) {
   await triggerTripsyPrint(printRoot);
 }
 
-async function openTripsyItineraryPrintView(tripKey, { summaryOnly = false, partialKeys = null } = {}) {
-  const html = await buildTripsyPrintHtml(tripKey, { summaryOnly, partialKeys });
+async function openTripsyItineraryPrintView(tripKey, { summaryOnly = false, partialKeys = null, partialSavedAt = null } = {}) {
+  const html = await buildTripsyPrintHtml(tripKey, { summaryOnly, partialKeys, partialSavedAt });
   if (html == null) return;
   const printRoot = getOrCreateTripsyPrintRoot();
   printRoot.innerHTML = html;
@@ -25835,10 +25896,17 @@ const TRIPSY_PARTIAL_PANEL_VIEW_BTN_HTML = `
     <button type="button" class="btn primary" data-tripsy-partial-view style="width:100%;">View Partial Itinerary</button>
   </div>
 `;
-function tripsyPartialPanelHtml(trip, sections, savedKeys) {
+function tripsyPartialPanelHtml(trip, sections, savedKeys, savedAt = null) {
   // No saved selection yet -> everything starts INCLUDED (a partial is made
-  // by removing, not by rebuilding from nothing); a saved one resumes as-is.
-  const isChecked = key => (savedKeys ? savedKeys.has(key) : true);
+  // by removing, not by rebuilding from nothing); a saved one resumes as-is
+  // -- except an event CREATED AFTER that save, which resumes CHECKED (the
+  // owner never had the chance to exclude it; see
+  // tripsyPartialEventPostdatesSave, mirroring the render-time rule).
+  // Unchecking it here and pressing View re-saves with a fresh updatedAt,
+  // which is exactly what makes the exclusion stick from then on.
+  const savedAtParsed = savedAt ? Date.parse(savedAt) : NaN;
+  const savedAtMs = Number.isFinite(savedAtParsed) ? savedAtParsed : 0;
+  const isChecked = key => (savedKeys ? (savedKeys.has(key) || tripsyPartialKeyPostdatesSave(key, savedAtMs)) : true);
   const titleHtml = `<div style="padding:4px 4px 8px; font-size:13px; font-weight:700; color:var(--text); border-bottom:1px solid var(--line); margin-bottom:4px;">${esc(trip.name)} — Partial Itinerary</div>`;
   const hintHtml = `<div style="padding:0 4px 6px; font-size:11.5px; color:var(--muted);">Checked items are included. A day's own checkmark carries that day's write-up (and toggles its events with it).</div>`;
   const overviewHtml = tripsyPartialPanelRowHtml('Overview', 'overview', isChecked('overview'), false, '');
@@ -25972,7 +26040,7 @@ function tripsyPartialModeDialog() {
 // Returns {status}: 'none' (nothing missing -- the document is complete),
 // 'queued' (a new request was just filed), or 'pending' (an earlier request
 // is still awaiting its answer; a stale-looking one re-fires the worker).
-async function tripsyPartialEnsureNarratives(tripKey, keys, onStage) {
+async function tripsyPartialEnsureNarratives(tripKey, keys, onStage, savedAt = null) {
   const stage = text => { try { if (onStage) onStage(text); } catch (e) { /* progress is best-effort */ } };
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return { status: 'none' };
@@ -25983,7 +26051,7 @@ async function tripsyPartialEnsureNarratives(tripKey, keys, onStage) {
   // Which included rows still need a Part-1 blurb -- judged over the SAME
   // filtered view the document renders, so split halves / P/S rows / layovers
   // are treated identically to the filter itself.
-  const filtered = tripsyFilterPrintDayDataForPartial({ dayKeys, byDay, placesByDay: new Map(), placeEvents: [], summaryByDay }, keys);
+  const filtered = tripsyFilterPrintDayDataForPartial({ dayKeys, byDay, placesByDay: new Map(), placeEvents: [], summaryByDay }, keys, savedAt);
   const summaryEntry = cache[`${tripKey}::summary`];
   const blurbByKey = new Map(((summaryEntry && summaryEntry.content && summaryEntry.content.rows) || []).map(r => [r.row_key, r.blurb]));
   const summaryDayKeys = filtered.dayKeys.filter(k => (filtered.summaryByDay.get(k) || []).some(item => {
@@ -26089,7 +26157,7 @@ function getOrCreateTripsyPartialOverlay() {
     btn.disabled = true;
     btn.textContent = 'Preparing…';
     try {
-      await openTripsyItineraryPrintView(overlay.dataset.tripKey || '', { partialKeys: overlay._partialKeys || new Set(), summaryOnly: overlay._partialMode === 'summary' });
+      await openTripsyItineraryPrintView(overlay.dataset.tripKey || '', { partialKeys: overlay._partialKeys || new Set(), summaryOnly: overlay._partialMode === 'summary', partialSavedAt: overlay._partialSavedAt || null });
     } catch (e) {
       console.error('Partial itinerary PDF failed:', e);
       toast('Could not prepare the partial itinerary for printing. Please try again.', 'error');
@@ -26108,15 +26176,21 @@ async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null) 
   progress('Building partial itinerary…');
   overlay.style.display = 'flex';
   let keys = keysSet;
-  if (!keys || !mode) {
-    const saved = await Store.getTripsyPartialItinerary(tripKey);
-    if (!keys) keys = new Set(saved && Array.isArray(saved.keys) ? saved.keys : []);
-    // A record saved before modes existed reads as 'full' -- it renders the
-    // whole filtered document exactly as before this option existed.
-    if (!mode) mode = (saved && saved.mode) || 'full';
-  }
+  // The record's updatedAt dates the selection: an event created AFTER it
+  // defaults to included (tripsyPartialEventPostdatesSave -- "The itinerary
+  // does not show all of the concerts," 2026-09-28). Read even when the
+  // caller hands the keys directly (the picker's own View press), since the
+  // save that press fired is what stamps updatedAt fresh; a beat of clock
+  // skew there is harmless -- nothing can postdate a save made this instant.
+  const saved = await Store.getTripsyPartialItinerary(tripKey);
+  const savedAt = (saved && saved.updatedAt) || null;
+  if (!keys) keys = new Set(saved && Array.isArray(saved.keys) ? saved.keys : []);
+  // A record saved before modes existed reads as 'full' -- it renders the
+  // whole filtered document exactly as before this option existed.
+  if (!mode) mode = (saved && saved.mode) || 'full';
   overlay._partialKeys = keys;
   overlay._partialMode = mode;
+  overlay._partialSavedAt = savedAt;
   // Full mode checks for any included section still missing its narrative on
   // EVERY open (owner only) -- Show self-heals a creation-time ask that never
   // got answered, rather than leaving the document bare forever (the
@@ -26132,7 +26206,7 @@ async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null) 
   let generation = { status: 'none' };
   if (ownerFull) {
     try {
-      generation = await tripsyPartialEnsureNarratives(tripKey, keys, progress);
+      generation = await tripsyPartialEnsureNarratives(tripKey, keys, progress, savedAt);
     } catch (e) {
       console.error('Partial narrative request failed:', e);
       await tripsyConfirmDialog(
@@ -26148,7 +26222,7 @@ async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null) 
   // version ran in front of the first paint -- never delay the open. The
   // maintenance still happens, in tripsyBackgroundPhotoMaintenance below,
   // which repaints in place only if it actually changed something.
-  const html = await buildTripsyPrintHtml(tripKey, { partialKeys: keys, summaryOnly: mode === 'summary' });
+  const html = await buildTripsyPrintHtml(tripKey, { partialKeys: keys, summaryOnly: mode === 'summary', partialSavedAt: savedAt });
   if (html == null) {
     progress('This trip could not be loaded.');
     return;
@@ -26172,7 +26246,7 @@ async function showTripsyPartialItinerary(tripKey, keysSet = null, mode = null) 
   content.scrollTop = 0;
   document.body.classList.add('tripsy-partial-open');
   if (ownerFull) {
-    tripsyBackgroundPhotoMaintenance(tripKey, { partialKeys: keys, summaryOnly: false }, html, freshHtml => {
+    tripsyBackgroundPhotoMaintenance(tripKey, { partialKeys: keys, summaryOnly: false, partialSavedAt: savedAt }, html, freshHtml => {
       // Repaint only if this overlay is still showing this same trip.
       if (overlay.style.display === 'none' || overlay.dataset.tripKey !== tripKey) return;
       const st = content.scrollTop;
@@ -32479,7 +32553,7 @@ async function renderTripsyEventsListImpl() {
         const narrativeCache = await Store.getTripsyNarrativeCache();
         const sections = tripsyGeneratePanelSections(tripKey, effectiveTrip, dayKeys, summaryByDay, narrativeCache);
         const saved = await Store.getTripsyPartialItinerary(tripKey);
-        panel.innerHTML = tripsyPartialPanelHtml(trip, sections, saved && Array.isArray(saved.keys) ? new Set(saved.keys) : null);
+        panel.innerHTML = tripsyPartialPanelHtml(trip, sections, saved && Array.isArray(saved.keys) ? new Set(saved.keys) : null, saved && saved.updatedAt);
         positionTripsyFixedMenuAtRect(rect, panel);
         wireTripsyPartialPanel(panel, tripKey);
       } catch (err) {
@@ -33258,19 +33332,6 @@ async function renderTripsyEventsListImpl() {
       const ok = await Store.renameTripsyAttachment(btn.dataset.attachmentId, newName.trim());
       if (!ok) toast("Could not rename — storage error. Please try again.", "error");
       renderTripsyEventsList();
-    });
-  });
-
-  // Clicking a completed "🏷️ Flagged for parsing (done)" badge acknowledges
-  // and clears it -- owner-gated (see tripsyAttachmentMenuRowHtml), same as
-  // rename/delete, since a non-owner has read-only Drive access anyway.
-  container.querySelectorAll("[data-tripsy-clear-parse-flag]").forEach(el => {
-    el.addEventListener("click", async e => {
-      e.stopPropagation();
-      const ok = await Store.clearTripsyAttachmentParseFlag(el.dataset.attachmentId);
-      if (!ok) toast("Could not clear the flag — storage error. Please try again.", "error");
-      renderTripsyEventsList();
-      updateTripsyDocParseBadge();
     });
   });
 
