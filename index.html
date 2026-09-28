@@ -2159,6 +2159,54 @@ async function listDriveFilePermissions(fileId) {
   return (json.permissions || []).filter(p => p.type === 'user' && p.emailAddress);
 }
 
+// In-app Drive sharing WRITES -- the counterpart of the Share-dialog steps
+// the Users / Trips-Only pages used to only document ("Is there a way I can
+// add or delete trips-only access from within the app," 2026-09-28). Both
+// are deliberately IDEMPOTENT so a half-finished add/remove can simply be
+// pressed again: sharing skips an email that already holds ANY permission
+// (never downgrades an existing role to reader), and removing an absent
+// share is a no-op. Viewer role only, by design -- nothing in the app ever
+// grants write access to the data files. sendNotificationEmail=false:
+// the owner sends the app link themselves (the guide's Step 6), and
+// Drive's own "shared a file with you" email would just confuse.
+async function shareDriveFileWithEmailAsViewer(fileId, email) {
+  const lower = String(email).trim().toLowerCase();
+  const existing = (await listDriveFilePermissions(fileId))
+    .find(p => (p.emailAddress || '').toLowerCase() === lower);
+  if (existing) return { already: true };
+  await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?sendNotificationEmail=false`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'user', role: 'reader', emailAddress: lower }),
+  });
+  return { already: false };
+}
+async function removeDriveShareForEmail(fileId, email) {
+  const lower = String(email).trim().toLowerCase();
+  const p = (await listDriveFilePermissions(fileId))
+    .find(x => (x.emailAddress || '').toLowerCase() === lower);
+  if (!p) return { removed: false };
+  if (p.role === 'owner') throw new Error('that account OWNS the file — refusing to remove it');
+  await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions/${p.id}`, { method: 'DELETE' });
+  return { removed: true };
+}
+// trips-data.json's file id WITHOUT loading the trips -- tripsDataFileId is
+// only set once fetchTripsDataFromDrive has run, and the sharing flow must
+// work even on a session that hasn't opened My Trips yet. Same candidate
+// rule as that loader (real files only, newest modified wins); deliberately
+// does NOT touch the loader's own tripsDataFileId/tripsDataRevision state.
+async function resolveTripsDataFileIdForSharing() {
+  if (tripsDataFileId) return tripsDataFileId;
+  const q = encodeURIComponent(`name='${TRIPS_DATA_DRIVE_FILENAME}' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,mimeType,modifiedTime)&spaces=drive`);
+  const json = await res.json();
+  const candidates = (json.files || [])
+    .filter(f => !(f.mimeType || '').startsWith('application/vnd.google-apps'))
+    .sort((a, b) => (b.modifiedTime || '').localeCompare(a.modifiedTime || ''));
+  if (!candidates.length) throw new Error('trips-data.json not found in Drive');
+  return candidates[0].id;
+}
+
 // Fetches the file's current headRevisionId -- the id of its latest content
 // revision, which Drive bumps on every write. persistDriveData compares this
 // before each save to detect that another device/tab wrote since we loaded, so
@@ -8433,15 +8481,19 @@ function tripsOnlyViewerListHtml(tripsOnlyEmails, permissions) {
           <div style="font-weight:600; font-size:14px;">${esc((p && p.displayName) || email)}</div>
           <div style="font-size:12px; color:var(--muted);">${esc(email)} · Trips-only viewer</div>
         </div>
-        ${stale ? `<div style="flex-shrink:0; font-size:12px; color:var(--amber);">⚠️ No longer shared on the data file</div>` : ''}
+        <div style="display:flex; align-items:center; gap:10px; flex-shrink:0;">
+          ${stale ? `<div style="font-size:12px; color:var(--amber);">⚠️ No longer shared on the data file</div>` : ''}
+          <button class="btn" data-tripsonly-remove="${esc(email)}" style="font-size:12px; padding:5px 10px;">Remove</button>
+        </div>
       </div>`;
   }).join('');
   return rows + `
     <p style="color:var(--muted); font-size:12px; margin-top:10px; line-height:1.5;">
-      Manage these on <strong>Utilities → Users</strong> — un-tick <strong>Trips-only</strong> there to make someone a full
-      viewer again.${anyStale ? ` A <strong>⚠️</strong> row's Drive sharing was removed, so the setting currently does
-      nothing — un-tick it on the Users page to tidy up, or re-share <strong>flight-log-data.json</strong> to restore
-      their access.` : ''}
+      <strong>Remove</strong> takes back their Viewer share on <em>both</em> data files and clears the Trips-only
+      setting — full revocation. To make someone a <strong>full viewer</strong> instead (all pages, still read-only),
+      un-tick <strong>Trips-only</strong> on <strong>Utilities → Users</strong>.${anyStale ? ` A <strong>⚠️</strong>
+      row's Drive sharing was already removed, so its setting currently does nothing — Remove tidies it up, or
+      re-share <strong>flight-log-data.json</strong> to restore their access.` : ''}
     </p>`;
 }
 
@@ -8478,6 +8530,17 @@ async function renderUtilitiesTripsOnly() {
     <div class="card">
       <div class="card-title">Current Trips-Only Viewers</div>
       <div id="tripsonly-current-list"><div style="color:var(--muted); font-size:13px;">Loading…</div></div>
+      <div style="display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; align-items:center;">
+        <input id="tripsonly-add-email" type="email" placeholder="their.email@gmail.com" autocomplete="off"
+          style="flex:1; min-width:220px; padding:8px 10px; font-size:14px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px;">
+        <button class="btn primary" id="tripsonly-add-btn" style="font-size:13px; padding:8px 14px;">Add Viewer</button>
+      </div>
+      <p style="color:var(--muted); font-size:12px; margin-top:8px; line-height:1.5;">
+        <strong>Add Viewer</strong> does Steps 3–5 below in one go: shares <strong>flight-log-data.json</strong> and
+        <strong>trips-data.json</strong> with them as Viewer and turns on Trips-only. Step 2 — adding them as a Google
+        <strong>test user</strong> — still has to be done in the Google console first, or their sign-in will be blocked.
+        Half-finished? Pressing Add again is safe: already-done steps are skipped.
+      </p>
     </div>
 
     ${step(1, 'Confirm they have a Google Account', p(`They sign in with Google, so they need a Google Account (any email works — it doesn't have to be @gmail.com). If they don't have one, they can make one at <a href="https://accounts.google.com/signup" target="_blank" rel="noopener" style="color:var(--amber);">accounts.google.com/signup</a> using "Use my current email address instead."`))}
@@ -8536,8 +8599,8 @@ async function renderUtilitiesTripsOnly() {
   // call must never stand in front of a page render (the My Trips weather
   // lesson, same day). A failed permissions fetch degrades to the bare
   // email list ([] = can't verify, so nothing gets a stale flag).
-  (async () => {
-    const listEl = document.getElementById('tripsonly-current-list');
+  const listEl = document.getElementById('tripsonly-current-list');
+  const refreshTripsOnlyList = async () => {
     if (!listEl) return;
     try {
       const tripsOnlyEmails = await Store.getTripsOnlyEmails();
@@ -8551,7 +8614,72 @@ async function renderUtilitiesTripsOnly() {
       console.error('Trips-only viewer list failed:', e);
       listEl.innerHTML = `<div style="color:var(--muted); font-size:13px;">Could not load the list — reload the page to retry.</div>`;
     }
-  })();
+  };
+  refreshTripsOnlyList();
+
+  // Add Viewer: Steps 3-5 in one tap -- share both data files as Viewer,
+  // then flip the Trips-only flag. Order matters the other way on REMOVE
+  // (see below); here the flag goes LAST so a half-added person is never
+  // flagged trips-only without the file access that makes sign-in work.
+  // Every step is idempotent, so the error toast can honestly say "press
+  // Add again" after any mid-flight failure.
+  const addBtn = document.getElementById('tripsonly-add-btn');
+  const addInput = document.getElementById('tripsonly-add-email');
+  if (addBtn && addInput) addBtn.addEventListener('click', async () => {
+    const email = (addInput.value || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast('Enter a valid email address first.', 'error'); return; }
+    if (email === OWNER_EMAIL.toLowerCase()) { toast('That is the owner account — it always has full access.', 'error'); return; }
+    const ok = await tripsyConfirmDialog(
+      `Give ${email} Trips-only access? This shares flight-log-data.json and trips-data.json with them as VIEWER and limits them to My Trips / Travel View. They must also already be a Google test user (Step 2) or their sign-in will be blocked.`,
+      { title: 'Add Trips-Only viewer', yes: 'Add', no: 'Cancel' });
+    if (!ok) return;
+    addBtn.disabled = true;
+    const prevLabel = addBtn.textContent;
+    addBtn.textContent = 'Adding…';
+    try {
+      await shareDriveFileWithEmailAsViewer(driveFileId, email);
+      await shareDriveFileWithEmailAsViewer(await resolveTripsDataFileIdForSharing(), email);
+      const r = await Store.setTripsOnlyForEmail(email, true);
+      if (!r.ok) throw new Error(r.error || 'could not save the Trips-only setting');
+      toast(`${email} added as a Trips-only viewer.`, 'success');
+      addInput.value = '';
+    } catch (e) {
+      console.error('Add Trips-only viewer failed:', e);
+      toast(`Could not finish adding ${email} — ${String(e.message || e).slice(0, 200)}. Pressing Add again is safe: already-done steps are skipped.`, 'error');
+    } finally {
+      addBtn.disabled = false;
+      addBtn.textContent = prevLabel;
+    }
+    await refreshTripsOnlyList();
+  });
+
+  // Remove: full revocation, delegated so it survives every list refill.
+  // Shares come off FIRST and the flag clears LAST -- if a share removal
+  // fails midway, the person stays locked to trips-only rather than
+  // silently becoming a full viewer; a cleared-share-but-stuck-flag
+  // failure just shows the list's own ⚠️ stale row, which explains itself.
+  if (listEl) listEl.addEventListener('click', async e => {
+    const btn = e.target.closest('[data-tripsonly-remove]');
+    if (!btn) return;
+    const email = btn.dataset.tripsonlyRemove;
+    const ok = await tripsyConfirmDialog(
+      `Remove ${email}'s access completely? This removes their Viewer share on BOTH data files and clears the Trips-only setting. (To make them a FULL viewer instead, un-tick Trips-only on the Users page.)`,
+      { title: 'Remove access', yes: 'Remove', no: 'Cancel' });
+    if (!ok) return;
+    btn.disabled = true;
+    btn.textContent = 'Removing…';
+    try {
+      await removeDriveShareForEmail(driveFileId, email);
+      await removeDriveShareForEmail(await resolveTripsDataFileIdForSharing(), email);
+      const r = await Store.setTripsOnlyForEmail(email, false);
+      if (!r.ok) throw new Error(r.error || 'could not clear the Trips-only setting');
+      toast(`${email}'s access is removed.`, 'success');
+    } catch (err) {
+      console.error('Remove Trips-only viewer failed:', err);
+      toast(`Could not fully remove ${email} — ${String(err.message || err).slice(0, 200)}. Pressing Remove again is safe.`, 'error');
+    }
+    await refreshTripsOnlyList();
+  });
 }
 
 // Owner-only settings page for the Google Places API key used by the

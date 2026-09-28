@@ -220,6 +220,23 @@ flag on an email still ticked Trips-only whose Drive share was since removed (an
 list means the lookup failed, so bare emails show with NO stale flags rather than every row wrongly
 flagged). The card fills AFTER the page paints — the permissions fetch is a network round trip,
 and a network call never stands in front of a render (the My Trips weather lesson, same day).
+**And the whole grant/revoke lifecycle is in-app now** ("Is there a way I can add or delete
+trips-only access from within the app," same day): the card's **Add Viewer** box does Steps 3–5 in
+one tap — `shareDriveFileWithEmailAsViewer` on BOTH data files (`resolveTripsDataFileIdForSharing`
+finds `trips-data.json` without loading the trips, since `tripsDataFileId` is only set once My
+Trips has loaded) then `Store.setTripsOnlyForEmail(email, true)` — and each row's **Remove**
+button fully revokes (`removeDriveShareForEmail` on both files, then the flag). These are the
+app's FIRST Drive-permission writes, shaped defensively: **Viewer role only** (nothing in the app
+ever grants write access), `sendNotificationEmail=false` (the owner sends the app link themselves,
+per Step 6), both helpers **idempotent** (share skips an email already holding ANY permission —
+never downgrades a role; removing an absent share is a no-op) so every failure toast can honestly
+say "press it again," the file OWNER can never be removed (throws before the DELETE), and
+**ordering is deliberate and opposite on the two flows**: Add flips the flag LAST (a half-added
+person is never flagged without the access that makes sign-in work), Remove takes shares off FIRST
+(a midway failure leaves them locked to trips-only, never silently a full viewer — and a
+cleared-share-but-stuck-flag failure just shows the list's own ⚠️ stale row). Both actions sit
+behind a `tripsyConfirmDialog`. The one step that can NEVER move in-app is Google Console's OAuth
+test-user add (Step 2 — Google has no API for it), and the Add box's note says so.
 `tripsonlylist_test.js`.
 
 ### The data pipelines
