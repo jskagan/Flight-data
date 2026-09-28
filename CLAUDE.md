@@ -597,29 +597,57 @@ step 4; git history has it if ever needed.
   cache entry was already per COMPANY and shared across every trip, so one pick covers every
   itinerary that airline appears in — pinning is what makes it permanent. Company-less legs keep
   the old first-photo path untouched (no company, no wrong airline). `liverycheck_test.js`.
-- **A car TRANSFER leg (hotel or airport on an end) always shows a black Sprinter van** ("use a
-  picture of a sprinter van that is black instead of whatever image is generated or found by the
-  itinerary," 2026-09-27). Detection is `tripsyIsVanTransferLeg(ev, lodgings)`: a car-category
-  transportation leg (or an uncategorized one whose summary reads "Car …" — the snapshot builder's
-  title shape; flights/trains never match) with `/\bairports?\b/i` on any endpoint/summary line,
-  OR a trip lodging on exactly one end judged by the SAME `tripsyTransferSideForLodging` the
-  ordering pass uses (lodgings read once per build from the raw `trip.events` hosting rows, since
-  a transfer can land on a different day than its check-in row). Matched legs swap ONLY their
-  PHOTO subject in `tripsyTransportationCardHtml` — `photoCompany = TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT`
-  (`'Black Sprinter Van'`, a pseudo-company) — while the card's TEXT keeps the real operator. Riding
-  the per-company machinery buys everything for free: ONE shared cache entry across every transfer
-  on every trip (repeats are the point, like airlines), van-specific search queries
-  (`TRIPSY_VAN_TRANSFER_PHOTO_QUERIES` — no logo/livery wording, no generic 'car road trip'
-  fallback, since off-subject candidates would burn vision checks or get shown), a STRICT vision
-  check (the `tripsyTransportationPhotoAcceptable` prompt branches on the sentinel: a black/very
-  dark Sprinter-style passenger van as the main subject, or reject — unlike a real company's
-  lenient "no rival's branding" test), and the 🔄🗂🔍📋🚫 controls keyed to the sentinel, so one
-  paste/pick PINS the owner's chosen van picture for every transfer everywhere. One deliberate
-  asymmetry: for the sentinel, nothing passing the check returns the ICON, never the first-fetched
-  fallback photo (`pick = company === TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT ? null : fallback`) — a
-  wrong picture is exactly what the request forbids, and nothing is cached so a later maintenance
-  pass (or a manual pick) simply tries again. Itinerary print cards only, by request — the My Trips
-  timeline and Travel View are untouched. `vantransfer_test.js`.
+- **A car TRANSFER leg shows a FIXED picture — the owner's pinned airport photo for airport
+  transfers, a black Sprinter van for hotel-only transfers** ("use a picture of a sprinter van
+  that is black instead of whatever image is generated or found by the itinerary," 2026-09-27;
+  then "I just manually posted a photo to the transfers to and from the airports. Always use that
+  photo for transfers to and from airports in all future itineraries," 2026-09-28). Detection is
+  `tripsyVanTransferPhotoSubject(ev, lodgings)` → a SUBJECT or `''`: a car-category transportation
+  leg (or an uncategorized one whose summary reads "Car …" — the snapshot builder's title shape;
+  flights/trains never match) with `/\bairports?\b/i` on any endpoint/summary line returns the
+  AIRPORT subject — **airport wins over hotel**, so the common airport↔hotel run is an airport
+  transfer, which is both the owner's phrasing and where their pin was pasted — else a trip
+  lodging on exactly one end (judged by the SAME `tripsyTransferSideForLodging` the ordering pass
+  uses; lodgings read once per build from the raw `trip.events` hosting rows, since a transfer can
+  land on a different day than its check-in row) returns the HOTEL subject. Matched legs swap ONLY
+  their PHOTO subject in `tripsyTransportationCardHtml` (`photoCompany = subject || company`) —
+  card TEXT keeps the real operator. The subjects are pseudo-companies riding the per-company
+  machinery: `TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT` (**`'Black Sprinter Van'` — the STRING IS FROZEN:
+  the owner's pinned airport photo lives in live data under its derived key
+  `black sprinter van|||transport`; renaming orphans the pin**) for airport transfers, and
+  `TRIPSY_HOTEL_TRANSFER_PHOTO_SUBJECT` (`'Hotel Transfer Van'`) for hotel-only — split
+  2026-09-28 precisely so the pinned runway-themed photo can't bleed onto a hotel↔venue car;
+  `TRIPSY_TRANSFER_PHOTO_SUBJECTS` is the pair every sentinel check tests with `.includes`. Riding
+  the per-company machinery buys everything for free: ONE shared cache entry per subject across
+  every trip (repeats are the point, like airlines), van-specific search queries
+  (`TRIPSY_VAN_TRANSFER_PHOTO_QUERIES`, shared by both — no logo/livery wording, no generic 'car
+  road trip' fallback), a STRICT vision check (the `tripsyTransportationPhotoAcceptable` prompt
+  branches on the sentinels: a black/very dark Sprinter-style passenger van as the main subject,
+  or reject — unlike a real company's lenient "no rival's branding" test), and the 🔄🗂🔍📋🚫
+  controls keyed to the subject, so one paste/pick PINS a picture for that transfer kind
+  everywhere (which is exactly how the airport photo got pinned). Two deliberate asymmetries vs.
+  real companies: nothing passing the check returns the ICON, never the first-fetched fallback
+  photo (a wrong picture is exactly what the request forbids; nothing cached, a later maintenance
+  pass or manual pick tries again), and a cached transfer photo is **exempt from the TTL refetch**
+  (it has no staleness concept — a refetch could only swap a right answer for a different one;
+  only a manual re-pick or 🚫 replaces it; confirmed live 2026-09-28: the auto path landed a
+  correct black Sprinter on its very first run). The FIRST-ever open of a given subject still
+  paints the icon while the background pass searches/verifies/uploads — a one-time, global cost by
+  the fast-paint design ("There was no picture when I opened the itinerary," 2026-09-28). Related:
+  the 📋 paste handler now compresses before upload (`tripsyResizeImageBlob(blob, 1600, 0.85)` for
+  blobs >400KB, fail-soft — the pinned airport photo went up as a 2.8MB PNG), and
+  **`tripsyRecompressPastedPhotos`** (called from `runBackgroundSyncs` next to the folder-migration
+  precedent, owner-only, once per session) retrofits pastes made BEFORE that resize existed
+  ("Please also compress the image I uploaded - and any other stored photos," 2026-09-28): only a
+  paste can be oversized — Places media is fetched at `maxWidthPx=800` and the wardrobe/cube/diary
+  pickers all resize before upload — so the sweep walks exactly the `user-pasted-` photoName
+  entries, recompresses any still >400KB via `Store.saveTripsyPlacePhoto` with every flag
+  preserved (a pinned pick stays pinned, just smaller; `cacheTripsyPlacePhotoLocal` deletes the
+  oversized original from Drive and the local blob store), and stamps each checked entry
+  `recompressedAt` so no later session re-reads the bytes (an already-small paste stamps in
+  memory, carried by the next ordinary photo-cache flush). `pasterecompress_test.js`. Itinerary
+  print cards only, by request — the My Trips timeline and Travel View are untouched.
+  `vantransfer_test.js`.
 - **A place-card photo never repeats across DIFFERENT events in one document** ("many duplicate
   photos on the partial itinerary… we should not re-use a photo unless the event is exactly the
   same as the prior event using the photo except on a different day," 2026-09-27). Duplicates
@@ -1066,6 +1094,27 @@ step 4; git history has it if ever needed.
   and killed the relay polls waiting on the answer. NOTE: the Routine was created via http_api,
   so sessions cannot `update_trigger` it — its prompt is edited by the owner at
   claude.ai/code/routines. `cloudnarrative_test.js`.
+- **A Claude session edits trip data through a RELAY, never by touching `trips-data.json`** ("Can
+  you look up the concert times … and add them to the itinerary," 2026-09-28 — the first owner
+  request for a session to modify trip data directly). A session's Drive tooling can only CREATE
+  files, and replacing `trips-data.json` wholesale would race an open session's own edits (the
+  app's discovery is a name search, newest-modified wins; an open session's next save would land
+  invisibly in the stranded copy) — so the session writes **`tripsy-trip-edits.json`**
+  (`TRIPSY_TRIP_EDITS_FILENAME`, same folder/ACL as `trips-data.json`, so it grants nothing new)
+  holding `{edits:[…]}` of the EXACT plain change objects `Store.queueTripsyChange` has always
+  taken, and `drainTripsyTripEdits` (in `syncTripsyRelays` AFTER `ensureTripsyDecrypted`, next to
+  the narrative drain — the changes need the live trips array; owner-only) feeds each through that
+  one entry point: same conflict-guarded write, derived-cache cleanup, in-flight badge and failure
+  handling as a hand-made edit, app stays single writer. Entries must be REPLAY-SAFE (a failure
+  keeps the file via `drainTripsyRelayFiles`' delete-only-after-success): `edit_event` re-merges
+  idempotently; `create_event` is skipped when the trip already holds an event with the same
+  `name`+`startsAt`; `create_trip` is skipped when its key exists; an entry referencing something
+  gone, or an unknown type, is skipped rather than blocking the rest; one failed entry still lets
+  the rest apply, then throws so the file is retried. Applied edits toast "Applied N itinerary
+  updates from a Claude session." The first real relay (2026-09-28) set the Singapore GP concert
+  times/stages: 4 `edit_event` (JJ Lin, The Killers, James Arthur, Lana Del Rey — Padang) + 5
+  `create_event` (CORTIS, Zara Larsson; Split Enz, Goo Goo Dolls, Janet Jackson — Wharf).
+  `tripeditsrelay_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS

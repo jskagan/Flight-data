@@ -2409,6 +2409,52 @@ async function migrateTripsyPlacePhotosToSubfolder() {
   }
 }
 
+// Background recompression of oversized stored photos ("Please also compress
+// the image I uploaded - and any other stored photos," 2026-09-28). Only a
+// PASTED photo can be oversized: every other route into the photo store is
+// bounded at the source (Places media is fetched at maxWidthPx=800; the
+// wardrobe/cube/diary pickers resize before upload; and the 📋 paste path
+// itself resizes now) -- but pastes made before that resize existed uploaded
+// raw clipboard bytes (a real one landed a 2.8MB PNG). So the sweep targets
+// exactly the entries a paste created, identified by their 'user-pasted-'
+// photoName, and recompresses any still over the same 400KB threshold the
+// paste path uses. Per entry: replace via Store.saveTripsyPlacePhoto with
+// every flag preserved (ownerPinned/liveryChecked survive -- the owner's pick
+// stays their pick, just smaller) -- its cacheTripsyPlacePhotoLocal deletes
+// the oversized original from Drive and the local blob store, and
+// uploadTripsyPlacePhotoToDrive seeds the new bytes locally. Every checked
+// entry is stamped recompressedAt so no later session re-reads it (an
+// already-small one stamps in memory only; the next ordinary photo-cache
+// flush carries it). A per-entry failure just retries next session. Called
+// from runBackgroundSyncs (owner-only), once per session.
+let _tripsyPasteRecompressDone = false;
+async function tripsyRecompressPastedPhotos() {
+  if (_tripsyPasteRecompressDone || !isOwner) return;
+  _tripsyPasteRecompressDone = true;
+  const cache = (driveData && driveData.tripsyPlacePhotoCache) || {};
+  for (const [key, entry] of Object.entries(cache)) {
+    if (!entry || !entry.driveFileId || entry.recompressedAt) continue;
+    if (!String(entry.photoName || '').startsWith('user-pasted-')) continue;
+    try {
+      let blob = await tripsyGetCachedPhotoBlob(entry.driveFileId);
+      if (!blob) blob = await downloadDriveFileBlob(entry.driveFileId);
+      const stamp = { recompressedAt: new Date().toISOString() };
+      const resized = blob.size > 400000 ? await tripsyResizeImageBlob(blob, 1600, 0.85) : null;
+      if (resized && resized.size < blob.size * 0.9) {
+        const contentHash = await tripsyHashBlob(resized);
+        const driveFileId = await uploadTripsyPlacePhotoToDrive(resized, resized.type || 'image/jpeg');
+        await Store.saveTripsyPlacePhoto(key, { ...entry, driveFileId, contentHash, ...stamp });
+        console.log(`[photo recompress] ${key}: ${blob.size} -> ${resized.size} bytes`);
+      } else {
+        Store.cacheTripsyPlacePhotoLocal(key, { ...entry, ...stamp });
+        tripsyPlacePhotoCacheDirty = true;
+      }
+    } catch (e) {
+      console.error('tripsyRecompressPastedPhotos entry failed (will retry next session):', e);
+    }
+  }
+}
+
 // Hard-deletes a Drive file by id (the real DELETE endpoint, not a
 // trashed:true PATCH -- there's no reason to keep a trashed copy of a small,
 // single-purpose file this app fully owns the lifecycle of, e.g. a place-
@@ -5286,6 +5332,72 @@ async function drainTripsyNarrativeResults() {
   await drainTripsyRelayFiles(TRIPSY_NARRATIVE_RESULTS_FILENAME, relay => applyTripsyNarrativeResults(relay.results || []));
 }
 
+// Owner-only. Applies itinerary EDITS a Claude session left as a relay file
+// ("Can you look up the concert times ... and add them to the itinerary,"
+// 2026-09-28): a session outside the browser has no way to update
+// trips-data.json (its Drive tooling can only CREATE files), and replacing
+// the file wholesale behind the app's back would race an open session's own
+// edits -- so, exactly like every other relay, the session writes a small
+// tripsy-trip-edits.json and THIS drain feeds each entry through the one
+// Store.queueTripsyChange entry point: the same conflict-guarded write
+// path, derived-cache cleanup, in-flight badge and failure handling a
+// hand-made edit gets, with the app staying trips-data.json's single
+// writer. Each entry is the exact plain change object queueTripsyChange has
+// always taken (edit_event / create_event / ...). Entries must be safe to
+// REPLAY, because a failure keeps the relay file for the next open
+// (drainTripsyRelayFiles deletes only after applyFn resolves): an
+// edit_event re-merges the same fields (idempotent), a create_event is
+// skipped when the target trip already holds an event with the same name
+// AND startsAt, and a create_trip is skipped when its key exists -- the
+// dedupes that make replays create nothing twice. An entry referencing
+// something gone (event deleted meanwhile, unknown trip) or of an unknown
+// type is SKIPPED rather than blocking the rest. Trips must be loaded
+// first (queueTripsyChange edits the live array), so syncTripsyRelays
+// calls this after ensureTripsyDecrypted, next to the narrative drain.
+// Security: the relay lives in the owner's private Drive folder -- the
+// same ACL as trips-data.json itself, so it grants nothing new: anyone
+// able to write the relay could edit the data file directly.
+const TRIPSY_TRIP_EDITS_FILENAME = 'tripsy-trip-edits.json';
+const TRIPSY_TRIP_EDIT_KNOWN_TYPES = ['edit_event', 'delete_event', 'create_event', 'edit_trip', 'create_trip', 'delete_trip', 'move_event'];
+async function applyTripsyTripEditsRelay(relay) {
+  const edits = Array.isArray(relay && relay.edits) ? relay.edits : [];
+  let applied = 0, skipped = 0, failed = 0;
+  for (const change of edits) {
+    try {
+      const trips = tripsyDecryptedTrips || [];
+      if (!change || !TRIPSY_TRIP_EDIT_KNOWN_TYPES.includes(change.type)) { skipped++; continue; }
+      if (change.type === 'edit_event' || change.type === 'delete_event' || change.type === 'move_event') {
+        const exists = trips.some(t => (t.events || []).some(ev => tripsyEventKey(ev.tripsyRaw) === change.eventKey));
+        if (!exists) { skipped++; continue; }
+      } else if (change.type === 'create_event') {
+        const trip = trips.find(t => t.key === change.tripKey);
+        if (!trip) { skipped++; continue; }
+        const f = change.fields || {};
+        const dup = (trip.events || []).some(ev => ev.tripsyRaw
+          && (ev.tripsyRaw.name || '') === (f.name || '')
+          && (ev.tripsyRaw.startsAt || '') === (f.startsAt || ''));
+        if (dup) { skipped++; continue; } // a replay after a partial failure
+      } else if (change.type === 'create_trip') {
+        if (trips.some(t => t.key === change.tripKey)) { skipped++; continue; }
+      }
+      await Store.queueTripsyChange(change);
+      applied++;
+    } catch (e) {
+      failed++;
+      console.error('trip-edits relay entry failed:', e, change);
+    }
+  }
+  console.log(`[trip-edits relay] applied ${applied}, skipped ${skipped}, failed ${failed}`);
+  if (applied) toast(`Applied ${applied} itinerary update${applied === 1 ? '' : 's'} from a Claude session.`, 'success');
+  // A failed entry keeps the relay file so the next open retries it -- the
+  // replay dedupes above are what make that safe for the already-applied rest.
+  if (failed) throw new Error(`trip-edits relay: ${failed} entries failed (file kept for retry)`);
+}
+async function drainTripsyTripEdits() {
+  if (!isOwner || !tripsyDecryptedTrips) return;
+  await drainTripsyRelayFiles(TRIPSY_TRIP_EDITS_FILENAME, applyTripsyTripEditsRelay);
+}
+
 
 // Runs the app's side of every Drive-relay pipeline on startup:
 // drain applied-change confirmations and parsed email proposals a refresh left,
@@ -5352,6 +5464,10 @@ async function syncTripsyRelays() {
     // drains above: filing one ends in tripsyRecordItineraryBaseline, which
     // needs the real trip. A failure keeps the relay file for the next pass.
     try { await drainTripsyNarrativeResults(); } catch (e) { console.error('narrative-results drain failed:', e); }
+    // Itinerary edits a Claude session relayed (see drainTripsyTripEdits) --
+    // also needs the loaded trips, since every entry goes through the live
+    // queueTripsyChange path.
+    try { await drainTripsyTripEdits(); } catch (e) { console.error('trip-edits drain failed:', e); }
     // With the trips now loaded, silently drop any freshly-staged proposal
     // event that duplicates an existing tracked event -- the drains above run
     // BEFORE the decrypt (trips may not be loaded yet when they stage), so
@@ -5410,6 +5526,11 @@ async function runBackgroundSyncs() {
   // One-time: tidy existing place/transportation photos into the "Photos" subfolder.
   try { await migrateTripsyPlacePhotosToSubfolder(); }
   catch (e) { console.error('Place-photo folder migration failed (will retry next load):', e); }
+
+  // Recompress any oversized pasted photo left from before the 📋 paste
+  // path resized (see tripsyRecompressPastedPhotos).
+  try { await tripsyRecompressPastedPhotos(); }
+  catch (e) { console.error('Pasted-photo recompression failed (will retry next load):', e); }
 }
 
 function todayLocalDateString() {
@@ -15532,17 +15653,21 @@ function tripsyTransferSideForLodging(transport, lodging) {
 // any endpoint/summary line, or has one of the trip's lodgings on exactly
 // one end -- judged by the very same tripsyTransferSideForLodging the
 // ordering pass above uses, so "what counts as a hotel transfer" can never
-// mean two different things. Matched legs get the fixed black-Sprinter-van
-// photo subject (TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT) in
-// tripsyTransportationCardHtml instead of their own company.
-function tripsyIsVanTransferLeg(ev, lodgings) {
-  if (!ev || !ev.tripsyRaw || ev.tripsyRaw.resource !== 'transportation') return false;
+// mean two different things. It returns WHICH fixed photo subject the leg
+// gets ('' for an ordinary leg): an airport on either end wins the AIRPORT
+// subject -- including the common airport↔hotel run, which is a "transfer
+// to or from the airport" in the owner's words and is exactly where their
+// pinned airport photo was pasted -- and only a hotel match with no
+// airport in sight reads as a hotel transfer.
+function tripsyVanTransferPhotoSubject(ev, lodgings) {
+  if (!ev || !ev.tripsyRaw || ev.tripsyRaw.resource !== 'transportation') return '';
   const raw = ev.tripsyRaw;
   const category = String(raw.category || '').toLowerCase();
-  if (category ? category !== 'car' : !/^car\b/i.test(ev.summary || '')) return false;
+  if (category ? category !== 'car' : !/^car\b/i.test(ev.summary || '')) return '';
   const ends = [raw.departureDescription, raw.arrivalDescription, ev.location, ev.summary];
-  if (ends.some(d => /\bairports?\b/i.test(String(d || '')))) return true;
-  return (lodgings || []).some(l => tripsyTransferSideForLodging(ev, l));
+  if (ends.some(d => /\bairports?\b/i.test(String(d || '')))) return TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT;
+  if ((lodgings || []).some(l => tripsyTransferSideForLodging(ev, l))) return TRIPSY_HOTEL_TRANSFER_PHOTO_SUBJECT;
+  return '';
 }
 // Moves a lodging row next to the transfer that serves it: a Check-in goes
 // directly BELOW the transport that arrives there, a Check-out directly ABOVE
@@ -19936,7 +20061,7 @@ const TRIPSY_TRANSPORTATION_CATEGORY_GENERIC_QUERIES = {
 };
 
 // The fixed photo subject for a car transfer leg (hotel or airport on an
-// end -- tripsyIsVanTransferLeg): the owner wants every such leg to show a
+// end -- tripsyVanTransferPhotoSubject): the owner wants every such leg to show a
 // black Sprinter van, "instead of whatever image is generated or found by
 // the itinerary" (2026-09-27). It rides the existing per-COMPANY
 // transportation photo machinery as a pseudo-company, which buys the whole
@@ -19950,7 +20075,20 @@ const TRIPSY_TRANSPORTATION_CATEGORY_GENERIC_QUERIES = {
 // only acceptable photo is a van, so an off-subject candidate pool would
 // just burn vision checks (or worse, get shown -- see the fallback rule in
 // fetchTripsyTransportationPhoto).
+// TWO subjects since 2026-09-28 ("Always use that photo for transfers to
+// and from airports in all future itineraries" — the owner pasted a
+// runway-themed photo onto the airport transfer cards, which must not
+// bleed onto a purely hotel↔venue car where a runway makes no sense):
+// AIRPORT transfers (an airport on either end — including airport↔hotel,
+// which is what the owner pasted on) use the first subject, hotel-only
+// transfers the second. The first subject's STRING VALUE IS FROZEN: the
+// owner's pinned airport photo lives in the live data under its derived
+// cache key ('black sprinter van|||transport'), so renaming it orphans
+// that pin. Both subjects share the van queries and the strict van/
+// transfer vision check.
 const TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT = 'Black Sprinter Van';
+const TRIPSY_HOTEL_TRANSFER_PHOTO_SUBJECT = 'Hotel Transfer Van';
+const TRIPSY_TRANSFER_PHOTO_SUBJECTS = [TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT, TRIPSY_HOTEL_TRANSFER_PHOTO_SUBJECT];
 const TRIPSY_VAN_TRANSFER_PHOTO_QUERIES = [
   'black Mercedes Sprinter van',
   'black Sprinter passenger van',
@@ -19966,7 +20104,7 @@ const TRIPSY_VAN_TRANSFER_PHOTO_QUERIES = [
 // company-search-miss) leg still ends up with *some* representative photo
 // of its transport mode rather than no photo at all.
 function tripsyTransportationPhotoQueryVariants(company, category) {
-  if (company === TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT) return [...TRIPSY_VAN_TRANSFER_PHOTO_QUERIES];
+  if (TRIPSY_TRANSFER_PHOTO_SUBJECTS.includes(company)) return [...TRIPSY_VAN_TRANSFER_PHOTO_QUERIES];
   const companyVariants = company ? [`${company} logo`, `${company} livery`, company] : [];
   const genericVariants = TRIPSY_TRANSPORTATION_CATEGORY_GENERIC_QUERIES[category] || [];
   return [...companyVariants, ...genericVariants];
@@ -20025,7 +20163,7 @@ async function tripsyTransportationPhotoAcceptable(company, blob) {
     // is strict where a real company's is lenient: a wrong-color or
     // wrong-type vehicle is rejected outright rather than tolerated as
     // "nothing identifiably wrong".
-    const promptText = company === TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT
+    const promptText = TRIPSY_TRANSFER_PHOTO_SUBJECTS.includes(company)
       ? 'This photo will illustrate a private car transfer on a printed travel itinerary, which must show a black Sprinter van. Answer acceptable=true ONLY if the photo clearly shows, as its main subject, the exterior of a black (or very dark) Mercedes Sprinter-style passenger van. Answer acceptable=false for any other vehicle type or color, an interior-only shot, a logo, or anything else.'
       : `This photo will illustrate a trip leg operated by "${company}" on a printed travel itinerary. Answer acceptable=true if the photo shows ${company}'s own aircraft/vehicle, livery, logo, or premises, OR shows nothing identifiably belonging to any carrier (a generic unbranded aircraft or vehicle, an airport or station view, scenery). Answer acceptable=false if it identifiably shows a DIFFERENT airline's or operator's aircraft, livery, or logo.`;
     const result = await tripsyAttireClaudeCall(apiKey, schema, [
@@ -20090,7 +20228,11 @@ async function fetchTripsyTransportationPhoto(company, category) {
     const fresh = (Date.now() - new Date(cached.fetchedAt).getTime()) < TRIPSY_PLACE_PHOTO_TTL_DAYS * 86400000;
     // Same rule as fetchTripsyPlacePhoto: on a plain open/print always show the
     // cached photo (even past TTL); only refetch a stale one during generation.
-    if (fresh || !_tripsyAllowPhotoFetch) {
+    // The van-transfer sentinel is exempt from TTL entirely: its photo has
+    // exactly one right subject and no staleness concept, so a refetch could
+    // only ever swap a correct black Sprinter for a different (or wrong)
+    // picture. Once one is cached it stays until the owner re-picks or skips.
+    if (fresh || !_tripsyAllowPhotoFetch || TRIPSY_TRANSFER_PHOTO_SUBJECTS.includes(company)) {
       try {
         return await tripsyPlacePhotoDisplayUrl(cached.driveFileId);
       } catch (e) {
@@ -20140,7 +20282,7 @@ async function fetchTripsyTransportationPhoto(company, category) {
     // instead of whatever image is generated or found"): nothing passing
     // the check caches nothing, so a later maintenance pass tries again --
     // or the owner pastes/picks a van picture once, which pins it globally.
-    if (!pick) pick = company === TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT ? null : fallback;
+    if (!pick) pick = TRIPSY_TRANSFER_PHOTO_SUBJECTS.includes(company) ? null : fallback;
     if (!pick) return null;
     const contentHash = await tripsyHashBlob(pick.blob);
     const driveFileId = await uploadTripsyPlacePhotoToDrive(pick.blob, pick.blob.type || 'image/jpeg');
@@ -24947,8 +25089,8 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
   // wired to the transportation-specific fetch/cache functions above.
   // Reuses Part 1's per-row blurb the same way P/S cards do
   // (summaryBlurbByKey, keyed by tripsySummaryRowKey's `ev:${id}` convention).
-  // Lodgings for the black-van transfer rule, computed once per build --
-  // tripsyIsVanTransferLeg matches a car leg against ANY of the trip's
+  // Lodgings for the transfer photo rule, computed once per build --
+  // tripsyVanTransferPhotoSubject matches a car leg against ANY of the trip's
   // stays (a multi-day hotel's transfer can land on a different day from
   // its check-in row), so this reads the raw trip events, not the day data.
   const vanTransferLodgings = (trip.events || []).filter(e => e.tripsyRaw && e.tripsyRaw.resource === 'hosting');
@@ -24956,12 +25098,14 @@ async function buildTripsyPrintHtml(tripKey, { summaryOnly = false, partialKeys 
     const raw = ev.tripsyRaw;
     const company = raw.company || '';
     const category = raw.category || '';
-    // A car transfer leg (hotel or airport on an end) shows the fixed black
-    // Sprinter van instead of whatever a company/category search would
-    // find: its PHOTO subject becomes the shared sentinel pseudo-company
-    // (see TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT), while the card's TEXT (the
-    // company meta line below) keeps the leg's real operator.
-    const photoCompany = tripsyIsVanTransferLeg(ev, vanTransferLodgings) ? TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT : company;
+    // A car transfer leg shows a fixed picture instead of whatever a
+    // company/category search would find: its PHOTO subject becomes one of
+    // the two shared sentinel pseudo-companies -- the AIRPORT subject
+    // (holding the owner's pinned runway photo) for a leg with an airport
+    // on an end, the HOTEL subject (a black Sprinter) for a hotel-only
+    // transfer -- while the card's TEXT (the company meta line below)
+    // keeps the leg's real operator.
+    const photoCompany = tripsyVanTransferPhotoSubject(ev, vanTransferLodgings) || company;
     const cacheKey = tripsyTransportationPhotoCacheKey(photoCompany, category);
     const cachedEntry = await Store.getTripsyPlacePhoto(cacheKey);
     const isSkipped = !!(cachedEntry && cachedEntry.skipped);
@@ -29995,10 +30139,16 @@ function wireTripsyPhotoCardControls(contentEl) {
           toast('No image on the clipboard. Copy a picture first (right-click it → Copy Image), then tap 📋.', 'error');
           return;
         }
-        swapCardPhoto(card, name, URL.createObjectURL(blob)); // show it now
+        // Compress before storing: a clipboard image arrives at whatever
+        // size the source page served (a real paste landed a 2.8MB PNG,
+        // re-downloaded once per device), and a card never renders wider
+        // than ~1600px. tripsyResizeImageBlob fails soft to the original
+        // bytes, and small images are stored untouched.
+        const saveBlob = blob.size > 400000 ? await tripsyResizeImageBlob(blob, 1600, 0.85) : blob;
+        swapCardPhoto(card, name, URL.createObjectURL(saveBlob)); // show it now
         const cacheKey = cardCacheKey();
-        const contentHash = await tripsyHashBlob(blob);
-        const driveFileId = await uploadTripsyPlacePhotoToDrive(blob, blob.type || 'image/png');
+        const contentHash = await tripsyHashBlob(saveBlob);
+        const driveFileId = await uploadTripsyPlacePhotoToDrive(saveBlob, saveBlob.type || 'image/png');
         const existing = await Store.getTripsyPlacePhoto(cacheKey);
         const ok = await Store.saveTripsyPlacePhoto(cacheKey, {
           driveFileId, photoName: `user-pasted-${Date.now()}`, contentHash,
