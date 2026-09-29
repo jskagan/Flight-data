@@ -260,6 +260,24 @@ permissions in parallel, each degrading to `[]` (no flags on that side) independ
 already stale on the DATA file is not double-flagged. Note a Claude session CANNOT fix a missing
 share itself — the Drive connector's `share_file` is refused ("caller does not have permission")
 on these owner-owned files; the owner shares via Drive or Add Viewer.
+**A trips-only viewer WITHOUT Gmail access gets a Travel-View-only sign-in gate** ("can their
+sign-in page only show travel view instead of giving them the option for the full travel tracker
+functionality," 2026-09-29). The gate renders before identity is known, so it rides a per-device
+hint exactly like `SCOPE_TIER_KEY`: `completeSignIn` (in the scope-tier block, after
+`isTripsOnlyUser` resolves) stores `TRIPS_ONLY_DEVICE_KEY` when `tripsOnlyDeviceHintFor(isTripsOnly,
+hasGmail)` holds — Gmail access = the extra scope tier — and removes it otherwise, correcting it
+on every sign-in; such a sign-in also sets the Travel View pref, so it lands there. On the next
+visit `applyTripsOnlySignInGate` hides "Use Travel Tracker", makes Travel View the primary button,
+and shows a small "Show all options" link (for someone else on the same device). The FIRST sign-in
+on a new device still shows both buttons — nothing can know who it is yet. A UI convenience only:
+the `navigate()` guard is what actually scopes the account. **The Users page's third checkbox,
+"Show My Trips"** (under Trips-only; same day: "when checked, will still show the use travel
+tracker button"), opts a trips-only viewer OUT of that: `driveData.tripsOnlyShowMyTripsEmails`
+(`Store.getTripsOnlyShowMyTripsEmails`/`setTripsOnlyShowMyTripsForEmail`, flat lowercased array)
+is `tripsOnlyDeviceHintFor`'s third arg, so a ticked viewer keeps both buttons and lands wherever
+they choose. It is disabled/unchecked unless Trips-only is on, and `setTripsOnlyForEmail(email,
+false)` (the Users toggle AND the Trips-Only page's Remove) drops it too, so a re-added viewer
+starts Travel-View-only again — that cleanup is also its prune rule. `tripsonlygate_test.js`.
 
 ### The data pipelines
 

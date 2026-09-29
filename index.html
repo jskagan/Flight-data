@@ -1681,6 +1681,7 @@
   </label>
   <button id="signin-btn" class="btn primary" style="padding:12px 24px; font-size:14px;">Use Travel Tracker</button>
   <button id="signin-travelview-btn" class="btn" style="padding:12px 24px; font-size:14px;">Travel View</button>
+  <button id="signin-show-all-btn" type="button" style="display:none; background:none; border:none; color:var(--muted); font-size:12px; text-decoration:underline; cursor:pointer;">Signing in with a different account? Show all options</button>
   <div id="signin-status" style="color:var(--muted); font-size:13px; min-height:20px;"></div>
   <div style="color:var(--muted); font-size:11px; max-width:380px;">
     "Remember me" keeps you signed in on this browser for about an hour.
@@ -4102,10 +4103,35 @@ const Store = {
       const idx = driveData.tripsOnlyEmails.findIndex(e => e.toLowerCase() === lower);
       if (enabled && idx < 0) driveData.tripsOnlyEmails.push(lower);
       else if (!enabled && idx >= 0) driveData.tripsOnlyEmails.splice(idx, 1);
+      // Leaving trips-only also drops "Show My Trips" (it only means something for a
+      // trips-only viewer) so a later re-add starts from the Travel-View-only default.
+      if (!enabled && Array.isArray(driveData.tripsOnlyShowMyTripsEmails)) {
+        driveData.tripsOnlyShowMyTripsEmails = driveData.tripsOnlyShowMyTripsEmails.filter(e => e.toLowerCase() !== lower);
+      }
       await persistDriveData();
       return { ok: true };
     } catch (e) {
       console.error('Store.setTripsOnlyForEmail failed:', e);
+      return { ok: false, error: e.message || String(e) };
+    }
+  },
+  // Trips-only viewers who should STILL be offered "Use Travel Tracker" (i.e. My
+  // Trips) on the sign-in page. Without it, a trips-only viewer with no Gmail access
+  // gets a Travel-View-only gate (see TRIPS_ONLY_DEVICE_KEY). Same flat-array shape.
+  async getTripsOnlyShowMyTripsEmails() {
+    return [...(driveData.tripsOnlyShowMyTripsEmails || [])];
+  },
+  async setTripsOnlyShowMyTripsForEmail(email, enabled) {
+    try {
+      if (!driveData.tripsOnlyShowMyTripsEmails) driveData.tripsOnlyShowMyTripsEmails = [];
+      const lower = email.toLowerCase();
+      const idx = driveData.tripsOnlyShowMyTripsEmails.findIndex(e => e.toLowerCase() === lower);
+      if (enabled && idx < 0) driveData.tripsOnlyShowMyTripsEmails.push(lower);
+      else if (!enabled && idx >= 0) driveData.tripsOnlyShowMyTripsEmails.splice(idx, 1);
+      await persistDriveData();
+      return { ok: true };
+    } catch (e) {
+      console.error('Store.setTripsOnlyShowMyTripsForEmail failed:', e);
       return { ok: false, error: e.message || String(e) };
     }
   },
@@ -13657,10 +13683,11 @@ async function renderUsersListBody() {
   const body = document.getElementById('users-list-body');
   if (!body) return;
   try {
-    const [permissions, accessEmails, tripsOnlyEmails] = await Promise.all([
+    const [permissions, accessEmails, tripsOnlyEmails, showMyTripsEmails] = await Promise.all([
       listDriveFilePermissions(driveFileId),
       Store.getGmailCalendarAccessEmails(),
       Store.getTripsOnlyEmails(),
+      Store.getTripsOnlyShowMyTripsEmails(),
     ]);
     if (!permissions.length) {
       body.innerHTML = `<div style="color:var(--muted);">Could not load the sharing list from Drive.</div>`;
@@ -13672,8 +13699,11 @@ async function renderUsersListBody() {
       const roleLabel = p.role === 'owner' ? 'Owner' : p.role === 'writer' ? 'Editor' : p.role === 'reader' ? 'Viewer' : esc(p.role);
       const checked = isThisOwner || accessEmails.includes(email.toLowerCase());
       const tripsOnlyChecked = !isThisOwner && tripsOnlyEmails.includes(email.toLowerCase());
+      // Only meaningful for a trips-only viewer, so it's disabled (and reads
+      // unchecked) unless Trips-only is on.
+      const showMyTripsChecked = tripsOnlyChecked && showMyTripsEmails.includes(email.toLowerCase());
       return `
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-top:1px solid var(--line);">
+        <div data-user-row style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-top:1px solid var(--line);">
           <div style="min-width:0;">
             <div style="font-weight:600; font-size:14px;">${esc(p.displayName || email)}</div>
             <div style="font-size:12px; color:var(--muted);">${esc(email)} · ${roleLabel}</div>
@@ -13690,6 +13720,12 @@ async function renderUsersListBody() {
                 ${tripsOnlyChecked ? 'checked' : ''} ${isThisOwner ? 'disabled' : ''}
                 style="width:16px; height:16px; ${isThisOwner ? '' : 'cursor:pointer;'}">
               Trips-only
+            </label>
+            <label data-user-showmytrips-label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); justify-content:flex-end; ${tripsOnlyChecked ? 'cursor:pointer;' : 'opacity:0.5;'}">
+              <input type="checkbox" data-user-showmytrips-toggle data-email="${esc(email)}"
+                ${showMyTripsChecked ? 'checked' : ''} ${tripsOnlyChecked ? '' : 'disabled'}
+                style="width:16px; height:16px; ${tripsOnlyChecked ? 'cursor:pointer;' : ''}">
+              Show My Trips
             </label>
           </div>
         </div>
@@ -13709,6 +13745,12 @@ async function renderUsersListBody() {
         For trips to appear at all, also share <strong>trips-data.json</strong> with their Google account in Drive
         (same as the data file) -- trip data lives in its own file. Note: this scopes what they <em>see</em> in the app --
         it does not stop a technically-savvy person from reading the raw shared files directly.
+      </p>
+      <p style="color:var(--muted); font-size:12px; margin-top:8px; line-height:1.5;">
+        A trips-only person <strong>without</strong> Gmail access sees only the <strong>Travel View</strong> button on the
+        sign-in page (from their second sign-in on a device) and always lands in Travel View. Tick <strong>Show My Trips</strong>
+        to keep offering them the <strong>Use Travel Tracker</strong> button too, which opens My Trips. Takes effect at their
+        <strong>next</strong> sign-in.
       </p>
     `;
     body.querySelectorAll('[data-user-access-toggle]').forEach(cb => {
@@ -13740,7 +13782,33 @@ async function renderUsersListBody() {
         } else {
           toast(`Saved. Takes effect the next time ${email} signs in.`, 'success');
           cb.disabled = false;
+          // Show My Trips follows Trips-only: enabled only while it's on, and
+          // cleared when it goes off (the Store call above already dropped it).
+          const row = cb.closest('[data-user-row]');
+          const smt = row && row.querySelector('[data-user-showmytrips-toggle]');
+          const smtLabel = row && row.querySelector('[data-user-showmytrips-label]');
+          if (smt) {
+            smt.disabled = !enabled;
+            smt.style.cursor = enabled ? 'pointer' : '';
+            if (!enabled) smt.checked = false;
+          }
+          if (smtLabel) { smtLabel.style.opacity = enabled ? '' : '0.5'; smtLabel.style.cursor = enabled ? 'pointer' : ''; }
         }
+      });
+    });
+    body.querySelectorAll('[data-user-showmytrips-toggle]').forEach(cb => {
+      cb.addEventListener('change', async () => {
+        const email = cb.dataset.email;
+        const enabled = cb.checked;
+        cb.disabled = true;
+        const result = await Store.setTripsOnlyShowMyTripsForEmail(email, enabled);
+        if (!result.ok) {
+          toast(`Could not save -- ${result.error || 'unknown error'}`, 'error');
+          cb.checked = !enabled;
+        } else {
+          toast(`Saved. Takes effect the next time ${email} signs in.`, 'success');
+        }
+        cb.disabled = false;
       });
     });
   } catch (e) {
@@ -37205,6 +37273,34 @@ function loadTravelViewPref() {
 function saveTravelViewPref(on) {
   try { localStorage.setItem(TRAVEL_VIEW_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
 }
+// Trips-only DEVICE hint: the sign-in gate renders before anyone is signed in, so
+// it can't know the person at the keyboard is a trips-only viewer. Same answer as
+// SCOPE_TIER_KEY -- remember what the last sign-in on THIS device turned out to be.
+// Set (by completeSignIn, corrected on every sign-in) when that account is
+// trips-only AND has no Gmail access; the gate then offers only "Travel View",
+// with a small "Show all options" escape for someone else using the device. A UI
+// convenience only -- the navigate() guard is what actually scopes the account.
+const TRIPS_ONLY_DEVICE_KEY = 'flightlog_trips_only_device';
+function tripsOnlyDeviceHintFor(isTripsOnly, hasGmailAccess, showMyTrips = false) {
+  return !!isTripsOnly && !hasGmailAccess && !showMyTrips;
+}
+function loadTripsOnlyDeviceHint() {
+  try { return localStorage.getItem(TRIPS_ONLY_DEVICE_KEY) === '1'; } catch (e) { return false; }
+}
+function saveTripsOnlyDeviceHint(on) {
+  try { if (on) localStorage.setItem(TRIPS_ONLY_DEVICE_KEY, '1'); else localStorage.removeItem(TRIPS_ONLY_DEVICE_KEY); } catch (e) { /* ignore */ }
+}
+// Shape the sign-in gate for this device: trips-only -> Travel View is the one
+// (primary) choice; otherwise both buttons as always. `showAll` is the escape link.
+function applyTripsOnlySignInGate(tripsOnly) {
+  const fullBtn = document.getElementById('signin-btn');
+  const tvBtn = document.getElementById('signin-travelview-btn');
+  const allLink = document.getElementById('signin-show-all-btn');
+  if (!fullBtn || !tvBtn) return;
+  fullBtn.style.display = tripsOnly ? 'none' : '';
+  tvBtn.className = tripsOnly ? 'btn primary' : 'btn';
+  if (allLink) allLink.style.display = tripsOnly ? '' : 'none';
+}
 // The one account allowed to upload/edit/delete -- everyone else who
 // signs in gets read-only access to the same shared data. Real
 // enforcement also happens at the Google Drive permission level (share
@@ -37421,6 +37517,13 @@ async function completeSignIn() {
       const accessEmails = await Store.getGmailCalendarAccessEmails();
       const needsExtraScope = isOwner || (!!currentUserEmail && accessEmails.includes(currentUserEmail.toLowerCase()));
       saveScopeTierHint(needsExtraScope ? 'full' : 'base');
+      // Trips-only with no Gmail access: next time, the gate offers only Travel
+      // View -- and this sign-in lands there too (it's their whole app).
+      // "Show My Trips" (Users page) keeps the full gate for this trips-only viewer.
+      const showMyTrips = isTripsOnlyUser && (await Store.getTripsOnlyShowMyTripsEmails()).includes(currentUserEmail.toLowerCase());
+      const tripsOnlyDevice = tripsOnlyDeviceHintFor(isTripsOnlyUser, needsExtraScope, showMyTrips);
+      saveTripsOnlyDeviceHint(tripsOnlyDevice);
+      if (tripsOnlyDevice) saveTravelViewPref(true);
     } catch (e) {
       console.error('Updating scope-tier hint failed (non-fatal):', e);
     }
@@ -37686,6 +37789,9 @@ function initGoogleAuth() {
   document.getElementById('signin-btn').addEventListener('click', () => startSignIn(false));
   const tvSigninBtn = document.getElementById('signin-travelview-btn');
   if (tvSigninBtn) tvSigninBtn.addEventListener('click', () => startSignIn(true));
+  applyTripsOnlySignInGate(loadTripsOnlyDeviceHint());
+  const showAllBtn = document.getElementById('signin-show-all-btn');
+  if (showAllBtn) showAllBtn.addEventListener('click', () => applyTripsOnlySignInGate(false));
 
   // Token client is ready (so a silent refresh can run later) -- NOW take the
   // cached-token fast path if a valid remembered token exists; otherwise the splash
