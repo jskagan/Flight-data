@@ -102,6 +102,19 @@ assert(/data-tripsonly-remove="\$\{esc\(email\)\}"/.test(extractFn('tripsOnlyVie
   }
 })();
 
+// ---- "Can you update the trips-only view page on utilities so it shows the
+// url a user would need to click to get the trips view" (2026-09-29): the
+// guide's "Send them the link" step shows the app's own URL with a Copy
+// button. Derived from location, never hardcoded. ----
+{
+  const appUrl = new Function(`${extractFn('tripsOnlyAppUrl')} return tripsOnlyAppUrl;`)();
+  assert(appUrl({ origin: 'https://jskagan.github.io', pathname: '/Flight-data/index.html' }) === 'https://jskagan.github.io/Flight-data/'
+    && appUrl({ origin: 'https://jskagan.github.io', pathname: '/Flight-data/' }) === 'https://jskagan.github.io/Flight-data/',
+    'THE ASK: the shown URL is the app\'s own address, with a trailing index.html stripped to the canonical form Pages serves anyway');
+  assert(appUrl({ origin: 'http://localhost:8080', pathname: '/index.html' }) === 'http://localhost:8080/',
+    'a locally-served copy shows ITS address -- nothing is hardcoded to the deployed host');
+}
+
 // ---- wiring: the page renders the card, and fills it AFTER painting ----
 const page = extractFn('renderUtilitiesTripsOnly');
 assert(/Current Trips-Only Viewers/.test(page) && /id="tripsonly-current-list"/.test(page),
@@ -132,4 +145,8 @@ assert(/catch \(e\) \{ console\.error\('Trips-only list: permissions lookup fail
     'both failure toasts point at the safe retry the idempotent helpers make true');
   assert(/email === OWNER_EMAIL\.toLowerCase\(\)/.test(page),
     'the owner account cannot be added as a trips-only viewer');
+  assert(/id="tripsonly-app-url"[^>]*>\$\{esc\(tripsOnlyAppUrl\(\)\)\}/.test(page)
+    && /navigator\.clipboard\.writeText\(tripsOnlyAppUrl\(\)\)/.test(page)
+    && /tap the link text to select it, then copy manually/.test(page),
+    'the link renders in a selectable code box with a Copy button whose refused-clipboard fallback explains the manual path');
 }

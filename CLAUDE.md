@@ -237,7 +237,14 @@ person is never flagged without the access that makes sign-in work), Remove take
 cleared-share-but-stuck-flag failure just shows the list's own ⚠️ stale row). Both actions sit
 behind a `tripsyConfirmDialog`. The one step that can NEVER move in-app is Google Console's OAuth
 test-user add (Step 2 — Google has no API for it), and the Add box's note says so.
-`tripsonlylist_test.js`.
+**Step 6 shows the actual link with a Copy button** ("Can you update the trips-only view page on
+utilities so it shows the url a user would need to click to get the trips view," 2026-09-29):
+`tripsOnlyAppUrl()` derives it from the app's OWN location (origin + pathname, trailing
+`index.html` stripped) rather than hardcoding the Pages URL — a moved repo or a locally-served
+copy stays correct — rendered in a `user-select:all` code box so a refused clipboard (old WebView,
+the mailto lesson) still leaves a manual copy path, which the Copy button's error toast points at.
+The note says there is no viewer-specific link: everyone opens the same address, and what they see
+is decided at sign-in by the trips-only flag. `tripsonlylist_test.js`.
 
 ### The data pipelines
 
