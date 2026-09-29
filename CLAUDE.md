@@ -245,6 +245,21 @@ copy stays correct — rendered in a `user-select:all` code box so a refused cli
 the mailto lesson) still leaves a manual copy path, which the Copy button's error toast points at.
 The note says there is no viewer-specific link: everyone opens the same address, and what they see
 is decided at sign-in by the trips-only flag. `tripsonlylist_test.js`.
+**The viewer list checks BOTH files' sharing, and Travel View names the real failure** ("A user is
+getting this message when she tries to view the trips only view," 2026-09-29 — Travel View said
+"Trip data is locked on this device — open My Trips once to unlock," encryption-era wording whose
+advice could never help: every trips-only viewer was shared on `flight-log-data.json` but NOBODY
+on `trips-data.json`, so all could sign in and none could load a trip, while the viewer list showed
+every row clean). Fixes: `ensureTripsyDecrypted` now records WHY a load failed
+(`tripsyTripsLoadError`); `tripsyTripsLoadLooksNotShared()` keys on the loader's own "not found"
+(Drive hides unshared files), so Travel View tells a not-shared viewer to ask the owner to share
+`trips-data.json` and a transient failure to reload. `tripsOnlyViewerListHtml` takes a third
+`tripsPermissions` arg and flags "⚠️ Not shared on the trips file — they see no trips" (Add Viewer
+is the remedy: idempotent, it only fills the missing share); the page fetches both files'
+permissions in parallel, each degrading to `[]` (no flags on that side) independently, and a row
+already stale on the DATA file is not double-flagged. Note a Claude session CANNOT fix a missing
+share itself — the Drive connector's `share_file` is refused ("caller does not have permission")
+on these owner-owned files; the owner shares via Drive or Add Viewer.
 
 ### The data pipelines
 

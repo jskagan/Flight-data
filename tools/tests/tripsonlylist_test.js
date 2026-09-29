@@ -59,6 +59,45 @@ assert(/No one has Trips-only access yet/.test(listHtml([], [{ emailAddress: 'a@
     'an EMPTY permissions list means the Drive lookup failed -- bare emails show with NO stale flags, rather than every row wrongly flagged');
 }
 
+// ---- "A user is getting this message when she tries to view the trips only
+// view" (2026-09-29): every trips-only viewer was shared on flight-log-data
+// but NOBODY on trips-data.json -- sign-in worked, no trips ever loaded, and
+// this list showed every row clean. The check now verifies BOTH files. ----
+{
+  const dataPerms = [{ emailAddress: 'mo@example.com', displayName: 'Mo', role: 'reader' },
+    { emailAddress: 'rob@example.com', displayName: 'Rob', role: 'reader' }];
+  const out = listHtml(['mo@example.com', 'rob@example.com'], dataPerms,
+    [{ emailAddress: 'MO@example.com', role: 'reader' }]);
+  assert((out.match(/⚠️ Not shared on the trips file/g) || []).length === 1 && /rob@example\.com/.test(out)
+    && /enter that same email in <strong>Add Viewer<\/strong>/.test(out),
+    'THE LIVE BUG: a viewer shared on the data file but NOT the trips file is flagged (case-insensitively), with Add Viewer as the remedy');
+  const outNoTrips = listHtml(['mo@example.com'], dataPerms, []);
+  assert(!/Not shared on the trips file/.test(outNoTrips),
+    'an empty trips-file permissions list means THAT lookup failed -- no trips flags, same rule as the data file');
+  const outStale = listHtml(['gone@example.com'], dataPerms, [{ emailAddress: 'mo@example.com' }]);
+  assert(/No longer shared on the data file/.test(outStale) && !/Not shared on the trips file/.test(outStale),
+    'a row already stale on the DATA file (cannot sign in at all) is not double-flagged for the trips file');
+}
+
+// ---- the Travel View failure message names the REAL reason ----
+assert(!/locked on this device/.test(html) && !/once to unlock/.test(html),
+  'the encryption-era "locked on this device -- open My Trips once to unlock" wording is GONE (its advice could never fix a missing share)');
+assert(/let tripsyTripsLoadError = null;/.test(html)
+  && /tripsyTripsLoadError = e;/.test(extractFn('ensureTripsyDecrypted'))
+  && /tripsyTripsLoadError = null;/.test(extractFn('ensureTripsyDecrypted')),
+  'ensureTripsyDecrypted records WHY the load failed (and clears it on success) so failure screens can be honest');
+{
+  const looksNotShared = new Function(
+    'tripsyTripsLoadError',
+    extractFn('tripsyTripsLoadLooksNotShared').replace(/^function /, 'var f = function ') + '\nreturn f();');
+  assert(looksNotShared({ message: 'trips-data.json not found (or not shared with this account).' }) === true
+    && looksNotShared({ message: 'network error' }) === false && looksNotShared(null) === false,
+    'the not-shared test keys on the loader\'s own "not found" (Drive hides unshared files); anything else reads as transient');
+}
+assert(/doesn't have access to the trip data yet\. Ask \$\{esc\(OWNER_EMAIL\)\} to share <b>trips-data\.json<\/b>/.test(html)
+  && /Couldn't load the trip data — check your connection and reload\./.test(html),
+  'Travel View tells a not-shared viewer to ask the owner for the trips-data.json share, and a transient failure to just reload');
+
 // ---- "Is there a way I can add or delete trips-only access from within the
 // app" (2026-09-28, follow-up): the card gained an Add Viewer box (shares
 // BOTH data files as Viewer + flips the flag -- Steps 3-5 in one tap) and a
@@ -121,10 +160,12 @@ assert(/Current Trips-Only Viewers/.test(page) && /id="tripsonly-current-list"/.
   'the Trips-Only Access page carries the Current Trips-Only Viewers card');
 assert(page.indexOf('main.innerHTML') < page.indexOf('Store.getTripsOnlyEmails()')
   && /listDriveFilePermissions\(driveFileId\)/.test(page)
-  && /listEl\.innerHTML = tripsOnlyViewerListHtml\(tripsOnlyEmails, permissions\)/.test(page),
-  'the fill runs after the page paints, reading the same permissions source the Users page uses -- a network call never stands in front of the render');
-assert(/catch \(e\) \{ console\.error\('Trips-only list: permissions lookup failed/.test(page),
-  'a failed permissions fetch degrades to the bare email list instead of erroring the card');
+  && /resolveTripsDataFileIdForSharing\(\)\.then\(id => listDriveFilePermissions\(id\)\)/.test(page)
+  && /listEl\.innerHTML = tripsOnlyViewerListHtml\(tripsOnlyEmails, permissions, tripsPermissions\)/.test(page),
+  'the fill runs after the page paints, reading BOTH files\' sharing in parallel -- each lookup degrades to [] independently, and a network call never stands in front of the render');
+assert(/console\.error\('Trips-only list: data-file permissions lookup failed \(showing bare emails\):', e\); return \[\];/.test(page)
+  && /console\.error\('Trips-only list: trips-file permissions lookup failed \(skipping that check\):', e\); return \[\];/.test(page),
+  'each failed permissions fetch degrades independently -- bare emails / skipped check, never an errored card');
 
 // ---- wiring: add/remove flows, both confirmed, both ordered deliberately ----
 {

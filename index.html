@@ -8478,17 +8478,30 @@ function tripsOnlyAppUrl(loc) {
 // since removed (harmless -- they can't sign in at all -- but worth showing
 // so the list reflects reality). An EMPTY permissions list means the Drive
 // lookup failed/was skipped, so nothing is flagged rather than everything.
-function tripsOnlyViewerListHtml(tripsOnlyEmails, permissions) {
+// The row check verifies BOTH files' sharing, because they break differently
+// ("A user is getting this message when she tries to view the trips only
+// view," 2026-09-29 — every trips-only viewer was shared on flight-log-data
+// but NOBODY was shared on trips-data.json, so all of them could sign in and
+// none could see a single trip, while this list showed every row clean):
+// missing the DATA file share means they can't sign in at all; missing the
+// TRIPS file share means sign-in works but My Trips / Travel View load
+// nothing. An empty permissions array on either side means that lookup
+// failed/was skipped, so that side flags nothing.
+function tripsOnlyViewerListHtml(tripsOnlyEmails, permissions, tripsPermissions = []) {
   if (!tripsOnlyEmails.length) {
     return `<div style="color:var(--muted); font-size:14px;">No one has Trips-only access yet — follow the steps below to add someone.</div>`;
   }
   const canVerify = permissions.length > 0;
+  const canVerifyTrips = tripsPermissions.length > 0;
   const byEmail = new Map(permissions.map(p => [String(p.emailAddress || '').toLowerCase(), p]));
-  let anyStale = false;
+  const tripsEmails = new Set(tripsPermissions.map(p => String(p.emailAddress || '').toLowerCase()));
+  let anyStale = false, anyTripsMissing = false;
   const rows = tripsOnlyEmails.map(email => {
     const p = byEmail.get(email);
     const stale = canVerify && !p;
+    const tripsMissing = !stale && canVerifyTrips && !tripsEmails.has(email);
     if (stale) anyStale = true;
+    if (tripsMissing) anyTripsMissing = true;
     return `
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-top:1px solid var(--line);">
         <div style="min-width:0;">
@@ -8497,6 +8510,7 @@ function tripsOnlyViewerListHtml(tripsOnlyEmails, permissions) {
         </div>
         <div style="display:flex; align-items:center; gap:10px; flex-shrink:0;">
           ${stale ? `<div style="font-size:12px; color:var(--amber);">⚠️ No longer shared on the data file</div>` : ''}
+          ${tripsMissing ? `<div style="font-size:12px; color:var(--amber);">⚠️ Not shared on the trips file — they see no trips</div>` : ''}
           <button class="btn" data-tripsonly-remove="${esc(email)}" style="font-size:12px; padding:5px 10px;">Remove</button>
         </div>
       </div>`;
@@ -8507,7 +8521,10 @@ function tripsOnlyViewerListHtml(tripsOnlyEmails, permissions) {
       setting — full revocation. To make someone a <strong>full viewer</strong> instead (all pages, still read-only),
       un-tick <strong>Trips-only</strong> on <strong>Utilities → Users</strong>.${anyStale ? ` A <strong>⚠️</strong>
       row's Drive sharing was already removed, so its setting currently does nothing — Remove tidies it up, or
-      re-share <strong>flight-log-data.json</strong> to restore their access.` : ''}
+      re-share <strong>flight-log-data.json</strong> to restore their access.` : ''}${anyTripsMissing ? ` A row
+      flagged <strong>"Not shared on the trips file"</strong> can sign in but sees an empty My Trips / a
+      "no access to the trip data" Travel View — enter that same email in <strong>Add Viewer</strong> above to
+      grant the missing share (already-done steps are skipped).` : ''}
     </p>`;
 }
 
@@ -8639,12 +8656,19 @@ async function renderUtilitiesTripsOnly() {
     if (!listEl) return;
     try {
       const tripsOnlyEmails = await Store.getTripsOnlyEmails();
-      let permissions = [];
+      let permissions = [], tripsPermissions = [];
       if (tripsOnlyEmails.length) {
-        try { permissions = await listDriveFilePermissions(driveFileId); }
-        catch (e) { console.error('Trips-only list: permissions lookup failed (showing bare emails):', e); }
+        // BOTH files' sharing, in parallel -- each degrades to [] (no flags
+        // on that side) independently, so one failed lookup can't blank the
+        // other's verdicts.
+        [permissions, tripsPermissions] = await Promise.all([
+          listDriveFilePermissions(driveFileId)
+            .catch(e => { console.error('Trips-only list: data-file permissions lookup failed (showing bare emails):', e); return []; }),
+          resolveTripsDataFileIdForSharing().then(id => listDriveFilePermissions(id))
+            .catch(e => { console.error('Trips-only list: trips-file permissions lookup failed (skipping that check):', e); return []; }),
+        ]);
       }
-      listEl.innerHTML = tripsOnlyViewerListHtml(tripsOnlyEmails, permissions);
+      listEl.innerHTML = tripsOnlyViewerListHtml(tripsOnlyEmails, permissions, tripsPermissions);
     } catch (e) {
       console.error('Trips-only viewer list failed:', e);
       listEl.innerHTML = `<div style="color:var(--muted); font-size:13px;">Could not load the list — reload the page to retry.</div>`;
@@ -35138,7 +35162,7 @@ async function renderTripsyParseReview() {
 
   const trips = await ensureTripsyDecrypted();
   if (!trips) {
-    container.innerHTML = `<div class="card"><div class="empty-state">Trip data isn't unlocked on this device yet — visit <a href="#" data-parse-review-nav-tripsy style="color:var(--amber);">My Trips</a> first.</div></div>`;
+    container.innerHTML = `<div class="card"><div class="empty-state">Trip data isn't loaded yet — visit <a href="#" data-parse-review-nav-tripsy style="color:var(--amber);">My Trips</a> first.</div></div>`;
     container.querySelector("[data-parse-review-nav-tripsy]").addEventListener("click", e => { e.preventDefault(); navigate('tripsytrips'); });
     return;
   }
@@ -35435,17 +35459,27 @@ async function renderTripsyTrips() {
 // shared by the Tripsy Trips page (loadTripsyTrips below, which also
 // repopulates that page's own #tripsy-card) and Home's "Upcoming Trips" card.
 // Returns the trips array, or null on failure (file missing, not shared with
-// this account, or a transient Drive error) -- caller decides what to show.
+// this account, or a transient Drive error) -- caller decides what to show,
+// and tripsyTripsLoadError keeps WHY it failed so the failure screens can be
+// honest about it (a not-shared account needs the owner to act; a transient
+// error just needs a reload -- telling one audience the other's remedy wastes
+// their time, which is exactly what the old Travel View "locked" message did).
+let tripsyTripsLoadError = null;
+function tripsyTripsLoadLooksNotShared() {
+  return /not found/i.test(String((tripsyTripsLoadError && tripsyTripsLoadError.message) || ''));
+}
 async function ensureTripsyDecrypted() {
   if (tripsyDecryptedTrips) return tripsyDecryptedTrips;
   try {
     tripsyDecryptedTrips = await fetchTripsDataFromDrive();
+    tripsyTripsLoadError = null;
     // Second prune pass, now that the trip-scoped rules have real trips to
     // judge against (the sign-in pass ran with null). In-memory, owner-only.
     if (isOwner) pruneDriveDataInMemory(tripsyDecryptedTrips);
     return tripsyDecryptedTrips;
   } catch (e) {
     console.error('trips-data.json load failed:', e);
+    tripsyTripsLoadError = e;
     return null;
   }
 }
@@ -36061,7 +36095,20 @@ async function renderTravelView(chosenTripKey) {
   wireExit(); armMeasure();
 
   const decrypted = await ensureTripsyDecrypted();
-  if (!decrypted) { main.innerHTML = shell('Travel View', `<div class="empty-state">Trip data is locked on this device — open <b>My Trips</b> once to unlock, then reload.</div>`); wireExit(); return; }
+  // The failure message names the REAL reason (a trips-only viewer hit the
+  // old "open My Trips to unlock" wording here, 2026-09-29 — it survived
+  // from the encrypted-snapshot era, and its advice could never help: her
+  // account simply had no Drive share on trips-data.json, which only the
+  // OWNER can fix; My Trips' own Trip Data Unavailable card already said so
+  // honestly, Travel View didn't). Not-shared (the load's "not found" —
+  // Drive hides unshared files) gets the ask-the-owner wording; anything
+  // else reads as transient.
+  if (!decrypted) {
+    main.innerHTML = shell('Travel View', `<div class="empty-state">${tripsyTripsLoadLooksNotShared()
+      ? `Your Google account doesn't have access to the trip data yet. Ask ${esc(OWNER_EMAIL)} to share <b>trips-data.json</b> with this account — once that's done, reload this page.`
+      : `Couldn't load the trip data — check your connection and reload. If this keeps happening, ask ${esc(OWNER_EMAIL)} to check your access.`}</div>`);
+    wireExit(); return;
+  }
   // Load the P/S reservations Travel View weaves in next to flights. My Trips
   // lazy-loads these too, but entering Travel View directly (the sign-in button)
   // skips that page, so load them here rather than depend on My Trips having run.

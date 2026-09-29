@@ -12,7 +12,7 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 
 // ---- source-pattern checks: the fix is present in renderTravelView ----
 const tvStart = html.indexOf('async function renderTravelView(');
-const tvBlock = html.slice(tvStart, tvStart + 14000); // the attire-guide-load section is well into the function
+const tvBlock = html.slice(tvStart, tvStart + 24000); // the attire-guide-load section is well into the function
 assert(/const washedDayKeys = Store\.listTripsyLaundry\(trip\.key\)\.filter\(r => r\.washedAt\)\.map\(r => r\.dayKey\);/.test(tvBlock),
   'collects every actually-washed day (either person) for this trip');
 assert(/const latestWashDayKey = washedDayKeys\.length \? washedDayKeys\.reduce\(\(a, b\) => \(b > a \? b : a\)\) : null;/.test(tvBlock),
