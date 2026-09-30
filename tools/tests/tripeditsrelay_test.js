@@ -68,6 +68,7 @@ assert(/if \(!isOwner \|\| !tripsyDecryptedTrips\) return;/.test(extractFn('drai
       if (failOn && change.eventSummary === failOn) throw new Error('write failed');
       calls.queued.push(change);
     } };
+    ${extractFn('tripsyTripEditCreateIdentity')}
     ${src.replace(/^async function /, 'var applyTripsyTripEditsRelay = async function ')}
     return applyTripsyTripEditsRelay;
   `)(calls, trips, failOn || null);
@@ -100,4 +101,23 @@ assert(/if \(!isOwner \|\| !tripsyDecryptedTrips\) return;/.test(extractFn('drai
   try { await mk('JJ Lin - Padang Stage')(relay); } catch (e) { threw = true; }
   assert(threw && calls.queued.length === 1 && calls.queued[0].fields.name === 'CORTIS - Padang Stage',
     'one failed entry does not block the rest, and the throw keeps the relay file for the next open (replay dedupes make that safe)');
+
+  // "incorporate this information into the itinerary for my Germany trip"
+  // (2026-09-30): relayed CAR legs were silently skipped. Transportation has no
+  // name/startsAt, so the old name+startsAt dedupe read '' === '' against any
+  // existing flight and called every new leg a duplicate.
+  calls.queued.length = 0; calls.toasts.length = 0;
+  trips[0].events.push({ id: 'transportation-5', tripsyRaw: { resource: 'transportation', id: 5, category: 'airplane',
+    departureAt: '2026-11-16T09:15:00', departureDescription: 'Zurich (ZRH)', arrivalDescription: 'Stuttgart (STR)' } });
+  await mk()({ edits: [
+    { type: 'create_event', tripKey: 'tripsy-1', tripsyResource: 'transportation', eventSummary: 'Drive',
+      fields: { category: 'car', departureAt: '2026-11-18T12:30:00', departureDescription: 'Stuttgart', arrivalDescription: 'Salzburg' } },
+    { type: 'create_event', tripKey: 'tripsy-1', tripsyResource: 'transportation', eventSummary: 'Flight replay',
+      fields: { category: 'airplane', departureAt: '2026-11-16T09:15:00', departureDescription: 'Zurich (ZRH)', arrivalDescription: 'Stuttgart (STR)' } },
+  ] });
+  assert(calls.queued.length === 1 && calls.queued[0].eventSummary === 'Drive',
+    'THE FIX: a new car leg on a trip with flights is applied, while a true transportation replay (same departure time + endpoints) is still skipped');
+  const ident = new Function(extractFn('tripsyTripEditCreateIdentity') + '; return tripsyTripEditCreateIdentity;')();
+  assert(ident('transportation', {}) === '' && ident('activity', {}) === '',
+    'an entry with nothing identifying never dedupes against anything');
 })();

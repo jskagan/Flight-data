@@ -1364,7 +1364,13 @@ step 4; git history has it if ever needed.
   edits repaint an open page and an unchanged pass still skips the rebuild. The first real relay (2026-09-28) set the Singapore GP concert
   times/stages: 4 `edit_event` (JJ Lin, The Killers, James Arthur, Lana Del Rey — Padang) + 5
   `create_event` (CORTIS, Zara Larsson; Split Enz, Goo Goo Dolls, Janet Jackson — Wharf).
-  `tripeditsrelay_test.js`.
+  **The `create_event` replay dedupe is per-resource** (`tripsyTripEditCreateIdentity`, found
+  2026-09-30 adding the Germany road-trip drives): it compared `name`+`startsAt`, which
+  TRANSPORTATION doesn't carry, so `'' === ''` matched any existing flight and every relayed
+  car/train leg was silently skipped (and the relay file then deleted). Transportation now keys on
+  `departureAt`+endpoints, everything else on `name`+`startsAt`, and an entry with nothing
+  identifying never dedupes. A relay carrying transportation must not be uploaded before this
+  fix is live. `tripeditsrelay_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS

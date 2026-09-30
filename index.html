@@ -5437,6 +5437,19 @@ async function drainTripsyNarrativeResults() {
 // able to write the relay could edit the data file directly.
 const TRIPSY_TRIP_EDITS_FILENAME = 'tripsy-trip-edits.json';
 const TRIPSY_TRIP_EDIT_KNOWN_TYPES = ['edit_event', 'delete_event', 'create_event', 'edit_trip', 'create_trip', 'delete_trip', 'move_event'];
+// A create_event's replay-dedupe identity. Transportation carries no
+// name/startsAt at all (its fields are departure/arrival), so the old
+// name+startsAt test read '' === '' against EVERY existing flight and
+// silently skipped every relayed car/train leg on a trip that had one.
+// Returns '' (never dedupe) when there is nothing identifying to compare.
+function tripsyTripEditCreateIdentity(resource, raw) {
+  const r = raw || {};
+  const parts = resource === 'transportation'
+    ? [r.departureAt, r.departureDescription, r.arrivalDescription]
+    : [r.name, r.startsAt];
+  if (!parts.some(v => v)) return '';
+  return [resource || '', ...parts.map(v => String(v || '').trim().toLowerCase())].join('|');
+}
 async function applyTripsyTripEditsRelay(relay) {
   const edits = Array.isArray(relay && relay.edits) ? relay.edits : [];
   let applied = 0, skipped = 0, failed = 0;
@@ -5450,10 +5463,9 @@ async function applyTripsyTripEditsRelay(relay) {
       } else if (change.type === 'create_event') {
         const trip = trips.find(t => t.key === change.tripKey);
         if (!trip) { skipped++; continue; }
-        const f = change.fields || {};
-        const dup = (trip.events || []).some(ev => ev.tripsyRaw
-          && (ev.tripsyRaw.name || '') === (f.name || '')
-          && (ev.tripsyRaw.startsAt || '') === (f.startsAt || ''));
+        const id = tripsyTripEditCreateIdentity(change.tripsyResource, change.fields || {});
+        const dup = !!id && (trip.events || []).some(ev => ev.tripsyRaw
+          && tripsyTripEditCreateIdentity(ev.tripsyRaw.resource, ev.tripsyRaw) === id);
         if (dup) { skipped++; continue; } // a replay after a partial failure
       } else if (change.type === 'create_trip') {
         if (trips.some(t => t.key === change.tripKey)) { skipped++; continue; }
