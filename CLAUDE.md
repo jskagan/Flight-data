@@ -1606,7 +1606,14 @@ step 4; git history has it if ever needed.
   block-dress-level-propagation model — see the `displayCategory` note under the manual-override
   bullet below; before it, the receptions kept their own Cocktail tier and this drill-down showed
   only the Concert.)
-- **"Do Laundry Today"** sits on its own flush-right row (`.tripsy-dg-laundry-row`) directly
+- **The "🧺 Laundry" button** (labeled "Do Laundry Today" until 2026-10-01 — "Why does the daily
+  dress guide say to do laundry every day?": it sits on EVERY upcoming day so a wash can be
+  recorded whenever one happens, and the imperative read as advice to wash daily; the real advice
+  is the orange "Best day for laundry" bar and, after a wash, the red run-out bars — don't
+  reinstate an imperative label) shows on the trip's CURRENT day only ("only show it on the
+  current day," same day — `isToday` off `dgTodayKey`; no trip in progress → no button anywhere),
+  plus any day already washed, which keeps its "Washed Today" record. It sits on its own
+  flush-right row (`.tripsy-dg-laundry-row`) directly
   BELOW each day's "Start the day in…" instruction bar — outside it, not in it: that bar states
   what to wear, and on an outfit-linked day the whole bar is a tap target for the outfit, which a
   nested button had to fight (the handler's `stopPropagation` is kept anyway, so a bubble can't
@@ -1739,10 +1746,10 @@ step 4; git history has it if ever needed.
   from an already-open guide flips the button immediately via the same `refreshLaundryInfo` callback
   the run-out-bar fix above already threads through `showTripsyLaundryDay`'s `opts.onChanged`, since
   that re-render recomputes `washedDayKeys` fresh too.
-  **A past, never-washed day shows no laundry button at all** (`isPastDay`, off
-  `tripsyTravelViewTodayKey` vs the day's own key) — "Do Laundry Today" for a day that's already over
-  reads as an instruction the owner can no longer act on. A washed day keeps its button regardless of
-  how far past it is, since that's a record worth looking back at, not an instruction to follow.
+  **Only TODAY, or a day already washed, shows a laundry button** (`isToday`, off
+  `tripsyTravelViewTodayKey`; superseded the earlier hide-past-days-only rule on 2026-10-01). A washed
+  day keeps its button regardless of how far past it is, since that's a record worth looking back at,
+  not an instruction to follow.
   **`showTripsyWashedDay` shows the actual garment PHOTOS**, not a plain text list — the same
   `tw-grid`/`tw-card`/`tw-photo` shape every other garment display in the app uses (the outfit view,
   Packing Status, …), loaded through the same `tripsyWardrobeLoadPhotos`; a "No Picture" generic

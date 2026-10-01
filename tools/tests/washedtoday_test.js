@@ -38,7 +38,7 @@ assert(/Store\.listTripsyLaundry\(guide\.tripKey\)\s*\n\s*\.filter\(r => r\.wash
 assert(/const washedToday = washedDayKeys\.has\(day\.dayKey\);/.test(guideRender), 'each day checks its own washed state');
 assert(/data-tripsy-laundry-washed="\$\{washedToday \? '1' : ''\}"/.test(guideRender),
   'the button carries the washed state as a data attribute for the click handler to read');
-assert(/\$\{washedToday \? 'Washed Today' : 'Do Laundry Today'\}/.test(guideRender),
+assert(/\$\{washedToday \? 'Washed Today' : '🧺 Laundry'\}/.test(guideRender) && !/'Do Laundry Today'/.test(guideRender),
   'THE FIX: the button label switches once a wash is confirmed for that day');
 
 // ---- the click handler branches on that attribute ----
@@ -113,18 +113,18 @@ assert(/tripsyWardrobeLoadPhotos\(ov\);/.test(washedDay), 'photos are actually l
   assert(items.length === 0, 'a missing bag produces an empty list, not an error');
 }
 
-// ---- THE OTHER ASK: a past day with no wash gets no laundry button at all ----
-assert(/const isPastDay = !!\(dgTodayKey && day\.dayKey < dgTodayKey\);/.test(guideRender),
-  'each day checks whether it\'s already past, using the trip\'s own local today');
-assert(/const laundryRow = \(i === 0 && isOwner && \(washedToday \|\| !isPastDay\)\)/.test(guideRender),
-  'THE ASK: "Do Laundry Today" is hidden once the day is past and was never washed -- there\'s nothing left to act on');
+// ---- "only show it on the current day" (2026-10-01): today, or a day already washed ----
+assert(/const isToday = !!\(dgTodayKey && day\.dayKey === dgTodayKey\);/.test(guideRender),
+  'each day checks whether it IS today, using the trip\'s own local today');
+assert(/const laundryRow = \(i === 0 && isOwner && \(washedToday \|\| isToday\)\)/.test(guideRender),
+  'THE ASK: the Laundry button shows on the current day only (plus any day already washed)');
 
 // ---- executed: the laundry-row visibility rule itself, against fixtures ----
 {
-  const rowShown = (isOwner, washedToday, isPastDay) => !!(isOwner && (washedToday || !isPastDay));
-  assert(rowShown(true, false, false) === true, 'today/future, not washed -> "Do Laundry Today" shows, unchanged');
-  assert(rowShown(true, true, false) === true, 'today/future, washed -> "Washed Today" shows, unchanged');
-  assert(rowShown(true, false, true) === false, 'THE ASK: past day, never washed -> no button at all');
-  assert(rowShown(true, true, true) === true, 'past day that WAS washed -> "Washed Today" still shows -- a record worth keeping, not an instruction');
-  assert(rowShown(false, false, false) === false, 'a viewer (not owner) never sees the row, unaffected by this change');
+  const rowShown = (isOwner, washedToday, isToday) => !!(isOwner && (washedToday || isToday));
+  assert(rowShown(true, false, true) === true, 'today, not washed -> "🧺 Laundry" shows');
+  assert(rowShown(true, false, false) === false, 'THE ASK: any other day (past OR future), never washed -> no button');
+  assert(rowShown(true, true, true) === true, 'today, washed -> "Washed Today" shows');
+  assert(rowShown(true, true, false) === true, 'a past day that WAS washed -> "Washed Today" still shows -- a record, not an instruction');
+  assert(rowShown(false, false, true) === false, 'a viewer (not owner) never sees the row');
 }
