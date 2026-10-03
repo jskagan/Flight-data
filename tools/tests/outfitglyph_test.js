@@ -41,7 +41,7 @@ assert(/const outfitGlyphHtml = outfitPersons && outfitPersons\.size\s*\n\s*\? `
 
 // THE ASK, explicitly: available to every viewer, not gated behind edit/delete access
 // like the icons next to it.
-assert(/const actionsHtml = \(outfitGlyphHtml \|\| ownerIconsHtml\)\s*\n\s*\? `<div style="display:flex; gap:6px; flex-shrink:0;">\$\{outfitGlyphHtml\}\$\{ownerIconsHtml\}<\/div>`\s*\n\s*: '';/.test(html),
+assert(/const actionsHtml = \(entryBtnHtml \|\| outfitGlyphHtml \|\| ownerIconsHtml\)\s*\n\s*\? `<div style="display:flex; gap:6px; flex-shrink:0;">\$\{entryBtnHtml\}\$\{outfitGlyphHtml\}\$\{ownerIconsHtml\}<\/div>`\s*\n\s*: '';/.test(html),
   'the glyph is NOT behind the canEditDelete gate that hides ownerIconsHtml for a non-owner viewer');
 
 // ---- wiring: tapping opens the SAME outfit modal, choosing the right person ----

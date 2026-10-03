@@ -2978,6 +2978,18 @@ function pruneDriveDataInMemory(trips) {
           if (!keys.has(k.split('::')[0])) delete cache[k];
         }
       }
+      // Entry-requirements research no remaining flight's route uses (the trip or
+      // flight was deleted, or re-routed) -- a later flight on the same route
+      // just researches it again.
+      if (driveData.tripsyEntryRequirements) {
+        const liveRoutes = new Set();
+        for (const t of trips) for (const ev of (t.events || [])) {
+          if (ev && tripsyIsFlightRaw(ev.tripsyRaw)) liveRoutes.add(tripsyEntryRouteKey(ev.tripsyRaw));
+        }
+        for (const k of Object.keys(driveData.tripsyEntryRequirements)) {
+          if (!liveRoutes.has(k)) delete driveData.tripsyEntryRequirements[k];
+        }
+      }
       // A partial-itinerary selection for a trip that no longer exists has
       // nothing left to filter.
       if (Array.isArray(driveData.tripsyPartialItineraries)) {
@@ -5584,6 +5596,9 @@ async function syncTripsyRelays() {
     // also needs the loaded trips, since every entry goes through the live
     // queueTripsyChange path.
     try { await drainTripsyTripEdits(); } catch (e) { console.error('trip-edits drain failed:', e); }
+    // Hand-entered entry requirements a Claude session relayed. (Research
+    // itself never runs here -- only from the trip header's 🛂 button.)
+    try { await drainTripsyEntryRequirementsRelay(); } catch (e) { console.error('entry-requirements relay drain failed:', e); }
     // With the trips now loaded, silently drop any freshly-staged proposal
     // event that duplicates an existing tracked event -- the drains above run
     // BEFORE the decrypt (trips may not be loaded yet when they stage), so
@@ -12008,6 +12023,324 @@ function tripsyOutfitBlockLiveTier(guide, block) {
 // just async-flavored) since the My Trips card builder is not async. A block with an
 // empty garmentIds (composition came back with nothing, gaps only) doesn't count --
 // there's nothing to show for it.
+// ---- Entry requirements for international flights ---------------------------
+// "When there is a flight into a different country first created in an
+// itinerary, can you research any entry or visa requirements for that country
+// and, if there are any, put a button on the flight event that says 'Entry
+// Requirements'" (2026-10-03). One Claude call per ROUTE (departure + arrival
+// description), with the web_search server tool so visa/ETA rules (which change
+// -- ETIAS, ETA schemes) come from current official sources rather than training
+// memory. The result is cached in driveData.tripsyEntryRequirements keyed by
+// tripsyEntryRouteKey, shared across trips and with every viewer (read-only for
+// them; only the owner's app ever researches, since that costs API calls and
+// writes driveData). Travelers are assumed to hold US passports (the family
+// lives in Los Angeles) -- TRIPSY_ENTRY_TRAVELER_NATIONALITY is the one place
+// to change that. Research runs ONLY when the owner presses the trip header's
+// 🛂 "Entry Requirements" button (tripsyResearchTripEntryRequirements) -- it
+// used to run automatically on every sync and after each new flight, which
+// spent API calls nobody asked for ("Instead of having the app automatically
+// research entry requirements, put a button on the title bar," 2026-10-03).
+// A domestic flight's record says international:false and simply shows no
+// button.
+const TRIPSY_ENTRY_TRAVELER_NATIONALITY = 'United States';
+const TRIPSY_ENTRY_PARALLEL_CALLS = 4;
+function tripsyIsFlightRaw(raw) {
+  return !!raw && raw.resource === 'transportation' && raw.category === 'airplane';
+}
+function tripsyEntryRouteKey(raw) {
+  if (!raw) return '';
+  const norm = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const dep = norm(raw.departureDescription), arr = norm(raw.arrivalDescription);
+  return arr ? `${dep}→${arr}` : '';
+}
+function tripsyEntryRecordForRaw(raw) {
+  const key = tripsyEntryRouteKey(raw);
+  const map = (typeof driveData !== 'undefined' && driveData && driveData.tripsyEntryRequirements) || {};
+  return key ? (map[key] || null) : null;
+}
+// The button shows only when the research found something to DO: an
+// international arrival with requirements and at least one item or link.
+function tripsyEntryRecordShowsButton(rec) {
+  return !!(rec && rec.international && rec.requirementsNeeded
+    && ((rec.items && rec.items.length) || (rec.links && rec.links.length)));
+}
+// Every flight route in ONE trip worth researching, deduped by route (one call
+// serves every flight on it), minus routes already known to be DOMESTIC -- no
+// border, nothing to recheck. Routes already researched as international are
+// kept: pressing the button again is how the owner rechecks them.
+function tripsyEntryTripRoutes(trip, records) {
+  const seen = new Set();
+  const out = [];
+  for (const ev of ((trip && trip.events) || [])) {
+    const raw = ev && ev.tripsyRaw;
+    if (!tripsyIsFlightRaw(raw) || ev.hidden) continue;
+    const key = tripsyEntryRouteKey(raw);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const rec = (records || {})[key];
+    if (rec && rec.international === false) continue;
+    out.push({ key, raw });
+  }
+  return out;
+}
+// The trip-header button: a trip not yet over with at least one flight that
+// isn't known to be domestic. Countries are only known AFTER research, so an
+// unresearched flight counts as possibly international.
+function tripsyEntryTripShowsButton(trip, records, todayKey) {
+  const endK = tripsyDayKey(trip && trip.end) || tripsyDayKey(trip && trip.start);
+  if (endK && todayKey && endK < todayKey) return false;
+  return tripsyEntryTripRoutes(trip, records).length > 0;
+}
+function tripsyEntryPromptText(raw, nationality) {
+  const arrDay = String(raw.arrivalAt || raw.departureAt || '').slice(0, 10);
+  return `Research the entry requirements for this flight's arrival.
+
+Flight: departs ${raw.departureDescription || 'unknown'} and arrives ${raw.arrivalDescription || 'unknown'} on ${arrDay || 'an upcoming date'}${raw.company ? ` (${raw.company}${raw.transportNumber ? ' ' + raw.transportNumber : ''})` : ''}.
+Travelers: citizens of the ${nationality} traveling on ${nationality} passports, for tourism, staying well under 90 days.
+
+Steps:
+1. Work out the country of the departure airport and of the arrival airport.
+2. If they are the same country, the flight is domestic: international is false and nothing else is needed.
+3. If the arrival is a different country, search current OFFICIAL sources (the destination government, the EU for Schengen/ETIAS, the US State Department's country page) for what these travelers must obtain, complete or check to enter on the arrival date: visa, electronic travel authorization (e.g. ETIAS, UK ETA, ESTA-style schemes), passport validity or blank-page rules, mandatory arrival/registration forms, and anything else required at the border. If the travelers are citizens returning to their own country, nothing is needed.
+4. Note whether a scheme is already in force on the arrival date or only planned; never present a planned scheme as required.
+
+requirements_needed is true only when there is at least one concrete thing to obtain, complete or check before travel (a passport-validity rule counts).
+Links must be official websites where the traveler completes or reads the requirement -- no travel agencies or third-party visa services.
+
+Finish your reply with ONLY this JSON (no prose after it), wrapped in <json></json> tags:
+<json>{"departure_country":"","arrival_country":"","international":true,"requirements_needed":true,"headline":"one sentence summary","items":[{"title":"short name","detail":"what to do, when, cost/validity if known"}],"links":[{"label":"what the site is for","url":"https://..."}]}</json>`;
+}
+// Pulls the trailing <json>…</json> out of the model's text and keeps only what
+// the dialog renders, so a malformed or overlong answer can't break the page.
+function tripsyEntryParseResult(text) {
+  const m = String(text || '').match(/<json>([\s\S]*?)<\/json>(?![\s\S]*<json>)/);
+  if (!m) throw new Error('entry-requirements answer had no <json> block');
+  return tripsyEntryNormalizeRecord(JSON.parse(m[1].trim()));
+}
+// The one sanitizer for the model's answer AND the session relay below, so a
+// record can't reach the dialog with a non-http link or a domestic flight
+// claiming requirements, whichever way it arrived.
+function tripsyEntryNormalizeRecord(j) {
+  j = j || {};
+  const str = (v, n) => String(v == null ? '' : v).trim().slice(0, n);
+  const okUrl = u => /^https?:\/\/[^\s"'<>]+$/i.test(String(u || '').trim());
+  return {
+    departureCountry: str(j.departure_country, 80),
+    arrivalCountry: str(j.arrival_country, 80),
+    international: j.international === true,
+    requirementsNeeded: j.international === true && j.requirements_needed === true,
+    headline: str(j.headline, 400),
+    items: (Array.isArray(j.items) ? j.items : []).slice(0, 12)
+      .map(it => ({ title: str(it && it.title, 120), detail: str(it && it.detail, 1200) }))
+      .filter(it => it.title || it.detail),
+    links: (Array.isArray(j.links) ? j.links : []).slice(0, 10)
+      .filter(l => l && okUrl(l.url))
+      .map(l => ({ label: str(l.label, 160) || str(l.url, 160), url: str(l.url, 600) })),
+  };
+}
+// A Claude SESSION can fill entry requirements in by hand ("can you manually
+// enter those now and they can be rechecked by the app in around 30 days,"
+// 2026-10-03): it writes tripsy-entry-requirements.json (same folder/ACL as
+// the other relays) holding {entries:[{route_key, route, checked_at, sources,
+// …the <json> answer fields…}]}, never touching flight-log-data.json itself.
+// The drain sanitizes each through tripsyEntryNormalizeRecord, keeps a record
+// already on file only if it is NEWER, saves once, and the ordinary 30-day
+// button press re-researches from there (there is no automatic recheck).
+const TRIPSY_ENTRY_RELAY_FILENAME = 'tripsy-entry-requirements.json';
+function tripsyEntryRecordsFromRelay(relay, nowIso) {
+  const out = {};
+  for (const e of (relay && Array.isArray(relay.entries) ? relay.entries : [])) {
+    const key = String((e && e.route_key) || '').trim().toLowerCase();
+    if (!key || !key.includes('→')) continue;
+    const ts = Date.parse(e.checked_at);
+    out[key] = {
+      ...tripsyEntryNormalizeRecord(e),
+      sources: (Array.isArray(e.sources) ? e.sources : []).filter(u => /^https?:\/\/[^\s"'<>]+$/i.test(String(u || ''))).slice(0, 8),
+      verifiedOnline: true,
+      nationality: TRIPSY_ENTRY_TRAVELER_NATIONALITY,
+      route: String(e.route || '').slice(0, 200),
+      checkedAt: Number.isFinite(ts) ? new Date(ts).toISOString() : nowIso,
+    };
+  }
+  return out;
+}
+async function drainTripsyEntryRequirementsRelay() {
+  if (!isOwner || !driveData) return;
+  await drainTripsyRelayFiles(TRIPSY_ENTRY_RELAY_FILENAME, async relay => {
+    const incoming = tripsyEntryRecordsFromRelay(relay, new Date().toISOString());
+    const map = driveData.tripsyEntryRequirements || (driveData.tripsyEntryRequirements = {});
+    let changed = 0;
+    for (const [k, rec] of Object.entries(incoming)) {
+      const cur = map[k];
+      if (cur && cur.checkedAt && Date.parse(cur.checkedAt) >= Date.parse(rec.checkedAt)) continue;
+      map[k] = rec;
+      changed++;
+    }
+    // A failed save throws, so the shared drain KEEPS the relay for next time.
+    if (changed) await persistDriveData();
+    if (changed && currentView === 'tripsytrips') renderTripsyEventsList();
+  });
+}
+async function tripsyEntryClaudeRequest(apiKey, messages, withSearch, withFallbacks = true) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+      // Server-side refusal fallback: a safety-classifier refusal reroutes to
+      // another model instead of failing the research outright.
+      ...(withFallbacks ? { 'anthropic-beta': 'server-side-fallback-2026-07-01' } : {}),
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-5-5',
+      max_tokens: 16000,
+      output_config: { effort: 'medium' },
+      ...(withFallbacks ? { fallbacks: 'default' } : {}),
+      ...(withSearch ? { tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 6 }] } : {}),
+      messages,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    const err = new Error(`Claude API error ${res.status}: ${body.slice(0, 300)}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+// One research call (plus pause_turn continuations -- a long server-side search
+// loop can hand the turn back mid-way). If web search itself is rejected (e.g.
+// not enabled for the org) it retries once WITHOUT it and marks the record
+// unverified, so the dialog says the answer came from model knowledge only.
+async function tripsyResearchEntryRequirements(apiKey, raw) {
+  const prompt = tripsyEntryPromptText(raw, TRIPSY_ENTRY_TRAVELER_NATIONALITY);
+  const run = async (withSearch, withFallbacks = true) => {
+    const messages = [{ role: 'user', content: prompt }];
+    let data = null;
+    for (let i = 0; i < 4; i++) {
+      data = await tripsyEntryClaudeRequest(apiKey, messages, withSearch, withFallbacks);
+      if (data.stop_reason !== 'pause_turn') break;
+      messages.push({ role: 'assistant', content: data.content });
+    }
+    if (data.stop_reason === 'refusal') throw new Error('entry-requirements research was declined');
+    const blocks = data.content || [];
+    const text = blocks.filter(b => b.type === 'text').map(b => b.text).join('');
+    const sources = [];
+    for (const b of blocks) {
+      if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) {
+        for (const r of b.content) if (r && r.url && !sources.includes(r.url)) sources.push(r.url);
+      }
+    }
+    return { parsed: tripsyEntryParseResult(text), sources: sources.slice(0, 8) };
+  };
+  // Degrade one option at a time on a 400 (an option this account or API
+  // version doesn't accept), so no single rejected setting can make every
+  // research attempt fail: first drop the refusal fallback, then web search.
+  let out, verified = true;
+  try { out = await run(true, true); }
+  catch (e) {
+    if (!(e && e.status === 400)) throw e;
+    try { out = await run(true, false); }
+    catch (e2) {
+      if (!(e2 && e2.status === 400)) throw e2;
+      out = await run(false, false); verified = false;
+    }
+  }
+  return {
+    ...out.parsed,
+    sources: out.sources,
+    verifiedOnline: verified,
+    nationality: TRIPSY_ENTRY_TRAVELER_NATIONALITY,
+    route: `${raw.departureDescription || ''} → ${raw.arrivalDescription || ''}`,
+    checkedAt: new Date().toISOString(),
+  };
+}
+// Trips with a research run in flight -- the header button renders ⏳ and
+// disabled for them, and a second press can't start a duplicate run.
+const tripsyEntryResearchingTrips = new Set();
+async function tripsyResearchTripEntryRequirements(tripKey) {
+  if (!isOwner || !driveData || !tripsyDecryptedTrips) return;
+  if (tripsyTripsAreOffline || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+    toast('Entry requirements need a connection — try again once you\'re online.');
+    return;
+  }
+  if (tripsyEntryResearchingTrips.has(tripKey)) { toast('Already researching this trip\'s entry requirements…'); return; }
+  const trip = tripsyDecryptedTrips.find(t => t.key === tripKey);
+  const todo = tripsyEntryTripRoutes(trip, driveData.tripsyEntryRequirements);
+  if (!todo.length) { toast('This trip has no international flights to check.'); return; }
+  tripsyEntryResearchingTrips.add(tripKey);
+  toast(`Researching entry requirements for ${todo.length} flight route${todo.length === 1 ? '' : 's'} — this usually takes a minute or two.`);
+  try {
+    const apiKey = await fetchAnthropicApiKeyFromDrive();
+    // A small pool rather than one-at-a-time: each call is a multi-search web
+    // research turn, so serial would make a many-leg trip wait several minutes.
+    const results = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < todo.length) {
+        const { key, raw } = todo[next++];
+        try { results.push({ key, rec: await tripsyResearchEntryRequirements(apiKey, raw) }); }
+        catch (e) { console.error('Entry-requirements research failed for', key, e); results.push({ key, rec: null }); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(TRIPSY_ENTRY_PARALLEL_CALLS, todo.length) }, worker));
+    const map = driveData.tripsyEntryRequirements || (driveData.tripsyEntryRequirements = {});
+    const ok = results.filter(r => r.rec);
+    for (const r of ok) map[r.key] = r.rec;
+    const failed = results.length - ok.length;
+    if (ok.length) {
+      try { await persistDriveData(); }
+      catch (e) { console.error('Saving entry requirements failed (kept in memory):', e); toast('Entry requirements found, but saving them failed — they\'ll show until you reload.', 'error'); }
+    }
+    const withReqs = ok.filter(r => tripsyEntryRecordShowsButton(r.rec)).length;
+    const failNote = failed ? ` ${failed} route${failed === 1 ? '' : 's'} couldn't be checked — press the button again to retry.` : '';
+    if (!ok.length) toast(`Couldn't research entry requirements right now.${failNote}`, 'error');
+    else if (withReqs) toast(`Entry requirements found for ${withReqs} flight route${withReqs === 1 ? '' : 's'} — tap 🛂 Entry Requirements on those flights.${failNote}`);
+    else toast(`No entry requirements needed for this trip's flights.${failNote}`);
+  } catch (e) {
+    console.error('Entry-requirements research failed:', e);
+    toast(`Couldn't research entry requirements: ${String((e && e.message) || e).slice(0, 200)}`, 'error');
+  } finally {
+    tripsyEntryResearchingTrips.delete(tripKey);
+    if (currentView === 'tripsytrips') renderTripsyEventsList();
+  }
+}
+function tripsyEntryRequirementsHtml(rec) {
+  const items = (rec.items || []).map(it => `
+    <li style="margin:0 0 10px;"><strong>${esc(it.title)}</strong>${it.detail ? `<div style="margin-top:2px;">${esc(it.detail)}</div>` : ''}</li>`).join('');
+  const links = (rec.links || []).map(l => `
+    <li style="margin:0 0 6px;"><a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.label)}</a></li>`).join('');
+  const checked = rec.checkedAt ? new Date(rec.checkedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+  return `
+    <h2 style="margin:0 0 4px; font-size:19px;">Entry Requirements${rec.arrivalCountry ? ` — ${esc(rec.arrivalCountry)}` : ''}</h2>
+    <div style="font-size:12.5px; color:var(--muted); margin-bottom:12px;">${esc(rec.route || '')}</div>
+    ${rec.headline ? `<p style="margin:0 0 12px; line-height:1.5;">${esc(rec.headline)}</p>` : ''}
+    ${items ? `<ul style="margin:0 0 12px; padding-left:20px; line-height:1.5;">${items}</ul>` : ''}
+    ${links ? `<div style="font-weight:600; margin:4px 0 6px;">Where to complete them</div><ul style="margin:0 0 12px; padding-left:20px;">${links}</ul>` : ''}
+    <div style="font-size:12px; color:var(--muted); line-height:1.45;">
+      For ${esc(rec.nationality || TRIPSY_ENTRY_TRAVELER_NATIONALITY)} passport holders${checked ? `, checked ${esc(checked)}` : ''}.
+      ${rec.verifiedOnline === false ? 'Web search was unavailable, so this is from general knowledge only. ' : ''}Always confirm on the official sites before you travel.
+    </div>`;
+}
+function showTripsyEntryRequirements(routeKey) {
+  const rec = ((driveData && driveData.tripsyEntryRequirements) || {})[routeKey];
+  if (!rec) return;
+  let ov = document.getElementById('tripsy-entry-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-entry-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483100';
+  ov.innerHTML = `
+    <div class="tw-modal-paper" style="max-width:560px; max-height:85vh; overflow:auto; text-align:left; position:relative;">
+      <button class="tripsy-close-x" data-entry-close aria-label="Close" style="position:absolute; top:10px; right:10px;">✕</button>
+      ${tripsyEntryRequirementsHtml(rec)}
+    </div>`;
+  ov.style.display = 'flex';
+  const close = () => { ov.style.display = 'none'; };
+  ov.querySelector('[data-entry-close]').onclick = close;
+  ov.onclick = e => { if (e.target === ov) close(); };
+}
+
 function tripsyOutfitEventPersonsMap(tripKey) {
   const map = new Map();
   for (const o of (driveData.tripsyTripOutfits || [])) {
@@ -32483,6 +32816,12 @@ async function renderTripsyEventsListImpl() {
       const outfitGlyphHtml = outfitPersons && outfitPersons.size
         ? `<button class="btn" data-tripsy-outfit-glyph data-trip-key="${esc(trip.key)}" data-event-id="${esc(ev.id)}" data-persons="${esc([...outfitPersons].join(','))}" style="font-size:17px; padding:4px 10px;" title="View outfit">👔</button>`
         : '';
+      // "Entry Requirements" (every viewer -- read-only): only once research found
+      // something to do for this flight's international arrival.
+      const entryRec = panelKey && tripsyIsFlightRaw(ev.tripsyRaw) ? tripsyEntryRecordForRaw(ev.tripsyRaw) : null;
+      const entryBtnHtml = tripsyEntryRecordShowsButton(entryRec)
+        ? `<button class="btn" data-tripsy-entry-reqs="${esc(tripsyEntryRouteKey(ev.tripsyRaw))}" style="font-size:12px; padding:4px 10px; white-space:nowrap;" title="Entry and visa requirements">🛂 Entry Requirements</button>`
+        : '';
       const ownerIconsHtml = !canEditDelete ? '' : isPendingDelete
         ? `<button class="btn" data-tripsy-undo-delete-event data-change-id="${esc(ev._pendingDeleteId)}" style="font-size:11px; padding:3px 8px;">Undo</button>`
         : `${docIconHtml}
@@ -32490,8 +32829,8 @@ async function renderTripsyEventsListImpl() {
             <button class="btn" data-tripsy-attach-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" style="font-size:17px; padding:4px 10px;" title="Attach Doc">📎</button>
             <button class="btn" data-tripsy-move-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" style="font-size:17px; padding:4px 10px;" title="Move to another trip">↪️</button>
             <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:17px; padding:4px 10px;" title="Delete">🗑️</button>`;
-      const actionsHtml = (outfitGlyphHtml || ownerIconsHtml)
-        ? `<div style="display:flex; gap:6px; flex-shrink:0;">${outfitGlyphHtml}${ownerIconsHtml}</div>`
+      const actionsHtml = (entryBtnHtml || outfitGlyphHtml || ownerIconsHtml)
+        ? `<div style="display:flex; gap:6px; flex-shrink:0;">${entryBtnHtml}${outfitGlyphHtml}${ownerIconsHtml}</div>`
         : '';
       // Keyed by eventKey (not panelKey) so the Check-out half of a
       // Check-in/Check-out split -- which shares its panel container with
@@ -32797,6 +33136,18 @@ async function renderTripsyEventsListImpl() {
     // 🔍 Search this trip -- toggles the find-in-page bar (searchBarHtml below,
     // placed just above the timeline) that highlights + steps through matches
     // in this trip's own timeline. Sits right of the Itinerary button.
+    // 🛂 Entry Requirements -- owner-only (research costs API calls and writes
+    // driveData), on a trip not yet over with a flight not known to be
+    // domestic. Pressing it researches the trip's flight routes and the
+    // per-flight 🛂 buttons appear on the timeline rows that need them. Its
+    // own wrapper rather than iconLabelButton so the two-word label can wrap.
+    const entryBusy = tripsyEntryResearchingTrips.has(trip.key);
+    const entryTripButtonHtml = (!collapsed && isOwner && tripsyEntryTripShowsButton(trip, driveData.tripsyEntryRequirements, tripsyTodayDayKey())) ? `
+      <div style="display:flex; flex-direction:column; align-items:center; gap:3px; max-width:68px;">
+        <button class="btn" data-tripsy-entry-research data-key="${esc(trip.key)}" ${entryBusy ? 'disabled' : ''} title="${entryBusy ? 'Researching entry requirements…' : 'Research entry and visa requirements for this trip\'s international flights'}" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:16px; display:flex; align-items:center; justify-content:center;">${entryBusy ? '⏳' : '🛂'}</button>
+        <span style="font-size:10px; color:var(--muted); text-align:center; line-height:1.15;">Entry Requirements</span>
+      </div>
+    ` : '';
     const searchButtonHtml = !collapsed ? iconLabelButton(`
       <button class="btn" data-tripsy-trip-search-toggle data-key="${esc(trip.key)}" title="Search this trip" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:16px; display:flex; align-items:center; justify-content:center;">🔍</button>
     `, 'Search') : '';
@@ -32957,6 +33308,7 @@ async function renderTripsyEventsListImpl() {
             ${documentButtonHtml}
             ${itineraryButtonHtml}
             ${attireButtonHtml}
+            ${entryTripButtonHtml}
             ${searchButtonHtml}
             ${sortButtonHtml}
             ${tripActionsMenuButtonHtml}
@@ -33542,6 +33894,18 @@ async function renderTripsyEventsListImpl() {
   // next render's pass.
   tripsyFlagStaleAttireButtons(container, trips);
 
+  // Trip header 🛂 Entry Requirements: research runs in the background; the
+  // button flips to ⏳ at once, and the finished run re-renders the page.
+  container.querySelectorAll('[data-tripsy-entry-research]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '⏳';
+      tripsyResearchTripEntryRequirements(btn.dataset.key);
+    });
+  });
+
   // Per-trip 🔍 Search: the toggle reveals that trip's find-in-page bar, which
   // highlights + steps through matches within its own timeline (tripsyCreateFindInPage).
   container.querySelectorAll("[data-tripsy-trip-search-toggle]").forEach(btn => {
@@ -33964,6 +34328,12 @@ async function renderTripsyEventsListImpl() {
   // Guide person if THEY actually have an outfit for this event, else whichever person
   // does -- read from data-persons at click time rather than baked into the button's
   // handler, since tripsyDressGuidePerson can change after this row was rendered.
+  container.querySelectorAll("[data-tripsy-entry-reqs]").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      showTripsyEntryRequirements(btn.dataset.tripsyEntryReqs);
+    });
+  });
   container.querySelectorAll("[data-tripsy-outfit-glyph]").forEach(btn => {
     btn.addEventListener("click", e => {
       e.stopPropagation();

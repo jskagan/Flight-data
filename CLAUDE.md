@@ -1382,6 +1382,42 @@ step 4; git history has it if ever needed.
   `departureAt`+endpoints, everything else on `name`+`startsAt`, and an entry with nothing
   identifying never dedupes. A relay carrying transportation must not be uploaded before this
   fix is live. `tripeditsrelay_test.js`.
+- **International flights get researched ENTRY REQUIREMENTS — ON DEMAND, from a trip-header button —
+  and flights that need something get a "🛂 Entry Requirements" button** ("When there is a flight into
+  a different country … research any entry or visa requirements … put a button on the flight event,"
+  2026-10-03; then, same day, "Instead of having the app automatically research entry requirements,
+  put a button on the title bar of any trip with an international destination"). **Nothing researches
+  automatically** — the first version swept on every relay sync and after each new flight save
+  (`tripsyEnsureEntryRequirements`, removed); don't re-add a background trigger, since every call is
+  a paid multi-search web research turn. The owner-only title-bar button (`data-tripsy-entry-research`,
+  labelled "Entry Requirements", ⏳ + disabled while `tripsyEntryResearchingTrips` holds the trip)
+  shows on a trip not yet over (`tripsyEntryTripShowsButton`) with at least one flight that isn't
+  KNOWN domestic — countries are only known after research, so an unresearched flight counts as
+  possibly international. Pressing it runs `tripsyResearchTripEntryRequirements`: every route in
+  that trip (`tripsyEntryTripRoutes` — deduped, known-domestic skipped, known-international
+  RE-checked, which is how the owner refreshes a record; there is no 30-day auto-recheck), a
+  4-call pool (`TRIPSY_ENTRY_PARALLEL_CALLS`), one persist, a toast naming how many routes need
+  something (and how many failed — a failed route stays unrecorded, the next press retries it),
+  then a re-render that puts the per-flight buttons on the rows. One Claude call per ROUTE
+  (`tripsyEntryRouteKey` = normalized departure→arrival description), `claude-opus-5-5` with the
+  `web_search_20260209` server tool (rules like ETIAS/UK ETA change — training memory isn't enough)
+  and the server-side refusal fallback (`fallbacks:'default'` + beta header); `pause_turn` is
+  continued, and a 400 degrades one option at a time (drop fallbacks, then web search — the record
+  is then `verifiedOnline:false` and the dialog says so). The answer ends in a `<json>` block
+  (`tripsyEntryParseResult`: http(s) links only, a domestic flight can never claim requirements, no
+  block = throw). Records live in `driveData.tripsyEntryRequirements` (route key →
+  `{departureCountry, arrivalCountry, international, requirementsNeeded, headline, items, links,
+  sources, nationality, checkedAt}`), shared by every viewer; travelers are assumed US passport
+  holders (`TRIPSY_ENTRY_TRAVELER_NATIONALITY`). The row button (`data-tripsy-entry-reqs`, every
+  viewer) shows only when `tripsyEntryRecordShowsButton` (international + requirements + something
+  to list); `showTripsyEntryRequirements` renders the escaped details with links opening in a new
+  tab. Prune rule: records no remaining flight's route uses are dropped. **A Claude session can
+  hand-enter records** ("can you manually enter those now," same day) through the relay
+  `tripsy-entry-requirements.json` (`{entries:[{route_key, route, checked_at, sources, …the <json>
+  answer fields…}]}` — `route_key` must equal `tripsyEntryRouteKey`'s normalization: trimmed,
+  lowercased, whitespace-collapsed `departure→arrival` descriptions). `drainTripsyEntryRequirementsRelay`
+  runs in `syncTripsyRelays`, sanitizes each entry through the same `tripsyEntryNormalizeRecord` the
+  model's answer uses, and never replaces a NEWER record. `entryreqs_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS
