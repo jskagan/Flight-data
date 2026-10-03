@@ -2590,7 +2590,17 @@ const TRIPSY_OFFLINE_APP_STORE = 'appCache';
 const TRIPSY_OFFLINE_PHOTO_STORE = 'photoBlobs';
 const TRIPSY_OFFLINE_PURGE_DAYS_AFTER_TRIP = 7;
 function openTripsyOfflineDb() {
-  return new Promise((resolve, reject) => {
+  // ONE shared connection per page ("The buttons to select individual trips from
+  // the my trips page are reacting very slowly," 2026-10-03): every caller used to
+  // open a FRESH connection and never close it -- every My Trips render (each
+  // trip tap) awaited a new open before it could paint, and a photo-heavy
+  // itinerary piled up dozens of live connections. The promise is memoized on the
+  // function itself (no module-level let, so the tests' extracted copy stays
+  // self-contained); a failed open, or a connection the browser closes or that a
+  // version upgrade elsewhere asks to close, clears the memo so the next call
+  // simply opens again.
+  if (openTripsyOfflineDb._p) return openTripsyOfflineDb._p;
+  const p = new Promise((resolve, reject) => {
     if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
     const req = indexedDB.open(TRIPSY_OFFLINE_DB_NAME, 3);
     // Guarded creates, not an else-branch on oldVersion: a device upgrading from
@@ -2619,11 +2629,16 @@ function openTripsyOfflineDb() {
       // And the mirror side: when ANOTHER context needs a version upgrade,
       // close this connection instead of being the blocker -- the next
       // openTripsyOfflineDb call simply opens a fresh one.
-      db.onversionchange = () => { try { db.close(); } catch (e) {} };
+      const forget = () => { if (openTripsyOfflineDb._p === p) openTripsyOfflineDb._p = null; };
+      db.onversionchange = () => { forget(); try { db.close(); } catch (e) {} };
+      db.onclose = forget;
       settle(resolve, db);
     };
     req.onerror = () => settle(reject, req.error);
   });
+  openTripsyOfflineDb._p = p;
+  p.catch(() => { if (openTripsyOfflineDb._p === p) openTripsyOfflineDb._p = null; });
+  return p;
 }
 
 // ---- Persistent photo-blob cache (the v3 store above). All fail soft: a
@@ -2831,6 +2846,8 @@ async function deleteTripsyOfflineDoc(driveFileId) {
 }
 // Metadata only (no blobs) -- used by the row template to show which docs
 // are already cached, and by the purge routine to decide what to drop.
+// The last offline-doc id set a My Trips render read (see its bounded wait).
+let tripsyOfflineDocIdsLastKnown = new Set();
 async function listTripsyOfflineDocsMeta() {
   try {
     const db = await openTripsyOfflineDb();
@@ -32215,7 +32232,19 @@ async function renderTripsyEventsListImpl() {
   // Which of those attachments already have a local offline copy on THIS
   // device -- drives the offline toggle's tooltip wording in
   // tripsyDocumentMenuRowHtml.
-  const offlineDriveFileIds = new Set((await listTripsyOfflineDocsMeta()).map(d => d.driveFileId));
+  // Bounded wait, never a stall: this only words a tooltip, and every trip tap
+  // re-runs this render -- a slow or stalled IndexedDB open (its own timeout is
+  // 4s) used to hold EVERY expand/collapse behind it (2026-10-03). Past 300ms the
+  // last set this session read is used, and the lookup still refreshes that set
+  // in the background for the next render.
+  const offlineMetaLookup = listTripsyOfflineDocsMeta().then(list => {
+    tripsyOfflineDocIdsLastKnown = new Set(list.map(d => d.driveFileId));
+    return tripsyOfflineDocIdsLastKnown;
+  });
+  const offlineDriveFileIds = await Promise.race([
+    offlineMetaLookup,
+    new Promise(r => setTimeout(() => r(tripsyOfflineDocIdsLastKnown), 300)),
+  ]);
   // Trips that don't exist in Tripsy yet (queued via the doc-parse review
   // page's "create a new trip" option) render as their own cards, stubbed
   // just enough to flow through the exact same pendingCreates/day-grouping/

@@ -1146,6 +1146,17 @@ step 4; git history has it if ever needed.
   place — deliberately NOT a full re-render, which would tear down open panels and yank the
   scroll mid-read. A slot that still resolves nothing keeps what it shows (a background pass
   never blanks a chip). `mytripsweather_test.js`.
+- **ONE shared IndexedDB connection per page, and the My Trips render never waits long on it**
+  ("The buttons to select individual trips from the my trips page are reacting very slowly,"
+  2026-10-03): every trip tap re-runs `renderTripsyEventsListImpl`, which awaited
+  `listTripsyOfflineDocsMeta` → `openTripsyOfflineDb` — and that opened a FRESH connection on
+  every call and never closed one (a photo-heavy itinerary piled up dozens). `openTripsyOfflineDb`
+  now memoizes its promise ON THE FUNCTION (`openTripsyOfflineDb._p`, not a module-level `let`,
+  so the tests' extracted copy stays self-contained); a failed open, `db.onclose`, or
+  `onversionchange` (which still closes the connection, never the blocker) clears the memo so
+  the next call reopens. The render races that lookup against 300ms and falls back to
+  `tripsyOfflineDocIdsLastKnown` (it only words a tooltip), refreshing the set in the background.
+  `idbmemo_test.js`.
 - **Past trips render under collapsed YEAR sections, below the current/upcoming cards** (built
   for the 154-trip historical backfill — flat, they'd stack a wall of 2011 above the trip you're
   actually on and pay 150 cards' HTML besides). A trip is "past" once its last day (falling back
