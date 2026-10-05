@@ -2337,6 +2337,23 @@ would overwrite the glyph with the word.
   immediately. `tripsyWardrobeChooseQty` (asked when more than one copy is available) now pins its
   own z-index above the Add Garment dialog specifically — it used to rely on plain DOM append order,
   which broke the moment a caller other than the base page height opened it first.
+- **The Wardrobe's bulk Edit page has a search bar + filters, and Save says it saved** ("When you
+  select edit a garment, add filters and a search bar … when the user presses the save button,
+  indicate that the changes have been saved," 2026-10-05). `tripsyWardrobeOpenBulkEdit`'s sticky
+  filter bar: a search box (live name + color, case-insensitive) and Whose / Type / Dress-level
+  selects (Whose opens on the library being viewed; Type lists only groups present). Filters HIDE
+  rows (`display:none`) rather than re-render, so an edit typed into a row a later filter hides is
+  kept and still saved, and matching reads each row's LIVE values. Save now writes only CHANGED
+  garments, in ONE persist (`Store.saveWardrobeGarments`, the batch twin of `saveWardrobeGarment`
+  with the same conflict retry) — it used to call `saveWardrobeGarment` per row, one whole-file
+  PATCH per garment, ~89 sequential writes for a one-field change. Feedback: the button reads
+  "Saving…", then a green **✓ Saved** (`.tw-bulk-saved`) that stays until the next edit, plus a
+  status line and toast naming the count; nothing changed says "No changes to save"; a failure
+  says so. The page stays open after saving (it used to auto-close) so several garments can be
+  found and fixed in one visit. Rows are listed ALPHABETICALLY by name ("Sort garments alphabetically when the user
+  presses the edit button," same day — `localeCompare`, `sensitivity:'base'`, numeric), sorting a
+  copy so the stored wardrobe order is untouched. The single-garment form (card Edit / + Add garment) closes
+  instantly, so it now toasts `Saved "<name>".` `wardrobebulkedit_test.js`.
 - **The garment form is rebuilt FRESH on every open** ("Whenever a user selects add garment, make
   sure all the fields to describe that garment are cleared from the last time," 2026-10-05).
   `showWardrobeGarmentForm` removes the previous `#tw-form-overlay` node before

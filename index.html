@@ -1225,6 +1225,7 @@
      iOS momentum inside the dialog. */
   .tw-modal-paper { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; max-width: 520px; width: 100%; max-height: 88vh; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 20px; color: var(--text); }
   .tw-modal-paper.tw-wide { max-width: 780px; }
+  .tw-bulk-saved, .tw-bulk-saved:hover { background: var(--home-green, #3fb950) !important; border-color: var(--home-green, #3fb950) !important; color: #04210F !important; }
   .tw-form-photo { width: 150px; aspect-ratio: 1 / 1; border-radius: 10px; background: #2a2a3a center/cover no-repeat; border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; font-size: 40px; margin: 0 auto 10px; }
   .tw-field { margin-bottom: 14px; }
   .tw-field > label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 5px; }
@@ -4321,6 +4322,24 @@ const Store = {
         catch (e) { if (e && e.conflict && attempt < 2) { apply(); continue; } throw e; }
       }
     } catch (e) { console.error('Store.saveWardrobeGarment failed:', e); return false; }
+  },
+  // Several garments in ONE whole-file write (the bulk Edit page) -- one
+  // saveWardrobeGarment per row meant one full-file PATCH per garment.
+  async saveWardrobeGarments(garments) {
+    try {
+      const apply = () => {
+        if (!driveData.tripsyWardrobe) driveData.tripsyWardrobe = [];
+        for (const garment of garments) {
+          const i = driveData.tripsyWardrobe.findIndex(g => g.id === garment.id);
+          if (i >= 0) driveData.tripsyWardrobe[i] = garment; else driveData.tripsyWardrobe.push(garment);
+        }
+      };
+      apply();
+      for (let attempt = 0; ; attempt++) {
+        try { await persistDriveData({ silentConflict: true }); return true; }
+        catch (e) { if (e && e.conflict && attempt < 2) { apply(); continue; } throw e; }
+      }
+    } catch (e) { console.error('Store.saveWardrobeGarments failed:', e); return false; }
   },
   async deleteWardrobeGarment(id) {
     try {
@@ -9092,6 +9111,9 @@ function showWardrobeGarmentForm(existing, onSaved) {
       ov.style.display = 'none';
       saveBtn.disabled = false;
       if (onSaved) onSaved();
+      // The form closes instantly, so say so -- an error toast below replaces it
+      // if the background Drive write fails.
+      toast(`Saved “${name}”.`);
       savePromise
         .then(ok => { if (!ok) toast('Garment saved on this device but didn’t sync to Drive — open it and Save again.', 'error'); })
         .catch(() => toast('Garment saved on this device but didn’t sync to Drive — open it and Save again.', 'error'));
@@ -14005,6 +14027,13 @@ function getOrCreateWardrobeBulkEditOverlay() {
         <button class="btn" id="tw-bulk-close">Close</button>
       </div>
       <div style="font-size:12.5px; color:var(--muted); line-height:1.5; margin-bottom:12px;">Adjust each garment's name, type, color, and the dress codes it works for, then Save. (Change a photo via a card's Edit button.)</div>
+      <div id="tw-bulk-filters" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; position:sticky; top:0; z-index:2; background:var(--panel); padding:6px 0;">
+        <input type="search" id="tw-bulk-search" class="field-input" placeholder="Search name or color…" autocomplete="off" spellcheck="false" style="flex:1; min-width:160px;">
+        <select id="tw-bulk-f-person" class="btn" aria-label="Whose"><option value="">His &amp; Hers</option><option value="him">His</option><option value="her">Hers</option></select>
+        <select id="tw-bulk-f-group" class="btn" aria-label="Type"></select>
+        <select id="tw-bulk-f-tier" class="btn" aria-label="Dress level"></select>
+        <span id="tw-bulk-count" style="font-size:12px; color:var(--muted); white-space:nowrap;"></span>
+      </div>
       <div id="tw-bulk-body"></div>
       <datalist id="tw-bulk-color-list">${TRIPSY_WARDROBE_COLORS.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:16px; position:sticky; bottom:0; background:var(--panel); padding-top:10px;">
@@ -14021,39 +14050,113 @@ async function tripsyWardrobeOpenBulkEdit(onDone) {
   const bodyEl = ov.querySelector('#tw-bulk-body');
   const statusEl = ov.querySelector('#tw-bulk-status');
   const saveBtn = ov.querySelector('#tw-bulk-save');
+  const searchEl = ov.querySelector('#tw-bulk-search');
+  const personEl = ov.querySelector('#tw-bulk-f-person');
+  const groupEl = ov.querySelector('#tw-bulk-f-group');
+  const tierEl = ov.querySelector('#tw-bulk-f-tier');
+  const countEl = ov.querySelector('#tw-bulk-count');
   ov.querySelector('#tw-bulk-close').onclick = () => { ov.style.display = 'none'; };
   ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
-  const garments = await Store.listWardrobe();
-  if (!garments.length) { bodyEl.innerHTML = `<div class="empty-state">No garments yet.</div>`; saveBtn.style.display = 'none'; ov.style.display = 'flex'; return; }
+  // Alphabetical by name ("Sort garments alphabetically when the user presses the
+  // edit button," 2026-10-05), case/accent-insensitive; a COPY, so the stored
+  // wardrobe order is untouched.
+  const garments = [...(await Store.listWardrobe())].sort((x, y) =>
+    String(x.name || '').localeCompare(String(y.name || ''), undefined, { sensitivity: 'base', numeric: true }));
+  if (!garments.length) { bodyEl.innerHTML = `<div class="empty-state">No garments yet.</div>`; saveBtn.style.display = 'none'; ov.querySelector('#tw-bulk-filters').style.display = 'none'; ov.style.display = 'flex'; return; }
+  ov.querySelector('#tw-bulk-filters').style.display = 'flex';
   saveBtn.style.display = '';
+  saveBtn.textContent = 'Save changes';
+  saveBtn.disabled = false;
   statusEl.textContent = '';
   bodyEl.innerHTML = garments.map(tripsyWardrobeEditRowHtml).join('');
   tripsyWardrobeLoadPhotos(bodyEl);
   const byId = new Map(garments.map(g => [g.id, g]));
-  saveBtn.onclick = async () => {
-    saveBtn.disabled = true;
-    let saved = 0, failed = 0;
+
+  // Search + filters ("add filters and a search bar to be able to quickly find a
+  // garment," 2026-10-05). They HIDE rows rather than re-render them, so an edit
+  // typed into a row that a later filter hides is kept and still saved.
+  // The row's LIVE values are what's matched, so a just-retyped name is findable.
+  const rowValues = row => ({
+    name: row.querySelector('.tw-import-name').value,
+    color: row.querySelector('.tw-import-color').value,
+    person: row.querySelector('.tw-import-person')?.value === 'her' ? 'her' : 'him',
+    group: row.querySelector('.tw-import-group').value,
+    tiers: [...row.querySelectorAll('.tw-import-tiers input[data-tw-tier]:checked')].map(el => el.getAttribute('data-tw-tier')),
+  });
+  const presentGroups = TRIPSY_ATTIRE_PACKING_GROUPS.filter(grp => garments.some(g => g.group === grp));
+  groupEl.innerHTML = `<option value="">All types</option>` + presentGroups.map(grp => `<option value="${esc(grp)}">${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[grp] || grp)}</option>`).join('');
+  tierEl.innerHTML = `<option value="">All dress levels</option>` + tripsyWardrobeTierOptions().map(t => `<option value="${esc(t)}">${esc(tripsyWardrobeTierLabel(t))}</option>`).join('');
+  searchEl.value = '';
+  // Opens on the library being viewed on the Wardrobe page (the same default the
+  // Add garment form uses); "His & Hers" shows everything.
+  personEl.value = (typeof tripsyWardrobePerson !== 'undefined' && tripsyWardrobePerson) || '';
+  groupEl.value = '';
+  tierEl.value = '';
+  const applyFilters = () => {
+    const q = searchEl.value.trim().toLowerCase();
     const rows = [...bodyEl.querySelectorAll('.tw-import-row')];
+    let shown = 0;
     for (const row of rows) {
+      const v = rowValues(row);
+      const ok = (!q || `${v.name} ${v.color}`.toLowerCase().includes(q))
+        && (!personEl.value || v.person === personEl.value)
+        && (!groupEl.value || v.group === groupEl.value)
+        && (!tierEl.value || v.tiers.includes(tierEl.value));
+      row.style.display = ok ? '' : 'none';
+      if (ok) shown++;
+    }
+    countEl.textContent = `${shown} of ${rows.length}`;
+  };
+  searchEl.oninput = applyFilters;
+  personEl.onchange = groupEl.onchange = tierEl.onchange = applyFilters;
+  applyFilters();
+  // Any edit after a save clears the "Saved" state so the button reads as
+  // something to press again.
+  bodyEl.oninput = bodyEl.onchange = () => {
+    if (saveBtn.dataset.saved) { delete saveBtn.dataset.saved; saveBtn.textContent = 'Save changes'; saveBtn.classList.remove('tw-bulk-saved'); statusEl.textContent = ''; }
+  };
+
+  saveBtn.onclick = async () => {
+    // Only CHANGED garments are written, all in one save -- including rows a
+    // filter currently hides.
+    const changed = [];
+    for (const row of bodyEl.querySelectorAll('.tw-import-row')) {
       const g = byId.get(row.getAttribute('data-tw-id'));
       if (!g) continue;
-      const updated = {
-        ...g,
-        name: row.querySelector('.tw-import-name').value.trim() || g.name,
-        person: row.querySelector('.tw-import-person')?.value === 'her' ? 'her' : 'him',
-        group: row.querySelector('.tw-import-group').value,
-        color: row.querySelector('.tw-import-color').value.trim(),
-        tiers: [...row.querySelectorAll('.tw-import-tiers input[data-tw-tier]:checked')].map(el => el.getAttribute('data-tw-tier')),
-      };
-      const ok = await Store.saveWardrobeGarment(updated);
-      if (ok) saved++; else failed++;
+      const v = rowValues(row);
+      const updated = { ...g, name: v.name.trim() || g.name, person: v.person, group: v.group, color: v.color.trim(), tiers: v.tiers };
+      const same = updated.name === (g.name || '') && updated.person === (g.person || 'him') && updated.group === (g.group || '')
+        && updated.color === (g.color || '') && updated.tiers.join('|') === (g.tiers || []).join('|');
+      if (!same) changed.push(updated);
     }
-    statusEl.textContent = `Saved ${saved}${failed ? `, ${failed} failed` : ''}.`;
+    if (!changed.length) { statusEl.style.color = 'var(--muted)'; statusEl.textContent = 'No changes to save.'; return; }
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    statusEl.style.color = 'var(--muted)';
+    statusEl.textContent = `Saving ${changed.length} garment${changed.length === 1 ? '' : 's'}…`;
+    const ok = await Store.saveWardrobeGarments(changed);
     saveBtn.disabled = false;
-    if (saved && onDone) onDone();
-    if (saved && !failed) setTimeout(() => { ov.style.display = 'none'; }, 800);
+    if (ok) {
+      for (const g of changed) byId.set(g.id, g); // the new baseline for the next save
+      // "When the user presses the save button, indicate that the changes have been
+      // saved" (2026-10-05): the button itself flips to a green ✓ Saved and stays
+      // that way until the next edit, plus a status line and a toast.
+      saveBtn.textContent = '✓ Saved';
+      saveBtn.dataset.saved = '1';
+      saveBtn.classList.add('tw-bulk-saved');
+      statusEl.style.color = 'var(--home-green, #3fb950)';
+      statusEl.textContent = `Saved ${changed.length} garment${changed.length === 1 ? '' : 's'}.`;
+      toast(`Wardrobe saved — ${changed.length} garment${changed.length === 1 ? '' : 's'} updated.`);
+      if (onDone) onDone();
+    } else {
+      saveBtn.textContent = 'Save changes';
+      statusEl.style.color = 'var(--red, #e02424)';
+      statusEl.textContent = 'Could not save — please try again.';
+      toast('Could not save the wardrobe changes — please try again.', 'error');
+    }
   };
   ov.style.display = 'flex';
+  searchEl.focus();
 }
 
 // Populates the live "Authorized Users" card on the Users utility page --
