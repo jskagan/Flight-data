@@ -28,14 +28,16 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 
 // ---- showTripsyOutfitModal fires opts.onSwapped right after a successful swap save ----
 const modal = extractFn('showTripsyOutfitModal');
-assert(/const ok = await Store\.saveTripsyTripOutfits\(outfits\);\s*\n\s*if \(!ok\)[\s\S]{0,1200}if \(opts\.onSwapped\) opts\.onSwapped\(\);/.test(modal),
-  'onSwapped fires after the swap save succeeds, before the modal repaints itself');
+// Optimistic since 2026-10-05: the in-memory change is real immediately, so onSwapped
+// fires BEFORE the background save, and again if that save fails and rolls back.
+assert(modal.indexOf('if (opts.onSwapped) opts.onSwapped();') < modal.indexOf('Store.saveTripsyTripOutfits(outfits)'),
+  'onSwapped fires on the optimistic change, before the modal repaints itself');
 assert(/if \(opts\.onSwapped\) opts\.onSwapped\(\);\s*\n\s*showTripsyOutfitModal\(tripKey, eventId, person, opts\);/.test(modal),
   'the modal still repaints itself too -- onSwapped is additive, not a replacement');
 // A failed save must NOT fire onSwapped -- nothing actually changed.
 const swapBlock = modal.slice(modal.indexOf("btn.onclick = async () => {"), modal.indexOf('if (opts.onSwapped)') + 40);
-assert(/if \(!ok\) \{ toast\('Could not save the change\.', 'error'\); return; \}/.test(swapBlock),
-  'a failed save returns before reaching onSwapped');
+assert(/if \(!ok\) \{\s*\n\s*block\.garmentIds = prevIds;[\s\S]{0,200}if \(opts\.onSwapped\) opts\.onSwapped\(\);/.test(modal),
+  'a failed save rolls back and refreshes the guide again');
 
 // ---- the Daily Dress Guide's outfit-block click handler wires the shared refresh
 // callback (refreshLaundryInfo -- also reused by the laundry-day trigger, see

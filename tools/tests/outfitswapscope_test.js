@@ -32,7 +32,7 @@ assert(/tripsyOutfitSwapPicker\(tripKey, block, currentId, person, liveTier\)/.t
   'and passes it into the picker');
 assert(/chosen === TRIPSY_OUTFIT_SWAP_REMOVE\)[\s\S]{0,20}\{[\s\S]{0,80}block\.garmentIds\.splice\(i, 1\);/.test(modal),
   'a Remove result splices the garment out with no replacement');
-assert(/if \(chosen === currentId\) return;[\s\S]{0,20}block\.garmentIds\[i\] = chosen;/.test(modal),
+assert(/if \(chosen !== TRIPSY_OUTFIT_SWAP_REMOVE && chosen === currentId\) return;[\s\S]{0,300}block\.garmentIds\[i\] = chosen;/.test(modal),
   'an ordinary pick still replaces in place');
 
 // ---- tripsyOutfitBlockLiveTier: executed against fixtures ----

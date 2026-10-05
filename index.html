@@ -3689,7 +3689,15 @@ const Store = {
   // Composed outfits are now stored one record per (tripKey, person). A legacy
   // record with no `person` reads as 'him', so today's composed sets stay His.
   async getTripsyTripOutfits(tripKey, person = 'him') {
-    return (driveData.tripsyTripOutfits || []).find(o => o.tripKey === tripKey && (o.person || 'him') === person) || null;
+    const rec = (driveData.tripsyTripOutfits || []).find(o => o.tripKey === tripKey && (o.person || 'him') === person) || null;
+    // The airport-transfer block wears the flight's outfit -- applied on every read
+    // (idempotent, in memory; the next save carries it) so every surface agrees,
+    // including outfits composed before the rule existed.
+    try {
+      const guide = (driveData.tripsyAttireGuides || []).find(g => g.tripKey === tripKey);
+      if (rec && guide) tripsyOutfitSyncFlightTransfers(guide, rec);
+    } catch (e) { console.error('flight-transfer outfit sync failed (non-fatal):', e); }
+    return rec;
   },
   async saveTripsyTripOutfits(outfits) {
     const person = outfits.person || 'him';
@@ -10020,6 +10028,15 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
         });
       }
     }
+    // A flight tier whose only bottoms are shorts/swimwear deducts nothing from them
+    // (see the claimer), but the bottom you fly in still needs a line to be picked on.
+    const flightTierLines = byTier[flightClaimer.tier] || [];
+    if (!flightClaimer.has('pants') && flightTierLines.some(ln => ln.group === 'pants')) {
+      (companions[flightClaimer.tier] = companions[flightClaimer.tier] || []).push({
+        name: `${TRIPSY_FLIGHT_WORN_ROLE_LABEL.pants}${TRIPSY_FLIGHT_WORN_SUFFIX}`,
+        typeKey: '', group: 'pants', need: 1, flightWorn: true,
+      });
+    }
     // A line fully covered by what's worn drops out rather than lingering at 0 -- every
     // other line here is guaranteed need >= 1, so this only removes what was just zeroed.
     for (const k of Object.keys(byTier)) byTier[k] = byTier[k].filter(ln => ln.need > 0);
@@ -10087,8 +10104,17 @@ function tripsyWardrobeFlightWornClaimer(guide) {
       }
       if (itemTier !== tier) return false;
       const grp = group || tripsyAttirePackingGroupOf({ name });
+      // Nobody flies in shorts or swimwear, so the worn bottom is never deducted from
+      // such a line ("Why are jeans appearing as casual shorts on my packing plan?",
+      // 2026-10-05: a tier whose only bottoms line was the owner's own "Shorts" had it
+      // zeroed and hidden -- the jeans worn on the plane were counted AS the shorts).
+      // The role stays unclaimed; tripsyWardrobeNeedByTier still adds the flight
+      // companion line (see `has`), so the jeans remain pickable.
+      // A mixed line ("casual shorts/jeans") still offers long bottoms, so it can be claimed.
+      if (grp === 'pants' && ['shorts', 'swim'].includes(typeKey) && !/\b(jeans|trousers|pants|chinos)\b/i.test(name)) return false;
       return ['tops', 'pants', 'footwear'].includes(grp) ? take(grp) : false;
     },
+    has(role) { return taken.has(role); },
   };
 }
 // One off a quantity that may be a plain count ("4" -> "3") or a range ("8-9" -> "7-8").
@@ -11165,7 +11191,10 @@ async function tripsyWardrobeWearDays(tripKey, garmentId, person) {
     const evs = [];
     for (const b of blocks) {
       const found = (b.eventIds || []).map(id => evById.get(id) || { id, name: b.label || 'Event', dayKey: b.dayKey });
-      for (const ev of found) evs.push({ ...ev, dayKey: ev.dayKey || b.dayKey });
+      // The ride from the airport is the SAME wearing as the flight it follows, so it
+      // files under the flight's day rather than counting a second wear day.
+      const asFlightDay = b.wornFromFlightDayKey && blocks.some(o => o !== b && o.dayKey === b.wornFromFlightDayKey);
+      for (const ev of found) evs.push({ ...ev, dayKey: asFlightDay ? b.wornFromFlightDayKey : (ev.dayKey || b.dayKey) });
     }
     return { days: group(evs), basis: 'outfits', outfitLinked: true };
   }
@@ -11857,6 +11886,8 @@ async function showTripsyWearDaysOverlay(tripKey, garment, person) {
     if (row) showTripsyOutfitModal(tripKey, row.getAttribute('data-tw-weardays-event'), person);
   };
 }
+// Serializes the outfit modal's background Swap/Remove saves (see its swap handler).
+let tripsyOutfitSwapChain = Promise.resolve();
 async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}) {
   let ov = document.getElementById('tw-outfit-overlay');
   if (!ov) {
@@ -11940,24 +11971,21 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
       if (!chosen) return; // cancelled
       const i = (block.garmentIds || []).indexOf(currentId);
       if (i < 0) return;
+      if (chosen !== TRIPSY_OUTFIT_SWAP_REMOVE && chosen === currentId) return;
+      const prevIds = block.garmentIds.slice();
       if (chosen === TRIPSY_OUTFIT_SWAP_REMOVE) {
         block.garmentIds.splice(i, 1); // e.g. a tie that's merely optional at Cocktail
       } else {
-        if (chosen === currentId) return;
         block.garmentIds[i] = chosen;
       }
-      const ok = await Store.saveTripsyTripOutfits(outfits);
-      if (!ok) { toast('Could not save the change.', 'error'); return; }
-      // This swap can push extra wear onto whichever garment just went IN, which can
-      // leave a LATER block short of it -- check for that and fix it automatically
-      // (no confirmation; see tripsyOutfitAutoAdjustAfterSwap for why this differs from
-      // the Wash Now flow, which asks first).
-      const adjustedCount = await tripsyOutfitAutoAdjustAfterSwap(tripKey, person, guide);
-      if (adjustedCount) {
-        toast(adjustedCount > 1
-          ? `Also reconfigured ${adjustedCount} later outfits to keep everything clean.`
-          : 'Also reconfigured a later outfit to keep everything clean.');
-      }
+      // The flight and the airport-transfer ride after it are ONE outfit: a swap on
+      // either carries to the other.
+      tripsyOutfitSyncFlightTransfers(guide, outfits, block);
+      // OPTIMISTIC ("There was a delay when I hit a button to remove a garment from an
+      // outfit," 2026-10-05): `outfits` is the live driveData record, so the change is
+      // already real in memory -- repaint NOW and let the whole-file Drive save (plus
+      // the auto-reconfigure's own save) run behind it, serialized so two quick swaps
+      // can't race. A failed save restores this block and repaints, with a toast.
       // Tell whatever opened this modal that a swap actually happened -- the Daily
       // Dress Guide's run-out bar is computed ONCE per opening and cached in its own
       // renderOpts, so without this callback it kept naming a garment that had
@@ -11965,6 +11993,33 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
       // the guide behind this modal.
       if (opts.onSwapped) opts.onSwapped();
       showTripsyOutfitModal(tripKey, eventId, person, opts);
+      const repaintIfShowing = () => {
+        if (ov.style.display !== 'none') showTripsyOutfitModal(tripKey, eventId, person, opts);
+      };
+      tripsyOutfitSwapChain = tripsyOutfitSwapChain.then(async () => {
+        let ok = false;
+        try { ok = await Store.saveTripsyTripOutfits(outfits); } catch (e) { ok = false; }
+        if (!ok) {
+          block.garmentIds = prevIds;
+          tripsyOutfitSyncFlightTransfers(guide, outfits, block);
+          toast('Could not save the outfit change — it was undone.', 'error');
+          if (opts.onSwapped) opts.onSwapped();
+          repaintIfShowing();
+          return;
+        }
+        // This swap can push extra wear onto whichever garment just went IN, which can
+        // leave a LATER block short of it -- check for that and fix it automatically
+        // (no confirmation; see tripsyOutfitAutoAdjustAfterSwap for why this differs from
+        // the Wash Now flow, which asks first).
+        const adjustedCount = await tripsyOutfitAutoAdjustAfterSwap(tripKey, person, guide);
+        if (adjustedCount) {
+          toast(adjustedCount > 1
+            ? `Also reconfigured ${adjustedCount} later outfits to keep everything clean.`
+            : 'Also reconfigured a later outfit to keep everything clean.');
+          if (opts.onSwapped) opts.onSwapped();
+          repaintIfShowing();
+        }
+      }).catch(e => console.error('outfit swap background save failed:', e));
     };
   });
   // Tapping a garment's photo shows where it's packed -- read-only, so every viewer
@@ -24717,8 +24772,80 @@ function tripsyAttireForceAthleticCategories(days) {
   }
   return forced;
 }
+// ---- The ride from the airport wears the FLIGHT's outfit ----
+// "An outfit for transportation from a flight to a hotel should always be the same as
+// the outfit on the flight" (2026-10-05). You step off the plane and into the car in
+// the same clothes. A link is a ground transfer (not a flight/train/ferry) whose FROM
+// side names an airport, whose previous real event on the trip -- free-day
+// placeholders skipped, across day boundaries, since an overnight flight sits on its
+// DEPARTURE day while the car sits on the arrival day -- is a flight at most 2 days
+// earlier. Pure; returns [{ flight, transfer, flightDayKey, transferDayKey }] over the
+// guide's own event objects.
+function tripsyAttireIsFlightEvent(ev) {
+  return !!ev && ev.resource === 'transportation' && /^\s*flight\b/i.test(String(ev.name || ''));
+}
+function tripsyAttireIsAirportTransfer(ev) {
+  if (!ev || ev.resource !== 'transportation') return false;
+  const name = String(ev.name || '');
+  if (/^\s*(flight|train|ferry|cruise|boat)\b/i.test(name)) return false;
+  const from = name.split(/→|\s+to\s+/i)[0];
+  return /\b(airport|terminal|arrivals?|arriving)\b|\([A-Z]{3}\)/i.test(from);
+}
+function tripsyAttireFlightTransferLinks(days) {
+  const links = [];
+  let prev = null;
+  for (const day of (days || [])) {
+    for (const ev of (day.events || [])) {
+      if (ev.freeDay) continue;
+      if (prev && tripsyAttireIsFlightEvent(prev.ev) && tripsyAttireIsAirportTransfer(ev)) {
+        const gapDays = (Date.parse(day.dayKey) - Date.parse(prev.dayKey)) / 86400000;
+        if (gapDays >= 0 && gapDays <= 2) links.push({ flight: prev.ev, transfer: ev, flightDayKey: prev.dayKey, transferDayKey: day.dayKey });
+      }
+      prev = { ev, dayKey: day.dayKey };
+    }
+  }
+  return links;
+}
+// The transfer takes the flight's dress code (base tier), so on the same day the two
+// fall in ONE run (identical tiers never need a change) and share one outfit. A manual
+// override on the transfer still wins. Idempotent; returns the links.
+function tripsyAttireMatchTransfersToFlights(days) {
+  const links = tripsyAttireFlightTransferLinks(days);
+  for (const l of links) {
+    if (l.transfer.categoryOverridden || !l.flight.category) continue;
+    l.transfer.category = l.flight.category;
+    l.transfer.alternateCategory = '';
+  }
+  return links;
+}
+// Outfit side: after an overnight flight the transfer is on another day, so it is its
+// own block -- copy the flight block's garments onto it (and onto the flight block
+// first when `source` is the transfer block, so a Swap made on either side holds for
+// both). Stamps `wornFromFlightDayKey` so wear counting treats the two as ONE wearing.
+// Mutates `outfits` in place; returns how many blocks changed.
+function tripsyOutfitSyncFlightTransfers(guide, outfits, source = null) {
+  if (!guide || !outfits || !(outfits.blocks || []).length) return 0;
+  const blockOf = id => outfits.blocks.find(b => (b.eventIds || []).includes(id));
+  const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+  let changed = 0;
+  for (const l of tripsyAttireFlightTransferLinks(guide.days)) {
+    const fb = blockOf(l.flight.id), tb = blockOf(l.transfer.id);
+    if (!fb || !tb || fb === tb) continue;
+    if (source && source === tb && !same(fb.garmentIds || [], tb.garmentIds || [])) {
+      fb.garmentIds = (tb.garmentIds || []).slice(); changed++;
+    }
+    if (!same(tb.garmentIds || [], fb.garmentIds || [])) { tb.garmentIds = (fb.garmentIds || []).slice(); changed++; }
+    if (tb.wornFromFlightDayKey !== fb.dayKey) { tb.wornFromFlightDayKey = fb.dayKey; changed++; }
+  }
+  return changed;
+}
 function computeTripsyAttireBlocks(days) {
   const rankOf = category => TRIPSY_ATTIRE_CATEGORY_ORDER.indexOf(category);
+  // The airport-transfer car wears the flight's dress code (see above); the arrival-day
+  // run it starts after an overnight flight is the SAME occasion, so it isn't counted
+  // again below (that would size one extra outfit into the packing guidance).
+  const flightLinks = tripsyAttireMatchTransfersToFlights(days);
+  const continuesFlight = new Set(flightLinks.filter(l => l.flightDayKey !== l.transferDayKey).map(l => l.transfer));
 
   // Flatten every event with its dayKey plus a reference back to the real
   // object, so the derived displayCategory can be stamped onto it in place.
@@ -24761,6 +24888,7 @@ function computeTripsyAttireBlocks(days) {
     }
     run.category = category;
     run.items.forEach(it => { it._ref.displayCategory = category; });
+    if (continuesFlight.has(run.items[0]._ref)) continue;
     blockCounts[category] = (blockCounts[category] || 0) + 1;
     (runsByCategory[category] = runsByCategory[category] || []).push(run);
   }
@@ -24794,6 +24922,7 @@ function computeTripsyAttireBlocks(days) {
 // instead of re-judging them.
 function tripsyAttireTieredTimeBlocks(days) {
   const rankOf = c => TRIPSY_ATTIRE_CATEGORY_ORDER.indexOf(c);
+  tripsyAttireMatchTransfersToFlights(days);
   const flattened = [];
   for (const day of (days || [])) for (const ev of (day.events || [])) flattened.push({ ...ev, dayKey: day.dayKey, _ref: ev });
   const runs = [];
@@ -30393,13 +30522,23 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
       if (j >= 0) { keptByIndex.set(i, unused[j]); unused.splice(j, 1); }
     });
   }
-  const staleBlocks = blocks.filter((b, i) => !keptByIndex.has(i));
+  // A block that is the airport-transfer ride after an OVERNIGHT flight wears the
+  // flight block's outfit verbatim (tripsyOutfitSyncFlightTransfers, run on the result
+  // below), so it is never sent to Claude to dress -- that would also make Claude count
+  // the flight's top as worn twice.
+  const flightCopyIdx = new Set();
+  for (const l of tripsyAttireFlightTransferLinks(guide.days)) {
+    const ti = blocks.findIndex(b => b.eventIds.includes(l.transfer.id));
+    const fi = blocks.findIndex(b => b.eventIds.includes(l.flight.id));
+    if (ti >= 0 && fi >= 0 && ti !== fi) flightCopyIdx.add(ti);
+  }
+  const staleBlocks = blocks.filter((b, i) => !keptByIndex.has(i) && !flightCopyIdx.has(i));
   // A kept block's outfit is carried over but its eventIds/label are refreshed from the
   // CURRENT block, so per-event outfit lookups (the 👔 glyph, the guide's "See outfit"
   // cue) stay correct after events fold into or leave a block.
   const keptOutBlock = (b, sb) => ({
     dayKey: b.dayKey, category: b.category, eventIds: b.eventIds, label: b.label,
-    garmentIds: sb.garmentIds || [], note: sb.note || '', gaps: sb.gaps || [],
+    garmentIds: (sb && sb.garmentIds) || [], note: (sb && sb.note) || '', gaps: (sb && sb.gaps) || [],
   });
   if (!staleBlocks.length) {
     // Every current block is already dressed -- nothing for Claude to do at all. Still
@@ -30410,6 +30549,7 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
       selectionFingerprint: selectionFp,
       blocks: blocks.map((b, i) => keptOutBlock(b, keptByIndex.get(i))),
     };
+    tripsyOutfitSyncFlightTransfers(guide, outfits);
     const ok = await Store.saveTripsyTripOutfits(outfits);
     if (!ok) {
       // Same preserved-result shape as the main path below, so the caller's Retry Save
@@ -30486,7 +30626,7 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
   const keptSection = keptByIndex.size ? `
 
 ALREADY-DRESSED BLOCKS — kept exactly as they are, do NOT re-dress or output these. Their garments' wear DOES count against the re-wear limits below when dressing the blocks above:
-${[...keptByIndex.entries()].map(([i, sb]) => {
+${[...keptByIndex.entries()].filter(([i]) => !flightCopyIdx.has(i)).map(([i, sb]) => {
     const tags = (sb.garmentIds || []).map(id => tagById.get(id)).filter(Boolean);
     return `${scheduleLineFor(blocks[i])} → ${tags.join(', ') || '(none)'}`;
   }).join('\n')}` : '';
@@ -30550,7 +30690,8 @@ Rules:
     });
   }
   const outBlocks = blocks
-    .map((b, i) => keptByIndex.has(i) ? keptOutBlock(b, keptByIndex.get(i)) : dressedById.get(b.blockId))
+    .map((b, i) => keptByIndex.has(i) ? keptOutBlock(b, keptByIndex.get(i))
+      : flightCopyIdx.has(i) ? keptOutBlock(b, null) : dressedById.get(b.blockId))
     .filter(Boolean);
   if (!dressedById.size) throw new Error('No outfits came back — try again.');
   const outfits = {
@@ -30561,6 +30702,7 @@ Rules:
     selectionFingerprint: selectionFp,
     blocks: outBlocks,
   };
+  tripsyOutfitSyncFlightTransfers(guide, outfits);
   // The save itself gets its own bounded retry, on top of whatever
   // persistTripsyNarrativeCacheWithRetry already does internally for a REVISION
   // CONFLICT specifically -- a plain transient failure (a network blip, a briefly

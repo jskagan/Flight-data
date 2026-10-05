@@ -37,7 +37,7 @@ assert(/const j = unused\.findIndex\(sb => sb\.dayKey === b\.dayKey && sb\.categ
   'coverage matching is the same greedy day+tier multiset rule tripsyOutfitsUncoveredBlocks uses');
 assert(/if \(j >= 0\) \{ keptByIndex\.set\(i, unused\[j\]\); unused\.splice\(j, 1\); \}/.test(composeFn),
   'each saved block covers at most ONE current block (multiset, not just presence)');
-assert(/const staleBlocks = blocks\.filter\(\(b, i\) => !keptByIndex\.has\(i\)\);/.test(composeFn),
+assert(/const staleBlocks = blocks\.filter\(\(b, i\) => !keptByIndex\.has\(i\) && !flightCopyIdx\.has\(i\)\);/.test(composeFn),
   'only uncovered blocks are considered stale');
 assert(/if \(!staleBlocks\.length\) \{/.test(composeFn) && /no API call needed/.test(composeFn),
   'zero stale blocks -> no Claude call at all, just a refresh save');
@@ -45,11 +45,11 @@ assert(/const scheduleLines = staleBlocks\.map\(scheduleLineFor\)\.join\('\\n'\)
   'THE FIX: the prompt\'s dress-these list contains only the stale blocks');
 assert(/ALREADY-DRESSED BLOCKS/.test(composeFn) && /wear DOES count against the re-wear limits/.test(composeFn),
   'kept outfits are given as fixed context so the whole-trip rotation limits still hold');
-assert(/eventIds: b\.eventIds, label: b\.label,\s*\n\s*garmentIds: sb\.garmentIds \|\| \[\]/.test(composeFn),
+assert(/eventIds: b\.eventIds, label: b\.label,\s*\n\s*garmentIds: \(sb && sb\.garmentIds\) \|\| \[\]/.test(composeFn),
   'a kept block carries its outfit verbatim but refreshes eventIds/label from the CURRENT block');
 assert(/if \(!b \|\| !staleIds\.has\(b\.blockId\)\) continue;/.test(composeFn),
   'a stray result for a non-stale block is ignored, never overwrites a kept outfit');
-assert(/\.map\(\(b, i\) => keptByIndex\.has\(i\) \? keptOutBlock\(b, keptByIndex\.get\(i\)\) : dressedById\.get\(b\.blockId\)\)/.test(composeFn),
+assert(/\.map\(\(b, i\) => keptByIndex\.has\(i\) \? keptOutBlock\(b, keptByIndex\.get\(i\)\)\s*\n\s*: flightCopyIdx\.has\(i\) \? keptOutBlock\(b, null\) : dressedById\.get\(b\.blockId\)\)/.test(composeFn),
   'the final set merges kept + freshly-dressed blocks back into current-block order');
 assert(/if \(!dressedById\.size\) throw new Error\('No outfits came back — try again\.'\);/.test(composeFn),
   'an empty API result still fails loudly (kept blocks alone must not mask a failed call)');

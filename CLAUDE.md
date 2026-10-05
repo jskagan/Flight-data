@@ -1758,6 +1758,13 @@ step 4; git history has it if ever needed.
   always offered alongside the candidate grid) instead of a garment id, splicing the piece out of
   `block.garmentIds` with no replacement — e.g. a tie that's merely optional now that the event
   reads Cocktail rather than Black Tie, where a substitute isn't the point, dropping it is.
+  **Swap and Remove are optimistic** ("There was a delay when I hit a button to remove a
+  garment from an outfit," 2026-10-05): the handler mutates `block.garmentIds` (a live
+  `driveData` record), fires `onSwapped`, and repaints the modal IMMEDIATELY; the whole-file
+  save and the auto-reconfigure that follows it run in the background on
+  `tripsyOutfitSwapChain`, so two quick swaps can't race. A failed save restores the block's
+  previous ids, toasts "…it was undone", and fires `onSwapped` again and repaints (only if the
+  modal is still open), as does a successful auto-reconfigure. `outfitswapfast_test.js`.
   **Swap only offers a garment that's actually FREE that day.** Besides `wornElsewhere` (already
   worn in THIS block), it now excludes anything already assigned to a DIFFERENT block on the SAME
   day — offering it would mean the same physical piece worn in two outfits at once. A garment worn
@@ -2033,6 +2040,27 @@ step 4; git history has it if ever needed.
   which also retired the old casual↔formal count-elevation edge (a non-itemized event no longer
   breaks a run). Since `computeTripsyAttireBlocks` no longer calls `tripsyAttireContinuesPrevious`,
   that function is now unused (kept as documentation of the older continuity-first grouping).
+- **The ride from the airport wears the FLIGHT's outfit** ("An outfit for transportation from
+  a flight to a hotel should always be the same as the outfit on the flight," 2026-10-05).
+  `tripsyAttireFlightTransferLinks(days)` pairs a ground transfer whose FROM side names an
+  airport (`tripsyAttireIsAirportTransfer` — not a flight/train/ferry; "airport", "terminal",
+  "arrival(s)/arriving" or a `(XXX)` code before the →) with the previous real event on the
+  trip when that is a flight (`tripsyAttireIsFlightEvent`) at most 2 days earlier — walked
+  ACROSS days and skipping free-day placeholders, because an overnight flight sits on its
+  departure day while the car sits on the arrival day. Two halves: **dress code** —
+  `tripsyAttireMatchTransfersToFlights` (run at the top of `computeTripsyAttireBlocks` and
+  `tripsyAttireTieredTimeBlocks`, idempotent) gives the transfer the flight's base tier unless
+  the owner overrode it, so a same-day pair falls in one run (identical tiers never need a
+  change) and shares one outfit; a cross-day arrival run is NOT counted as a new occasion.
+  **Outfit** — `tripsyOutfitSyncFlightTransfers(guide, outfits, source)` copies the flight
+  block's `garmentIds` onto the cross-day transfer block (from the transfer side first when
+  `source` is it, so a Swap on either holds for both) and stamps `wornFromFlightDayKey`.
+  Applied on EVERY `Store.getTripsyTripOutfits` read (in memory, idempotent — so outfits
+  composed before the rule are corrected everywhere at once), in the Swap handler, and on
+  compose, which never sends the copied block to Claude (nor lists it as kept context — it
+  would read as the flight's top worn twice). `tripsyWardrobeWearDays` files the copied
+  block's events under the flight's day, so laundry counts ONE wearing.
+  `flighttransferoutfit_test.js`.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"
   2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day
@@ -2547,7 +2575,13 @@ would overwrite the glyph with the word.
   into the composer's pool for free. Within a tier the claim goes to whichever line comes first,
   which picked the wrong bottom — this trip's casual tier lists "shorts" ahead of "trousers", so
   the flight-worn bottom came out as SHORTS — so shorts and swimwear are offered to the claimer
-  LAST (a tier with only shorts still claims one). That rank is typed off the line NAME, not
+  LAST. **And a shorts/swim line is never DEDUCTED at all** ("Why are jeans appearing as casual
+  shorts on my packing plan?", 2026-10-05 — the casual tier's only bottoms line was the owner's
+  own custom "Shorts", need 1, so the claim zeroed and hid it: the jeans worn on the plane were
+  counted AS the shorts). The claimer returns false for a pants item typed shorts/swim unless its
+  name also names jeans/trousers/pants/chinos (a mixed "shorts/jeans" line is still claimable),
+  and exposes `has(role)` so `tripsyWardrobeNeedByTier` still adds the "Bottoms — wearing on the
+  flight" companion when the flight tier has bottoms but none were claimable. That rank is typed off the line NAME, not
   `ln.typeKey`: the mix-and-match tiers collapse their lines to generic group lines, so
   casual/smart-casual/athletic lines carry no type at all — exactly the tiers a flight departs in.
   The companion is named for the ROLE, never for the line it was deducted from: on a

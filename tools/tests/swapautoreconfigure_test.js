@@ -40,7 +40,7 @@ assert(/\} catch \(e\) \{\s*\n\s*console\.error\('tripsyOutfitAutoAdjustAfterSwa
 
 // ---- source-pattern checks: wired into the Swap handler, after the save succeeds ----
 const modal = extractFn('showTripsyOutfitModal');
-assert(/if \(!ok\) \{ toast\('Could not save the change\.', 'error'\); return; \}\s*\n[\s\S]{0,600}const adjustedCount = await tripsyOutfitAutoAdjustAfterSwap\(tripKey, person, guide\);/.test(modal),
+assert(/try \{ ok = await Store\.saveTripsyTripOutfits\(outfits\); \}[\s\S]{0,300}if \(!ok\) \{[\s\S]{0,300}return;\s*\n\s*\}[\s\S]{0,600}const adjustedCount = await tripsyOutfitAutoAdjustAfterSwap\(tripKey, person, guide\);/.test(modal),
   'runs right after a successful swap save (a failed save already returned above)');
 assert(/if \(adjustedCount\) \{\s*\n\s*toast\(adjustedCount > 1/.test(modal), 'tells the owner when something else was reconfigured as a result');
 

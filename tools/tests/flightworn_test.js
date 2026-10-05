@@ -102,13 +102,23 @@ assert(JSON.stringify(flightLines.map(l => l.name).sort()) === JSON.stringify([
   'Bottoms — wearing on the flight', 'Shoes — wearing on the flight', 'Top — wearing on the flight'].sort()),
   'companions are named by role -> ' + flightLines.map(l => l.name).join(' | '));
 
-// A tier with ONLY shorts still claims one, rather than claiming nothing.
+// A tier with ONLY shorts still offers the flight "Bottoms" line, but never deducts from
+// the shorts ("Why are jeans appearing as casual shorts on my packing plan?", 2026-10-05:
+// the jeans you fly in were being counted AS a pair of shorts, hiding a 1-pair line).
 const g3 = JSON.parse(JSON.stringify(guide));
 g3.packingList.him = g3.packingList.him.filter(i => i.name !== 'casual bottoms');
 const need3 = tripsyWardrobeNeedByTier(g3, 'him');
 const b3 = (need3['casual'] || []).filter(l => l.flightWorn && l.group === 'pants');
-assert(b3.length === 1 && /^Bottoms/.test(b3[0].name), 'with only shorts, one IS claimed -- and still reads "Bottoms" -> ' + JSON.stringify(b3.map(l => l.name)));
-assert((need3['casual'] || []).some(l => !l.flightWorn && /shorts/.test(l.name) && l.need === 1), 'and the shorts line is what got deducted, 2 -> 1');
+assert(b3.length === 1 && /^Bottoms/.test(b3[0].name), 'with only shorts, the "Bottoms" flight line is still offered -> ' + JSON.stringify(b3.map(l => l.name)));
+assert((need3['casual'] || []).some(l => !l.flightWorn && /shorts/.test(l.name) && l.need === 2), 'and the shorts line is NOT deducted: 2 stays 2');
+const g4 = JSON.parse(JSON.stringify(g3));
+g4.packingList.him = g4.packingList.him.map(i => i.name === 'casual shorts' ? { ...i, quantity: '1' } : i);
+const need4 = tripsyWardrobeNeedByTier(g4, 'him');
+assert((need4['casual'] || []).some(l => !l.flightWorn && /shorts/.test(l.name) && l.need === 1), 'THE REPORT: a 1-pair shorts line no longer vanishes into the flight jeans');
+const g5 = JSON.parse(JSON.stringify(g3));
+g5.packingList.him = g5.packingList.him.map(i => i.name === 'casual shorts' ? { ...i, name: 'casual shorts/jeans' } : i);
+const need5 = tripsyWardrobeNeedByTier(g5, 'him');
+assert((need5['casual'] || []).some(l => !l.flightWorn && /jeans/.test(l.name) && l.need === 1), 'a mixed "shorts/jeans" line still carries the flight deduction');
 
 // A trip that does NOT start with a flight gets no companions at all.
 const g2 = JSON.parse(JSON.stringify(guide));
