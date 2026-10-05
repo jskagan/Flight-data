@@ -2337,6 +2337,23 @@ would overwrite the glyph with the word.
   immediately. `tripsyWardrobeChooseQty` (asked when more than one copy is available) now pins its
   own z-index above the Add Garment dialog specifically — it used to rely on plain DOM append order,
   which broke the moment a caller other than the base page height opened it first.
+- **A garment photo can come from the camera OR the photo library** ("How do I select a photo
+  from my photo library to add a garment," 2026-10-05). `showWardrobeGarmentForm`'s "Take / choose
+  photo" button used to click ONE hidden input carrying `capture="environment"`, which on
+  iPhone/iPad opens the camera outright with no library option. It now opens the shared
+  `tripsyPickImageFile` picker (Take Photo / Choose Photo over two inputs, the shape that works on
+  iPad — the diary already used it). Never put `capture` on an input meant to reach the library.
+  `garmentphotolib_test.js`.
+- **Shorts and long trousers never stand in for each other** ("Do not include shorts as potential
+  garments for chinos," 2026-10-05). The mix-and-match tiers collapse their need lines to untyped
+  whole-group pools, so a "Chinos" line matched every `pants`-group garment, shorts included.
+  `tripsyWardrobeGarmentFillsLine` now rejects a `shorts`/`swim`-typed garment on an untyped line
+  whose NAME types as `trousers` or `jeans`, and — the reverse, same day: "Do not use jeans or
+  trousers as shorts" — a `trousers`/`jeans` garment on a line whose name types as `shorts`. Jeans
+  and trousers still substitute for each other, and a generic "bottoms" line still offers
+  everything. Every picker that matches by line
+  (Plan Packing List, Add Garment's attach step) goes through that one function.
+  `chinosnoshorts_test.js`.
 - **A packed suit covers a tier's blazer + trousers — including one packed for another tier.** A
   tier whose need is "blazer (or informal suit) + trousers" (e.g. Cocktail) DROPS both lines once
   any selected suit is wearable at that tier, judged by the garment's own `tiers` — so a suit going
