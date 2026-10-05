@@ -22,7 +22,7 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 
 // ---- wiring: the photo is a tap target, wired for EVERY viewer, not owner-gated ----
 const modal = extractFn('showTripsyOutfitModal');
-assert(/data-tw-outfit-photo="\$\{esc\(g\.id\)\}" style="cursor:pointer;"/.test(modal),
+assert(/data-tw-outfit-photo="\$\{esc\(g\.id\)\}" style="cursor:pointer; position:relative;"/.test(modal),
   'the photo carries the garment id and looks tappable');
 assert(!/isOwner \? `<div class="tw-actions">.*data-tw-outfit-photo/.test(modal),
   'unlike Swap, the photo tap is not wrapped in an isOwner check');

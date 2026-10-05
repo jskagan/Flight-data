@@ -2542,6 +2542,31 @@ would overwrite the glyph with the word.
   clears what the other raised. `tripsySetAttireStaleBadge`'s stale state carries
   `.tripsy-menu-flash`. Tapping a glyph flagged ONLY for outfits just opens the menu — the
   guide prompt would have no itinerary changes to list. `stalereasons_test.js`.
+- **An outfit shows its own problems inline: a garment that must GO gets a Swap button plus the
+  garments that could replace it, and a MISSING top/bottoms/shoes gets an Add button plus the
+  garments that could complete it** ("When a garment needs to be removed from an outfit, show a
+  swap button and show garments that could be used to replace the removed garment. When a garment
+  is missing from an outfit, show an add button and show garments that could be used to complete
+  the outfit," 2026-10-05). In `showTripsyOutfitModal`: a garment in the outfit but no longer on
+  the Packing List (`lostIds`, selection read from `Store.getTripWardrobe`) is outlined red and
+  badged "Not packed", and under the grid a "⚠ X is no longer packed — replace it with…" row
+  carries a **Swap** button (the same `data-tw-outfit-swap` the card has, opening the same picker)
+  and the `tripsyOutfitSwapCandidates` list as pickable cards. Completeness is judged by three
+  body ROLES (`TRIPSY_OUTFIT_ROLES` = tops/pants/footwear, labelled via
+  `TRIPSY_FLIGHT_WORN_ROLE_LABEL`): `tripsyOutfitGarmentRoles(g)` goes by TYPE first because the
+  dress_wear group spans both halves (a dress shirt is a top, a suit/tuxedo brings its trousers, a
+  dress covers both; ties, blazers, belts, essentials fill nothing), falling back to the packing
+  group; `tripsyOutfitMissingRoles(garments)` lists the unfilled ones. Each gets a "⚠ No shoes in
+  this outfit — complete it with…" row with an **Add** button (`tripsyOutfitAddPicker`, the Swap
+  picker's shell with no Remove, z `2147483098` so it clears BOTH the modal and the fix page) and
+  `tripsyOutfitAddCandidates` inline (packed, this person, not an essential, not already in the
+  outfit, free that day, tagged for the live tier — the Swap rules minus the same-type test, since
+  the role IS the type). Claude's free-text `block.gaps` still show beneath. Swap, Remove, a
+  replacement pick and Add all go through ONE `applyOutfitChange(currentId, chosen)` (null
+  `currentId` = push) on the optimistic `tripsyOutfitSwapChain` with rollback. Viewers see the
+  marks and the missing-role rows, no controls. `showTripsyOutfitFixPage` gets the same Add
+  sections (`data-fix-add`/`data-fix-add-pick`), stays open for an incomplete outfit, and its
+  problem note names what is missing. `outfitaddmissing_test.js`.
 - **A dress-code refresh now proactively offers to recompose outfits it just made stale**, instead
   of leaving that discoverable only per-block. Refreshing the Attire Guide (dress-code
   categorization) and composing Outfits (the actual garment picks per time-block) are two separate,

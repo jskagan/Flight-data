@@ -89,7 +89,7 @@ assert(/items\.push\(\{ kind: 'lost', line, person, block: b, outfits, lostIds: 
   'reasons carry the LIVE block so the fix page can swap in place');
 assert(/if \(choice && choice\.action === 'fix'\) \{ showTripsyOutfitFixPage\(key, choice\.item\); return; \}/.test(html), 'Fix opens the fix page');
 const fix = extractFn('showTripsyOutfitFixPage');
-assert(/⚠️ The problem: this outfit wears <b>\$\{esc\(lostNames\.join\(', '\)\)\}<\/b>, which .* no longer on your Packing List/.test(fix),
+assert(/this outfit wears <b>\$\{esc\(lostNames\.join\(', '\)\)\}<\/b>, which .* no longer on your Packing List/.test(fix) && /⚠️ The problem: \$\{problemText\}/.test(fix),
   'THE ASK: the page keeps the explanation of the problem');
 assert(/<h3[^>]*>This outfit<\/h3>\s*<div class="tw-grid">\$\{outfitCards\}<\/div>/.test(fix) && /Not packed<\/span>/.test(fix),
   'THE ASK: every garment in the outfit is pictured, the problem one marked');

@@ -11943,15 +11943,65 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
     stale = (!!guide && tripsyOutfitBlockTierMoved(guide, block))
       || !!(outfits.selectionFingerprint && tripsyOutfitSelectionFingerprint(sel).hash !== outfits.selectionFingerprint.hash);
   } catch (e) { /* staleness is best-effort */ }
+  // A garment that NEEDS TO GO -- it's in this outfit but no longer on the Packing List
+  // -- is marked on its card, and what could replace it is shown right under the outfit
+  // ("When a garment needs to be removed from an outfit, show a swap button and show
+  // garments that could be used to replace the removed garment," 2026-10-05). The Swap
+  // button is the one every card already carries; the inline strip is the same
+  // candidate list that button's picker would show, one tap closer.
+  const liveTier = tripsyOutfitBlockLiveTier(guide, block);
+  let packedIds = null;
+  try { packedIds = new Set(tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey)).map(e => e.id)); } catch (e) { packedIds = null; }
+  const lostIds = packedIds ? cards.filter(g => !packedIds.has(g.id)).map(g => g.id) : [];
+  const notPackedBadge = `<span style="position:absolute; top:6px; left:6px; background:var(--red, #c0392b); color:#fff; font-size:11px; font-weight:700; padding:2px 7px; border-radius:6px;">Not packed</span>`;
   const cardHtml = cards.length ? cards.map(g => `
-    <div class="tw-card" data-tw-id="${esc(g.id)}">
-      <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}" data-tw-outfit-photo="${esc(g.id)}" style="cursor:pointer;" title="Where is this packed?">${g.driveFileId ? '' : '👕'}</div>
+    <div class="tw-card" data-tw-id="${esc(g.id)}"${lostIds.includes(g.id) ? ' data-tw-outfit-lost style="outline:3px solid var(--red, #c0392b); border-radius:10px;"' : ''}>
+      <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}" data-tw-outfit-photo="${esc(g.id)}" style="cursor:pointer; position:relative;" title="Where is this packed?">${g.driveFileId ? '' : '👕'}${lostIds.includes(g.id) ? notPackedBadge : ''}</div>
       <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}</div><div class="tw-meta">${esc(tripsyGarmentTypeBucket(g).label)}${g.color ? ` · ${esc(g.color)}` : ''}</div></div>
       <div class="tw-actions">
         <button class="btn" data-tw-outfit-weardays="${esc(g.id)}">Wear Days</button>
         ${isOwner ? `<button class="btn" data-tw-outfit-swap="${esc(g.id)}">Swap</button>` : ''}
       </div>
     </div>`).join('') : `<div style="color:var(--muted); padding:12px 0;">No garments were assigned to this block.</div>`;
+  // Owner-only: the replacement strip per unpacked garment, and the Add strip per
+  // missing role. Both are pure cache reads (wardrobe + selection), so they're built
+  // before the paint rather than filled in after it.
+  let replaceHtml = '';
+  if (isOwner) for (const lostId of lostIds) {
+    const lost = byId.get(lostId);
+    let candidates = [];
+    try { ({ candidates } = await tripsyOutfitSwapCandidates(tripKey, block, lostId, person, liveTier)); } catch (e) { candidates = []; }
+    replaceHtml += `
+      <div data-tw-outfit-replace-section="${esc(lostId)}" style="margin-top:14px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:6px;">
+          <div style="font-size:13.5px; font-weight:600; color:var(--red, #c0392b);">⚠ ${esc(lost.name || 'This garment')} is no longer packed — replace it with…</div>
+          <button class="btn" data-tw-outfit-swap="${esc(lostId)}">Swap</button>
+        </div>
+        ${candidates.length
+          ? `<div class="tw-grid">${candidates.map(g => tripsyOutfitCandidateCardHtml(g, `data-tw-outfit-replace-pick="${esc(g.id)}" data-tw-outfit-replace-lost="${esc(lostId)}"`)).join('')}</div>`
+          : `<div style="color:var(--muted); font-size:13px;">Nothing else packed for this trip fits here — add one on the Packing List, or use Swap to remove it.</div>`}
+      </div>`;
+  }
+  // A garment MISSING from the outfit: a role (top / bottoms / shoes) nothing in it
+  // fills gets its own row with an Add button and the packed garments that could
+  // complete it. Claude's own free-text gaps still show beneath, as before.
+  const missingRoles = tripsyOutfitMissingRoles(cards);
+  let addHtml = '';
+  for (const role of missingRoles) {
+    const roleLabel = TRIPSY_FLIGHT_WORN_ROLE_LABEL[role] || role;
+    let candidates = [];
+    if (isOwner) { try { ({ candidates } = await tripsyOutfitAddCandidates(tripKey, block, role, person, liveTier)); } catch (e) { candidates = []; } }
+    addHtml += `
+      <div data-tw-outfit-missing="${esc(role)}" style="margin-top:14px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:6px;">
+          <div style="font-size:13.5px; font-weight:600; color:var(--amber, #D4A24C);">⚠ No ${esc(roleLabel.toLowerCase())} in this outfit${isOwner ? ' — complete it with…' : ''}</div>
+          ${isOwner ? `<button class="btn" data-tw-outfit-add="${esc(role)}">Add</button>` : ''}
+        </div>
+        ${!isOwner ? '' : (candidates.length
+          ? `<div class="tw-grid">${candidates.map(g => tripsyOutfitCandidateCardHtml(g, `data-tw-outfit-add-pick="${esc(g.id)}" data-tw-outfit-add-role="${esc(role)}"`)).join('')}</div>`
+          : `<div style="color:var(--muted); font-size:13px;">No ${esc(roleLabel.toLowerCase())} packed for this trip ${roleLabel === 'Shoes' ? 'are' : 'is'} free that day — add one on the Packing List.</div>`)}
+      </div>`;
+  }
   const gapsHtml = (block.gaps || []).length
     ? `<div style="margin-top:12px; display:flex; flex-direction:column; gap:4px;">${block.gaps.map(x => `<div style="color:var(--amber, #D4A24C); font-size:13px;">⚠ ${esc(x)}</div>`).join('')}</div>`
     : '';
@@ -11965,6 +12015,8 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
       ${stale ? `<div class="tripsy-attire-stale-note" style="margin-bottom:12px;">Your events or packing selection changed since these outfits were composed — recompose from the Attire panel to update.</div>` : ''}
       ${block.note ? `<div style="background:var(--panel-2); border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:12px;">${esc(block.note)}</div>` : ''}
       <div class="tw-grid">${cardHtml}</div>
+      ${replaceHtml}
+      ${addHtml}
       ${gapsHtml}
       ${opts.onDetails ? `<div style="margin-top:16px; text-align:right;"><button class="btn" data-tw-outfit-details>View event details</button></div>` : ''}
     </div>`;
@@ -11979,17 +12031,44 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
   if (isOwner) ov.querySelectorAll('[data-tw-outfit-swap]').forEach(btn => {
     btn.onclick = async () => {
       const currentId = btn.dataset.twOutfitSwap;
-      // The LIVE tier, not block.category (the tier this outfit was COMPOSED against)
-      // -- an event's dress code can be hand-overridden after composing, and Swap must
-      // offer substitutes for what the owner is dressing for NOW.
-      const liveTier = tripsyOutfitBlockLiveTier(guide, block);
+      // The LIVE tier (hoisted above), not block.category (the tier this outfit was
+      // COMPOSED against) -- an event's dress code can be hand-overridden after
+      // composing, and Swap must offer substitutes for what the owner is dressing for NOW.
       const chosen = await tripsyOutfitSwapPicker(tripKey, block, currentId, person, liveTier);
       if (!chosen) return; // cancelled
-      const i = (block.garmentIds || []).indexOf(currentId);
-      if (i < 0) return;
+      applyOutfitChange(currentId, chosen);
+    };
+  });
+  // The inline strips: a tap on a replacement candidate swaps it in for the unpacked
+  // garment; a tap on a completion candidate (or the Add button's picker) adds it.
+  if (isOwner) {
+    const wirePick = (el, go) => {
+      el.addEventListener('click', go);
+      el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+    };
+    ov.querySelectorAll('[data-tw-outfit-replace-pick]').forEach(el => wirePick(el, () => applyOutfitChange(el.dataset.twOutfitReplaceLost, el.dataset.twOutfitReplacePick)));
+    ov.querySelectorAll('[data-tw-outfit-add-pick]').forEach(el => wirePick(el, () => applyOutfitChange(null, el.dataset.twOutfitAddPick)));
+    ov.querySelectorAll('[data-tw-outfit-add]').forEach(btn => {
+      btn.onclick = async () => {
+        const chosen = await tripsyOutfitAddPicker(tripKey, block, btn.dataset.twOutfitAdd, person, liveTier);
+        if (chosen) applyOutfitChange(null, chosen);
+      };
+    });
+  }
+  // ONE apply path for Swap, Remove, the inline replacement pick and Add: `currentId`
+  // is the piece being replaced/removed (null = nothing, `chosen` is simply added),
+  // `chosen` a garment id or TRIPSY_OUTFIT_SWAP_REMOVE.
+  function applyOutfitChange(currentId, chosen) {
+      if (!chosen) return;
+      const i = currentId ? (block.garmentIds || []).indexOf(currentId) : -1;
+      if (currentId && i < 0) return;
       if (chosen !== TRIPSY_OUTFIT_SWAP_REMOVE && chosen === currentId) return;
+      if (!currentId && (chosen === TRIPSY_OUTFIT_SWAP_REMOVE || (block.garmentIds || []).includes(chosen))) return;
+      if (!block.garmentIds) block.garmentIds = [];
       const prevIds = block.garmentIds.slice();
-      if (chosen === TRIPSY_OUTFIT_SWAP_REMOVE) {
+      if (!currentId) {
+        block.garmentIds.push(chosen); // completing the outfit: a missing top/bottoms/shoes
+      } else if (chosen === TRIPSY_OUTFIT_SWAP_REMOVE) {
         block.garmentIds.splice(i, 1); // e.g. a tie that's merely optional at Cocktail
       } else {
         block.garmentIds[i] = chosen;
@@ -12036,8 +12115,7 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
           repaintIfShowing();
         }
       }).catch(e => console.error('outfit swap background save failed:', e));
-    };
-  });
+  }
   // Tapping a garment's photo shows where it's packed -- read-only, so every viewer
   // gets this, not just the owner (unlike Swap, right next to it in the same card).
   ov.querySelectorAll('[data-tw-outfit-photo]').forEach(el => {
@@ -12588,6 +12666,108 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
     };
     tripsyWardrobeLoadPhotos(ov);
   });
+}
+
+// ---- Incomplete outfits: which body ROLE is missing, and what could fill it ----
+// "When a garment is missing from an outfit, show an add button and show garments that
+// could be used to complete the outfit" (2026-10-05). An outfit is judged complete by
+// the three roles a person can't leave the room without -- a top, a bottom and shoes --
+// keyed by the same packing GROUPS the flight-worn claimer uses. Role membership is by
+// TYPE first, because the dress_wear group spans tops and bottoms: a dress shirt is a
+// top, a suit/tuxedo brings its own trousers, a dress or gown covers both halves at
+// once. Outerwear and accessories fill no role; a tie or belt is never what's missing.
+const TRIPSY_OUTFIT_ROLES = ['tops', 'pants', 'footwear'];
+function tripsyOutfitGarmentRoles(g) {
+  if (!g) return [];
+  const tk = tripsyGarmentTypeKey(g.name);
+  if (tk === 'dress') return ['tops', 'pants'];
+  if (tk === 'suit' || tk === 'tuxedo') return ['pants'];
+  if (tk === 'dress-shirt' || tk === 'shirt' || tk === 'polo' || tk === 'tee') return ['tops'];
+  if (['trousers', 'jeans', 'shorts', 'skirt', 'swim'].includes(tk)) return ['pants'];
+  if (tk === 'shoes') return ['footwear'];
+  if (['tie', 'cufflinks', 'sunglasses', 'belt', 'socks', 'dress-socks', 'underwear', 'undershirt', 'blazer', 'jacket', 'light-jacket', 'sweater'].includes(tk)) return [];
+  const grp = tripsyAttirePackingGroupOf(g);
+  return TRIPSY_OUTFIT_ROLES.includes(grp) ? [grp] : [];
+}
+// The roles nothing in `garments` (the outfit's resolved garment records) fills, in
+// top → bottoms → shoes order. An empty outfit is missing all three.
+function tripsyOutfitMissingRoles(garments) {
+  const filled = new Set();
+  for (const g of (garments || [])) for (const r of tripsyOutfitGarmentRoles(g)) filled.add(r);
+  return TRIPSY_OUTFIT_ROLES.filter(r => !filled.has(r));
+}
+// Packed garments of this person that would fill `role` in `block`: the same
+// availability rules as a Swap candidate (packed, never an essential, not already in
+// this outfit, free that day, tagged for the block's LIVE tier), minus the "same type
+// as the piece being replaced" test, since there is no piece -- the role itself is the
+// type. Shared by the outfit modal's inline Add strip, the Add picker and the fix page.
+async function tripsyOutfitAddCandidates(tripKey, block, role, person, liveTier) {
+  const [garments, selectedRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
+  const byId = new Map(garments.map(g => [g.id, g]));
+  const inBlock = new Set(block.garmentIds || []);
+  const outfitsForDay = await Store.getTripsyTripOutfits(tripKey, person);
+  const wornSameDay = new Set();
+  if (outfitsForDay && block.dayKey) {
+    for (const b of (outfitsForDay.blocks || [])) {
+      if (b === block || b.dayKey !== block.dayKey) continue;
+      for (const id of (b.garmentIds || [])) wornSameDay.add(id);
+    }
+  }
+  const candidates = [...new Set(tripsyNormalizeTripSelection(selectedRaw).map(e => e.id))]
+    .map(id => byId.get(id))
+    .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g)
+      && !inBlock.has(g.id) && !wornSameDay.has(g.id)
+      && tripsyOutfitGarmentRoles(g).includes(role)
+      && (!liveTier || (g.tiers || []).includes(liveTier)));
+  return { candidates };
+}
+// The Add picker: the Swap picker's shell for a MISSING role -- no "Remove" (there is
+// nothing to remove), the grid is what could complete the outfit. Resolves a garment id
+// or null on cancel.
+async function tripsyOutfitAddPicker(tripKey, block, role, person = 'him', liveTier = null) {
+  const { candidates } = await tripsyOutfitAddCandidates(tripKey, block, role, person, liveTier);
+  const roleLabel = TRIPSY_FLIGHT_WORN_ROLE_LABEL[role] || role;
+  const tierLabel = liveTier ? (TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier] || liveTier) : '';
+  return new Promise(resolve => {
+    let ov = document.getElementById('tw-add-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-add-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    // Above BOTH callers: the outfit modal (2147483080) and the outfit fix page
+    // (2147483095) -- the Swap picker's z-index lesson, which once opened invisibly
+    // behind the modal that awaited it.
+    ov.style.zIndex = '2147483098';
+    const done = val => { ov.style.display = 'none'; resolve(val); };
+    ov.innerHTML = `
+      <div class="tw-modal-paper tw-wide">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px;">
+          <h2 style="margin:0; font-size:17px;">Add ${esc(roleLabel)}${tierLabel ? ` for ${esc(tierLabel)}` : ''}</h2>
+          <button class="btn" data-tw-add-cancel>Cancel</button>
+        </div>
+        ${candidates.length
+          ? `<div class="tw-grid">${candidates.map(g => `
+              <div class="tw-card tw-card-select" data-tw-add-pick="${esc(g.id)}" role="button" tabindex="0">
+                <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : '👕'}</div>
+                <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}</div><div class="tw-meta">${esc(tripsyGarmentTypeBucket(g).label)}${g.color ? ` · ${esc(g.color)}` : ''}</div></div>
+              </div>`).join('')}</div>`
+          : `<div style="color:var(--muted); padding:8px 0 4px;">No ${esc(roleLabel.toLowerCase())}${tierLabel ? ` for ${esc(tierLabel)}` : ''} packed for this trip that ${roleLabel === 'Shoes' ? 'are' : 'is'} free that day — add one on the Packing List.</div>`}
+      </div>`;
+    ov.style.display = 'flex';
+    ov.querySelector('[data-tw-add-cancel]').onclick = () => done(null);
+    ov.onclick = e => {
+      if (e.target === ov) { done(null); return; }
+      const pick = e.target.closest('[data-tw-add-pick]');
+      if (pick) done(pick.dataset.twAddPick);
+    };
+    tripsyWardrobeLoadPhotos(ov);
+  });
+}
+// Small pickable garment card for the inline "could replace / could complete" strips
+// under an outfit (the modal and the fix page share it).
+function tripsyOutfitCandidateCardHtml(g, attrs) {
+  return `
+    <div class="tw-card tw-card-select" ${attrs} role="button" tabindex="0">
+      <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : '👕'}</div>
+      <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}</div><div class="tw-meta">${esc(tripsyGarmentTypeBucket(g).label)}${g.color ? ` · ${esc(g.color)}` : ''}</div></div>
+    </div>`;
 }
 
 // "Pack For Trip" — a dress-code → garment drill-down driven by the attire guide's
@@ -28418,7 +28598,11 @@ async function showTripsyOutfitFixPage(tripKey, item) {
   }
   const close = () => { ov.style.display = 'none'; };
   const tierLabel = TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier || block.category] || liveTier || block.category || '';
-  if (!lostIds.length) {
+  // A role nothing in the outfit fills (top / bottoms / shoes) is a problem of its own
+  // kind: it gets an Add section with the packed garments that could complete it.
+  const outfitGarments = (block.garmentIds || []).map(id => byId.get(id)).filter(g => g && !tripsyWardrobeGarmentExcludedFromOutfits(g));
+  const missingRoles = tripsyOutfitMissingRoles(outfitGarments);
+  if (!lostIds.length && !missingRoles.length) {
     close();
     toast('This outfit no longer has a problem.', 'success');
     if (currentView === 'tripsytrips') renderTripsyEventsList();
@@ -28447,6 +28631,24 @@ async function showTripsyOutfitFixPage(tripKey, item) {
         <button class="btn" data-fix-remove="${esc(lostId)}" style="color:var(--red, #c0392b); border-color:var(--red, #c0392b);">Remove ${esc(lost.name || 'it')} from this outfit</button>
       </div>`);
   }
+  // Missing roles: an Add button (the picker) plus the candidates inline.
+  const missingLabels = missingRoles.map(r => (TRIPSY_FLIGHT_WORN_ROLE_LABEL[r] || r).toLowerCase());
+  for (const role of missingRoles) {
+    const roleLabel = TRIPSY_FLIGHT_WORN_ROLE_LABEL[role] || role;
+    const { candidates } = await tripsyOutfitAddCandidates(tripKey, block, role, person, liveTier);
+    solutionSections.push(`
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin:18px 0 6px;">
+        <h3 style="margin:0; font-size:15px;">Add ${esc(roleLabel.toLowerCase())} to complete the outfit…</h3>
+        <button class="btn" data-fix-add="${esc(role)}">Add</button>
+      </div>
+      ${candidates.length
+        ? `<div class="tw-grid">${candidates.map(g => card(g, 'tw-card-select', '', `data-fix-add-pick="${esc(g.id)}" role="button" tabindex="0"`)).join('')}</div>`
+        : `<div style="color:var(--muted); padding:4px 0;">No ${esc(roleLabel.toLowerCase())} packed for this trip ${roleLabel === 'Shoes' ? 'are' : 'is'} free that day — add one on the Packing List.</div>`}`);
+  }
+  const problemText = [
+    lostNames.length ? `this outfit wears <b>${esc(lostNames.join(', '))}</b>, which ${lostNames.length === 1 ? 'is' : 'are'} no longer on your Packing List for this trip` : '',
+    missingLabels.length ? `this outfit has no ${esc(missingLabels.join(', '))}` : '',
+  ].filter(Boolean).join('; and ');
   ov.innerHTML = `
     <div class="tw-modal-paper tw-wide">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
@@ -28454,7 +28656,7 @@ async function showTripsyOutfitFixPage(tripKey, item) {
         <button class="tripsy-close-x" data-fix-close aria-label="Close" title="Close">&#10005;</button>
       </div>
       ${block.label ? `<div style="color:var(--muted); font-size:13px; margin-bottom:10px;">${esc(block.label)}</div>` : ''}
-      <div class="tripsy-attire-stale-note" style="margin-bottom:14px;">⚠️ The problem: this outfit wears <b>${esc(lostNames.join(', '))}</b>, which ${lostNames.length === 1 ? 'is' : 'are'} no longer on your Packing List for this trip. Pick a packed replacement below, remove the piece, or let the app re-dress the outfit.</div>
+      <div class="tripsy-attire-stale-note" style="margin-bottom:14px;">⚠️ The problem: ${problemText}. ${lostNames.length ? 'Pick a packed replacement below, remove the piece, ' : 'Add a packed garment below, '}or let the app re-dress the outfit.</div>
       <h3 style="margin:0 0 6px; font-size:15px;">This outfit</h3>
       <div class="tw-grid">${outfitCards}</div>
       ${solutionSections.join('')}
@@ -28466,13 +28668,17 @@ async function showTripsyOutfitFixPage(tripKey, item) {
   ov.querySelector('[data-fix-close]').onclick = close;
   // Apply a solution in place and save in the background (the Swap handler's shape:
   // optimistic, serialized on tripsyOutfitSwapChain, rolled back with a toast on failure).
+  // `lostId` null = ADD `replacementId` to complete the outfit (a missing role).
   const apply = (lostId, replacementId) => {
-    const i = (block.garmentIds || []).indexOf(lostId);
-    if (i < 0) return;
+    if (!block.garmentIds) block.garmentIds = [];
+    const i = lostId ? block.garmentIds.indexOf(lostId) : -1;
+    if (lostId && i < 0) return;
+    if (!lostId && (!replacementId || block.garmentIds.includes(replacementId))) return;
     const prevIds = block.garmentIds.slice();
-    if (replacementId) block.garmentIds[i] = replacementId; else block.garmentIds.splice(i, 1);
+    if (!lostId) block.garmentIds.push(replacementId);
+    else if (replacementId) block.garmentIds[i] = replacementId; else block.garmentIds.splice(i, 1);
     if (guide) tripsyOutfitSyncFlightTransfers(guide, outfits, block);
-    toast(replacementId ? `Swapped in ${(byId.get(replacementId) || {}).name || 'the replacement'}.` : 'Removed from the outfit.', 'success');
+    toast(!lostId ? `Added ${(byId.get(replacementId) || {}).name || 'the garment'}.` : (replacementId ? `Swapped in ${(byId.get(replacementId) || {}).name || 'the replacement'}.` : 'Removed from the outfit.'), 'success');
     tripsyOutfitSwapChain = tripsyOutfitSwapChain.then(async () => {
       let ok = false;
       try { ok = await Store.saveTripsyTripOutfits(outfits); } catch (e) { ok = false; }
@@ -28493,6 +28699,17 @@ async function showTripsyOutfitFixPage(tripKey, item) {
     el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
   });
   ov.querySelectorAll('[data-fix-remove]').forEach(b => { b.onclick = () => apply(b.dataset.fixRemove, null); });
+  ov.querySelectorAll('[data-fix-add-pick]').forEach(el => {
+    const go = () => apply(null, el.dataset.fixAddPick);
+    el.addEventListener('click', go);
+    el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+  });
+  ov.querySelectorAll('[data-fix-add]').forEach(b => {
+    b.onclick = async () => {
+      const chosen = await tripsyOutfitAddPicker(tripKey, block, b.dataset.fixAdd, person, liveTier);
+      if (chosen) apply(null, chosen);
+    };
+  });
   ov.querySelector('[data-fix-redress]').onclick = () => { close(); tripsyGenerateOutfitsInBackground(tripKey); };
   tripsyWardrobeLoadPhotos(ov);
 }
