@@ -134,3 +134,16 @@ assert(/if \(!eventId\) \{ showTripsyOutfitFixPage\(tripKey, item\); return; \}/
 assert(/const close = \(\) => \{ ov\.style\.display = 'none'; if \(opts\.onClose\) opts\.onClose\(\); \};\s*ov\._close = close;/.test(modal)
   && /\(ov\._close \|\| \(\(\) => \{ ov\.style\.display = 'none'; \}\)\)\(\)/.test(modal), 'the modal honors onClose from its button and from click-outside');
 assert(/if \(currentView === 'tripsytrips'\) renderTripsyEventsList\(\); \/\/ the menu ⚠️ re-judges/.test(modal), 'a change made there re-judges the menu ⚠️');
+
+// "This is all I am seeing - still no way to get to the specific outfit causing the problem"
+// (2026-10-05, screenshot: the dialog's only row was the "packing picks changed" fallback).
+// The fingerprint gate flagged a trip where picks were merely ADDED, so there was no outfit
+// to name. Staleness is now judged per outfit, by the same lost-garment rule the reasons use.
+const need = extractFn('tripsyOutfitsNeedRecompose');
+assert(!/selMoved/.test(need) && !/outfits\.selectionFingerprint\.hash/.test(need) && /return lostSomething \|\| uncovered;/.test(need),
+  'THE REPORT: a changed packing selection alone never raises the ⚠️ -- only an outfit that lost a garment, or an uncovered block');
+assert(/!selected\.has\(id\) && !\(garmentById\.has\(id\) && tripsyWardrobeGarmentExcludedFromOutfits\(garmentById\.get\(id\)\)\)/.test(need)
+  && /!selected\.has\(id\) && !\(garmentById\.has\(id\) && tripsyWardrobeGarmentExcludedFromOutfits\(garmentById\.get\(id\)\)\)/.test(extractFn('tripsyOutfitStaleReasons')),
+  'the check and the reasons share one lost rule, so every flag has a row naming its outfit (a deleted garment counts as lost)');
+assert(/data-tw-outfit-remove-dangling="\$\{esc\(id\)\}"/.test(modal) && /applyOutfitChange\(btn\.dataset\.twOutfitRemoveDangling, TRIPSY_OUTFIT_SWAP_REMOVE\)/.test(modal),
+  'an outfit still listing a deleted garment offers Remove it, so that problem can be cleared on the outfit too');

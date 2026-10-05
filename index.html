@@ -11956,6 +11956,10 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
   let packedIds = null;
   try { packedIds = new Set(tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey)).map(e => e.id)); } catch (e) { packedIds = null; }
   const lostIds = packedIds ? cards.filter(g => !packedIds.has(g.id)).map(g => g.id) : [];
+  // A garment id with no wardrobe record any more (deleted) can't be pictured, but it is
+  // still IN the outfit -- the staleness check counts it as lost, so give it a row with a
+  // Remove so the problem can actually be cleared here.
+  const danglingIds = (block.garmentIds || []).filter(id => !byId.has(id));
   const notPackedBadge = `<span style="position:absolute; top:6px; left:6px; background:var(--red, #c0392b); color:#fff; font-size:11px; font-weight:700; padding:2px 7px; border-radius:6px;">Not packed</span>`;
   const cardHtml = cards.length ? cards.map(g => `
     <div class="tw-card" data-tw-id="${esc(g.id)}"${lostIds.includes(g.id) ? ' data-tw-outfit-lost style="outline:3px solid var(--red, #c0392b); border-radius:10px;"' : ''}>
@@ -11983,6 +11987,13 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
         ${candidates.length
           ? `<div class="tw-grid">${candidates.map(g => tripsyOutfitCandidateCardHtml(g, `data-tw-outfit-replace-pick="${esc(g.id)}" data-tw-outfit-replace-lost="${esc(lostId)}"`)).join('')}</div>`
           : `<div style="color:var(--muted); font-size:13px;">Nothing else packed for this trip fits here — add one on the Packing List, or use Swap to remove it.</div>`}
+      </div>`;
+  }
+  if (isOwner) for (const id of danglingIds) {
+    replaceHtml += `
+      <div data-tw-outfit-replace-section="${esc(id)}" style="margin-top:14px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+        <div style="font-size:13.5px; font-weight:600; color:var(--red, #c0392b);">⚠ This outfit still lists a garment that is no longer in your wardrobe.</div>
+        <button class="btn" data-tw-outfit-remove-dangling="${esc(id)}" style="color:var(--red, #c0392b); border-color:var(--red, #c0392b);">Remove it</button>
       </div>`;
   }
   // A garment MISSING from the outfit: a role (top / bottoms / shoes) nothing in it
@@ -12051,6 +12062,7 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
     };
     ov.querySelectorAll('[data-tw-outfit-replace-pick]').forEach(el => wirePick(el, () => applyOutfitChange(el.dataset.twOutfitReplaceLost, el.dataset.twOutfitReplacePick)));
     ov.querySelectorAll('[data-tw-outfit-add-pick]').forEach(el => wirePick(el, () => applyOutfitChange(null, el.dataset.twOutfitAddPick)));
+    ov.querySelectorAll('[data-tw-outfit-remove-dangling]').forEach(btn => { btn.onclick = () => applyOutfitChange(btn.dataset.twOutfitRemoveDangling, TRIPSY_OUTFIT_SWAP_REMOVE); });
     ov.querySelectorAll('[data-tw-outfit-add]').forEach(btn => {
       btn.onclick = async () => {
         const chosen = await tripsyOutfitAddPicker(tripKey, block, btn.dataset.twOutfitAdd, person, liveTier);
@@ -28533,10 +28545,11 @@ async function tripsyOutfitStaleReasons(tripKey) {
       lines.push(line); items.push({ kind: 'uncovered', line, person, block: b, outfits });
     }
     for (const b of (outfits.blocks || [])) {
-      const lost = (b.garmentIds || []).filter(id => !selected.has(id) && garmentById.has(id) && !tripsyWardrobeGarmentExcludedFromOutfits(garmentById.get(id)));
+      // Same lost rule as tripsyOutfitsNeedRecompose, so a flag always has a row to name.
+      const lost = (b.garmentIds || []).filter(id => !selected.has(id) && !(garmentById.has(id) && tripsyWardrobeGarmentExcludedFromOutfits(garmentById.get(id))));
       if (!lost.length) continue;
       blocks++;
-      const line = `• ${who}: ${tripsyDayHeaderLabel(b.dayKey)} outfit uses ${lost.map(id => garmentById.get(id).name).join(', ')} — no longer packed`;
+      const line = `• ${who}: ${tripsyDayHeaderLabel(b.dayKey)} outfit uses ${lost.map(id => garmentById.has(id) ? garmentById.get(id).name : 'a garment no longer in your wardrobe').join(', ')} — no longer packed`;
       // `block`/`outfits` are the LIVE records, so the fix page can swap in place.
       lines.push(line); items.push({ kind: 'lost', line, person, block: b, outfits, lostIds: lost });
     }
@@ -31424,13 +31437,21 @@ async function tripsyOutfitsNeedRecompose(tripKey, person = 'him') {
     // introduce a whole new tier (a semi-formal line appearing with nothing picked for
     // it), which makes the plan incomplete AND the outfits stale at the same moment.
     // An unfinished plan is a separate problem, said separately in the dialog.
+    // A changed packing selection is judged PER OUTFIT, not by fingerprint ("still no
+    // way to get to the specific outfit causing the problem," 2026-10-05: the old
+    // selectionFingerprint test flagged a trip where picks were merely ADDED, so the
+    // problems dialog had no outfit to name -- just a fallback row). The same rule the
+    // regenerate keeps outfits by: an outfit is a problem only when it wears something
+    // no longer selected (a garment deleted from the wardrobe counts as lost too).
     const sel = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey));
-    const selMoved = !!(outfits.selectionFingerprint
-      && tripsyOutfitSelectionFingerprint(sel).hash !== outfits.selectionFingerprint.hash);
+    const selected = new Set(sel.map(e => e.id));
+    const garmentById = new Map((driveData.tripsyWardrobe || []).map(g => [g.id, g]));
+    const lostSomething = (outfits.blocks || []).some(b => (b.garmentIds || []).some(id =>
+      !selected.has(id) && !(garmentById.has(id) && tripsyWardrobeGarmentExcludedFromOutfits(garmentById.get(id)))));
     // A block with no outfit to dress it (a genuinely new time-block, or one whose tier
     // moved -- including via a manual dress-code override, which no fingerprint sees).
     const uncovered = tripsyOutfitsUncoveredBlocks(guide, outfits).length > 0;
-    return selMoved || uncovered;
+    return lostSomething || uncovered;
   } catch (e) {
     console.error('Outfit staleness check failed (non-fatal):', e);
     return false;

@@ -2585,7 +2585,18 @@ would overwrite the glyph with the word.
   `ov._close`) both honor it. The modal is where the inline Swap/replacements and Add/candidates
   live, so the problem garment and its fixes are on the same screen; a successful change there
   re-renders My Trips so the menu ⚠️ re-judges. `showTripsyOutfitFixPage` survives only as the
-  fallback for a block with no event id. `outfitaddmissing_test.js`.
+  fallback for a block with no event id. **The outfits ⚠️ itself is judged PER OUTFIT, never by
+  the selection fingerprint** ("This is all I am seeing - still no way to get to the specific
+  outfit causing the problem," same day, with a screenshot of the dialog's lone fallback row:
+  `tripsyOutfitsNeedRecompose` flagged on `selectionFingerprint` drift, which fires when picks
+  are merely ADDED, so nothing was wrong with any outfit and there was no outfit to open).
+  It now uses the same lost-garment rule `tripsyOutfitStaleReasons` lists (an outfit wearing
+  something no longer selected — a garment deleted from the wardrobe counts as lost, named "a
+  garment no longer in your wardrobe") OR an uncovered block, so every flag has a row naming its
+  outfit; the fallback row can no longer be reached. The outfit modal gives a deleted garment's
+  dangling id its own "Remove it" row (`data-tw-outfit-remove-dangling`), since it cannot be
+  pictured or swapped. `outfits.selectionFingerprint` is still written, no longer consulted.
+  `outfitaddmissing_test.js`.
 - **A dress-code refresh now proactively offers to recompose outfits it just made stale**, instead
   of leaving that discoverable only per-block. Refreshing the Attire Guide (dress-code
   categorization) and composing Outfits (the actual garment picks per time-block) are two separate,
