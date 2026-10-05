@@ -116,5 +116,5 @@ assert(/data-tripsy-attire-stale-warning=\$\{CSS\.escape\(trip\.key\)\}/.test(ex
 assert(/if \(staleFlagged && isOwner && await tripsyAttireStalePrompt\(key\)\) return;/.test(html),
   'THE ASK: selecting a flagged row brings up the same out-of-date dialog the 👔 button uses');
 assert(/return !\(await tripsyAttireStalePrompt\(tripKey\)\);/.test(html), 'the 👔 button itself uses that shared prompt');
-assert(/if \(regen\) \{ tripsyGenerateOutfitsInBackground\(key\); return; \}/.test(html), 'a stale View Outfits regenerates in the background');
+assert(/if \(choice && choice\.action === 'update'\) \{ tripsyGenerateOutfitsInBackground\(key\); return; \}/.test(html), 'a stale View Outfits regenerates in the background');
 assert(!/tripsyShowOutfitComposingSpinner\(/.test(html), 'THE ASK: no blocking spinner is left anywhere -- attire pages update in the background');

@@ -2519,7 +2519,29 @@ would overwrite the glyph with the word.
   longer packed — and promises to re-dress only those; the background regenerate already does
   exactly that (incremental + per-outfit `outfitStillPacked`). `tripsyConfirmDialog` now renders
   `\n` as line breaks (`white-space:pre-line`, left-aligned when multi-line) so these lists read as
-  lists. `stalereasons_test.js`.
+  lists. **And a problem OUTFIT can be fixed by hand from that dialog** ("add a button to the
+  dialog boxes that will allow the user to see that outfit and swap another garment for the one
+  that is creating the problem … keep the explanation of the problem and suggest possible
+  solutions … Show pictures of all relevant garments," same day): `tripsyOutfitStaleReasons` also
+  returns structured `items` (a `lost` item carries the LIVE `block`/`outfits` records and
+  `lostIds`), and `tripsyOutfitProblemsDialog` (own overlay, replaces the confirm) lists each
+  reason with a **Fix this outfit** button on every `lost` row (an uncovered block has nothing to
+  swap — Update is its fix), plus Update / Not now. Fix opens `showTripsyOutfitFixPage` (z
+  2147483095): the problem kept at the top ("this outfit wears X, which is no longer on your
+  Packing List"), every garment in the outfit pictured with the problem one(s) outlined red and
+  badged "Not packed", then per lost garment the packed replacements `tripsyOutfitSwapCandidates`
+  would offer (pictured; a pick here is always one Swap would equally allow), a Remove button, and
+  a re-dress-in-the-background button. A pick swaps in place and saves on `tripsyOutfitSwapChain`
+  (optimistic, flight/airport-ride sync kept, rollback + toast on failure), repaints for the next
+  problem garment, and re-renders My Trips so the ⚠️ re-judges. **The 👔 glyph's own ⚠️ now
+  FLASHES and mirrors ANY flagged menu row** ("If there is a warning triangle on any item in the
+  attire menu, also show the flashing triangle next to the attire menu glyph," same day):
+  `tripsyAttireMenuWarningSync(container, tripKey)` reads the visible
+  `data-tripsy-attire-stale-warning` / `data-tripsy-outfits-warning` rows and sets the badge
+  (generating still wins); BOTH flagging passes call it after setting their rows, so neither
+  clears what the other raised. `tripsySetAttireStaleBadge`'s stale state carries
+  `.tripsy-menu-flash`. Tapping a glyph flagged ONLY for outfits just opens the menu — the
+  guide prompt would have no itinerary changes to list. `stalereasons_test.js`.
 - **A dress-code refresh now proactively offers to recompose outfits it just made stale**, instead
   of leaving that discoverable only per-block. Refreshing the Attire Guide (dress-code
   categorization) and composing Outfits (the actual garment picks per time-block) are two separate,

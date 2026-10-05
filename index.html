@@ -25139,10 +25139,13 @@ function tripsySetAttireStaleBadge(btn, state) {
     btn.appendChild(badge);
   }
   const generating = want === 'generating';
-  badge.className = `tripsy-attire-stale-badge${generating ? ' tripsy-attire-stale-badge--generating' : ''}`;
+  // A stale badge FLASHES, like the menu rows it mirrors ("If there is a warning triangle on
+  // any item in the attire menu, also show the flashing triangle next to the attire menu
+  // glyph," 2026-10-05); a generating one blinks too, with its own class and title.
+  badge.className = `tripsy-attire-stale-badge${generating ? ' tripsy-attire-stale-badge--generating' : ' tripsy-menu-flash'}`;
   badge.title = generating
     ? 'Building this trip’s attire guide…'
-    : 'Itinerary changed since the attire guide was generated — open Attire and Refresh.';
+    : 'Something in the Attire menu is out of date — open the menu to see what.';
   badge.setAttribute('aria-label', generating ? 'Attire guide is being generated' : 'Attire may be out of date');
 }
 // Applies the blinking badge to the 👔 buttons of every trip currently generating, without
@@ -25261,18 +25264,30 @@ function tripsyItineraryProgressDialog(tripKey) {
 // attire guide is now out of date, flag its 👔 button with a ⚠️. Re-queries the
 // live card node per trip (container = the persistent #tripsy-card), so a
 // background re-render landing mid-pass is harmless -- the next render re-runs it.
+// The 👔 glyph's ⚠️ mirrors the menu: it shows (flashing) whenever ANY row of this trip's
+// Attire menu carries a visible ⚠️ -- the Daily Dress Guide / Clothing Summary rows (guide
+// stale) or View Outfits (outfits stale) -- and clears only when none does. A run in flight
+// still wins with the blinking "generating" badge. Both flagging passes call this after
+// setting their rows, so neither can clear a badge the other raised.
+function tripsyAttireMenuWarningSync(container, tripKey) {
+  const btn = [...container.querySelectorAll('[data-tripsy-attire-menu-toggle]')].find(b => b.dataset.key === tripKey);
+  if (!btn) return;
+  if (tripsyAttireGeneratingKeys.has(tripKey)) { tripsySetAttireStaleBadge(btn, 'generating'); return; }
+  const k = CSS.escape(tripKey);
+  const any = [...container.querySelectorAll(`[data-tripsy-attire-stale-warning="${k}"], [data-tripsy-outfits-warning="${k}"]`)]
+    .some(el => el.style.display !== 'none');
+  tripsySetAttireStaleBadge(btn, any ? 'stale' : '');
+}
 async function tripsyFlagStaleAttireButtons(container, trips) {
   const guides = driveData.tripsyAttireGuides || [];
   for (const trip of trips) {
     const guide = guides.find(g => g.tripKey === trip.key);
     const stale = await tripsyAttireGuideIsStale(trip, guide);
-    const btn = [...container.querySelectorAll('[data-tripsy-attire-menu-toggle]')].find(b => b.dataset.key === trip.key);
-    // A run in flight wins: a re-render landing mid-generation must not replace the
-    // blinking badge with the steady stale one (or drop it entirely).
-    tripsySetAttireStaleBadge(btn, tripsyAttireGeneratingKeys.has(trip.key) ? 'generating' : (stale ? 'stale' : ''));
-    // The same verdict on the menu's Daily Dress Guide / Clothing Summary rows.
+    // The menu's Daily Dress Guide / Clothing Summary rows carry the verdict; the 👔 glyph
+    // then mirrors whatever rows are flagged (a run in flight still wins there).
     container.querySelectorAll(`[data-tripsy-attire-stale-warning="${CSS.escape(trip.key)}"]`)
       .forEach(el => { el.style.display = stale && !tripsyAttireGeneratingKeys.has(trip.key) ? 'inline-flex' : 'none'; });
+    tripsyAttireMenuWarningSync(container, trip.key);
   }
 }
 
@@ -28321,23 +28336,165 @@ async function tripsyOutfitStaleReasons(tripKey) {
   const garmentById = new Map((driveData.tripsyWardrobe || []).map(g => [g.id, g]));
   const selection = tripsyNormalizeTripSelection((driveData.tripsyTripWardrobe || {})[tripKey] || []);
   const selected = new Set(selection.map(e => e.id));
-  const lines = []; let blocks = 0;
+  const lines = []; const items = []; let blocks = 0;
   for (const person of ['him', 'her']) {
     const outfits = await Store.getTripsyTripOutfits(tripKey, person);
     if (!outfits || !(outfits.blocks || []).some(b => (b.garmentIds || []).length)) continue;
     const who = person === 'her' ? 'Hers' : 'His';
     for (const b of (guide ? tripsyOutfitsUncoveredBlocks(guide, outfits) : [])) {
       blocks++;
-      lines.push(`• ${who}: no outfit for ${tripsyDayHeaderLabel(b.dayKey)} (${TRIPSY_ATTIRE_CATEGORY_LABEL[b.category] || b.category}) — ${b.label || 'new time-block'}`);
+      const line = `• ${who}: no outfit for ${tripsyDayHeaderLabel(b.dayKey)} (${TRIPSY_ATTIRE_CATEGORY_LABEL[b.category] || b.category}) — ${b.label || 'new time-block'}`;
+      lines.push(line); items.push({ kind: 'uncovered', line, person });
     }
     for (const b of (outfits.blocks || [])) {
       const lost = (b.garmentIds || []).filter(id => !selected.has(id) && garmentById.has(id) && !tripsyWardrobeGarmentExcludedFromOutfits(garmentById.get(id)));
       if (!lost.length) continue;
       blocks++;
-      lines.push(`• ${who}: ${tripsyDayHeaderLabel(b.dayKey)} outfit uses ${lost.map(id => garmentById.get(id).name).join(', ')} — no longer packed`);
+      const line = `• ${who}: ${tripsyDayHeaderLabel(b.dayKey)} outfit uses ${lost.map(id => garmentById.get(id).name).join(', ')} — no longer packed`;
+      // `block`/`outfits` are the LIVE records, so the fix page can swap in place.
+      lines.push(line); items.push({ kind: 'lost', line, person, block: b, outfits, lostIds: lost });
     }
   }
-  return { lines, blocks };
+  return { lines, items, blocks };
+}
+// The View Outfits out-of-date dialog ("If view outfits is displaying a particular outfit
+// with a problem, add a button to the dialog boxes that will allow the user to see that
+// outfit and swap another garment for the one that is creating the problem," 2026-10-05):
+// one row per reason, and a "Fix this outfit" button on every row whose outfit wears
+// something no longer packed. Resolves {action:'update'} (background regenerate of only
+// what changed), {action:'fix', item} or null (Not now).
+function tripsyOutfitProblemsDialog(reasons, { planDone = true } = {}) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-outfit-problems-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-outfit-problems-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483100';
+    const items = reasons.items && reasons.items.length ? reasons.items : [{ kind: 'selection', line: '• Your packing picks changed since these outfits were composed.' }];
+    const rows = items.map((it, i) => `
+      <div style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--line);">
+        <div style="flex:1; min-width:0; text-align:left;">${esc(it.line)}</div>
+        ${it.kind === 'lost' ? `<button class="btn" data-fix-item="${i}" style="flex-shrink:0;">Fix this outfit</button>` : ''}
+      </div>`).join('');
+    const n = reasons.blocks || 0;
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:560px;">
+        <h2 style="margin:0 0 8px; font-size:19px; text-align:center;">⚠️ Outfits may be out of date</h2>
+        <div style="font-size:14.5px; line-height:1.5; margin-bottom:6px;">Since these outfits were composed:</div>
+        <div style="margin-bottom:14px;">${rows}</div>
+        <div style="font-size:13.5px; color:var(--muted); line-height:1.5; margin-bottom:16px; text-align:left;">
+          Fix this outfit lets you pick the replacement yourself, with pictures. Update re-dresses ${n ? `only ${n === 1 ? 'that outfit' : `those ${n} outfits`}` : 'only what changed'} in the background — every other outfit is kept as it is.${planDone ? '' : ' Note your packing list still has lines with nothing picked for them, so finish those first if you want the outfits to cover everything.'}
+        </div>
+        <div style="display:flex; gap:10px; justify-content:center;">
+          <button class="btn primary" data-problems-update>Update</button>
+          <button class="btn" data-problems-no>Not now</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; resolve(v); };
+    ov.querySelector('[data-problems-update]').onclick = () => done({ action: 'update' });
+    ov.querySelector('[data-problems-no]').onclick = () => done(null);
+    ov.querySelectorAll('[data-fix-item]').forEach(b => { b.onclick = () => done({ action: 'fix', item: items[Number(b.dataset.fixItem)] }); });
+    ov.onclick = e => { if (e.target === ov) done(null); };
+  });
+}
+// THE FIX PAGE: the problem outfit with every garment pictured, the problem garment(s)
+// marked, the explanation kept at the top, and the possible solutions -- a packed
+// replacement (pictured; the same candidates Swap offers, so a pick here is always one
+// Swap would equally allow), removing the piece, or letting the app re-dress the outfit in
+// the background. A pick swaps in place and saves in the background, exactly like Swap.
+async function showTripsyOutfitFixPage(tripKey, item) {
+  const { person, block, outfits } = item;
+  const garments = await Store.listWardrobe();
+  const byId = new Map(garments.map(g => [g.id, g]));
+  const selected = new Set(tripsyNormalizeTripSelection((driveData.tripsyTripWardrobe || {})[tripKey] || []).map(e => e.id));
+  const guide = await Store.getTripsyAttireGuide(tripKey);
+  const liveTier = guide ? tripsyOutfitBlockLiveTier(guide, block) : (block.category || null);
+  const lostIds = (block.garmentIds || []).filter(id => !selected.has(id) && byId.has(id) && !tripsyWardrobeGarmentExcludedFromOutfits(byId.get(id)));
+  let ov = document.getElementById('tw-outfit-fix-overlay');
+  if (!ov) {
+    ov = document.createElement('div'); ov.id = 'tw-outfit-fix-overlay'; ov.className = 'tw-modal';
+    ov.style.zIndex = '2147483095'; // above the outfit modal (2147483080), below the confirm dialogs
+    document.body.appendChild(ov);
+    ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+  }
+  const close = () => { ov.style.display = 'none'; };
+  const tierLabel = TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier || block.category] || liveTier || block.category || '';
+  if (!lostIds.length) {
+    close();
+    toast('This outfit no longer has a problem.', 'success');
+    if (currentView === 'tripsytrips') renderTripsyEventsList();
+    return;
+  }
+  const card = (g, extraClass = '', badge = '', attrs = '') => `
+    <div class="tw-card ${extraClass}" ${attrs}>
+      <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}" style="position:relative;">${g.driveFileId ? '' : '👕'}${badge}</div>
+      <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}</div><div class="tw-meta">${esc(tripsyGarmentTypeBucket(g).label)}${g.color ? ` · ${esc(g.color)}` : ''}</div></div>
+    </div>`;
+  const outfitCards = (block.garmentIds || []).map(id => byId.get(id)).filter(g => g && !tripsyWardrobeGarmentExcludedFromOutfits(g))
+    .map(g => lostIds.includes(g.id)
+      ? card(g, '', `<span style="position:absolute; top:6px; left:6px; background:var(--red, #c0392b); color:#fff; font-size:11px; font-weight:700; padding:2px 7px; border-radius:6px;">Not packed</span>`, 'style="outline:3px solid var(--red, #c0392b); border-radius:10px;"')
+      : card(g)).join('');
+  const lostNames = lostIds.map(id => byId.get(id).name || 'a garment');
+  const solutionSections = [];
+  for (const lostId of lostIds) {
+    const lost = byId.get(lostId);
+    const { candidates } = await tripsyOutfitSwapCandidates(tripKey, block, lostId, person, liveTier);
+    solutionSections.push(`
+      <h3 style="margin:18px 0 6px; font-size:15px;">Replace ${esc(lost.name || 'this garment')} with…</h3>
+      ${candidates.length
+        ? `<div class="tw-grid">${candidates.map(g => card(g, 'tw-card-select', '', `data-fix-pick="${esc(g.id)}" data-fix-lost="${esc(lostId)}" role="button" tabindex="0"`)).join('')}</div>`
+        : `<div style="color:var(--muted); padding:4px 0;">Nothing else packed for this trip fits here — add one on the Packing List, or use one of the options below.</div>`}
+      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn" data-fix-remove="${esc(lostId)}" style="color:var(--red, #c0392b); border-color:var(--red, #c0392b);">Remove ${esc(lost.name || 'it')} from this outfit</button>
+      </div>`);
+  }
+  ov.innerHTML = `
+    <div class="tw-modal-paper tw-wide">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
+        <h2 style="margin:0; font-size:18px;">Fix outfit — ${esc(tripsyDayHeaderLabel(block.dayKey))}${tierLabel ? ` · ${esc(tierLabel)}` : ''}</h2>
+        <button class="tripsy-close-x" data-fix-close aria-label="Close" title="Close">&#10005;</button>
+      </div>
+      ${block.label ? `<div style="color:var(--muted); font-size:13px; margin-bottom:10px;">${esc(block.label)}</div>` : ''}
+      <div class="tripsy-attire-stale-note" style="margin-bottom:14px;">⚠️ The problem: this outfit wears <b>${esc(lostNames.join(', '))}</b>, which ${lostNames.length === 1 ? 'is' : 'are'} no longer on your Packing List for this trip. Pick a packed replacement below, remove the piece, or let the app re-dress the outfit.</div>
+      <h3 style="margin:0 0 6px; font-size:15px;">This outfit</h3>
+      <div class="tw-grid">${outfitCards}</div>
+      ${solutionSections.join('')}
+      <div style="margin-top:18px; padding-top:12px; border-top:1px solid var(--line); display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;">
+        <button class="btn" data-fix-redress>Let the app re-dress this outfit (background)</button>
+      </div>
+    </div>`;
+  ov.style.display = 'flex';
+  ov.querySelector('[data-fix-close]').onclick = close;
+  // Apply a solution in place and save in the background (the Swap handler's shape:
+  // optimistic, serialized on tripsyOutfitSwapChain, rolled back with a toast on failure).
+  const apply = (lostId, replacementId) => {
+    const i = (block.garmentIds || []).indexOf(lostId);
+    if (i < 0) return;
+    const prevIds = block.garmentIds.slice();
+    if (replacementId) block.garmentIds[i] = replacementId; else block.garmentIds.splice(i, 1);
+    if (guide) tripsyOutfitSyncFlightTransfers(guide, outfits, block);
+    toast(replacementId ? `Swapped in ${(byId.get(replacementId) || {}).name || 'the replacement'}.` : 'Removed from the outfit.', 'success');
+    tripsyOutfitSwapChain = tripsyOutfitSwapChain.then(async () => {
+      let ok = false;
+      try { ok = await Store.saveTripsyTripOutfits(outfits); } catch (e) { ok = false; }
+      if (!ok) {
+        block.garmentIds = prevIds;
+        if (guide) tripsyOutfitSyncFlightTransfers(guide, outfits, block);
+        toast('Could not save the outfit change — it was undone.', 'error');
+        if (ov.style.display !== 'none') showTripsyOutfitFixPage(tripKey, item);
+        return;
+      }
+      if (currentView === 'tripsytrips') renderTripsyEventsList(); // the ⚠️ re-judges
+    }).catch(e => console.error('outfit fix background save failed:', e));
+    showTripsyOutfitFixPage(tripKey, item); // repaint: next problem garment, or "fixed"
+  };
+  ov.querySelectorAll('[data-fix-pick]').forEach(el => {
+    const go = () => apply(el.dataset.fixLost, el.dataset.fixPick);
+    el.addEventListener('click', go);
+    el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+  });
+  ov.querySelectorAll('[data-fix-remove]').forEach(b => { b.onclick = () => apply(b.dataset.fixRemove, null); });
+  ov.querySelector('[data-fix-redress]').onclick = () => { close(); tripsyGenerateOutfitsInBackground(tripKey); };
+  tripsyWardrobeLoadPhotos(ov);
 }
 function tripsyAttireFindNewGuideEvents(guide, currentDays) {
   const prior = new Map();
@@ -34150,14 +34307,12 @@ async function renderTripsyEventsListImpl() {
               // Name the exact outfits at issue, and promise only the minimum: the
               // background regenerate re-dresses precisely these blocks, nothing else.
               const reasons = await tripsyOutfitStaleReasons(key);
-              const list = reasons.lines.length ? reasons.lines.join('\n') : '• Your packing picks changed since these outfits were composed.';
-              const regen = await tripsyConfirmDialog(
-                `Since these outfits were composed:\n${list}\n\nUpdating re-dresses ${reasons.blocks ? `only ${reasons.blocks === 1 ? 'that outfit' : `those ${reasons.blocks} outfits`}` : 'only what changed'} in the background — every other outfit is kept as it is.${planDone ? '' : ' Note your packing list still has lines with nothing picked for them, so finish those first if you want the outfits to cover everything.'}`,
-                { title: '⚠️ Outfits may be out of date', yes: 'Update', no: 'Not now' });
-              // Regenerate runs in the BACKGROUND ("Always update attire-related pages in
-              // the background," 2026-10-05) -- the list opens again from the menu once the
-              // flashing ⏳ stops.
-              if (regen) { tripsyGenerateOutfitsInBackground(key); return; }
+              const choice = await tripsyOutfitProblemsDialog(reasons, { planDone });
+              // Update runs in the BACKGROUND ("Always update attire-related pages in the
+              // background," 2026-10-05) -- the list opens again from the menu once the
+              // flashing ⏳ stops. Fix opens the problem outfit with its solutions pictured.
+              if (choice && choice.action === 'update') { tripsyGenerateOutfitsInBackground(key); return; }
+              if (choice && choice.action === 'fix') { showTripsyOutfitFixPage(key, choice.item); return; }
             }
             showTripsyOutfitList(key, who);
           })();
@@ -34475,6 +34630,10 @@ async function renderTripsyEventsListImpl() {
     }
     const badge = btn.querySelector('.tripsy-attire-stale-badge');
     if (!isOwner || !badge || badge.className.includes('--generating')) return true;
+    // Flagged only because View Outfits is: open the menu so that flashing row is the thing
+    // to tap -- the guide prompt would have no itinerary changes to list.
+    const guideRow = container.querySelector(`[data-tripsy-attire-stale-warning="${CSS.escape(tripKey)}"]`);
+    if (!guideRow || guideRow.style.display === 'none') return true;
     // (Once the trip has started the packing side is frozen -- the prompt's wording says
     // what a Refresh really does in each state; see tripsyAttireStalePrompt.)
     return !(await tripsyAttireStalePrompt(tripKey)); // a started refresh keeps the menu shut
@@ -34561,6 +34720,7 @@ async function renderTripsyEventsListImpl() {
         try {
           const stale = (await tripsyOutfitsNeedRecompose(trip.key, 'him')) || (await tripsyOutfitsNeedRecompose(trip.key, 'her'));
           el.style.display = stale ? 'inline-flex' : 'none';
+          tripsyAttireMenuWarningSync(container, trip.key); // the 👔 glyph mirrors this row too
         } catch (e) { /* leave hidden */ }
       }
     })();

@@ -70,7 +70,48 @@ const reasons = extractFn('tripsyOutfitStaleReasons');
 assert(/tripsyOutfitsUncoveredBlocks\(guide, outfits\)/.test(reasons) && /no outfit for \$\{tripsyDayHeaderLabel\(b\.dayKey\)\}/.test(reasons),
   'uncovered time-blocks are named by day and dress code');
 assert(/no longer packed/.test(reasons) && /!selected\.has\(id\)/.test(reasons), 'outfits wearing an unpacked garment are named with the garment');
-assert(/const reasons = await tripsyOutfitStaleReasons\(key\);/.test(html) && /Since these outfits were composed:\\n\$\{list\}/.test(html),
+assert(/const reasons = await tripsyOutfitStaleReasons\(key\);/.test(html) && /await tripsyOutfitProblemsDialog\(reasons, \{ planDone \}\)/.test(html)
+  && /Since these outfits were composed:/.test(extractFn('tripsyOutfitProblemsDialog')),
   'THE ASK: the View Outfits dialog lists those precise reasons');
 assert(/every other outfit is kept as it is\./.test(html), 'and promises only the minimum');
 assert(/white-space:pre-line/.test(extractFn('tripsyConfirmDialog')), 'the confirm dialog renders the list line by line');
+
+// "If view outfits is displaying a particular outfit with a problem, add a button to the dialog
+// boxes that will allow the user to see that outfit and swap another garment for the one that is
+// creating the problem … keep the explanation of the problem and suggest possible solutions …
+// Show pictures of all relevant garments" (2026-10-05).
+const probs = extractFn('tripsyOutfitProblemsDialog');
+assert(/it\.kind === 'lost' \? `<button class="btn" data-fix-item="\$\{i\}"[^>]*>Fix this outfit<\/button>` : ''/.test(probs),
+  'THE ASK: every problem-outfit row gets a "Fix this outfit" button (uncovered blocks have nothing to swap)');
+assert(/done\(\{ action: 'fix', item: items\[Number\(b\.dataset\.fixItem\)\] \}\)/.test(probs) && /done\(\{ action: 'update' \}\)/.test(probs),
+  'the dialog resolves to fix-this-item or update');
+assert(/items\.push\(\{ kind: 'lost', line, person, block: b, outfits, lostIds: lost \}\)/.test(reasons),
+  'reasons carry the LIVE block so the fix page can swap in place');
+assert(/if \(choice && choice\.action === 'fix'\) \{ showTripsyOutfitFixPage\(key, choice\.item\); return; \}/.test(html), 'Fix opens the fix page');
+const fix = extractFn('showTripsyOutfitFixPage');
+assert(/⚠️ The problem: this outfit wears <b>\$\{esc\(lostNames\.join\(', '\)\)\}<\/b>, which .* no longer on your Packing List/.test(fix),
+  'THE ASK: the page keeps the explanation of the problem');
+assert(/<h3[^>]*>This outfit<\/h3>\s*<div class="tw-grid">\$\{outfitCards\}<\/div>/.test(fix) && /Not packed<\/span>/.test(fix),
+  'THE ASK: every garment in the outfit is pictured, the problem one marked');
+assert(/await tripsyOutfitSwapCandidates\(tripKey, block, lostId, person, liveTier\)/.test(fix) && /data-fix-pick="\$\{esc\(g\.id\)\}"/.test(fix),
+  'THE ASK: the solutions are the packed replacements Swap itself would offer, each pictured');
+assert(/data-fix-remove="\$\{esc\(lostId\)\}"/.test(fix) && /data-fix-redress/.test(fix) && /tripsyGenerateOutfitsInBackground\(tripKey\)/.test(fix),
+  'remove-the-piece and re-dress-in-the-background are offered too');
+assert(/block\.garmentIds\[i\] = replacementId; else block\.garmentIds\.splice\(i, 1\);/.test(fix) && /tripsyOutfitSwapChain = tripsyOutfitSwapChain\.then/.test(fix)
+  && /block\.garmentIds = prevIds;/.test(fix),
+  'a pick swaps in place, saves in the background on the swap chain, and rolls back on failure');
+assert(/tripsyOutfitSyncFlightTransfers\(guide, outfits, block\)/.test(fix), 'the flight/airport-ride pairing holds after a fix');
+assert(/tripsyWardrobeLoadPhotos\(ov\)/.test(fix), 'photos are painted');
+
+// "If there is a warning triangle on any item in the attire menu, also show the flashing
+// triangle next to the attire menu glyph" (2026-10-05).
+const sync = extractFn('tripsyAttireMenuWarningSync');
+assert(/\[data-tripsy-attire-stale-warning="\$\{k\}"\], \[data-tripsy-outfits-warning="\$\{k\}"\]/.test(sync) && /some\(el => el\.style\.display !== 'none'\)/.test(sync),
+  'THE ASK: the 👔 glyph is flagged whenever ANY menu row (guide pages or View Outfits) shows a ⚠️');
+assert(/tripsySetAttireStaleBadge\(btn, any \? 'stale' : ''\)/.test(sync) && /tripsySetAttireStaleBadge\(btn, 'generating'\); return;/.test(sync),
+  'and cleared only when none does; a run in flight still wins');
+assert(/' tripsy-menu-flash'\}`;/.test(extractFn('tripsySetAttireStaleBadge')), 'THE ASK: the glyph triangle FLASHES');
+assert(/tripsyAttireMenuWarningSync\(container, trip\.key\);/.test(extractFn('tripsyFlagStaleAttireButtons')), 'the guide-stale pass syncs the glyph');
+assert(/el\.style\.display = stale \? 'inline-flex' : 'none';\s*\n\s*tripsyAttireMenuWarningSync\(container, trip\.key\);/.test(html), 'the outfits pass syncs the glyph too');
+assert(/if \(!guideRow \|\| guideRow\.style\.display === 'none'\) return true;/.test(html),
+  'a glyph flagged only for outfits opens the menu (no itinerary changes to list)');
