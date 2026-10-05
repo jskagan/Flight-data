@@ -31,7 +31,7 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 
 // ---- the trigger: every generate AND refresh, while the overlay is still up ----
 const gen = extractFn('runTripsyAttireGeneration');
-assert(/if \(isOwner && guide && summaryLiveForTrip\(\) && !opts\.approved\) \{\s*\n\s*await showTripsyAttireReviewDialog\(guide, \{/.test(gen),
+assert(/if \(isOwner && guide && summaryLiveForTrip\(\) && !opts\.approved && !opts\.minimal\) \{\s*\n\s*await showTripsyAttireReviewDialog\(guide, \{/.test(gen),
   'THE ASK (+ same-day follow-up): the review dialog opens after EVERY generate or refresh (owner, overlay still showing)');
 assert(!/!isRefresh && isOwner && guide && summaryLiveForTrip/.test(gen),
   'the original first-generate-only gate is gone -- "also display the review dialog after a user regenerates"');

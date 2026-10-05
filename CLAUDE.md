@@ -2493,6 +2493,33 @@ would overwrite the glyph with the word.
   `generateTripsyAttireGuide` has done since overrides were preserved) — then opens the page
   only if no refresh was started; a flagged View Outfits shows the existing "Outfits may be out of
   date" Regenerate/Ignore dialog. `attiredressfirst_test.js`, `outfitrecomposeafterrefresh_test.js`.
+- **A flagged menu row explains the PRECISE changes behind its ⚠️ and does the MINIMUM to clear
+  it** ("explain the precise changes that caused the triangle to appear and ask if the user wants
+  to update the item. Always do the minimum amount of work required," 2026-10-05). The guide's
+  staleness is `eventFingerprint` (id + date + startTime), so exactly four changes can raise it,
+  and `tripsyAttireGuideChanges(guide, currentDays)` diffs the saved guide against the current
+  build into `added` / `removed` / `moved` (another day, with `from`) / `retimed` (with the old
+  time), free-day placeholders ignored; `tripsyAttireChangeSummaryText` renders one "• Added:
+  Concert — Thu, May 2 at 8:00 PM" line per change (capped at 12 + "…and N more").
+  `tripsyAttireStalePrompt(tripKey)` — now top-level, shared by the 👔 button and the flagged Daily
+  Dress Guide / Clothing Summary rows — shows that list, says what the update will do (ask dress
+  codes for the new events, drop the removed, re-place the moved; "every dress code you already
+  have is kept, nothing is regenerated"), and, for a full guide, works out BEFORE anything runs
+  whether the packing counts are even affected: `tripsyAttireGuidanceFingerprintFor` (the same
+  formula `runGuidancePhase` stores as `guidanceFingerprint`) over `tripsyAttireMergedDaysPreview`
+  (a dry run of the merge, new events at their suggested tier). Update → `tripsyAttireMinimalUpdate`:
+  `showTripsyAttireNewEventsDialog` for the new events (cancel = nothing changes), the mechanical
+  `tripsyAttireApplyNewEvents` merge (carries every saved category by id, no Claude call), the
+  free `tripsyAttireAdoptNewEventsIntoOutfits`, a repaint of any open guide/summary — and ONLY
+  when the guidance fingerprint moved on a full guide, `tripsyRunAttireGenerationSafely(…,
+  {isRefresh:true, minimal:true})` in the background (its `eventsUnchanged` path reuses every
+  category and runs just the guidance phase; `minimal` suppresses the review dialog, the outfit
+  offers and uses its own toasts). The flagged View Outfits row lists `tripsyOutfitStaleReasons`
+  — per person, each uncovered time-block by day/tier/label and each outfit wearing a garment no
+  longer packed — and promises to re-dress only those; the background regenerate already does
+  exactly that (incremental + per-outfit `outfitStillPacked`). `tripsyConfirmDialog` now renders
+  `\n` as line breaks (`white-space:pre-line`, left-aligned when multi-line) so these lists read as
+  lists. `stalereasons_test.js`.
 - **A dress-code refresh now proactively offers to recompose outfits it just made stale**, instead
   of leaving that discoverable only per-block. Refreshing the Attire Guide (dress-code
   categorization) and composing Outfits (the actual garment picks per time-block) are two separate,

@@ -59,7 +59,7 @@ assert(/tripsyRunAttireGenerationSafely\(tripKey, \{ isRefresh: true, dressOnly:
 assert(/overlay\.style\.display = 'flex';/.test(approve) && approve.indexOf("display = 'flex'") < approve.indexOf('tripsyRunAttireGenerationSafely'),
   'the Clothing Summary opens first so its progress line shows');
 assert(/if \(tripsyAttireGeneratingKeys\.has\(tripKey\)\)/.test(approve), 'a double press cannot start two builds');
-assert(/summaryLiveForTrip\(\) && !opts\.approved\)/.test(extractFn('runTripsyAttireGeneration')), 'no second review dialog after approving');
+assert(/summaryLiveForTrip\(\) && !opts\.approved && !opts\.minimal\)/.test(extractFn('runTripsyAttireGeneration')), 'no second review dialog after approving');
 const menuAt = html.indexOf("menuListButtonHtml(`data-tripsy-attire-nav=\"dressguide\"", html.indexOf(': ['));
 const fullMenu = html.slice(html.indexOf(': [', html.indexOf('const attireMenuItems = attireDressOnly')), html.indexOf("].join('')", html.indexOf('const attireMenuItems = attireDressOnly')));
 assert(fullMenu.indexOf('nav="dressguide"') > 0 && fullMenu.indexOf('nav="dressguide"') < fullMenu.indexOf('nav="summary"'),

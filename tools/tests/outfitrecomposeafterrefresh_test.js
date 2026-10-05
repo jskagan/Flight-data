@@ -30,10 +30,10 @@ function extractFn(name) {
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 const fn = extractFn('runTripsyAttireGeneration');
-assert(fn.includes("toast(opts.approved ? 'Clothing Summary created.' : guide && guide.packingFrozen"), 'sanity: extracted the real function, found the success toast');
+assert(fn.includes("toast(opts.minimal ? 'Packing counts re-sized.' : opts.approved ? 'Clothing Summary created.' : guide && guide.packingFrozen"), 'sanity: extracted the real function, found the success toast');
 
 // ---- source-pattern checks ----
-assert(/if \(isOwner\) \{\s*\n\s*for \(const p of \['him', 'her'\]\) \{/.test(fn),
+assert(/if \(isOwner && !opts\.minimal\) \{[^\n]*\n\s*for \(const p of \['him', 'her'\]\) \{/.test(fn),
   'THE FIX: after a successful guide generate/refresh, both people are checked -- owner-only, since recomposing writes');
 assert(/const existing = \(driveData\.tripsyTripOutfits \|\| \[\]\)\.find\(o => o\.tripKey === tripKey && \(o\.person \|\| 'him'\) === p\);/.test(fn),
   'only looks at outfits that actually exist for this trip+person');
@@ -49,7 +49,7 @@ assert(/if \(regen\) \{ tripsyGenerateOutfitsInBackground\(tripKey\); break; \}/
 // This only runs on a SUCCESSFUL generate/refresh -- placed after the success toast,
 // never inside the catch block (a failed guide has nothing new to compare outfits
 // against).
-const successToastIdx = fn.indexOf("toast(opts.approved ? 'Clothing Summary created.' : guide && guide.packingFrozen");
+const successToastIdx = fn.indexOf("toast(opts.minimal ? 'Packing counts re-sized.' : opts.approved ? 'Clothing Summary created.' : guide && guide.packingFrozen");
 const checkIdx = fn.indexOf('tripsyOutfitsNeedRecompose(tripKey, p)');
 const catchIdx = fn.indexOf('} catch (e) {');
 assert(successToastIdx > -1 && checkIdx > successToastIdx && checkIdx < catchIdx,
