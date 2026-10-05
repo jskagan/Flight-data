@@ -2512,6 +2512,14 @@ would overwrite the glyph with the word.
   `TRIPSY_WEARS_BEFORE_WASH` (its per-type wash-cadence map) since the type has no entry there
   either and both fall back to the same `outerwear` group answer (`Infinity` — never washed on a
   trip), so no explicit entry was needed for correct behavior.
+  **For NEED-LINE matching, a light jacket is still a jacket** ("Why isn't the Loro Piana
+  Traveler Jacket listed as a rain jacket," 2026-10-05): guide lines like "rain jacket" / "packable
+  rain jacket" type as `jacket`, so after the split the traveler jacket matched none of them.
+  `tripsyGarmentLineMatchType` folds `light-jacket` → `jacket`, used by
+  `tripsyWardrobeGarmentFillsLine` (both the typed-line test and the untyped-line exclusion) and by
+  `tripsyWardrobeAssignGarments`' fallback match, so the jacket is both OFFERED on and COUNTED
+  toward those lines (and a plain jacket fills a light-jacket-named line). Cube behavior still keys
+  on the real `light-jacket` type. `lightjacketline_test.js`.
 - **A trip that STARTS with a flight wears its first outfit rather than packing it.** The outfit for
   that first time block is on your body when you leave, so it's deducted from every packing analysis:
   one top, one bottom and one pair of shoes at the block's own tier, plus the underwear and socks
