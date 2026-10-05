@@ -2337,6 +2337,15 @@ would overwrite the glyph with the word.
   immediately. `tripsyWardrobeChooseQty` (asked when more than one copy is available) now pins its
   own z-index above the Add Garment dialog specifically — it used to rely on plain DOM append order,
   which broke the moment a caller other than the base page height opened it first.
+- **The garment form is rebuilt FRESH on every open** ("Whenever a user selects add garment, make
+  sure all the fields to describe that garment are cleared from the last time," 2026-10-05).
+  `showWardrobeGarmentForm` removes the previous `#tw-form-overlay` node before
+  `getOrCreateWardrobeFormOverlay` builds a new one: the node used to be reused, so a late async
+  result from the previous open (an Edit's photo download, a picker or Paste result) could paint
+  into the next form. A late result now lands in a detached node. A NEW garment's Type starts on
+  an empty "Select type…" option instead of silently pre-picking the first group; left unchosen,
+  Save derives it from the name via `tripsyAttirePackingGroupOf`. "Whose" still defaults to the
+  library being viewed, which is deliberate. `garmentformreset_test.js`.
 - **A garment photo can come from the camera OR the photo library** ("How do I select a photo
   from my photo library to add a garment," 2026-10-05). `showWardrobeGarmentForm`'s "Take / choose
   photo" button used to click ONE hidden input carrying `capture="environment"`, which on
