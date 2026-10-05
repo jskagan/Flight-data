@@ -2366,9 +2366,11 @@ would overwrite the glyph with the word.
 - **A garment photo can come from the camera OR the photo library** ("How do I select a photo
   from my photo library to add a garment," 2026-10-05). `showWardrobeGarmentForm`'s "Take / choose
   photo" button used to click ONE hidden input carrying `capture="environment"`, which on
-  iPhone/iPad opens the camera outright with no library option. It now opens the shared
-  `tripsyPickImageFile` picker (Take Photo / Choose Photo over two inputs, the shape that works on
-  iPad — the diary already used it). Never put `capture` on an input meant to reach the library.
+  iPhone/iPad opens the camera outright with no library option. It is now ONE hidden input with
+  NO `capture`, clicked synchronously from the button: iOS's own sheet then offers Photo Library
+  and Take Photo in one step (same-day follow-up — a first fix routed through the shared
+  `tripsyPickImageFile` Take/Choose picker, which put a redundant in-app step in front of that
+  very sheet). Never put `capture` on an input meant to reach the library.
   `garmentphotolib_test.js`.
 - **Shorts and long trousers never stand in for each other** ("Do not include shorts as potential
   garments for chinos," 2026-10-05). The mix-and-match tiers collapse their need lines to untyped
