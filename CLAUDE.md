@@ -2575,7 +2575,17 @@ would overwrite the glyph with the word.
   Add candidates; closing it (button OR click-outside, which routes through `ov._close`) with
   nothing picked removes that block again, or it would count as covering its time-block and
   clear the ⚠️. The packing-picks-changed fallback row gets **View outfits** (`action:'view'`,
-  falls through to the list like Not now). `outfitaddmissing_test.js`.
+  falls through to the list like Not now). **Both buttons open THE OUTFIT ITSELF, not the fix
+  page** ("I want the button on the dialog box to take me to the specific outfit where there is
+  a problem and show the specific garments that can be selected to address that problem," same
+  day): `tripsyOutfitOpenProblem(tripKey, item)` materializes an uncovered block
+  (`tripsyOutfitMaterializeUncovered`, the shared helper the fix page also calls) and opens
+  `showTripsyOutfitModal` on the block's first event with `opts.onClose` →
+  `tripsyOutfitDiscardIfEmpty` — the modal's close and its click-outside (routed through
+  `ov._close`) both honor it. The modal is where the inline Swap/replacements and Add/candidates
+  live, so the problem garment and its fixes are on the same screen; a successful change there
+  re-renders My Trips so the menu ⚠️ re-judges. `showTripsyOutfitFixPage` survives only as the
+  fallback for a block with no event id. `outfitaddmissing_test.js`.
 - **A dress-code refresh now proactively offers to recompose outfits it just made stale**, instead
   of leaving that discoverable only per-block. Refreshing the Attire Guide (dress-code
   categorization) and composing Outfits (the actual garment picks per time-block) are two separate,

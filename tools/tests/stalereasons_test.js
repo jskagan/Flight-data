@@ -87,7 +87,7 @@ assert(/done\(\{ action: 'fix', item: items\[Number\(b\.dataset\.fixItem\)\] \}\
   'the dialog resolves to fix-this-item or update');
 assert(/items\.push\(\{ kind: 'lost', line, person, block: b, outfits, lostIds: lost \}\)/.test(reasons),
   'reasons carry the LIVE block so the fix page can swap in place');
-assert(/if \(choice && choice\.action === 'fix'\) \{ showTripsyOutfitFixPage\(key, choice\.item\); return; \}/.test(html), 'Fix opens the fix page');
+assert(/if \(choice && choice\.action === 'fix'\) \{ tripsyOutfitOpenProblem\(key, choice\.item\); return; \}/.test(html), 'Fix opens the problem outfit');
 const fix = extractFn('showTripsyOutfitFixPage');
 assert(/this outfit wears <b>\$\{esc\(lostNames\.join\(', '\)\)\}<\/b>, which .* no longer on your Packing List/.test(fix) && /⚠️ The problem: \$\{problemText\}/.test(fix),
   'THE ASK: the page keeps the explanation of the problem');

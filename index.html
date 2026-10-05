@@ -11912,9 +11912,12 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
     // outfits list (2147482990); both are places you tap through to reach an outfit.
     ov.style.zIndex = '2147483080';
     document.body.appendChild(ov);
-    ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+    // Click-outside routes through the CURRENT open's close (ov._close) so an opts.onClose
+    // hook (the problems dialog's materialized-empty-block cleanup) runs either way.
+    ov.addEventListener('click', e => { if (e.target === ov) (ov._close || (() => { ov.style.display = 'none'; }))(); });
   }
-  const close = () => { ov.style.display = 'none'; };
+  const close = () => { ov.style.display = 'none'; if (opts.onClose) opts.onClose(); };
+  ov._close = close;
   const outfits = await Store.getTripsyTripOutfits(tripKey, person);
   const block = outfits && (outfits.blocks || []).find(b => (b.eventIds || []).includes(eventId));
   if (!block) {
@@ -12102,6 +12105,7 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
           repaintIfShowing();
           return;
         }
+        if (currentView === 'tripsytrips') renderTripsyEventsList(); // the menu ⚠️ re-judges
         // This swap can push extra wear onto whichever garment just went IN, which can
         // leave a LATER block short of it -- check for that and fix it automatically
         // (no confirmation; see tripsyOutfitAutoAdjustAfterSwap for why this differs from
@@ -28565,7 +28569,7 @@ function tripsyOutfitProblemsDialog(reasons, { planDone = true } = {}) {
         <div style="font-size:14.5px; line-height:1.5; margin-bottom:6px;">Since these outfits were composed:</div>
         <div style="margin-bottom:14px;">${rows}</div>
         <div style="font-size:13.5px; color:var(--muted); line-height:1.5; margin-bottom:16px; text-align:left;">
-          Fix this outfit lets you pick the replacement yourself, with pictures; Dress this outfit lets you build a missing one from what's packed. Update re-dresses ${n ? `only ${n === 1 ? 'that outfit' : `those ${n} outfits`}` : 'only what changed'} in the background — every other outfit is kept as it is.${planDone ? '' : ' Note your packing list still has lines with nothing picked for them, so finish those first if you want the outfits to cover everything.'}
+          Fix this outfit opens that outfit with the problem garment marked and the packed garments that could replace it; Dress this outfit opens the missing one with what's packed for each piece. Update re-dresses ${n ? `only ${n === 1 ? 'that outfit' : `those ${n} outfits`}` : 'only what changed'} in the background — every other outfit is kept as it is.${planDone ? '' : ' Note your packing list still has lines with nothing picked for them, so finish those first if you want the outfits to cover everything.'}
         </div>
         <div style="display:flex; gap:10px; justify-content:center;">
           <button class="btn primary" data-problems-update>Update</button>
@@ -28586,6 +28590,34 @@ function tripsyOutfitProblemsDialog(reasons, { planDone = true } = {}) {
 // replacement (pictured; the same candidates Swap offers, so a pick here is always one
 // Swap would equally allow), removing the piece, or letting the app re-dress the outfit in
 // the background. A pick swaps in place and saves in the background, exactly like Swap.
+function tripsyOutfitMaterializeUncovered(item) {
+  if (item.kind !== 'uncovered' || !item.outfits) return false;
+  const cur = item.block;
+  const saved = { dayKey: cur.dayKey, category: cur.category, eventIds: (cur.eventIds || []).slice(), label: cur.label || '', garmentIds: [], note: '', gaps: [] };
+  if (!item.outfits.blocks) item.outfits.blocks = [];
+  item.outfits.blocks.push(saved);
+  item.kind = 'dress'; item.block = saved; item.lostIds = [];
+  return true;
+}
+// Drops a materialized block that never got a garment, so an untouched visit can't read
+// as "covered" to the ⚠️ check. Safe to call on any item.
+function tripsyOutfitDiscardIfEmpty(item) {
+  if (item.kind !== 'dress' || !item.outfits || (item.block.garmentIds || []).length) return;
+  const i = (item.outfits.blocks || []).indexOf(item.block);
+  if (i >= 0) item.outfits.blocks.splice(i, 1);
+}
+// The problems dialog's button: open THE outfit itself ("take me to the specific outfit
+// where there is a problem and show the specific garments that can be selected to
+// address that problem," 2026-10-05) -- the outfit modal already marks an unpacked garment
+// with its replacements and a missing role with its Add candidates. An uncovered block is
+// materialized first so the modal has an outfit to open on; closing it still empty drops
+// it again. Only a block with no event id at all falls back to the fix page.
+function tripsyOutfitOpenProblem(tripKey, item) {
+  tripsyOutfitMaterializeUncovered(item);
+  const eventId = ((item.block && item.block.eventIds) || [])[0];
+  if (!eventId) { showTripsyOutfitFixPage(tripKey, item); return; }
+  showTripsyOutfitModal(tripKey, eventId, item.person, { onClose: () => tripsyOutfitDiscardIfEmpty(item) });
+}
 async function showTripsyOutfitFixPage(tripKey, item) {
   // An UNCOVERED time-block has no saved outfit to fix, so one is materialized here --
   // an empty block in the live record, in the same shape compose saves -- and the page
@@ -28594,13 +28626,7 @@ async function showTripsyOutfitFixPage(tripKey, item) {
   // nothing picked removes it again (see `close`), so an untouched visit can't read as
   // "covered" to the ⚠️ check. ("The app is giving me this message but not a button to
   // go to the outfit so I can fix it," 2026-10-05 -- only unpacked-garment rows had one.)
-  if (item.kind === 'uncovered' && item.outfits) {
-    const cur = item.block;
-    const saved = { dayKey: cur.dayKey, category: cur.category, eventIds: (cur.eventIds || []).slice(), label: cur.label || '', garmentIds: [], note: '', gaps: [] };
-    if (!item.outfits.blocks) item.outfits.blocks = [];
-    item.outfits.blocks.push(saved);
-    item.kind = 'dress'; item.block = saved; item.lostIds = [];
-  }
+  tripsyOutfitMaterializeUncovered(item);
   const { person, block, outfits } = item;
   const garments = await Store.listWardrobe();
   const byId = new Map(garments.map(g => [g.id, g]));
@@ -28621,10 +28647,7 @@ async function showTripsyOutfitFixPage(tripKey, item) {
     ov.style.display = 'none';
     // A block materialized for "Dress this outfit" that never got a garment is dropped
     // again, or it would count as covering its time-block and silently clear the ⚠️.
-    if (item.kind === 'dress' && !(block.garmentIds || []).length) {
-      const i = (outfits.blocks || []).indexOf(block);
-      if (i >= 0) outfits.blocks.splice(i, 1);
-    }
+    tripsyOutfitDiscardIfEmpty(item);
   };
   ov._close = close;
   const tierLabel = TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier || block.category] || liveTier || block.category || '';
@@ -34560,7 +34583,7 @@ async function renderTripsyEventsListImpl() {
               // background," 2026-10-05) -- the list opens again from the menu once the
               // flashing ⏳ stops. Fix opens the problem outfit with its solutions pictured.
               if (choice && choice.action === 'update') { tripsyGenerateOutfitsInBackground(key); return; }
-              if (choice && choice.action === 'fix') { showTripsyOutfitFixPage(key, choice.item); return; }
+              if (choice && choice.action === 'fix') { tripsyOutfitOpenProblem(key, choice.item); return; }
               // Not now and View outfits both fall through to the list.
             }
             showTripsyOutfitList(key, who);

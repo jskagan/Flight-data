@@ -114,9 +114,23 @@ assert(/it\.kind === 'uncovered' \? `<button class="btn" data-fix-item="\$\{i\}"
   'THE REPORT: a time-block with no outfit gets a "Dress this outfit" button');
 assert(/data-problems-view[^>]*>View outfits<\/button>/.test(probs) && /done\(\{ action: 'view' \}\)/.test(probs), 'the packing-picks-changed fallback row gets View outfits');
 assert(/items\.push\(\{ kind: 'uncovered', line, person, block: b, outfits \}\)/.test(extractFn('tripsyOutfitStaleReasons')), 'uncovered items carry the current block + live record');
-assert(/if \(item\.kind === 'uncovered' && item\.outfits\) \{[\s\S]*item\.outfits\.blocks\.push\(saved\);[\s\S]*item\.kind = 'dress'; item\.block = saved;/.test(fix),
-  'the fix page materializes an empty saved block for it, so the Add sections apply');
-assert(/if \(item\.kind === 'dress' && !\(block\.garmentIds \|\| \[\]\)\.length\) \{[\s\S]*outfits\.blocks\.splice\(i, 1\);/.test(fix) && /ov\._close = close;/.test(fix)
+const mat = extractFn('tripsyOutfitMaterializeUncovered');
+assert(/item\.outfits\.blocks\.push\(saved\);[\s\S]*item\.kind = 'dress'; item\.block = saved;/.test(mat) && /tripsyOutfitMaterializeUncovered\(item\);/.test(fix),
+  'an uncovered block is materialized as an empty saved block (shared helper; the fix page uses it too)');
+const disc = extractFn('tripsyOutfitDiscardIfEmpty');
+assert(/item\.outfits\.blocks\.splice\(i, 1\);/.test(disc) && /tripsyOutfitDiscardIfEmpty\(item\);/.test(fix) && /ov\._close = close;/.test(fix)
   && /\(ov\._close \|\| \(\(\) => \{ ov\.style\.display = 'none'; \}\)\)\(\)/.test(fix),
   'closed with nothing picked (button or click-outside), the empty block is dropped again so the ⚠️ stays honest');
 assert(/no outfit has been composed for this time-block yet/.test(fix) && /Dress outfit' : 'Fix outfit'/.test(fix), 'the page says so');
+
+// "I want the button on the dialog box to take me to the specific outfit where there is a
+// problem and show the specific garments that can be selected to address that problem"
+// (2026-10-05): the button opens THE outfit (the modal above, which marks the unpacked
+// garment with replacements and a missing role with Add candidates), not a separate page.
+const open = extractFn('tripsyOutfitOpenProblem');
+assert(/tripsyOutfitMaterializeUncovered\(item\);/.test(open) && /showTripsyOutfitModal\(tripKey, eventId, item\.person, \{ onClose: \(\) => tripsyOutfitDiscardIfEmpty\(item\) \}\)/.test(open),
+  'THE ASK: the dialog button opens that specific outfit (an uncovered block is materialized first; closed empty, it is dropped)');
+assert(/if \(!eventId\) \{ showTripsyOutfitFixPage\(tripKey, item\); return; \}/.test(open), 'only a block with no event at all falls back to the fix page');
+assert(/const close = \(\) => \{ ov\.style\.display = 'none'; if \(opts\.onClose\) opts\.onClose\(\); \};\s*ov\._close = close;/.test(modal)
+  && /\(ov\._close \|\| \(\(\) => \{ ov\.style\.display = 'none'; \}\)\)\(\)/.test(modal), 'the modal honors onClose from its button and from click-outside');
+assert(/if \(currentView === 'tripsytrips'\) renderTripsyEventsList\(\); \/\/ the menu ⚠️ re-judges/.test(modal), 'a change made there re-judges the menu ⚠️');
