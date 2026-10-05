@@ -31,9 +31,11 @@ const composeFn = extractFn('composeTripsyOutfits');
 assert(composeFn.includes('INCREMENTAL RECOMPOSE'), 'sanity: extracted the real function');
 
 // ---- source-pattern checks ----
-assert(/existing\.selectionFingerprint && existing\.selectionFingerprint\.hash === selectionFp\.hash/.test(composeFn),
-  'partial mode only when the packing selection is UNCHANGED -- a changed selection could strand kept outfits on unpacked garments');
-assert(/const j = unused\.findIndex\(sb => sb\.dayKey === b\.dayKey && sb\.category === b\.category\);/.test(composeFn),
+assert(/if \(existing && \(existing\.blocks \|\| \[\]\)\.length\) \{/.test(composeFn) && !/existing\.selectionFingerprint\.hash === selectionFp\.hash/.test(composeFn),
+  'a changed packing selection no longer disables partial mode wholesale (2026-10-05)');
+assert(/const outfitStillPacked = sb => \(sb\.garmentIds \|\| \[\]\)\.every\(id => stillSelected\.has\(id\)/.test(composeFn),
+  'instead, a saved outfit is kept only when every garment in it is still packed');
+assert(/const j = unused\.findIndex\(sb => sb\.dayKey === b\.dayKey && sb\.category === b\.category && outfitStillPacked\(sb\)\);/.test(composeFn),
   'coverage matching is the same greedy day+tier multiset rule tripsyOutfitsUncoveredBlocks uses');
 assert(/if \(j >= 0\) \{ keptByIndex\.set\(i, unused\[j\]\); unused\.splice\(j, 1\); \}/.test(composeFn),
   'each saved block covers at most ONE current block (multiset, not just presence)');
@@ -56,14 +58,16 @@ assert(/if \(!dressedById\.size\) throw new Error\('No outfits came back — try
 
 // ---- executed: the coverage-matching + merge logic, against fixtures ----
 {
-  const run = (currentBlocks, savedBlocks, selectionMatches, dressed) => {
+  // `stillSelected`: the garment ids still packed (null = everything still packed).
+  const run = (currentBlocks, savedBlocks, stillSelected, dressed) => {
+    const outfitStillPacked = sb => !stillSelected || (sb.garmentIds || []).every(id => stillSelected.has(id));
     // Mirrors the real function's partial-recompose control flow exactly (pinned by
     // the source-pattern assertions above to this same shape).
     const keptByIndex = new Map();
-    if (savedBlocks && savedBlocks.length && selectionMatches) {
+    if (savedBlocks && savedBlocks.length) {
       const unused = [...savedBlocks];
       currentBlocks.forEach((b, i) => {
-        const j = unused.findIndex(sb => sb.dayKey === b.dayKey && sb.category === b.category);
+        const j = unused.findIndex(sb => sb.dayKey === b.dayKey && sb.category === b.category && outfitStillPacked(sb));
         if (j >= 0) { keptByIndex.set(i, unused[j]); unused.splice(j, 1); }
       });
     }
@@ -92,7 +96,7 @@ assert(/if \(!dressedById\.size\) throw new Error\('No outfits came back — try
   ];
 
   // THE ASK: only the block whose tier moved is stale; the other two keep their outfits.
-  let r = run(current, saved, true, [{ blockId: 'B2', dayKey: 'd1', category: 'smart_casual', eventIds: ['e2', 'e3'], label: 'B2', garmentIds: ['g9'], note: 'fresh', gaps: [] }]);
+  let r = run(current, saved, null, [{ blockId: 'B2', dayKey: 'd1', category: 'smart_casual', eventIds: ['e2', 'e3'], label: 'B2', garmentIds: ['g9'], note: 'fresh', gaps: [] }]);
   assert(r.staleBlocks.length === 1 && r.staleBlocks[0].blockId === 'B2',
     `THE ASK: a one-block tier change re-dresses ONE block, not the whole trip -> ${JSON.stringify(r.staleBlocks.map(b => b.blockId))}`);
   assert(r.keptCount === 2, 'the other two blocks keep their existing outfits');
@@ -106,21 +110,25 @@ assert(/if \(!dressedById\.size\) throw new Error\('No outfits came back — try
   r = run(unchanged, [
     { dayKey: 'd1', category: 'casual', garmentIds: ['g1'] },
     { dayKey: 'd2', category: 'cocktail', garmentIds: ['g4'] },
-  ], true, []);
+  ], null, []);
   assert(r.staleBlocks.length === 0 && r.outBlocks.length === 2, 'all blocks covered -> zero stale, the API call is skipped entirely');
 
-  // A changed packing selection disables partial mode -- everything re-dresses.
-  r = run(current, saved, false, current.map(b => ({ ...b, garmentIds: ['gN'], note: 'fresh', gaps: [] })));
-  assert(r.staleBlocks.length === 3 && r.keptCount === 0, 'a changed selection re-dresses every block, same as before this fix');
+  // THE 2026-10-05 ASK: a changed packing selection re-dresses ONLY the outfits that lost a
+  // garment (here g4 was unpacked), not the whole trip.
+  r = run(current, saved, new Set(['g1', 'g2', 'g3']), [
+    { blockId: 'B2', dayKey: 'd1', category: 'smart_casual', eventIds: ['e2', 'e3'], label: 'B2', garmentIds: ['g9'], note: 'fresh', gaps: [] },
+    { blockId: 'B3', dayKey: 'd2', category: 'cocktail', eventIds: ['e4'], label: 'B3', garmentIds: ['g8'], note: 'fresh', gaps: [] }]);
+  assert(r.staleBlocks.map(b => b.blockId).join(',') === 'B2,B3' && r.keptCount === 1,
+    'a changed selection re-dresses only the block that lost a garment (plus uncovered ones), keeping the rest');
 
   // First-ever compose (no saved outfits) -- full, unchanged behavior.
-  r = run(current, [], true, current.map(b => ({ ...b, garmentIds: ['gN'], note: 'fresh', gaps: [] })));
+  r = run(current, [], null, current.map(b => ({ ...b, garmentIds: ['gN'], note: 'fresh', gaps: [] })));
   assert(r.staleBlocks.length === 3, 'a first compose with nothing saved dresses everything, unchanged');
 
   // A SECOND block of the same day+tier appearing: multiset counting means only the
   // extra one is stale, and the one saved outfit isn't double-assigned to both.
   const twoSame = [B('B1', 'd1', 'casual', ['e1']), B('B2', 'd1', 'casual', ['e9'])];
-  r = run(twoSame, [{ dayKey: 'd1', category: 'casual', garmentIds: ['g1'] }], true,
+  r = run(twoSame, [{ dayKey: 'd1', category: 'casual', garmentIds: ['g1'] }], null,
     [{ blockId: 'B2', dayKey: 'd1', category: 'casual', eventIds: ['e9'], label: 'B2', garmentIds: ['g5'], note: 'fresh', gaps: [] }]);
   assert(r.staleBlocks.length === 1 && r.staleBlocks[0].blockId === 'B2' && r.keptCount === 1,
     'a second same-day-same-tier block only re-dresses the uncovered one (multiset, matching tripsyOutfitsUncoveredBlocks)');

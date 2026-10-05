@@ -14,13 +14,14 @@ const html = fs.readFileSync(path.join(__dirname, '..', '..', 'index.html'), 'ut
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 // ---- the menu builder's gates ----
-const start = html.indexOf('const attireMenuItems = [');
+const start = html.indexOf('const attireMenuItems = attireDressOnly');
 const menu = html.slice(start, html.indexOf('].join', start));
 assert(menu.length > 200, 'sanity: found the Attire menu builder');
 assert(/isOwner && attireHasGuide \? menuListButtonHtml\(`data-tripsy-attire-nav="pack"/.test(menu),
   'THE ASK: Plan Packing List requires a saved guide, not just owner');
-assert(/isOwner && attireHasGuide \? menuListButtonHtml\(`data-tripsy-attire-nav="packlist"/.test(menu),
-  'THE ASK: Packing Status requires a saved guide, not just owner');
+assert(/attireStatusReady \? menuListButtonHtml\(`data-tripsy-attire-nav="packlist"/.test(menu)
+  && /const attireStatusReady = attirePlanDone \|\| \(isOwner && attireHasGuide && attireAnyPacked\);/.test(html),
+  'Packing Status requires a saved guide AND a complete Packing List (or packing already begun) -- 2026-10-05');
 assert(/attireHasGuide \? menuListButtonHtml\(`data-tripsy-attire-nav="summary"/.test(menu)
   && /attireHasGuide \? menuListButtonHtml\(`data-tripsy-attire-nav="dressguide"/.test(menu),
   'Clothing Summary / Daily Dress Guide keep their existing guide gates');
@@ -35,18 +36,19 @@ assert(cardIdx > -1 && personsGate > cardIdx && personsGate - cardIdx < 2000,
 
 // ---- executed: the menu composition per state ----
 {
-  const items = (isOwner, hasGuide, hasOutfits, outfitsReady) => [
+  const items = (isOwner, hasGuide, hasOutfits, outfitsReady, statusReady = false) => [
     hasGuide ? 'summary' : '',
     hasGuide ? 'dressguide' : '',
     isOwner && hasGuide ? 'pack' : '',
-    isOwner && hasGuide ? 'packlist' : '',
+    isOwner && hasGuide && statusReady ? 'packlist' : '',
     hasOutfits ? 'outfits' : (outfitsReady ? 'outfits' : ''),
     isOwner ? (hasGuide ? 'refresh' : 'generate') : '',
   ].filter(Boolean);
   assert(JSON.stringify(items(true, false, false, false)) === JSON.stringify(['generate']),
     'THE ASK: a guide-less owner sees exactly one item -- Generate');
-  assert(JSON.stringify(items(true, true, false, false)) === JSON.stringify(['summary', 'dressguide', 'pack', 'packlist', 'refresh']),
-    'once the guide exists, everything appears as before');
+  assert(JSON.stringify(items(true, true, false, false)) === JSON.stringify(['summary', 'dressguide', 'pack', 'refresh']),
+    'once the guide exists, the packing list appears; Packing Status waits for the list to be complete');
+  assert(items(true, true, false, false, true).includes('packlist'), 'a complete list (or packing begun) adds Packing Status');
   assert(items(false, false, false, false).length === 0,
     'a viewer with no guide still gets an empty menu (the whole button hides)');
   assert(!items(false, true, false, false).includes('pack'),

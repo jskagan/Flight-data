@@ -2122,6 +2122,36 @@ step 4; git history has it if ever needed.
   Turf" is dinner), `skiing` but never bare `ski` ("Ski Lodge Dinner" is dinner). A forced event
   loses its `alternateCategory` (nothing left to pick); a manual override always wins, so a
   false positive is one tap in the review dialog to fix, permanently. `athleticrule_test.js`.
+- **The attire flow STARTS with the dress codes alone — the Daily Dress Guide** ("The first
+  step in the attire flow should be to determine which events fall into which categories of
+  dress … present its suggestions to the user and allow the user to make changes. That is what
+  should happen in the daily dress guide," 2026-10-05). With no guide yet, the owner's 👔 button
+  opens no menu: its `beforeOpen` hook asks "Is the itinerary complete, and are you ready to build
+  the Daily Dress Guide?" and Yes runs `tripsyRunAttireGenerationSafely(…, {dressOnly: true})`.
+  `generateTripsyAttireGuide`'s `dressOnly` stage runs ONLY the events categorization —
+  `runGuidancePhase` returns null, so no packing guidance, `personGuidance: null`, empty packing
+  lists — and stamps `dressOnly: true` (`tripsyAttireGuideIsDressOnly` keys on that flag ONLY, so
+  an older full guide is never mistaken for one). Unspecified, a Refresh keeps the saved guide's
+  stage. On finish `runTripsyAttireGeneration` opens the Daily Dress Guide directly (every badge
+  there is the owner's tier picker), skipping the summary and review dialog; and while the guide
+  is dress-only the 👔 menu holds exactly one item, **Daily Dress Guide**. The stale-⚠️ refresh
+  prompt has its own dress-only wording. **The guide's sign-off is a green "Approved" button**
+  at its foot (owner-only, dress-only guides only; same day: "When the user selects that
+  button, create the clothing summary, and then make that option available on the attire menu
+  under the daily dress guide"): `tripsyApproveDressCodes` closes the guide, opens the Clothing
+  Summary shell (so the live stage line shows) and runs the generation with `{dressOnly:false,
+  approved:true}` — the events are unchanged since the dress-codes build, so every category and
+  override is reused verbatim and only the packing guidance call runs; no second review dialog.
+  The guide then stops being dress-only and the full 👔 menu returns, now ordered **Daily Dress
+  Guide, Clothing Summary**, then the packing items. **The Clothing Summary's own sign-off is a
+  green "Select Garments To Pack" button** at its foot (owner-only, same `.tripsy-dg-approve-btn`
+  style; same day: "bring up the Plan Packing List page, but change the name to packing list"),
+  opening `tripsyWardrobePackForTrip` for the person the guide is showing. With that, **"Plan
+  Packing List" is renamed "Packing List" everywhere a user sees it** (page title, 👔 menu item,
+  the summary's per-person card button, Packing Status' cross-link button — formerly "Packing
+  Plan" — and the empty-state/blocked messages); function names and code comments keep the old
+  name, and the CLAUDE.md table below still says Plan Packing List for the function it describes.
+  `attiredressfirst_test.js`.
 - **EVERY generate — first generate AND Refresh — ends in a review dialog of the time-blocks'
   tiers** ("show the user each of the events/time blocks with your suggested dress category… make
   the dress category a button… allow the user to select individual events… update the display
@@ -2438,6 +2468,31 @@ would overwrite the glyph with the word.
   deleted events). A changed packing selection still flags via `selectionFingerprint`. This replaced
   a blunt `guide.eventFingerprint` comparison that fired on ANY event edit; `outfits.guideFingerprint`
   is still written but no longer consulted.
+- **Outfits generate IN THE BACKGROUND from a "Generate Outfits" menu item, and obsolete attire
+  pages FLASH their ⚠️ on the 👔 menu** ("create a menu item under attire called generate
+  outfits … generate the outfits in the background … change the menu item from generate outfits
+  to view outfits. If there are changes to the itinerary that make the generated outfits or
+  garment counts obsolete, flash the yellow triangle by the appropriate menu item and, if the
+  user selects it, bring up the same dialog boxes you use now … Always update attire-related
+  pages in the background," 2026-10-05). The ✨ item (shown once a Packing List is complete) reads
+  **Generate Outfits** (`data-mode="generate"`) until outfits exist, then **View Outfits**. Generate
+  asks ("Generate outfits for this trip now?") and runs `tripsyGenerateOutfitsInBackground(tripKey)`
+  — fire-and-forget, one run per trip (`tripsyOutfitComposingKeys`), every person whose list is
+  complete or who already has outfits, `runTripsyOutfitComposition(…, {quiet:true})` in turn, then
+  a My Trips re-render that flips the label; a flashing ⏳ (`data-tripsy-outfits-generating`,
+  `tripsyRefreshOutfitGeneratingBadges`) marks the item meanwhile, and tapping it then just toasts.
+  EVERY path that used to block on the "Regenerating outfits…" spinner (the stale View Outfits
+  Regenerate, the post-refresh offer, the new-events offer, the outfit list's own Recompose) now
+  calls that one background entry — the spinner is retired; don't re-add a blocking one. **Stale
+  marks**: `.tripsy-menu-flash` (the attire blink keyframes, honoring reduced-motion) on the
+  ⚠️ beside Daily Dress Guide and Clothing Summary (`data-tripsy-attire-stale-warning`, shown by
+  the same `tripsyFlagStaleAttireButtons` pass that marks the 👔 button — which keeps its steady
+  ⚠️ "as you do now") and on View Outfits' existing `data-tripsy-outfits-warning`. Selecting a
+  flagged guide row runs `tripsyAttireStalePrompt` — the 👔 button's out-of-date dialog, factored
+  out so both can't drift (its full-guide wording now says hand-set dress codes are KEPT, which
+  `generateTripsyAttireGuide` has done since overrides were preserved) — then opens the page
+  only if no refresh was started; a flagged View Outfits shows the existing "Outfits may be out of
+  date" Regenerate/Ignore dialog. `attiredressfirst_test.js`, `outfitrecomposeafterrefresh_test.js`.
 - **A dress-code refresh now proactively offers to recompose outfits it just made stale**, instead
   of leaving that discoverable only per-block. Refreshing the Attire Guide (dress-code
   categorization) and composing Outfits (the actual garment picks per time-block) are two separate,
@@ -2482,9 +2537,7 @@ would overwrite the glyph with the word.
 - **Recomposing outfits is INCREMENTAL — only genuinely uncovered blocks go to Claude.** Reported
   2026-08-14: "Regenerating outfits takes a very long time for minor changes" — a Regenerate
   re-dressed EVERY time-block in one huge call even when one block's tier had moved.
-  `composeTripsyOutfits` now, when saved outfits exist AND the packing selection is unchanged
-  (`selectionFingerprint` match — a changed selection could strand kept outfits on unpacked
-  garments, so that case still re-dresses everything, as does a first compose), matches saved
+  `composeTripsyOutfits` now, when saved outfits exist, matches saved
   blocks to current blocks with the SAME greedy `dayKey|category` multiset rule
   `tripsyOutfitsUncoveredBlocks` uses for staleness — so what gets re-dressed is precisely what
   that check flagged. Covered blocks keep their outfit verbatim (eventIds/label refreshed from the
@@ -2495,6 +2548,16 @@ would overwrite the glyph with the word.
   back in current-block order; a stray result for a non-stale block is ignored rather than
   overwriting a kept outfit, and an empty result still fails loudly. The timing log gains a
   `(partial: dressed N, kept M)` suffix so a slow run can be judged against what it actually did.
+  **A changed packing selection is judged PER OUTFIT, not all-or-nothing** ("The app has been
+  regenerating outfits for too long. That process is supposed to take about one minute at the
+  most," 2026-10-05 — the live Singapore trip's picks had changed since its 07:03 compose, so the
+  old `selectionFingerprint` gate discarded all 31 outfits and re-dressed every block from 30
+  photos, minutes of streaming, when only ONE outfit — the Oct 21 casual block's unpacked board
+  shorts — actually used something no longer packed). A saved outfit is now kept when its
+  day+tier still matches AND `outfitStillPacked` (every garment still selected for this person,
+  essentials aside); only those that lost a garment, plus uncovered blocks, go to Claude. A
+  first compose still dresses everything. Newly added picks are NOT pushed into kept outfits —
+  Swap does that.
 - **Garment photos for the compose prompt are cached in memory** (`tripsyOutfitPhotoCache`,
   `driveFileId` → `Promise<base64>`). A REGENERATE otherwise re-downloaded and re-resized every
   selected garment's picture from Drive, identical bytes to the run a minute before — dozens of
@@ -2505,12 +2568,21 @@ would overwrite the glyph with the word.
   console lines (photo phase, and total with garment/block counts) sit alongside the
   `[attire timing] outfit composition` line the API call itself logs, so the next "why is this
   slow" is answered by reading the split rather than guessing.
-- **The "you finished — create outfits?" prompt** (`tripsyPackingCompleteDialog`, via
+- **The "list complete — start packing now?" prompt** (`tripsyPackingCompleteDialog`, via
   `maybeCongratulate`) fires on the incomplete→complete transition, from the **Done** button or from
   `closePage`, *not* from every pick — picking the last garment used to interrupt mid-flow. Ordinary
   mutations just re-render, leaving `planWasComplete` stale-but-false, which is exactly what lets the
   transition still be detected later; whichever of Done/close comes first records it, so it can't
-  prompt twice.
+  prompt twice. **What it asks changed 2026-10-05** ("when the list is complete, display a dialog box
+  asking if the user wants to start packing now. If yes, display the packing status bar. If not,
+  say select packing status when you are ready"): Start packing closes the Packing List and opens
+  `tripsyWardrobePackingList` for the same person; Not yet shows a single-OK "Select Packing Status
+  from the 👔 Attire menu when you are ready" — and either answer re-renders My Trips, because
+  **Packing Status is on the 👔 menu only once a list is complete** (`attireStatusReady` =
+  `attirePlanDone`, either person's `tripsyPlanPackingIsComplete`, OR anything already marked
+  `packed`, so a mid-packing trip never loses the page over a list edit). The old offer to compose
+  outfits here is gone; Compose Outfits stays on the menu. `attiredressfirst_test.js`,
+  `attiremenugate_test.js`.
 - **Essentials are packable; they're excluded from OUTFITS instead.** Underwear/socks/undershirt
   lines live in the tier-agnostic **General** pseudo-tier and are filled by real wardrobe garments
   like anything else. What they're kept out of is outfit composition —

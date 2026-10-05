@@ -30,7 +30,7 @@ function extractFn(name) {
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 const fn = extractFn('runTripsyAttireGeneration');
-assert(fn.includes("toast(guide && guide.packingFrozen"), 'sanity: extracted the real function, found the success toast');
+assert(fn.includes("toast(opts.approved ? 'Clothing Summary created.' : guide && guide.packingFrozen"), 'sanity: extracted the real function, found the success toast');
 
 // ---- source-pattern checks ----
 assert(/if \(isOwner\) \{\s*\n\s*for \(const p of \['him', 'her'\]\) \{/.test(fn),
@@ -43,13 +43,13 @@ assert(/if \(!\(await tripsyOutfitsNeedRecompose\(tripKey, p\)\)\) continue;/.te
   'THE ASK: reuses the SAME staleness check the Outfits nav link and the outfit modal already use, so this can never disagree with them');
 assert(/title: '⚠️ Outfits may be out of date', yes: 'Regenerate', no: 'Ignore' \}\);/.test(fn),
   'offers the same Regenerate/Ignore choice as the existing Outfits-nav prompt, not a silent auto-recompose');
-assert(/const hideSpinner = tripsyShowOutfitComposingSpinner\(p\);/.test(fn) && /await runTripsyOutfitComposition\(tripKey, p\);/.test(fn),
-  'accepting runs the real batch recompose (the same one Outfits-nav Regenerate uses), not a manual per-garment swap');
+assert(/if \(regen\) \{ tripsyGenerateOutfitsInBackground\(tripKey\); break; \}/.test(fn),
+  'accepting runs the real batch recompose in the BACKGROUND (the same one Outfits-nav Regenerate uses) -- 2026-10-05');
 
 // This only runs on a SUCCESSFUL generate/refresh -- placed after the success toast,
 // never inside the catch block (a failed guide has nothing new to compare outfits
 // against).
-const successToastIdx = fn.indexOf("toast(guide && guide.packingFrozen");
+const successToastIdx = fn.indexOf("toast(opts.approved ? 'Clothing Summary created.' : guide && guide.packingFrozen");
 const checkIdx = fn.indexOf('tripsyOutfitsNeedRecompose(tripKey, p)');
 const catchIdx = fn.indexOf('} catch (e) {');
 assert(successToastIdx > -1 && checkIdx > successToastIdx && checkIdx < catchIdx,
@@ -63,8 +63,7 @@ assert(successToastIdx > -1 && checkIdx > successToastIdx && checkIdx < catchIdx
     const driveData = { tripsyTripOutfits: existingOutfits };
     const tripsyOutfitsNeedRecompose = async (tripKey, p) => needsRecompose[p] || false;
     const tripsyConfirmDialog = async (msg, opts) => { calls.dialogsShown.push(opts.title); return ownerAnswersYes; };
-    const tripsyShowOutfitComposingSpinner = () => () => {};
-    const runTripsyOutfitComposition = async (tripKey, p) => { calls.recomposed.push(p); };
+    const tripsyGenerateOutfitsInBackground = tripKey => { calls.recomposed.push('both'); };
     const tripKey = 'T1';
 
     // Mirrors the real block's control flow exactly (pinned by the source-pattern
@@ -75,10 +74,7 @@ assert(successToastIdx > -1 && checkIdx > successToastIdx && checkIdx < catchIdx
         if (!existing || !(existing.blocks || []).some(b => (b.garmentIds || []).length)) continue;
         if (!(await tripsyOutfitsNeedRecompose(tripKey, p))) continue;
         const regen = await tripsyConfirmDialog('msg', { title: '⚠️ Outfits may be out of date', yes: 'Regenerate', no: 'Ignore' });
-        if (regen) {
-          const hideSpinner = tripsyShowOutfitComposingSpinner(p);
-          try { await runTripsyOutfitComposition(tripKey, p); } finally { hideSpinner(); }
-        }
+        if (regen) { tripsyGenerateOutfitsInBackground(tripKey); break; }
       }
     }
     return calls;
@@ -90,7 +86,7 @@ assert(successToastIdx > -1 && checkIdx > successToastIdx && checkIdx < catchIdx
   let r = await run([himOutfits], { him: true }, true);
   assert(r.dialogsShown.length === 1 && r.dialogsShown[0] === '⚠️ Outfits may be out of date',
     'THE ASK: a stale existing outfit is flagged right after the refresh, not left silent');
-  assert(r.recomposed.length === 1 && r.recomposed[0] === 'him', 'accepting recomposes that person');
+  assert(r.recomposed.length === 1 && r.recomposed[0] === 'both', 'accepting starts one background run (it covers every composed person)');
 
   // No outfits composed at all for either person -> nothing to go stale, no prompt.
   r = await run([], { him: true, her: true }, true);
@@ -104,8 +100,10 @@ assert(successToastIdx > -1 && checkIdx > successToastIdx && checkIdx < catchIdx
   r = await run([himOutfits], { him: true }, false);
   assert(r.dialogsShown.length === 1 && r.recomposed.length === 0, 'declining ("Ignore") does not recompose');
 
-  // Both people stale -> both are asked, independently.
+  // Both people stale -> ONE offer, and the accepted background run covers both (2026-10-05).
   const herOutfits = { tripKey: 'T1', person: 'her', blocks: [{ garmentIds: ['g2'] }] };
   r = await run([himOutfits, herOutfits], { him: true, her: true }, true);
-  assert(r.dialogsShown.length === 2 && r.recomposed.length === 2, 'both people are checked and offered independently -> ' + JSON.stringify(r));
+  assert(r.dialogsShown.length === 1 && r.recomposed.length === 1, 'both people stale -> one offer, one background run for both -> ' + JSON.stringify(r));
+  r = await run([himOutfits, herOutfits], { him: true, her: true }, false);
+  assert(r.dialogsShown.length === 2 && r.recomposed.length === 0, 'declining still offers the other person separately');
 })();

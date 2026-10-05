@@ -55,7 +55,7 @@ assert(/packingFrozen: preservePacking \|\| undefined,/.test(genFn),
   'packingFrozen stays tied to the trip having STARTED only -- a pre-trip reuse does not freeze anything');
 
 // ---- source-pattern checks: live stage reporting + honest wording ----
-assert(/async function generateTripsyAttireGuide\(tripKey, \{ onStage \} = \{\}\)/.test(html),
+assert(/async function generateTripsyAttireGuide\(tripKey, \{ onStage, dressOnly \} = \{\}\)/.test(html),
   'generateTripsyAttireGuide takes an optional onStage callback (existing callers unaffected)');
 assert(/stage\('Categorizing events by dress code…'\);/.test(genFn), 'the events phase reports itself');
 assert(/stage\('Writing the packing guidance — the slow step, typically 1–2 minutes…'\);/.test(genFn),
