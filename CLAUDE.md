@@ -2566,7 +2566,16 @@ would overwrite the glyph with the word.
   `currentId` = push) on the optimistic `tripsyOutfitSwapChain` with rollback. Viewers see the
   marks and the missing-role rows, no controls. `showTripsyOutfitFixPage` gets the same Add
   sections (`data-fix-add`/`data-fix-add-pick`), stays open for an incomplete outfit, and its
-  problem note names what is missing. `outfitaddmissing_test.js`.
+  problem note names what is missing. **Every row of the View Outfits problems dialog has a
+  button** ("The app is giving me this message but not a button to go to the outfit so I can fix
+  it," same day — only `lost` rows had one): an `uncovered` row (a time-block with no outfit) gets
+  **Dress this outfit** — `tripsyOutfitStaleReasons` now carries the current `block` + live
+  `outfits` on those items, and `showTripsyOutfitFixPage` materializes an empty saved block in
+  compose's shape (`item.kind` → `'dress'`) so the page opens as missing top/bottoms/shoes with
+  Add candidates; closing it (button OR click-outside, which routes through `ov._close`) with
+  nothing picked removes that block again, or it would count as covering its time-block and
+  clear the ⚠️. The packing-picks-changed fallback row gets **View outfits** (`action:'view'`,
+  falls through to the list like Not now). `outfitaddmissing_test.js`.
 - **A dress-code refresh now proactively offers to recompose outfits it just made stale**, instead
   of leaving that discoverable only per-block. Refreshing the Attire Guide (dress-code
   categorization) and composing Outfits (the actual garment picks per time-block) are two separate,

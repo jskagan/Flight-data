@@ -28524,7 +28524,9 @@ async function tripsyOutfitStaleReasons(tripKey) {
     for (const b of (guide ? tripsyOutfitsUncoveredBlocks(guide, outfits) : [])) {
       blocks++;
       const line = `• ${who}: no outfit for ${tripsyDayHeaderLabel(b.dayKey)} (${TRIPSY_ATTIRE_CATEGORY_LABEL[b.category] || b.category}) — ${b.label || 'new time-block'}`;
-      lines.push(line); items.push({ kind: 'uncovered', line, person });
+      // `block` is the CURRENT (enumerated) block, `outfits` the live record: the fix page
+      // materializes an empty saved block from it so the outfit can be dressed by hand.
+      lines.push(line); items.push({ kind: 'uncovered', line, person, block: b, outfits });
     }
     for (const b of (outfits.blocks || [])) {
       const lost = (b.garmentIds || []).filter(id => !selected.has(id) && garmentById.has(id) && !tripsyWardrobeGarmentExcludedFromOutfits(garmentById.get(id)));
@@ -28552,7 +28554,9 @@ function tripsyOutfitProblemsDialog(reasons, { planDone = true } = {}) {
     const rows = items.map((it, i) => `
       <div style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--line);">
         <div style="flex:1; min-width:0; text-align:left;">${esc(it.line)}</div>
-        ${it.kind === 'lost' ? `<button class="btn" data-fix-item="${i}" style="flex-shrink:0;">Fix this outfit</button>` : ''}
+        ${it.kind === 'lost' ? `<button class="btn" data-fix-item="${i}" style="flex-shrink:0;">Fix this outfit</button>`
+          : it.kind === 'uncovered' ? `<button class="btn" data-fix-item="${i}" style="flex-shrink:0;">Dress this outfit</button>`
+          : `<button class="btn" data-problems-view style="flex-shrink:0;">View outfits</button>`}
       </div>`).join('');
     const n = reasons.blocks || 0;
     ov.innerHTML = `
@@ -28561,7 +28565,7 @@ function tripsyOutfitProblemsDialog(reasons, { planDone = true } = {}) {
         <div style="font-size:14.5px; line-height:1.5; margin-bottom:6px;">Since these outfits were composed:</div>
         <div style="margin-bottom:14px;">${rows}</div>
         <div style="font-size:13.5px; color:var(--muted); line-height:1.5; margin-bottom:16px; text-align:left;">
-          Fix this outfit lets you pick the replacement yourself, with pictures. Update re-dresses ${n ? `only ${n === 1 ? 'that outfit' : `those ${n} outfits`}` : 'only what changed'} in the background — every other outfit is kept as it is.${planDone ? '' : ' Note your packing list still has lines with nothing picked for them, so finish those first if you want the outfits to cover everything.'}
+          Fix this outfit lets you pick the replacement yourself, with pictures; Dress this outfit lets you build a missing one from what's packed. Update re-dresses ${n ? `only ${n === 1 ? 'that outfit' : `those ${n} outfits`}` : 'only what changed'} in the background — every other outfit is kept as it is.${planDone ? '' : ' Note your packing list still has lines with nothing picked for them, so finish those first if you want the outfits to cover everything.'}
         </div>
         <div style="display:flex; gap:10px; justify-content:center;">
           <button class="btn primary" data-problems-update>Update</button>
@@ -28572,6 +28576,7 @@ function tripsyOutfitProblemsDialog(reasons, { planDone = true } = {}) {
     const done = v => { ov.style.display = 'none'; resolve(v); };
     ov.querySelector('[data-problems-update]').onclick = () => done({ action: 'update' });
     ov.querySelector('[data-problems-no]').onclick = () => done(null);
+    ov.querySelectorAll('[data-problems-view]').forEach(b => { b.onclick = () => done({ action: 'view' }); });
     ov.querySelectorAll('[data-fix-item]').forEach(b => { b.onclick = () => done({ action: 'fix', item: items[Number(b.dataset.fixItem)] }); });
     ov.onclick = e => { if (e.target === ov) done(null); };
   });
@@ -28582,6 +28587,20 @@ function tripsyOutfitProblemsDialog(reasons, { planDone = true } = {}) {
 // Swap would equally allow), removing the piece, or letting the app re-dress the outfit in
 // the background. A pick swaps in place and saves in the background, exactly like Swap.
 async function showTripsyOutfitFixPage(tripKey, item) {
+  // An UNCOVERED time-block has no saved outfit to fix, so one is materialized here --
+  // an empty block in the live record, in the same shape compose saves -- and the page
+  // then reads as "missing top / bottoms / shoes" with Add candidates for each. The
+  // item is rewritten in place so a repaint reuses the same saved block; closing with
+  // nothing picked removes it again (see `close`), so an untouched visit can't read as
+  // "covered" to the ⚠️ check. ("The app is giving me this message but not a button to
+  // go to the outfit so I can fix it," 2026-10-05 -- only unpacked-garment rows had one.)
+  if (item.kind === 'uncovered' && item.outfits) {
+    const cur = item.block;
+    const saved = { dayKey: cur.dayKey, category: cur.category, eventIds: (cur.eventIds || []).slice(), label: cur.label || '', garmentIds: [], note: '', gaps: [] };
+    if (!item.outfits.blocks) item.outfits.blocks = [];
+    item.outfits.blocks.push(saved);
+    item.kind = 'dress'; item.block = saved; item.lostIds = [];
+  }
   const { person, block, outfits } = item;
   const garments = await Store.listWardrobe();
   const byId = new Map(garments.map(g => [g.id, g]));
@@ -28594,9 +28613,20 @@ async function showTripsyOutfitFixPage(tripKey, item) {
     ov = document.createElement('div'); ov.id = 'tw-outfit-fix-overlay'; ov.className = 'tw-modal';
     ov.style.zIndex = '2147483095'; // above the outfit modal (2147483080), below the confirm dialogs
     document.body.appendChild(ov);
-    ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+    // Click-outside goes through the CURRENT open's close (ov._close), not a bare hide,
+    // so a materialized-but-still-empty block is cleaned up either way.
+    ov.addEventListener('click', e => { if (e.target === ov) (ov._close || (() => { ov.style.display = 'none'; }))(); });
   }
-  const close = () => { ov.style.display = 'none'; };
+  const close = () => {
+    ov.style.display = 'none';
+    // A block materialized for "Dress this outfit" that never got a garment is dropped
+    // again, or it would count as covering its time-block and silently clear the ⚠️.
+    if (item.kind === 'dress' && !(block.garmentIds || []).length) {
+      const i = (outfits.blocks || []).indexOf(block);
+      if (i >= 0) outfits.blocks.splice(i, 1);
+    }
+  };
+  ov._close = close;
   const tierLabel = TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier || block.category] || liveTier || block.category || '';
   // A role nothing in the outfit fills (top / bottoms / shoes) is a problem of its own
   // kind: it gets an Add section with the packed garments that could complete it.
@@ -28646,13 +28676,14 @@ async function showTripsyOutfitFixPage(tripKey, item) {
         : `<div style="color:var(--muted); padding:4px 0;">No ${esc(roleLabel.toLowerCase())} packed for this trip ${roleLabel === 'Shoes' ? 'are' : 'is'} free that day — add one on the Packing List.</div>`}`);
   }
   const problemText = [
+    item.kind === 'dress' ? 'no outfit has been composed for this time-block yet' : '',
     lostNames.length ? `this outfit wears <b>${esc(lostNames.join(', '))}</b>, which ${lostNames.length === 1 ? 'is' : 'are'} no longer on your Packing List for this trip` : '',
     missingLabels.length ? `this outfit has no ${esc(missingLabels.join(', '))}` : '',
   ].filter(Boolean).join('; and ');
   ov.innerHTML = `
     <div class="tw-modal-paper tw-wide">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px;">
-        <h2 style="margin:0; font-size:18px;">Fix outfit — ${esc(tripsyDayHeaderLabel(block.dayKey))}${tierLabel ? ` · ${esc(tierLabel)}` : ''}</h2>
+        <h2 style="margin:0; font-size:18px;">${item.kind === 'dress' ? 'Dress outfit' : 'Fix outfit'} — ${esc(tripsyDayHeaderLabel(block.dayKey))}${tierLabel ? ` · ${esc(tierLabel)}` : ''}</h2>
         <button class="tripsy-close-x" data-fix-close aria-label="Close" title="Close">&#10005;</button>
       </div>
       ${block.label ? `<div style="color:var(--muted); font-size:13px; margin-bottom:10px;">${esc(block.label)}</div>` : ''}
@@ -34530,6 +34561,7 @@ async function renderTripsyEventsListImpl() {
               // flashing ⏳ stops. Fix opens the problem outfit with its solutions pictured.
               if (choice && choice.action === 'update') { tripsyGenerateOutfitsInBackground(key); return; }
               if (choice && choice.action === 'fix') { showTripsyOutfitFixPage(key, choice.item); return; }
+              // Not now and View outfits both fall through to the list.
             }
             showTripsyOutfitList(key, who);
           })();

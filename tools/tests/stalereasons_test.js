@@ -81,8 +81,8 @@ assert(/white-space:pre-line/.test(extractFn('tripsyConfirmDialog')), 'the confi
 // creating the problem … keep the explanation of the problem and suggest possible solutions …
 // Show pictures of all relevant garments" (2026-10-05).
 const probs = extractFn('tripsyOutfitProblemsDialog');
-assert(/it\.kind === 'lost' \? `<button class="btn" data-fix-item="\$\{i\}"[^>]*>Fix this outfit<\/button>` : ''/.test(probs),
-  'THE ASK: every problem-outfit row gets a "Fix this outfit" button (uncovered blocks have nothing to swap)');
+assert(/it\.kind === 'lost' \? `<button class="btn" data-fix-item="\$\{i\}"[^>]*>Fix this outfit<\/button>`/.test(probs),
+  'THE ASK: every unpacked-garment row gets a "Fix this outfit" button');
 assert(/done\(\{ action: 'fix', item: items\[Number\(b\.dataset\.fixItem\)\] \}\)/.test(probs) && /done\(\{ action: 'update' \}\)/.test(probs),
   'the dialog resolves to fix-this-item or update');
 assert(/items\.push\(\{ kind: 'lost', line, person, block: b, outfits, lostIds: lost \}\)/.test(reasons),

@@ -106,3 +106,17 @@ assert(/Add \$\{esc\(roleLabel\.toLowerCase\(\)\)\} to complete the outfit…<\/
   && /data-fix-add-pick="\$\{esc\(g\.id\)\}"/.test(fix), 'THE ASK: an Add button plus the candidates, pictured');
 assert(/this outfit has no \$\{esc\(missingLabels\.join\(', '\)\)\}/.test(fix), 'the problem note names what is missing');
 assert(/if \(!lostId\) block\.garmentIds\.push\(replacementId\);/.test(fix) && /apply\(null, el\.dataset\.fixAddPick\)/.test(fix), 'adding goes through the same optimistic apply');
+
+// "The app is giving me this message but not a button to go to the outfit so I can fix it"
+// (2026-10-05): only unpacked-garment rows had a button; an UNCOVERED time-block had none.
+const probs = extractFn('tripsyOutfitProblemsDialog');
+assert(/it\.kind === 'uncovered' \? `<button class="btn" data-fix-item="\$\{i\}"[^>]*>Dress this outfit<\/button>`/.test(probs),
+  'THE REPORT: a time-block with no outfit gets a "Dress this outfit" button');
+assert(/data-problems-view[^>]*>View outfits<\/button>/.test(probs) && /done\(\{ action: 'view' \}\)/.test(probs), 'the packing-picks-changed fallback row gets View outfits');
+assert(/items\.push\(\{ kind: 'uncovered', line, person, block: b, outfits \}\)/.test(extractFn('tripsyOutfitStaleReasons')), 'uncovered items carry the current block + live record');
+assert(/if \(item\.kind === 'uncovered' && item\.outfits\) \{[\s\S]*item\.outfits\.blocks\.push\(saved\);[\s\S]*item\.kind = 'dress'; item\.block = saved;/.test(fix),
+  'the fix page materializes an empty saved block for it, so the Add sections apply');
+assert(/if \(item\.kind === 'dress' && !\(block\.garmentIds \|\| \[\]\)\.length\) \{[\s\S]*outfits\.blocks\.splice\(i, 1\);/.test(fix) && /ov\._close = close;/.test(fix)
+  && /\(ov\._close \|\| \(\(\) => \{ ov\.style\.display = 'none'; \}\)\)\(\)/.test(fix),
+  'closed with nothing picked (button or click-outside), the empty block is dropped again so the ⚠️ stays honest');
+assert(/no outfit has been composed for this time-block yet/.test(fix) && /Dress outfit' : 'Fix outfit'/.test(fix), 'the page says so');
