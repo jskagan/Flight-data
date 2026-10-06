@@ -140,10 +140,17 @@ assert(/if \(currentView === 'tripsytrips'\) renderTripsyEventsList\(\); \/\/ th
 // The fingerprint gate flagged a trip where picks were merely ADDED, so there was no outfit
 // to name. Staleness is now judged per outfit, by the same lost-garment rule the reasons use.
 const need = extractFn('tripsyOutfitsNeedRecompose');
-assert(!/selMoved/.test(need) && !/outfits\.selectionFingerprint\.hash/.test(need) && /return lostSomething \|\| uncovered;/.test(need),
+assert(!/selMoved/.test(need) && !/outfits\.selectionFingerprint\.hash/.test(need) && /return lostSomething \|\| incomplete \|\| uncovered;/.test(need),
   'THE REPORT: a changed packing selection alone never raises the ⚠️ -- only an outfit that lost a garment, or an uncovered block');
 assert(/!selected\.has\(id\) && !\(garmentById\.has\(id\) && tripsyWardrobeGarmentExcludedFromOutfits\(garmentById\.get\(id\)\)\)/.test(need)
   && /!selected\.has\(id\) && !\(garmentById\.has\(id\) && tripsyWardrobeGarmentExcludedFromOutfits\(garmentById\.get\(id\)\)\)/.test(extractFn('tripsyOutfitStaleReasons')),
   'the check and the reasons share one lost rule, so every flag has a row naming its outfit (a deleted garment counts as lost)');
 assert(/data-tw-outfit-remove-dangling="\$\{esc\(id\)\}"/.test(modal) && /applyOutfitChange\(btn\.dataset\.twOutfitRemoveDangling, TRIPSY_OUTFIT_SWAP_REMOVE\)/.test(modal),
   'an outfit still listing a deleted garment offers Remove it, so that problem can be cleared on the outfit too');
+
+// "I just want to confirm that all outfits for the Singapore GP trip are correct and complete"
+// (2026-10-05): the live check found an outfit with no bottoms and no ⚠️ -- its unpacked shorts
+// had been removed and nothing added. An incomplete outfit now raises the warning and gets a row.
+assert(/return lostSomething \|\| incomplete \|\| uncovered;/.test(extractFn('tripsyOutfitsNeedRecompose')), 'THE ASK: an outfit missing a top/bottoms/shoes raises the outfits ⚠️');
+assert(/outfit has no \$\{missing\.map\(r => \(TRIPSY_FLIGHT_WORN_ROLE_LABEL\[r\] \|\| r\)\.toLowerCase\(\)\)\.join\(', '\)\}`/.test(extractFn('tripsyOutfitStaleReasons')),
+  'and the problems dialog names what is missing, with a button to that outfit');

@@ -28553,6 +28553,17 @@ async function tripsyOutfitStaleReasons(tripKey) {
       // `block`/`outfits` are the LIVE records, so the fix page can swap in place.
       lines.push(line); items.push({ kind: 'lost', line, person, block: b, outfits, lostIds: lost });
     }
+    // Incomplete outfits (same rule as tripsyOutfitsNeedRecompose): opened like a lost one,
+    // where the modal's Add rows offer what could complete it.
+    for (const b of (outfits.blocks || [])) {
+      if (!(b.garmentIds || []).length) continue;
+      const worn = (b.garmentIds || []).map(id => garmentById.get(id)).filter(g => g && !tripsyWardrobeGarmentExcludedFromOutfits(g));
+      const missing = tripsyOutfitMissingRoles(worn);
+      if (!missing.length) continue;
+      blocks++;
+      const line = `• ${who}: ${tripsyDayHeaderLabel(b.dayKey)} outfit has no ${missing.map(r => (TRIPSY_FLIGHT_WORN_ROLE_LABEL[r] || r).toLowerCase()).join(', ')}`;
+      lines.push(line); items.push({ kind: 'lost', line, person, block: b, outfits, lostIds: [] });
+    }
   }
   return { lines, items, blocks };
 }
@@ -31448,10 +31459,15 @@ async function tripsyOutfitsNeedRecompose(tripKey, person = 'him') {
     const garmentById = new Map((driveData.tripsyWardrobe || []).map(g => [g.id, g]));
     const lostSomething = (outfits.blocks || []).some(b => (b.garmentIds || []).some(id =>
       !selected.has(id) && !(garmentById.has(id) && tripsyWardrobeGarmentExcludedFromOutfits(garmentById.get(id)))));
+    // An INCOMPLETE outfit -- no top, bottoms or shoes -- is a problem too ("confirm that all
+    // outfits for the Singapore GP trip are correct and complete," 2026-10-05: an outfit that
+    // had its unpacked shorts removed and nothing added sat with no bottoms and no ⚠️).
+    const incomplete = (outfits.blocks || []).some(b => (b.garmentIds || []).length
+      && tripsyOutfitMissingRoles((b.garmentIds || []).map(id => garmentById.get(id)).filter(g => g && !tripsyWardrobeGarmentExcludedFromOutfits(g))).length);
     // A block with no outfit to dress it (a genuinely new time-block, or one whose tier
     // moved -- including via a manual dress-code override, which no fingerprint sees).
     const uncovered = tripsyOutfitsUncoveredBlocks(guide, outfits).length > 0;
-    return lostSomething || uncovered;
+    return lostSomething || incomplete || uncovered;
   } catch (e) {
     console.error('Outfit staleness check failed (non-fatal):', e);
     return false;

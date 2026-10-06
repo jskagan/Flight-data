@@ -2596,6 +2596,14 @@ would overwrite the glyph with the word.
   outfit; the fallback row can no longer be reached. The outfit modal gives a deleted garment's
   dangling id its own "Remove it" row (`data-tw-outfit-remove-dangling`), since it cannot be
   pictured or swapped. `outfits.selectionFingerprint` is still written, no longer consulted.
+  **An INCOMPLETE outfit (no top, bottoms or shoes) raises the ⚠️ too** ("I just want to
+  confirm that all outfits for the Singapore GP trip are correct and complete," same day — a
+  live check found the Oct 21 casual outfit with no bottoms: its unpacked board shorts had been
+  removed and nothing added, and the lost/uncovered rules saw nothing wrong). Both
+  `tripsyOutfitsNeedRecompose` (`incomplete`, via `tripsyOutfitMissingRoles` over the outfit's
+  non-essential garments; an EMPTY block is ignored, compose can return gaps-only) and
+  `tripsyOutfitStaleReasons` (a `lost`-kind row with `lostIds: []` reading "outfit has no
+  bottoms", so it opens the outfit like any other problem) apply the same rule.
   `outfitaddmissing_test.js`.
 - **A dress-code refresh now proactively offers to recompose outfits it just made stale**, instead
   of leaving that discoverable only per-block. Refreshing the Attire Guide (dress-code
