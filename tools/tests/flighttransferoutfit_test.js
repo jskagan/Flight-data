@@ -94,3 +94,38 @@ assert(/tripsyOutfitSyncFlightTransfers\(guide, outfits, block\);/.test(extractF
 const compose = extractFn('composeTripsyOutfits');
 assert(/!keptByIndex\.has\(i\) && !flightCopyIdx\.has\(i\)/.test(compose), 'compose never asks Claude to dress the copied transfer block');
 assert(/asFlightDay \? b\.wornFromFlightDayKey/.test(extractFn('tripsyWardrobeWearDays')), 'wear days count the ride as the flight\'s wearing, not a second one');
+
+// "Why is the attire on October 7 different than October 6?" (2026-10-06): a day spent
+// entirely aboard the previous flight is an IN-FLIGHT placeholder, linked to that flight
+// exactly like the airport ride, not a free day with its own outfit.
+eval(['TRIPSY_ATTIRE_FREE_DAY_NAME'].map(constLine).join('\n'));
+eval(['tripsyInFlightInfoForDay', 'tripsyInFlightDetailText', 'tripsyAttireMarkInFlightDays'].map(extractFn).join('\n'));
+const inflightDays = [
+  { dayKey: '2030-03-01', events: [T('f9', 'Flight from LAX to SIN • SQ37', '9:00 PM', 'casual')] },
+  { dayKey: '2030-03-02', events: [{ id: 'freeday-2030-03-02', resource: 'activity', name: 'No events planned', freeDay: true, category: 'casual' }] },
+  { dayKey: '2030-03-03', events: [T('c9', 'Car from Changi Airport arrival → Hotel', '8:00 AM', 'smart_casual')] },
+  { dayKey: '2030-03-04', events: [{ id: 'freeday-2030-03-04', resource: 'activity', name: 'No events planned', freeDay: true, category: 'casual' }] },
+];
+const liveTrip = { events: [{ summary: 'Flight from LAX to SIN • SQ37', tripsyRaw: { resource: 'transportation', category: 'airplane', departureAt: '2030-03-01T21:00', arrivalAt: '2030-03-03T05:30', departureDescription: 'LAX', arrivalDescription: 'SIN', company: 'Singapore Airlines', transportNumber: 'SQ37' } }] };
+assert(tripsyAttireMarkInFlightDays(inflightDays, liveTrip) === 1 && inflightDays[1].events[0].inFlight === true
+  && /^✈️ In-flight — LAX → SIN • Singapore Airlines SQ37$/.test(inflightDays[1].events[0].name) && inflightDays[1].events[0].freeDay === true,
+  'THE ASK: the whole-day-aboard placeholder is marked in-flight and named for the leg (still a placeholder: not a real event)');
+assert(!inflightDays[3].events[0].inFlight, 'an ordinary free day after landing is untouched');
+assert(tripsyAttireMarkInFlightDays(inflightDays, liveTrip) === 0, 'idempotent');
+const il = tripsyAttireFlightTransferLinks(inflightDays);
+assert(il.length === 2 && il[0].transfer.id === 'freeday-2030-03-02' && il[1].transfer.id === 'c9' && il.every(l => l.flight.id === 'f9'),
+  'the in-flight day AND the arrival-day airport car both link to the flight (the placeholder never becomes the "previous event")');
+computeTripsyAttireBlocks(inflightDays);
+assert(inflightDays[1].events[0].category === 'casual' && inflightDays[2].events[0].category === 'casual', 'both take the flight\'s dress code');
+const io = { blocks: [
+  { dayKey: '2030-03-01', eventIds: ['f9'], garmentIds: ['henley', 'jeans', 'boots'] },
+  { dayKey: '2030-03-02', eventIds: ['freeday-2030-03-02'], garmentIds: ['linen', 'trousers', 'oxfords'] },
+  { dayKey: '2030-03-03', eventIds: ['c9'], garmentIds: ['polo', 'chinos'] },
+] };
+tripsyOutfitSyncFlightTransfers({ days: inflightDays }, io);
+assert(JSON.stringify(io.blocks[1].garmentIds) === JSON.stringify(['henley', 'jeans', 'boots']) && io.blocks[1].wornFromFlightDayKey === '2030-03-01',
+  'THE ASK: the in-flight day wears the flight outfit (one wearing), not its own');
+assert(JSON.stringify(io.blocks[2].garmentIds) === JSON.stringify(['henley', 'jeans', 'boots']), 'and so does the airport car on landing');
+assert(/tripsyAttireMarkInFlightDays\(filled, effectiveTrip\);/.test(extractFn('tripsyAttireBuildDays')), 'every build marks in-flight days');
+assert(/tripsyAttireMarkInFlightDays\(guide\.days, trip\)/.test(html.slice(html.indexOf('async getTripsyAttireGuide(tripKey)'), html.indexOf('async saveTripsyAttireGuide'))),
+  'a saved guide is retrofitted on read, so the live Oct 7 heals with no regeneration');

@@ -2060,6 +2060,20 @@ step 4; git history has it if ever needed.
   compose, which never sends the copied block to Claude (nor lists it as kept context — it
   would read as the flight's top worn twice). `tripsyWardrobeWearDays` files the copied
   block's events under the flight's day, so laundry counts ONE wearing.
+  **A day spent entirely in the air is an IN-FLIGHT placeholder that wears the flight outfit too**
+  ("Why is the attire on October 7 different than October 6?", 2026-10-06 — SQ37 leaves LAX late
+  Oct 6 and lands Oct 8, so Oct 7 got a "No events planned" free day and its own composed casual
+  outfit). `tripsyAttireMarkInFlightDays(days, trip)` judges each free-day placeholder with the
+  itinerary's own `tripsyInFlightInfoForDay`, keeps its `freeday-<day>` id and `freeDay: true`
+  (saved guide/outfit records keep matching; still out of the prompt, not jumpable, never a "new
+  event") and adds `inFlight: true` + the name "✈️ In-flight — LAX → SIN • Singapore Airlines
+  SQ37". `tripsyAttireFlightTransferLinks` links an `inFlight` placeholder to the previous flight
+  like an airport ride but never makes it the "previous event", so the arrival-day car still
+  links too; everything downstream (flight tier, not a new occasion, outfit copy +
+  `wornFromFlightDayKey`, never sent to compose) follows for free. Called on every build and on
+  every `Store.getTripsyAttireGuide` read (trip from `tripsyDecryptedTrips`, no-op when not
+  loaded), so a saved guide retrofits in memory and persists on its next save — verified against
+  the live Singapore GP data: Oct 7 took the Oct 6 flight outfit with the Oct 8 car link intact.
   `flighttransferoutfit_test.js`.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"

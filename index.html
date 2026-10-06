@@ -3667,7 +3667,14 @@ const Store = {
     }
   },
   async getTripsyAttireGuide(tripKey) {
-    return (driveData.tripsyAttireGuides || []).find(g => g.tripKey === tripKey) || null;
+    const guide = (driveData.tripsyAttireGuides || []).find(g => g.tripKey === tripKey) || null;
+    // In-memory retrofit: a free-day placeholder on a day spent in the air becomes the
+    // in-flight placeholder (see tripsyAttireMarkInFlightDays); persisted by the next save.
+    if (guide && typeof tripsyDecryptedTrips !== 'undefined' && Array.isArray(tripsyDecryptedTrips)) {
+      const trip = tripsyDecryptedTrips.find(t => t.key === tripKey);
+      try { if (trip) tripsyAttireMarkInFlightDays(guide.days, trip); } catch (e) { /* best-effort */ }
+    }
+    return guide;
   },
   async saveTripsyAttireGuide(guide) {
     try {
@@ -25008,12 +25015,15 @@ function tripsyAttireFlightTransferLinks(days) {
   let prev = null;
   for (const day of (days || [])) {
     for (const ev of (day.events || [])) {
-      if (ev.freeDay) continue;
-      if (prev && tripsyAttireIsFlightEvent(prev.ev) && tripsyAttireIsAirportTransfer(ev)) {
+      // An in-flight placeholder (a whole day aboard the previous flight) links like the
+      // airport ride, but is NOT the next "previous real event" -- the arrival-day car
+      // must still see the flight before it.
+      if (ev.freeDay && !ev.inFlight) continue;
+      if (prev && tripsyAttireIsFlightEvent(prev.ev) && (ev.inFlight || tripsyAttireIsAirportTransfer(ev))) {
         const gapDays = (Date.parse(day.dayKey) - Date.parse(prev.dayKey)) / 86400000;
         if (gapDays >= 0 && gapDays <= 2) links.push({ flight: prev.ev, transfer: ev, flightDayKey: prev.dayKey, transferDayKey: day.dayKey });
       }
-      prev = { ev, dayKey: day.dayKey };
+      if (!ev.inFlight) prev = { ev, dayKey: day.dayKey };
     }
   }
   return links;
@@ -30804,6 +30814,36 @@ function tripsyAttireFreeDayEvent(dayKey) {
     freeDay: true,
   };
 }
+// A day spent ENTIRELY IN THE AIR is not a free day ("Why is the attire on October 7
+// different than October 6?", 2026-10-06 -- SQ23 leaves LAX late Oct 6 and lands Oct 8,
+// so Oct 7 got a "No events planned" placeholder and its own composed casual outfit,
+// when you never leave the flight outfit). Judged by the SAME tripsyInFlightInfoForDay
+// the itinerary's "✈️ In-flight" day uses, against the live trip. The placeholder keeps
+// its free-day id (so a saved guide's event and outfit block keep matching) and
+// `freeDay: true` (out of the model prompt, not jumpable, never a "new event"), and adds
+// `inFlight: true` + the leg's detail as its name; tripsyAttireFlightTransferLinks then
+// pairs it with the flight exactly like the airport ride, so it takes the flight's dress
+// code, is not counted as another occasion, and wears the flight's outfit. Called on
+// every build AND on every guide read (Store.getTripsyAttireGuide), so a guide saved
+// before this rule retrofits in memory and persists on its next save. Idempotent; mutates
+// the placeholder events in place; returns how many were marked/unmarked.
+function tripsyAttireMarkInFlightDays(days, trip) {
+  if (!trip || !Array.isArray(days)) return 0;
+  let changed = 0;
+  for (const day of days) {
+    for (const ev of (day.events || [])) {
+      if (!ev.freeDay) continue;
+      const info = tripsyInFlightInfoForDay(day.dayKey, trip);
+      if (info) {
+        const name = `✈️ In-flight — ${tripsyInFlightDetailText(info) || 'in the air all day'}`;
+        if (!ev.inFlight || ev.name !== name) { ev.inFlight = true; ev.name = name; changed++; }
+      } else if (ev.inFlight) {
+        delete ev.inFlight; ev.name = TRIPSY_ATTIRE_FREE_DAY_NAME; changed++;
+      }
+    }
+  }
+  return changed;
+}
 async function tripsyAttireBuildDays(trip) {
   const { effectiveTrip, dayKeys, byDay } = await buildTripsyPrintDayData(trip);
   const days = [];
@@ -30838,7 +30878,9 @@ async function tripsyAttireBuildDays(trip) {
     const have = new Map(days.map(d => [d.dayKey, d]));
     const range = tripsyDayKeyRange(days[0].dayKey, days[days.length - 1].dayKey);
     if (range.length > days.length) {
-      return { effectiveTrip, days: range.map(k => have.get(k) || { dayKey: k, events: [tripsyAttireFreeDayEvent(k)] }) };
+      const filled = range.map(k => have.get(k) || { dayKey: k, events: [tripsyAttireFreeDayEvent(k)] });
+      tripsyAttireMarkInFlightDays(filled, effectiveTrip);
+      return { effectiveTrip, days: filled };
     }
   }
   return { effectiveTrip, days };
