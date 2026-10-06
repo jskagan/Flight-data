@@ -1847,6 +1847,25 @@ step 4; git history has it if ever needed.
   `SHIPPED HOME AFTER <day>` with a prompt rule keeping it out of later blocks. Any change on
   the screen fires `onChanged` → `refreshLaundryInfo`, so the guide's buttons and run-out bar
   repaint. `shiphome_test.js`.
+  **The screen also proposes RE-DRESSING the later outfits so MORE can go home** ("When the
+  user selects ship home, see if you can consolidate/reuse garments for the rest of the trip
+  to maximize the number of garments you can ship home," same day). The recommendation takes
+  the composed outfits as given; `tripsyShipHomeConsolidationPlan(tripKey, dayKey, person,
+  excludeKeys)` asks whether they could be re-dressed: greedy over this person's packed
+  garments with wearings after the ship day — fewest remaining wearings first, then least-worn
+  overall, so of two equals the more-worn one is KEPT — and for each later block wearing one,
+  a KEPT substitute through the exact `tripsyOutfitSwapCandidates` rule Swap offers (same slot,
+  live tier, free that day) that still has wear CAPACITY: packed copies × `tripsyWearsBeforeWash`,
+  against wearings since its last wash, so a one-wear shirt never absorbs anything (without a
+  wash, shirts = shirt-days) while a 10-wear pair of chinos takes three pairs' wearings and
+  frees two. A substitute that absorbs wear is anchored (never itself freed); wear is
+  concentrated onto the already-most-worn fit; blocks mirroring a flight block
+  (`wornFromFlightDayKey`) are left alone; keys already in the box can't be substitutes. The
+  plan is a PROPOSAL — an amber "♻️ Consolidate outfits to ship more" card above the box
+  naming the freed garments and each day's swap, with one **Apply & add to box** button: the
+  swaps land on the live blocks (one `Store.saveTripsyTripOutfits`, flight-transfer sync kept),
+  the freed garments go into the box, and the screen rebuilds from the recomputed truth.
+  Nothing is re-dressed silently.
 - **Tapping a garment's photo in the outfit view shows where it's actually packed**
   (`showTripsyGarmentCubeInfo`) — read-only, so every viewer gets it, not just the owner (unlike
   Swap, sitting right next to it in the same card). Reuses `tripsyCubesForEntry` exactly as Packing

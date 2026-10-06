@@ -31,8 +31,10 @@ const Store = {
   listTripsyShipHome: () => shipRecords,
   listTripsyLaundry: () => washes,
   listLaundryNotDirty: () => notDirty,
-  getTripsyTripOutfits: async () => ({ blocks: [] }),
+  getTripsyTripOutfits: async () => outfitsFixture,
 };
+let outfitsFixture = { blocks: [] };
+const tripsyOutfitBlockLiveTier = (g, b) => b.category || null;
 const tripsyNormalizeTripSelection = sel => sel;
 const tripsyWardrobeWearDays = async (t, id) => ({ days: (wearByGarment[id] || []).map(d => ({ dayKey: d })) });
 const tripsyWardrobeWearDaysFromLines = (g, p, lines) => ({ days: (wearByLine[lines[0].line] || []).map(d => ({ dayKey: d })) });
@@ -44,7 +46,7 @@ const tripsyGarmentTypeBucket = g => ({ key: g.bucket || 'tops', label: 'Tops' }
 const tripsyAttirePackingGroupOf = g => g.group || 'tops';
 const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
 eval(['tripsyShipHomeQtyBefore', 'tripsyShipHomeSplit', 'tripsyShipHomeCandidates', 'tripsyShipHomeGoneIds',
-  'tripsyLaundryWearDebtStep', 'tripsyLaundryRunOutByDay', 'tripsyOutfitSwapCandidates'].map(extractFn).join('\n'));
+  'tripsyLaundryWearDebtStep', 'tripsyLaundryRunOutByDay', 'tripsyOutfitSwapCandidates', 'tripsyShipHomeConsolidationPlan'].map(extractFn).join('\n'));
 
 (async () => {
   // ---- the maths ----
@@ -117,6 +119,41 @@ eval(['tripsyShipHomeQtyBefore', 'tripsyShipHomeSplit', 'tripsyShipHomeCandidate
   shipRecords = [{ tripKey: 'T', person: 'him', dayKey: D(4), box: { 'g:c': 1 } }];
   const ro2 = await tripsyLaundryRunOutByDay('T', 'him', { days: Array.from({ length: 10 }, (_, i) => ({ dayKey: D(i + 1) })) });
   assert(ro2.runOut.get(D(9)) && ro2.runOut.get(D(9)).includes('Loafers'), 'even a never-laundered garment (shoes) runs out once shipped, since the shortage is physical');
+
+  // ---- CONSOLIDATION: re-dress later outfits so more can go home ----
+  // Three pairs of chinos each worn once after ship day (day 4): one pair can take all
+  // three wearings (10-wear limit), so two go home. Three one-wear shirts each worn once
+  // cannot be consolidated without a wash. A single pair of loafers is already shared.
+  wardrobe = [
+    { id: 'p1', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'] }, { id: 'p2', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'] }, { id: 'p3', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'] },
+    { id: 's1', name: 'Blue shirt', person: 'him', group: 'tops', tiers: ['casual'] }, { id: 's2', name: 'Blue shirt', person: 'him', group: 'tops', tiers: ['casual'] }, { id: 's3', name: 'Blue shirt', person: 'him', group: 'tops', tiers: ['casual'] },
+    { id: 'lf', name: 'Loafers', person: 'him', group: 'footwear', tiers: ['casual'] },
+  ];
+  selection = ['p1', 'p2', 'p3', 's1', 's2', 's3', 'lf'].map(id => ({ id, qty: 1 }));
+  const mk = (day, ids) => ({ dayKey: day, category: 'casual', eventIds: ['e' + day], garmentIds: ids });
+  outfitsFixture = { blocks: [mk(D(2), ['p1', 's1', 'lf']), mk(D(5), ['p1', 's1', 'lf']), mk(D(6), ['p2', 's2', 'lf']), mk(D(7), ['p3', 's3', 'lf'])] };
+  shipRecords = []; washes = [];
+  const cp = await tripsyShipHomeConsolidationPlan('T', D(4), 'him');
+  const freedIds = cp.freed.map(f => f.id).sort();
+  assert(JSON.stringify(freedIds) === '["p2","p3"]', 'THE ASK: two of three chinos are freed by re-dressing the later outfits onto one pair -> ' + JSON.stringify(freedIds));
+  assert(cp.swaps.length === 2 && cp.swaps.every(sw => sw.newId === 'p1') && cp.swaps.map(sw => sw.dayKey).sort().join() === [D(6), D(7)].join(),
+    'wear is concentrated onto the pair already worn the most (p1), on exactly the two later blocks');
+  assert(!freedIds.includes('s1') && !freedIds.includes('s2') && !freedIds.includes('s3'), 'one-wear shirts are never consolidated (no wash, no capacity)');
+  assert(JSON.stringify(outfitsFixture.blocks[2].garmentIds) === JSON.stringify(['p2', 's2', 'lf']), 'the plan is a proposal: the saved outfits are untouched until applied');
+  // Capacity is respected: a pair already worn 9 days since its last wash can take ONE more, not two.
+  outfitsFixture = { blocks: [...Array.from({ length: 9 }, (_, i) => mk('2030-04-' + String(i + 10).padStart(2, '0'), ['p1', 'lf'])), mk(D(5), ['p1', 'lf']), mk(D(6), ['p2', 'lf']), mk(D(7), ['p3', 'lf'])] };
+  const cp2 = await tripsyShipHomeConsolidationPlan('T', D(4), 'him');
+  assert(!cp2.swaps.some(sw => sw.newId === 'p1'), 'a pair already at its wear limit never absorbs another wearing');
+  assert(cp2.freed.length === 2 && cp2.swaps.every(sw => sw.newId === cp2.swaps[0].newId), 'instead the OTHER pairs consolidate — p1 can even shed its one remaining wearing and go home too -> ' + JSON.stringify(cp2.freed.map(f => f.id)));
+  // A garment already in the box is never a substitute.
+  outfitsFixture = { blocks: [mk(D(5), ['p1', 'lf']), mk(D(6), ['p2', 'lf'])] };
+  const cp3 = await tripsyShipHomeConsolidationPlan('T', D(4), 'him', new Set(['g:p1']));
+  assert(!cp3.swaps.some(sw => sw.newId === 'p1'), 'a garment already going home cannot absorb wear');
+  const screen2 = extractFn('showTripsyShipHomeDay');
+  assert(/tripsyShipHomeConsolidationPlan\(tripKey, dayKey, person, new Set\(inBox\.keys\(\)\)\)/.test(screen2) && /data-ship-consolidate/.test(screen2) && /Consolidate outfits to ship more/.test(screen2),
+    'the screen proposes the consolidation with an Apply button');
+  assert(/sw\.block\.garmentIds\[i\] = sw\.newId;/.test(screen2) && /Store\.saveTripsyTripOutfits\(plan\.outfits\)/.test(screen2) && /for \(const f of plan\.freed\) inBox\.set/.test(screen2),
+    'Apply re-dresses the outfits (one save), then puts the freed garments in the box');
 
   // ---- wiring ----
   assert(/listTripsyShipHome\(tripKey\) \{/.test(html) && /async saveTripsyShipHome\(tripKey, person, dayKey, box\)/.test(html) && /async markTripsyShipHomeShipped\(tripKey, person, dayKey, shipped = true\)/.test(html),

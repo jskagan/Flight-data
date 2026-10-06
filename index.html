@@ -11399,6 +11399,77 @@ async function tripsyShipHomeCandidates(tripKey, dayKey, person) {
   out.sort((a, b) => b.surplus - a.surplus || a.futureWears - b.futureWears || a.name.localeCompare(b.name));
   return out;
 }
+// CONSOLIDATION ("When the user selects ship home, see if you can consolidate/reuse
+// garments for the rest of the trip to maximize the number of garments you can ship
+// home," 2026-10-06): the recommendation above takes the composed outfits as given, but
+// outfits can be RE-DRESSED. If three pairs of trousers are each worn once more and one
+// pair could take all three wearings (10-wear limit), two can go home. Greedy, garments
+// with the FEWEST remaining wearings first (the cheapest to free): for each later block
+// wearing it, find a KEPT substitute through the exact same tripsyOutfitSwapCandidates
+// rule Swap offers (same slot, right tier, free that day, packed) that still has wear
+// CAPACITY (packed copies × wears-before-wash, counting wearings since its last wash --
+// a one-wear shirt therefore never absorbs anything, which is right: without a wash the
+// number of shirts IS the number of shirt-days). A substitute that absorbs wear is
+// anchored (never itself freed), and wear is concentrated onto the already-most-worn
+// substitute so as few garments as possible stay. Blocks that mirror a flight block
+// (`wornFromFlightDayKey`) are left alone. Returns the plan only -- nothing is applied
+// until the owner taps it. `excludeKeys` are box keys already going home.
+async function tripsyShipHomeConsolidationPlan(tripKey, dayKey, person, excludeKeys = new Set()) {
+  const empty = { swaps: [], freed: [] };
+  const [outfits, guide, garments, selectedRaw] = await Promise.all([
+    Store.getTripsyTripOutfits(tripKey, person), Store.getTripsyAttireGuide(tripKey), Store.listWardrobe(), Store.getTripWardrobe(tripKey),
+  ]);
+  if (!outfits || !guide || !(outfits.blocks || []).length) return empty;
+  const byId = new Map((garments || []).map(g => [g.id, g]));
+  const shipRecords = Store.listTripsyShipHome(tripKey);
+  const qtyById = new Map();
+  for (const e of tripsyNormalizeTripSelection(selectedRaw)) qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
+  const qtyLeft = id => (qtyById.get(id) || 0) - tripsyShipHomeQtyBefore(shipRecords, person, 'g:' + id, dayKey) - (excludeKeys.has('g:' + id) ? Infinity : 0);
+  const washes = Store.listTripsyLaundry(tripKey).filter(r => r.washedAt && (r.person || 'him') === person && r.dayKey);
+  const lastWashFor = id => washes.reduce((best, r) => (((r.bag || {})['g:' + id] || (r.bag || {})['g:' + id + '::nn']) && (!best || r.dayKey > best)) ? r.dayKey : best, null);
+  const usable = g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g);
+  // Working copy of every block's garments; wear days per garment from those copies.
+  const plan = new Map((outfits.blocks || []).map(b => [b, (b.garmentIds || []).slice()]));
+  const blockDay = b => b.wornFromFlightDayKey || b.dayKey;
+  const wearDaysOf = id => { const s = new Set(); for (const [b, ids] of plan) if (ids.includes(id) && blockDay(b)) s.add(blockDay(b)); return s; };
+  const wornSinceWash = id => { const since = lastWashFor(id); return [...wearDaysOf(id)].filter(d => !since || d > since).length; };
+  const capacity = id => { const g = byId.get(id); const limit = tripsyWearsBeforeWash(g.name, null, g.group); const q = qtyLeft(id); return (!(limit > 0) || !isFinite(limit)) ? (q > 0 ? Infinity : 0) : q * limit; };
+  const futureBlocksOf = id => [...plan.entries()].filter(([b, ids]) => b.dayKey && b.dayKey > dayKey && !b.wornFromFlightDayKey && ids.includes(id)).map(([b]) => b);
+  const anchored = new Set();
+  const freed = []; const swaps = [];
+  const order = [...qtyById.keys()].filter(id => usable(byId.get(id)) && qtyLeft(id) > 0 && futureBlocksOf(id).length > 0)
+    // Fewest remaining wearings first, then the least-worn overall -- so of two equal
+    // garments the one already worn more is the one kept.
+    .sort((a, b) => futureBlocksOf(a).length - futureBlocksOf(b).length || wearDaysOf(a).size - wearDaysOf(b).size || (byId.get(a).name || '').localeCompare(byId.get(b).name || ''));
+  for (const id of order) {
+    if (anchored.has(id)) continue;
+    const blocks = futureBlocksOf(id);
+    const trial = []; const extra = new Map(); let ok = true;
+    for (const b of blocks) {
+      const liveTier = tripsyOutfitBlockLiveTier(guide, b);
+      let candidates = [];
+      try { ({ candidates } = await tripsyOutfitSwapCandidates(tripKey, { dayKey: b.dayKey, garmentIds: plan.get(b) }, id, person, liveTier)); } catch (e) { candidates = []; }
+      const fits = candidates.filter(c => !freed.some(f => f.id === c.id) && qtyLeft(c.id) > 0 && !wearDaysOf(c.id).has(b.dayKey)
+        && wornSinceWash(c.id) + (extra.get(c.id) || 0) + 1 <= capacity(c.id));
+      // Concentrate wear: the substitute already worn the most (that still fits) keeps the
+      // kept set small; among equals, the one with the most capacity.
+      fits.sort((x, y) => wornSinceWash(y.id) - wornSinceWash(x.id) || capacity(y.id) - capacity(x.id));
+      if (!fits.length) { ok = false; break; }
+      trial.push({ block: b, newId: fits[0].id });
+      extra.set(fits[0].id, (extra.get(fits[0].id) || 0) + 1);
+    }
+    if (!ok || !trial.length) continue;
+    const g = byId.get(id);
+    for (const t of trial) {
+      const ids = plan.get(t.block);
+      ids[ids.indexOf(id)] = t.newId;
+      anchored.add(t.newId);
+      swaps.push({ dayKey: t.block.dayKey, block: t.block, oldId: id, oldName: g.name || 'Garment', newId: t.newId, newName: (byId.get(t.newId) || {}).name || 'Garment' });
+    }
+    freed.push({ id, name: g.name || 'Garment', qty: qtyLeft(id), key: 'g:' + id });
+  }
+  return { swaps, freed, outfits };
+}
 // Garment ids of this person that are ENTIRELY gone (every packed copy in a box dated
 // before `dayKey`) -- what the outfit side excludes for a block on that day. Returns a
 // Map id -> the box's dayKey (the latest one), or an empty Map when nothing was shipped.
@@ -12042,6 +12113,15 @@ async function showTripsyShipHomeDay(tripKey, dayKey, person, opts = {}) {
     .then(ok => { if (!ok) toast('The ship-home box didn’t save — it may reappear on reload.', 'error'); if (opts.onChanged) opts.onChanged(); });
   const dayLabel = tripsyDayHeaderLabel(dayKey);
   const closeOv = () => { ov.style.display = 'none'; ov.onclick = null; };
+  // Can the later outfits be re-dressed to free MORE? (see tripsyShipHomeConsolidationPlan)
+  let plan = { swaps: [], freed: [] };
+  let guideForSync = null;
+  if (isOwner && !shipped) {
+    try { guideForSync = await Store.getTripsyAttireGuide(tripKey); } catch (e) { guideForSync = null; }
+    try { plan = await tripsyShipHomeConsolidationPlan(tripKey, dayKey, person, new Set(inBox.keys())); }
+    catch (e) { console.error('Ship-home consolidation failed (non-fatal):', e); }
+    if (!ov.contains(body)) return;
+  }
 
   const render = () => {
     const boxed = [...inBox.entries()].filter(([, n]) => n > 0).map(([key, n]) => ({ key, n, it: byKey.get(key) || null }));
@@ -12069,6 +12149,15 @@ async function showTripsyShipHomeDay(tripKey, dayKey, person, opts = {}) {
       <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">${shipped
         ? `This box was shipped home on ${esc(dayLabel)}. Its garments are out of the trip from the next day on.`
         : `Clothes you ship home on ${esc(dayLabel)} are gone for the rest of the trip. The app recommends what you can spare so you still have enough to wear — tap a garment to put it in the box.`}</div>
+      ${plan.freed.length ? `
+      <div class="tripsy-laundry-bag" style="border-color:var(--amber);">
+        <div class="tripsy-laundry-bag-head">
+          <span>♻️ Consolidate outfits to ship more</span>
+          <button class="btn primary" data-ship-consolidate style="font-size:11.5px; padding:4px 12px;">Apply &amp; add to box</button>
+        </div>
+        <div style="font-size:12.5px; color:var(--text); line-height:1.5;">Re-using garments you are already keeping across ${plan.swaps.length} later outfit${plan.swaps.length === 1 ? '' : 's'} would also free: <b>${plan.freed.map(f => esc(f.name) + (f.qty > 1 ? ` ×${f.qty}` : '')).join(', ')}</b>.</div>
+        <div style="font-size:12px; color:var(--muted); margin-top:6px;">${plan.swaps.map(sw => `${esc(tripsyDayHeaderLabel(sw.dayKey))}: ${esc(sw.oldName)} → ${esc(sw.newName)}`).join(' · ')}</div>
+      </div>` : ''}
       <div class="tripsy-laundry-bag">
         <div class="tripsy-laundry-bag-head">
           <span>📦 Ship-Home Box${boxTotal ? ` <span style="color:var(--muted); font-weight:400;">· ${boxTotal} item${boxTotal === 1 ? '' : 's'}</span>` : ''}${shipped ? ` <span style="color:var(--muted); font-weight:400;">· shipped</span>` : ''}</span>
@@ -12105,6 +12194,23 @@ async function showTripsyShipHomeDay(tripKey, dayKey, person, opts = {}) {
 
   ov.onclick = async e => {
     if (e.target === ov || e.target.closest('[data-laundry-close]')) { closeOv(); return; }
+    if (e.target.closest('[data-ship-consolidate]')) {
+      // Apply the re-dressing (the same live-record mutation a manual Swap makes, one
+      // save), put the freed garments in the box, then rebuild from the recomputed truth.
+      for (const sw of plan.swaps) {
+        const i = (sw.block.garmentIds || []).indexOf(sw.oldId);
+        if (i >= 0) sw.block.garmentIds[i] = sw.newId;
+      }
+      if (plan.outfits && guideForSync) tripsyOutfitSyncFlightTransfers(guideForSync, plan.outfits);
+      const ok = plan.outfits ? await Store.saveTripsyTripOutfits(plan.outfits) : false;
+      if (!ok) { toast('Could not save the outfit changes.', 'error'); return; }
+      for (const f of plan.freed) inBox.set(f.key, (inBox.get(f.key) || 0) + Math.max(1, f.qty));
+      await persistBox();
+      toast(`${plan.swaps.length} outfit${plan.swaps.length === 1 ? '' : 's'} re-dressed — ${plan.freed.length} more garment${plan.freed.length === 1 ? '' : 's'} in the box.`);
+      closeOv();
+      showTripsyShipHomeDay(tripKey, dayKey, person, opts);
+      return;
+    }
     if (e.target.closest('[data-ship-add-recommended]')) {
       for (const it of items) if (it.recommend) {
         const surplusLeft = Math.max(0, it.surplus - (inBox.get(it.key) || 0));
