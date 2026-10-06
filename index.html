@@ -9744,6 +9744,25 @@ const TRIPSY_CUBE_COLOR_CSS = {
 // one there is. The exception is a group whose brands are all IDENTICAL -- there the
 // brand distinguishes nothing and would just be noise on every label. A cube with no
 // brand recorded still shows the bare base, since there is nothing to append.
+// The record the cube form saves, built from the form's three traits over whatever the
+// cube already held (id, photo, addedAt). Pure, so the form's Save can be tested without a
+// DOM. The id falls back to a time-stamped string when `crypto.randomUUID` is missing --
+// it needs a secure context and is absent on some WebViews -- the same guard the "+ Add
+// Line" dialog carries; without it the Save threw before anything was saved or said.
+function tripsyCubeFormRecord(cube, { color, size, brand }) {
+  const prior = cube || {};
+  const id = prior.id
+    || ((typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+      ? crypto.randomUUID()
+      : `cube-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+  return {
+    ...prior,
+    id,
+    color: color || '', size: size || '', brand: brand || '',
+    driveFileId: prior.driveFileId || '',
+    addedAt: prior.addedAt || new Date().toISOString(),
+  };
+}
 // `name` is honoured as a fallback so a cube saved before this shape still reads sanely.
 function tripsyCubeName(cube) {
   if (!cube) return '';
@@ -10789,7 +10808,9 @@ async function tripsyPaintCubePhotos(rootEl) {
 // Add or rename a cube, with an optional photo. Deliberately reachable from INSIDE the
 // picker (no separate Utilities page) so a cube can be created at the moment of packing
 // into it. Resolves to the saved cube, or null if cancelled.
-function showTripsyCubeForm(existing) {
+// `onPhotoReady` (optional) is called once a picked photo has uploaded and re-saved in the
+// background -- the opener re-renders so the swatch tile becomes the picture.
+function showTripsyCubeForm(existing, onPhotoReady) {
   return new Promise(resolve => {
     const cube = existing || {};
     let ov = document.getElementById('tw-cube-form-overlay');
@@ -10875,7 +10896,7 @@ function showTripsyCubeForm(existing) {
     wirePicker('tw-cube-file-cam', 'tw-cube-take');
     wirePicker('tw-cube-file-lib', 'tw-cube-choose');
     const close = val => { ov.style.display = 'none'; ov.onclick = null; resolve(val); };
-    ov.onclick = async e => {
+    ov.onclick = e => {
       if (e.target.closest('[data-cube-cancel]') || e.target === ov) { close(null); return; }
       if (!e.target.closest('[data-cube-save]')) return;
       const color = ov.querySelector('#tw-cube-color').value;
@@ -10884,40 +10905,71 @@ function showTripsyCubeForm(existing) {
       const statusEl = ov.querySelector('#tw-cube-status');
       // Colour and size are what the label is built from, so both are required; brand
       // only ever disambiguates two cubes of the same colour and size, so it is not.
-      if (!color || !size) { statusEl.textContent = 'Please choose a color and a size.'; return; }
-      const saveBtn = ov.querySelector('[data-cube-save]');
-      saveBtn.disabled = true;
-      statusEl.textContent = pendingBlob ? 'Uploading photo…' : 'Saving…';
+      // Said loudly -- red text AND a toast -- because a muted 12px line under the photo
+      // buttons read as "I hit Save and nothing happened" (reported 2026-10-06).
+      if (!color || !size) {
+        statusEl.textContent = 'Please choose a color and a size.';
+        statusEl.style.color = 'var(--red, #e5484d)';
+        toast('Choose a color and a size for the cube first.', 'error');
+        return;
+      }
+      // NOTHING waits on the network in front of the close ("I hit save and nothing
+      // happened," 2026-10-06). Before this, a cube WITH a photo resized and uploaded it
+      // first -- a Drive folder lookup plus a multipart upload, tens of seconds on a weak
+      // signal, or forever on a hung fetch -- behind a disabled button and that same
+      // muted status line, and only then saved; and a throw anywhere in there (the id mint
+      // needs a secure-context crypto.randomUUID, absent on some WebViews) left the form
+      // open with no cube at all. Now the cube saves and the form closes at once -- the
+      // swatch fallback means a photo-less cube is already fully usable -- and the photo
+      // catches up in the background: resized, uploaded, re-saved onto the same id, and
+      // `onPhotoReady` repaints the page that opened the form. Same optimistic pattern
+      // as the garment form: savePackingCube applies in memory before its first await.
+      let saved;
       try {
-        let photoFileId = cube.driveFileId || '';
-        if (pendingBlob) {
-          const small = await tripsyResizeImageBlob(pendingBlob);
-          const newId = await uploadBlobToDrive(small, `packing-cube-${Date.now()}`, 'image/jpeg');
-          if (photoFileId && photoFileId !== newId) deleteDriveFile(photoFileId).catch(() => {});
-          photoFileId = newId;
-        }
-        const saved = {
-          ...cube,
-          id: cube.id || crypto.randomUUID(),
-          color, size, brand,
-          driveFileId: photoFileId,
-          addedAt: cube.addedAt || new Date().toISOString(),
-        };
-        // Same optimistic pattern as the garment form: savePackingCube applies to the
-        // in-memory library before its first await, so the picker can re-render at once
-        // while the full-file Drive PATCH finishes behind it.
-        const savePromise = Store.savePackingCube(saved);
-        close(saved);
-        savePromise
-          .then(ok => { if (!ok) toast('Cube saved on this device but didn’t sync to Drive — open it and Save again.', 'error'); })
-          .catch(() => toast('Cube saved on this device but didn’t sync to Drive — open it and Save again.', 'error'));
+        saved = tripsyCubeFormRecord(cube, { color, size, brand });
       } catch (err) {
         console.error('Packing cube save failed:', err);
-        statusEl.textContent = 'Could not save the photo. Please try again.';
-        saveBtn.disabled = false;
+        statusEl.textContent = 'Could not save the cube: ' + String(err && err.message || err).slice(0, 200);
+        statusEl.style.color = 'var(--red, #e5484d)';
+        toast('Could not save the cube — ' + String(err && err.message || err).slice(0, 200), 'error');
+        return;
+      }
+      const blob = pendingBlob;
+      const savePromise = Store.savePackingCube(saved);
+      close(saved);
+      toast(`Saved “${tripsyCubeName(saved)}”${blob ? ' — uploading its photo…' : '.'}`);
+      savePromise
+        .then(ok => { if (!ok) toast('Cube saved on this device but didn’t sync to Drive — open it and Save again.', 'error'); })
+        .catch(() => toast('Cube saved on this device but didn’t sync to Drive — open it and Save again.', 'error'));
+      if (blob) {
+        savePromise.catch(() => {}).then(() => tripsyCubeFormUploadPhoto(saved, blob))
+          .then(ok => { if (ok && typeof onPhotoReady === 'function') { try { onPhotoReady(); } catch (e) { console.error(e); } } });
       }
     };
   });
+}
+// The background half of the cube form's Save: resize + upload the picked photo, then
+// re-save the SAME cube id with its new driveFileId (replacing the prior photo file, if
+// any). Seeds the cube-photo URL cache from the resized bytes so the repaint never
+// downloads back what was just uploaded. Resolves true when the photo landed; every
+// failure is caught and toasted (the cube itself is already saved and usable).
+async function tripsyCubeFormUploadPhoto(saved, blob) {
+  try {
+    const small = await tripsyResizeImageBlob(blob);
+    const newId = await uploadBlobToDrive(small, `packing-cube-${Date.now()}`, 'image/jpeg');
+    if (!newId) throw new Error('Drive returned no file id');
+    try { tripsyCubePhotoUrlCache.set(newId, Promise.resolve(URL.createObjectURL(small))); } catch (e) { /* cache is a nicety */ }
+    const prior = (driveData.tripsyPackingCubes || []).find(c => c.id === saved.id) || saved;
+    const oldPhoto = prior.driveFileId || '';
+    const ok = await Store.savePackingCube({ ...prior, driveFileId: newId });
+    if (!ok) throw new Error('could not sync to Drive');
+    if (oldPhoto && oldPhoto !== newId) deleteDriveFile(oldPhoto).catch(() => {});
+    return true;
+  } catch (err) {
+    console.error('Packing cube photo upload failed:', err);
+    toast(`The cube is saved, but its photo didn’t upload (${String(err && err.message || err).slice(0, 120)}). Open the cube and add the photo again.`, 'error');
+    return false;
+  }
 }
 // THE cube picker. `copies` is the per-copy cube list being edited (length = how many
 // copies are selected for this line); each slot holds a cube id, '' for "not packed".
@@ -11010,7 +11062,7 @@ function showTripsyCubePicker(garmentName, copies) {
         return;
       }
       if (e.target.closest('[data-tw-new-cube]')) {
-        const created = await showTripsyCubeForm(null);
+        const created = await showTripsyCubeForm(null, () => { if (ov.style.display !== 'none') render(); });
         if (created) { working[activeCopy] = created.id; }
         render();
         return;
@@ -14764,11 +14816,13 @@ function showTripsyCubeContents(getState, onChanged) {
       if (view.mode === 'cube') { view = { mode: 'list' }; render(); return; }
       ov.style.display = 'none'; ov.onclick = null; return;
     }
-    if (e.target.closest('[data-tw-add-cube]')) { if (await showTripsyCubeForm(null)) { render(); onChanged && onChanged(); } return; }
+    // The photo lands in the background after the form closes; repaint when it does.
+    const repaint = () => { if (ov.style.display !== 'none') render(); };
+    if (e.target.closest('[data-tw-add-cube]')) { if (await showTripsyCubeForm(null, repaint)) { render(); onChanged && onChanged(); } return; }
     const editBtn = e.target.closest('[data-tw-edit-cube]');
     if (editBtn) {
       const cube = tripsyCubeById(editBtn.dataset.twEditCube);
-      if (cube && await showTripsyCubeForm(cube)) { render(); onChanged && onChanged(); }
+      if (cube && await showTripsyCubeForm(cube, repaint)) { render(); onChanged && onChanged(); }
       return;
     }
     const delBtn = e.target.closest('[data-tw-del-cube]');

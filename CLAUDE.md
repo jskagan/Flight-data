@@ -2482,6 +2482,23 @@ would overwrite the glyph with the word.
   sentinel its OWN named block (`specialBlock`, reusing `contents.get(id)` exactly like the
   existing "Cube not set" orphan block does for `''`) rather than lumping a deliberate choice in
   with genuinely-undecided copies.
+- **The cube form's Save closes INSTANTLY and the photo catches up in the background**
+  ("When I tried to add a new packing cube I hit save and nothing happened," 2026-10-06).
+  `showTripsyCubeForm`'s Save used to resize + upload a picked photo IN FRONT of saving the
+  cube and closing — a Drive folder lookup plus a multipart upload, tens of seconds on a weak
+  signal or forever on a hung fetch, behind a disabled button and a muted 12px status line —
+  and minted the id with an unguarded `crypto.randomUUID` (secure-context only; absent on some
+  WebViews), so a throw there left the form open with nothing saved and nothing said. The
+  record is now the pure `tripsyCubeFormRecord(cube, {color, size, brand})` (id falls back to a
+  time-stamped string, the "+ Add Line" guard's precedent), the click handler is synchronous —
+  `Store.savePackingCube` (optimistic in memory) then `close(saved)` with a "Saved …" toast, no
+  `await` before the close — and `tripsyCubeFormUploadPhoto` then resizes, uploads, re-saves the
+  SAME cube id with its `driveFileId`, seeds `tripsyCubePhotoUrlCache` from the resized bytes,
+  and calls the form's new second arg `onPhotoReady` so the opener (the cube picker and the
+  Cubes page's Add/Edit) repaints the swatch tile into the picture; an upload failure toasts
+  and never un-saves the cube (a photo-less cube is fully usable — the swatch IS a trait). A
+  missing color/size now toasts AND turns the status red. Verified with a Playwright run of
+  the real function (no photo, photo, missing size) before and after. `cubeformsave_test.js`.
 - **Allocation is per LINE, not per tier.** A pick is keyed `id::tier::line` (the line's NAME, not
   its index — indices shift whenever the guide is regenerated, which is also why skip keys use
   names), persisted in `driveData.tripsyTripWardrobe`. `availableFor` subtracts copies allocated to
