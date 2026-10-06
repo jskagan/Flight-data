@@ -1866,6 +1866,37 @@ step 4; git history has it if ever needed.
   swaps land on the live blocks (one `Store.saveTripsyTripOutfits`, flight-transfer sync kept),
   the freed garments go into the box, and the screen rebuilds from the recomputed truth.
   Nothing is re-dressed silently.
+  **A still-needed garment opens its own "where is it still worn" view, with a rules-EXPLAINED
+  swap per wearing** ("allow the user to select any of the garments still needed … show each
+  day and each outfit that the garment will be worn for the rest of the trip, and show a swap
+  button each time … show all garments that are not designated to be shipped home that could
+  be swapped, even if the rules would normally prevent … indicate if it can be swapped under
+  the rules or, if it can't, explain what rule prevented … and give the user a button to allow
+  a swap in spite of that rule," same day). Tapping a card in the "Still needed" box (a real
+  wardrobe garment; a "No Picture" generic has no outfits and keeps the plain ship-anyway
+  confirm) opens `showTripsyShipHomeGarmentDays` (own overlay, z `2147483092`): one row per
+  later block wearing it — day, live dress code, the events, "Worn with: …" — each with a
+  **Swap** button (a block mirroring a flight block says to swap it at the flight instead);
+  "Ship it anyway" reopens the ship screen with a one-shot `opts.shipAnywayKey` that runs the
+  old confirm + count ask there, where the box lives. Swap opens `tripsyShipHomeSwapPicker` (z
+  `2147483096`) over `tripsyShipHomeSwapOptions`: EVERY packed garment of this person not going
+  home (not in an earlier box, not designated for this one, not an essential, not itself), each
+  with the Swap rules it fails spelled out — "Already part of this outfit", "Worn in another
+  outfit the same day", on an itemized tier "A different type (…)" (a polo for a dress-shirt
+  slot), "Not tagged for <tier> in your wardrobe (tagged …)", plus the consolidation plan's
+  wear-capacity rule as advice ("Already
+  worn N times since its last wash with Q packed … would need washing before this day"). **A
+  different KIND of garment (another packing group — a top for a pair of trousers) is not listed
+  at all, not even as overridable** ("If a garment is a different type of garment (tops/bottoms)
+  do not even show those garments as being potentially able to be swapped," same day); the
+  picker's subtitle names the kind it shows ("Every packed bottoms not going home"). An
+  option with no failed rule is "✓ Can be swapped under the rules" and tappable; every other
+  shows its ✕ reasons and a **Swap anyway** button (resolves `forced: true`, toasted as
+  "outside the usual rules"). The allowed set is asserted equal to `tripsyOutfitSwapCandidates`'
+  own answer in `shiphome_test.js`, so the explanations can't drift from Swap's filter. A pick
+  swaps in place on the live block (flight-transfer sync, one save, rollback + toast on failure),
+  fires `onChanged`, and re-renders the view; once every wearing is swapped away, Back returns to
+  the ship screen, which recomputes and lists the garment under Recommended.
 - **Tapping a garment's photo in the outfit view shows where it's actually packed**
   (`showTripsyGarmentCubeInfo`) — read-only, so every viewer gets it, not just the owner (unlike
   Swap, sitting right next to it in the same card). Reuses `tripsyCubesForEntry` exactly as Packing

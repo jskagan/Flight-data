@@ -11470,6 +11470,195 @@ async function tripsyShipHomeConsolidationPlan(tripKey, dayKey, person, excludeK
   }
   return { swaps, freed, outfits };
 }
+// ---- Ship Home: a still-needed garment's remaining wearings, and a rules-EXPLAINED swap ----
+// "allow the user to select any of the garments still needed for the trip and, when he does,
+// show each day and each outfit that the garment will be worn for the rest of the trip, and
+// show a swap button each time … show all garments that are not designated to be shipped
+// home that could be swapped, even if the rules would normally prevent the app from
+// allocating that as an acceptable substitute … indicate if it can be swapped under the
+// rules or, if it can't, explain what rule prevented … and give the user a button to allow a
+// swap in spite of that rule" (2026-10-06).
+//
+// Every packed garment of this person that is not going home (not in an earlier box, not in
+// this box, not an essential, not the garment itself), each with the list of Swap rules it
+// FAILS -- empty means Swap itself would offer it. The rules are the same ones
+// tripsyOutfitSwapCandidates enforces (same slot / live tier / free that day), spelled out
+// instead of filtered, plus the consolidation plan's wear-capacity rule as advice.
+async function tripsyShipHomeSwapOptions(tripKey, block, currentGarmentId, person, liveTier, shipDayKey, excludeKeys = new Set()) {
+  const [garments, selectedRaw, outfits] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripsyTripOutfits(tripKey, person)]);
+  const byId = new Map(garments.map(g => [g.id, g]));
+  const current = byId.get(currentGarmentId);
+  const isMixAndMatch = liveTier && !TRIPSY_ATTIRE_ITEMIZED_CATEGORIES.includes(liveTier);
+  const bucketKey = current ? tripsyGarmentTypeBucket(current).key : null;
+  const currentGroup = current ? tripsyAttirePackingGroupOf(current) : null;
+  const inThisOutfit = new Set((block.garmentIds || []).filter(id => id !== currentGarmentId));
+  const wornSameDay = new Set();
+  for (const b of ((outfits && outfits.blocks) || [])) {
+    if (b === block || !block.dayKey || b.dayKey !== block.dayKey) continue;
+    for (const id of (b.garmentIds || [])) wornSameDay.add(id);
+  }
+  const shipRecords = Store.listTripsyShipHome(tripKey);
+  const qtyById = new Map();
+  for (const e of tripsyNormalizeTripSelection(selectedRaw)) qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
+  const washes = Store.listTripsyLaundry(tripKey).filter(r => r.washedAt && (r.person || 'him') === person && r.dayKey);
+  const lastWashFor = id => washes.reduce((best, r) => (((r.bag || {})['g:' + id] || (r.bag || {})['g:' + id + '::nn']) && (!best || r.dayKey > best)) ? r.dayKey : best, null);
+  const wearDaysOf = id => { const s = new Set(); for (const b of ((outfits && outfits.blocks) || [])) if ((b.garmentIds || []).includes(id) && (b.wornFromFlightDayKey || b.dayKey)) s.add(b.wornFromFlightDayKey || b.dayKey); return s; };
+  const tierLabel = t => TRIPSY_ATTIRE_CATEGORY_LABEL[t] || t;
+  const options = [];
+  for (const [id, qtyPacked] of qtyById) {
+    const g = byId.get(id);
+    if (!g || (g.person || 'him') !== person || id === currentGarmentId || tripsyWardrobeGarmentExcludedFromOutfits(g)) continue;
+    if (excludeKeys.has('g:' + id)) continue; // designated for this box
+    const qty = qtyPacked - tripsyShipHomeQtyBefore(shipRecords, person, 'g:' + id, shipDayKey);
+    if (qty <= 0) continue; // already gone home in an earlier box
+    // A different KIND of garment (tops vs bottoms vs shoes…) is never a swap for this one
+    // -- not listed at all, not even as an overridable rule ("If a garment is a different
+    // type of garment (tops/bottoms) do not even show those garments," 2026-10-06).
+    if (currentGroup && tripsyAttirePackingGroupOf(g) !== currentGroup) continue;
+    const reasons = [];
+    if (inThisOutfit.has(id)) reasons.push('Already part of this outfit.');
+    if (wornSameDay.has(id)) reasons.push('Worn in another outfit the same day.');
+    // Within the same kind, an itemized tier still cares about the specific type (a dress
+    // shirt slot vs a polo) -- that one stays an explained, overridable rule.
+    if (!isMixAndMatch && bucketKey && tripsyGarmentTypeBucket(g).key !== bucketKey) {
+      reasons.push(`A different type (${tripsyGarmentTypeBucket(g).label}, not ${tripsyGarmentTypeBucket(current).label}).`);
+    }
+    if (liveTier && !(g.tiers || []).includes(liveTier)) reasons.push(`Not tagged for ${tierLabel(liveTier)} in your wardrobe${(g.tiers || []).length ? ` (tagged ${(g.tiers || []).map(tierLabel).join(', ')})` : ''}.`);
+    // Wear capacity -- the consolidation plan's rule, here as a warning the owner can override.
+    const limit = tripsyWearsBeforeWash(g.name, null, g.group);
+    let capacityNote = '';
+    if (limit > 0 && isFinite(limit)) {
+      const since = lastWashFor(id);
+      const worn = [...wearDaysOf(id)].filter(d => !since || d > since).length;
+      if (worn + 1 > qty * limit) {
+        capacityNote = `Already worn ${worn} time${worn === 1 ? '' : 's'} since its last wash with ${qty} packed (${limit} wear${limit === 1 ? '' : 's'} each) — it would need washing before this day.`;
+        reasons.push(capacityNote);
+      }
+    }
+    options.push({ garment: g, reasons, allowed: reasons.length === 0 });
+  }
+  options.sort((a, b) => (a.allowed === b.allowed ? (a.garment.name || '').localeCompare(b.garment.name || '') : (a.allowed ? -1 : 1)));
+  return { options, current };
+}
+// The picker: every option pictured, allowed ones first, each with its verdict under the
+// card -- "✓ Can be swapped under the rules" or the rule(s) it fails plus a "Swap anyway"
+// button. Resolves { id, forced } or null. Sits above the garment-days view (…092) and
+// below tripsyConfirmDialog (…100).
+async function tripsyShipHomeSwapPicker(tripKey, block, currentGarmentId, person, liveTier, shipDayKey, excludeKeys) {
+  const { options, current } = await tripsyShipHomeSwapOptions(tripKey, block, currentGarmentId, person, liveTier, shipDayKey, excludeKeys);
+  const tierLabel = liveTier ? (TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier] || liveTier) : '';
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-shiphome-swap-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-shiphome-swap-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483096';
+    const done = val => { ov.style.display = 'none'; ov.onclick = null; resolve(val); };
+    ov.innerHTML = `
+      <div class="tw-modal-paper tw-wide">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:4px;">
+          <h2 style="margin:0; font-size:17px;">Swap ${esc((current && current.name) || 'garment')}${tierLabel ? ` on a ${esc(tierLabel)} day` : ''}</h2>
+          <button class="btn" data-ship-swap-cancel>Cancel</button>
+        </div>
+        <div style="font-size:12.5px; color:var(--muted); margin-bottom:10px;">Every packed ${esc(((current && TRIPSY_ATTIRE_PACKING_GROUP_LABEL[tripsyAttirePackingGroupOf(current)]) || 'garment').toLowerCase())} not going home. Under each one: whether the app's own rules would offer it, and if not, why — you can swap anyway.</div>
+        ${options.length ? `<div class="tw-grid">${options.map(o => `
+          <div class="tw-card${o.allowed ? ' tw-card-select' : ''}" ${o.allowed ? `data-ship-swap-pick="${esc(o.garment.id)}" role="button" tabindex="0"` : ''} style="${o.allowed ? '' : 'opacity:0.92;'}">
+            <div class="tw-photo" data-tw-photo="${esc(o.garment.driveFileId || '')}">${o.garment.driveFileId ? '' : '👕'}</div>
+            <div class="tw-info">
+              <div class="tw-name">${esc(o.garment.name || 'Untitled')}</div>
+              <div class="tw-meta">${esc(tripsyGarmentTypeBucket(o.garment).label)}${o.garment.color ? ` · ${esc(o.garment.color)}` : ''}</div>
+              ${o.allowed
+                ? `<div class="tw-meta" style="color:#3a9a5c; font-weight:700; margin-top:4px;">✓ Can be swapped under the rules</div>`
+                : `<div class="tw-meta" style="color:var(--red, #c0392b); margin-top:4px; line-height:1.4;">${o.reasons.map(r => `✕ ${esc(r)}`).join('<br>')}</div>
+                   <button class="btn" data-ship-swap-force="${esc(o.garment.id)}" style="margin-top:6px; font-size:11px; padding:3px 8px; width:100%;">Swap anyway</button>`}
+            </div>
+          </div>`).join('')}</div>`
+          : `<div style="color:var(--muted); padding:8px 0 4px;">Nothing else packed for this trip is staying with you.</div>`}
+      </div>`;
+    ov.style.display = 'flex';
+    ov.querySelector('[data-ship-swap-cancel]').onclick = () => done(null);
+    ov.onclick = e => {
+      if (e.target === ov) { done(null); return; }
+      const force = e.target.closest('[data-ship-swap-force]');
+      if (force) { e.stopPropagation(); done({ id: force.dataset.shipSwapForce, forced: true }); return; }
+      const pick = e.target.closest('[data-ship-swap-pick]');
+      if (pick) done({ id: pick.dataset.shipSwapPick, forced: false });
+    };
+    tripsyWardrobeLoadPhotos(ov);
+  });
+}
+// The garment-days view for a still-needed garment: every later outfit it is worn in (day,
+// dress code, the events, the rest of the outfit) with a Swap button per wearing. Once every
+// wearing is swapped away the garment is surplus, and "Back" returns to the ship screen,
+// which recomputes and lists it under Recommended. "Ship it anyway" keeps the old path.
+async function showTripsyShipHomeGarmentDays(tripKey, dayKey, person, item, opts = {}) {
+  let ov = document.getElementById('tripsy-shiphome-garment-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-shiphome-garment-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483092'; // above the ship screen (…090), below its picker (…096) and the confirm (…100)
+  const garmentId = item.key.startsWith('g:') ? item.key.slice(2) : null;
+  const excludeKeys = opts.excludeKeys || new Set();
+  const render = async () => {
+    const [outfits, guide, garments] = await Promise.all([Store.getTripsyTripOutfits(tripKey, person), Store.getTripsyAttireGuide(tripKey), Store.listWardrobe()]);
+    const byId = new Map(garments.map(g => [g.id, g]));
+    const evById = new Map();
+    for (const d of ((guide && guide.days) || [])) for (const ev of (d.events || [])) evById.set(ev.id, ev);
+    const blocks = garmentId ? ((outfits && outfits.blocks) || []).filter(b => b.dayKey && b.dayKey > dayKey && (b.garmentIds || []).includes(garmentId)) : [];
+    blocks.sort((a, b) => a.dayKey.localeCompare(b.dayKey));
+    const rows = blocks.map((b, i) => {
+      const liveTier = guide ? tripsyOutfitBlockLiveTier(guide, b) : (b.category || null);
+      const events = (b.eventIds || []).map(id => evById.get(id)).filter(Boolean).map(ev => ev.name || '').filter(Boolean);
+      const others = (b.garmentIds || []).filter(id => id !== garmentId).map(id => (byId.get(id) || {}).name).filter(Boolean);
+      const mirrored = !!b.wornFromFlightDayKey;
+      return `
+        <div class="tripsy-laundry-bag-row" style="align-items:flex-start; gap:12px;">
+          <div style="flex:1; min-width:0;">
+            <div style="font-weight:700;">${esc(tripsyDayHeaderLabel(b.dayKey))} · ${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[liveTier] || liveTier || '')}</div>
+            ${events.length ? `<div style="font-size:12.5px; color:var(--muted);">${esc(events.join(' · '))}</div>` : (b.label ? `<div style="font-size:12.5px; color:var(--muted);">${esc(b.label)}</div>` : '')}
+            <div style="font-size:12px; color:var(--muted); margin-top:2px;">Worn with: ${others.length ? esc(others.join(', ')) : '—'}</div>
+            ${mirrored ? `<div style="font-size:12px; color:var(--amber); margin-top:2px;">Wears the same outfit as the flight on ${esc(tripsyDayHeaderLabel(b.wornFromFlightDayKey))} — swap it there.</div>` : ''}
+          </div>
+          ${mirrored ? '' : `<button class="btn" data-ship-garment-swap="${i}" style="flex-shrink:0;">Swap</button>`}
+        </div>`;
+    }).join('');
+    ov.innerHTML = `
+      <div class="tw-modal-paper tw-wide">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;">
+          <h2 style="margin:0; font-size:18px; min-width:0; overflow:hidden; text-overflow:ellipsis;">${esc(item.name)} — after ${esc(tripsyDayHeaderLabel(dayKey))}</h2>
+          <button class="tripsy-close-x" data-ship-garment-back aria-label="Back" title="Back to Ship Home">&#10005;</button>
+        </div>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">${blocks.length
+          ? `Still worn in ${blocks.length} outfit${blocks.length === 1 ? '' : 's'} after the ship day. Swap it out of each one and it can go home.`
+          : 'No later outfit wears this any more — go back and it will be listed under Recommended to ship.'}</div>
+        <div class="tripsy-laundry-bag">${rows || `<div style="font-size:12.5px; color:var(--muted);">Nothing left to swap.</div>`}</div>
+        <div style="display:flex; justify-content:flex-end; gap:8px;">
+          ${blocks.length && !isOwner ? '' : ''}
+          <button class="btn" data-ship-garment-anyway title="Put it in the box even though later outfits still use it">Ship it anyway</button>
+          <button class="btn primary" data-ship-garment-back>Back to Ship Home</button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    ov.onclick = async e => {
+      if (e.target === ov || e.target.closest('[data-ship-garment-back]')) { ov.style.display = 'none'; ov.onclick = null; if (opts.onBack) opts.onBack(); return; }
+      if (e.target.closest('[data-ship-garment-anyway]')) { ov.style.display = 'none'; ov.onclick = null; if (opts.onShipAnyway) opts.onShipAnyway(); return; }
+      const sw = e.target.closest('[data-ship-garment-swap]');
+      if (!sw) return;
+      const b = blocks[Number(sw.dataset.shipGarmentSwap)];
+      if (!b) return;
+      const liveTier = guide ? tripsyOutfitBlockLiveTier(guide, b) : (b.category || null);
+      const choice = await tripsyShipHomeSwapPicker(tripKey, b, garmentId, person, liveTier, dayKey, excludeKeys);
+      if (!choice) return;
+      const prev = (b.garmentIds || []).slice();
+      const i = b.garmentIds.indexOf(garmentId);
+      if (i < 0) return;
+      b.garmentIds[i] = choice.id;
+      if (guide) tripsyOutfitSyncFlightTransfers(guide, outfits, b);
+      const ok = await Store.saveTripsyTripOutfits(outfits);
+      if (!ok) { b.garmentIds = prev; toast('Could not save the swap.', 'error'); return; }
+      toast(choice.forced ? `Swapped in ${(byId.get(choice.id) || {}).name || 'garment'} (outside the usual rules).` : `Swapped in ${(byId.get(choice.id) || {}).name || 'garment'}.`);
+      if (opts.onChanged) opts.onChanged();
+      render();
+    };
+  };
+  await render();
+}
 // Garment ids of this person that are ENTIRELY gone (every packed copy in a box dated
 // before `dayKey`) -- what the outfit side excludes for a block on that day. Returns a
 // Map id -> the box's dayKey (the latest one), or an empty Map when nothing was shipped.
@@ -12089,6 +12278,11 @@ async function showTripsyWashedDay(tripKey, dayKey, person) {
 // outfits, Swap/Add candidates, laundry list and run-out bar all treat its contents as
 // gone. Reuses the laundry overlay node (never open at once).
 async function showTripsyShipHomeDay(tripKey, dayKey, person, opts = {}) {
+  // One-shot: the garment-days view's "Ship it anyway" reopens this screen with the key to
+  // box, handled below once the items are known (the confirm + count ask happen here, where
+  // the box lives). Stripped from opts so the screen's own re-opens never repeat it.
+  const shipAnywayKey = opts.shipAnywayKey || null;
+  if (shipAnywayKey) { opts = { ...opts }; delete opts.shipAnywayKey; }
   let ov = document.getElementById('tripsy-laundry-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-laundry-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
   // BELOW tripsyConfirmDialog (2147483100), which this screen opens for its own
@@ -12113,6 +12307,24 @@ async function showTripsyShipHomeDay(tripKey, dayKey, person, opts = {}) {
     .then(ok => { if (!ok) toast('The ship-home box didn’t save — it may reappear on reload.', 'error'); if (opts.onChanged) opts.onChanged(); });
   const dayLabel = tripsyDayHeaderLabel(dayKey);
   const closeOv = () => { ov.style.display = 'none'; ov.onclick = null; };
+  // A still-needed garment can go anyway, but say what that means first.
+  const shipAnyway = async it => {
+    const left = remaining(it);
+    if (left <= 0) return false;
+    const ok = await tripsyConfirmDialog(`It is scheduled ${it.futureWears} more day${it.futureWears === 1 ? '' : 's'} after ${dayLabel}${it.nextWearDay ? ` (next on ${tripsyDayHeaderLabel(it.nextWearDay)})` : ''}. Those outfits will be flagged so you can swap in something else.`, { title: `Ship ${it.name} anyway?`, yes: 'Ship it', no: 'Keep it' });
+    if (!ok) return false;
+    let n = 1;
+    if (left > 1) {
+      n = await tripsyWardrobeChoosePackedCount(it.name, left, 1, { title: 'How many to ship home?', subtitle: 'with you' });
+      if (n == null || n <= 0) return false;
+    }
+    inBox.set(it.key, (inBox.get(it.key) || 0) + Math.min(n, left));
+    return true;
+  };
+  if (shipAnywayKey && !shipped && byKey.has(shipAnywayKey)) {
+    if (await shipAnyway(byKey.get(shipAnywayKey))) persistBox();
+    if (!ov.contains(body)) return;
+  }
   // Can the later outfits be re-dressed to free MORE? (see tripsyShipHomeConsolidationPlan)
   let plan = { swaps: [], freed: [] };
   let guideForSync = null;
@@ -12185,7 +12397,7 @@ async function showTripsyShipHomeDay(tripKey, dayKey, person, opts = {}) {
       ${stillNeeded.length ? `
         <div class="tripsy-laundry-notneeded">
           <div class="tripsy-laundry-notneeded-head">Still needed for the trip</div>
-          <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">Scheduled to be worn again after ${esc(dayLabel)}. You can still ship one, but a later outfit will then need a different garment.</div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">Scheduled to be worn again after ${esc(dayLabel)}. Tap one to see each outfit it is still worn in and swap it out — once nothing later needs it, it can go home.</div>
           <div class="tw-grid">${stillNeeded.map(cardHtml).join('')}</div>
         </div>` : ''}`}`;
     tripsyWardrobeLoadPhotos(body);
@@ -12250,10 +12462,22 @@ async function showTripsyShipHomeDay(tripKey, dayKey, person, opts = {}) {
     if (!it) return;
     const left = remaining(it);
     if (left <= 0) return;
-    // A still-needed garment can go anyway, but say what that means first.
     if (!it.recommend && !(inBox.get(it.key) > 0)) {
-      const ok = await tripsyConfirmDialog(`It is scheduled ${it.futureWears} more day${it.futureWears === 1 ? '' : 's'} after ${dayLabel}${it.nextWearDay ? ` (next on ${tripsyDayHeaderLabel(it.nextWearDay)})` : ''}. Those outfits will be flagged so you can swap in something else.`, { title: `Ship ${it.name} anyway?`, yes: 'Ship it', no: 'Keep it' });
-      if (!ok) return;
+      // A STILL-NEEDED garment: show where it is still worn, with a Swap per wearing (a
+      // real wardrobe garment has outfits to swap in; a "No Picture" generic has none, so
+      // it keeps the plain ship-anyway confirm).
+      if (it.key.startsWith('g:')) {
+        closeOv();
+        showTripsyShipHomeGarmentDays(tripKey, dayKey, person, it, {
+          excludeKeys: new Set(inBox.keys()),
+          onChanged: opts.onChanged,
+          onBack: () => showTripsyShipHomeDay(tripKey, dayKey, person, opts),
+          onShipAnyway: () => showTripsyShipHomeDay(tripKey, dayKey, person, { ...opts, shipAnywayKey: it.key }),
+        });
+        return;
+      }
+      if (!(await shipAnyway(it))) return;
+      render(); persistBox(); return;
     }
     let n = 1;
     if (left > 1) {

@@ -35,6 +35,8 @@ const Store = {
 };
 let outfitsFixture = { blocks: [] };
 const tripsyOutfitBlockLiveTier = (g, b) => b.category || null;
+const TRIPSY_ATTIRE_PACKING_GROUP_LABEL = { tops: 'Tops', pants: 'Bottoms', footwear: 'Shoes' };
+const TRIPSY_ATTIRE_CATEGORY_LABEL = { casual: 'Casual', formal: 'Formal' };
 const tripsyNormalizeTripSelection = sel => sel;
 const tripsyWardrobeWearDays = async (t, id) => ({ days: (wearByGarment[id] || []).map(d => ({ dayKey: d })) });
 const tripsyWardrobeWearDaysFromLines = (g, p, lines) => ({ days: (wearByLine[lines[0].line] || []).map(d => ({ dayKey: d })) });
@@ -46,7 +48,7 @@ const tripsyGarmentTypeBucket = g => ({ key: g.bucket || 'tops', label: 'Tops' }
 const tripsyAttirePackingGroupOf = g => g.group || 'tops';
 const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
 eval(['tripsyShipHomeQtyBefore', 'tripsyShipHomeSplit', 'tripsyShipHomeCandidates', 'tripsyShipHomeGoneIds',
-  'tripsyLaundryWearDebtStep', 'tripsyLaundryRunOutByDay', 'tripsyOutfitSwapCandidates', 'tripsyShipHomeConsolidationPlan'].map(extractFn).join('\n'));
+  'tripsyLaundryWearDebtStep', 'tripsyLaundryRunOutByDay', 'tripsyOutfitSwapCandidates', 'tripsyShipHomeConsolidationPlan', 'tripsyShipHomeSwapOptions'].map(extractFn).join('\n'));
 
 (async () => {
   // ---- the maths ----
@@ -154,6 +156,55 @@ eval(['tripsyShipHomeQtyBefore', 'tripsyShipHomeSplit', 'tripsyShipHomeCandidate
     'the screen proposes the consolidation with an Apply button');
   assert(/sw\.block\.garmentIds\[i\] = sw\.newId;/.test(screen2) && /Store\.saveTripsyTripOutfits\(plan\.outfits\)/.test(screen2) && /for \(const f of plan\.freed\) inBox\.set/.test(screen2),
     'Apply re-dresses the outfits (one save), then puts the freed garments in the box');
+
+  // ---- RULES-EXPLAINED swap options for a still-needed garment ----
+  wardrobe = [
+    { id: 'p1', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'], bucket: 'pants' },
+    { id: 'p2', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'], bucket: 'pants' },
+    { id: 'p3', name: 'Chinos', person: 'him', group: 'pants', tiers: ['formal'], bucket: 'pants' },
+    { id: 's1', name: 'Blue shirt', person: 'him', group: 'tops', tiers: ['casual'], bucket: 'tops' },
+    { id: 'p4', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'], bucket: 'pants' },
+    { id: 'p5', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'], bucket: 'pants' },
+    { id: 'h1', name: 'Skirt', person: 'her', group: 'pants', tiers: ['casual'], bucket: 'pants' },
+  ];
+  selection = ['p1', 'p2', 'p3', 's1', 'p4', 'p5', 'h1'].map(id => ({ id, qty: 1 }));
+  washes = []; shipRecords = [{ tripKey: 'T', person: 'him', dayKey: D(2), box: { 'g:p5': 1 } }];
+  const blk = mk(D(6), ['p1', 's1']);
+  outfitsFixture = { blocks: [blk, { dayKey: D(6), category: 'casual', eventIds: ['x'], garmentIds: ['p4'] }] };
+  const so = await tripsyShipHomeSwapOptions('T', blk, 'p1', 'him', 'casual', D(4), new Set(['g:p2']));
+  const byIdOpt = Object.fromEntries(so.options.map(o => [o.garment.id, o]));
+  assert(!byIdOpt.p1 && !byIdOpt.h1, 'never the garment itself, never the other person\'s');
+  assert(!byIdOpt.p2, 'THE ASK: a garment designated for this box is not offered');
+  assert(!byIdOpt.p5, 'a garment already shipped home in an earlier box is not offered');
+  assert(byIdOpt.p3 && !byIdOpt.p3.allowed && /Not tagged for Casual/.test(byIdOpt.p3.reasons.join(' ')), 'THE ASK: a wrong-tier garment is still listed, with the rule it fails spelled out');
+  assert(!byIdOpt.s1, 'THE ASK (follow-up): a different KIND of garment (a top, for a pair of trousers) is not shown at all, not even as overridable');
+  assert(byIdOpt.p4 && /Worn in another outfit the same day/.test(byIdOpt.p4.reasons.join(' ')), 'a garment in another outfit that day is named as such');
+  assert(so.options[0].allowed === false || so.options.every(o => !o.allowed), 'with nothing allowed here, nothing is marked ✓');
+  // An allowed one: p4 moved to another day.
+  outfitsFixture = { blocks: [blk, { dayKey: D(7), category: 'casual', eventIds: ['x'], garmentIds: ['p4'] }] };
+  const so2 = await tripsyShipHomeSwapOptions('T', blk, 'p1', 'him', 'casual', D(4), new Set(['g:p2']));
+  const p4 = so2.options.find(o => o.garment.id === 'p4');
+  assert(p4 && p4.allowed && so2.options[0].garment.id === 'p4', 'a garment passing every rule is marked allowed and listed first');
+  // Agreement with Swap's own filter: allowed == what tripsyOutfitSwapCandidates returns (box key aside).
+  const swapIds = (await tripsyOutfitSwapCandidates('T', blk, 'p1', 'him', 'casual')).candidates.map(g => g.id).filter(id => id !== 'p2').sort();
+  assert(JSON.stringify(so2.options.filter(o => o.allowed).map(o => o.garment.id).sort()) === JSON.stringify(swapIds), 'the explained rules agree with Swap\'s own candidate filter -> ' + swapIds);
+  // Capacity: a one-wear shirt already worn is flagged.
+  wardrobe.push({ id: 's2', name: 'Grey tee', person: 'him', group: 'tops', tiers: ['casual'], bucket: 'tops' });
+  selection.push({ id: 's2', qty: 1 });
+  outfitsFixture = { blocks: [mk(D(5), ['s2', 'p4']), mk(D(6), ['s1', 'p1'])] };
+  const so3 = await tripsyShipHomeSwapOptions('T', outfitsFixture.blocks[1], 's1', 'him', 'casual', D(4), new Set());
+  const s2 = so3.options.find(o => o.garment.id === 's2');
+  assert(s2 && !s2.allowed && /would need washing before this day/.test(s2.reasons.join(' ')), 'the wear-capacity rule is explained too (a worn one-wear tee)');
+  const picker = extractFn('tripsyShipHomeSwapPicker');
+  assert(/✓ Can be swapped under the rules/.test(picker) && /data-ship-swap-force=/.test(picker) && /Swap anyway/.test(picker) && /o\.reasons\.map\(r => `✕ \$\{esc\(r\)\}`\)/.test(picker),
+    'THE ASK (picker): verdict under each card, the failed rules listed, and a Swap anyway button');
+  assert(/done\(\{ id: force\.dataset\.shipSwapForce, forced: true \}\)/.test(picker), 'Swap anyway resolves as forced');
+  const gdays = extractFn('showTripsyShipHomeGarmentDays');
+  assert(/b\.dayKey > dayKey && \(b\.garmentIds \|\| \[\]\)\.includes\(garmentId\)/.test(gdays) && /data-ship-garment-swap=/.test(gdays) && /Worn with:/.test(gdays),
+    'THE ASK (view): each later outfit wearing the garment, with a Swap button each');
+  assert(/tripsyShipHomeSwapPicker\(tripKey, b, garmentId, person, liveTier, dayKey, excludeKeys\)/.test(gdays) && /Store\.saveTripsyTripOutfits\(outfits\)/.test(gdays), 'a pick swaps in place and saves');
+  const screen3 = extractFn('showTripsyShipHomeDay');
+  assert(/showTripsyShipHomeGarmentDays\(tripKey, dayKey, person, it, \{/.test(screen3) && /shipAnywayKey: it\.key/.test(screen3), 'tapping a still-needed garment opens that view; Ship it anyway still reaches the box');
 
   // ---- wiring ----
   assert(/listTripsyShipHome\(tripKey\) \{/.test(html) && /async saveTripsyShipHome\(tripKey, person, dayKey, box\)/.test(html) && /async markTripsyShipHomeShipped\(tripKey, person, dayKey, shipped = true\)/.test(html),
