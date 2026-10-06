@@ -18,6 +18,7 @@ fs.writeFileSync('laundry_run.js', `
 const assert=(c,m)=>{console.log((c?'ok   ':'FAIL ')+m); if(!c) process.exitCode=1;};
 // ---- stubs ----
 let wardrobe = [], selection = [], generics = [], wearByGarment = {}, wearByLine = {};
+function tripsyShipHomeQtyBefore() { return 0; } // Ship Home stub: nothing shipped
 const Store = {
   listWardrobe: async () => wardrobe,
   getTripWardrobe: async () => selection,
@@ -27,6 +28,7 @@ const Store = {
 const tripsyNormalizeTripSelection = sel => sel;
 let washes = [], notDirty = [];
 Store.listTripsyLaundry = () => washes;
+Store.listTripsyShipHome = () => [];
 Store.listLaundryNotDirty = () => notDirty;
 const tripsyWardrobeWearDays = async (tripKey, id) => ({ days: (wearByGarment[id] || []).map(d => ({ dayKey: d })) });
 const tripsyWardrobeWearDaysFromLines = (guide, person, lines) => ({ days: (wearByLine[lines[0].line] || []).map(d => ({ dayKey: d })) });

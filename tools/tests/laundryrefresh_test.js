@@ -79,7 +79,7 @@ assert(/showTripsyOutfitModal\(guide\.tripKey, el\.dataset\.tripsyOutfitBlock, p
 // internal self-rebuild calls (Wash Now, Not Dirty) pass the already-received `opts`
 // through by reference instead, which is how a second action on the same visit still
 // carries the callback without re-stating it. ----
-assert((html.match(/onChanged: refreshLaundryInfo/g) || []).length === 1,
-  'the literal onChanged wiring appears exactly once, at the guide\'s laundry-day trigger');
+assert((html.match(/onChanged: refreshLaundryInfo/g) || []).length === 2,
+  'the literal onChanged wiring appears exactly twice: the guide\'s laundry-day trigger and its ship-home trigger (Ship Home, 2026-10-06)');
 assert((html.match(/showTripsyLaundryDay\(tripKey, dayKey, person, opts\);/g) || []).length === 2,
   'both internal self-rebuild calls forward opts by reference rather than re-declaring onChanged');

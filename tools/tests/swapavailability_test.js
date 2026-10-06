@@ -46,6 +46,7 @@ assert(/!wornElsewhere\.has\(g\.id\) && !wornSameDay\.has\(g\.id\)/.test(candida
   const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
   let wardrobeFixture = [];
   let otherBlocksFixture = [];
+  function tripsyShipHomeGoneIds() { return new Map(); } // Ship Home stub: nothing shipped
   const Store = {
     getTripsyTripOutfits: async () => ({ blocks: otherBlocksFixture }),
     listWardrobe: async () => wardrobeFixture,

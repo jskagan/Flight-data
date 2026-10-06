@@ -65,6 +65,7 @@ assert(tripsyOutfitBlockLiveTier(guideFixture, { eventIds: [], category: 'casual
   const tripsyNormalizeTripSelection = sel => sel;
   const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';
   let wardrobeFixture = [];
+  function tripsyShipHomeGoneIds() { return new Map(); } // Ship Home stub: nothing shipped
   const Store = {
     // Same-day availability (a separate, later addition) isn't exercised by this
     // fixture set -- covered by its own test file. No other blocks is a no-op here.

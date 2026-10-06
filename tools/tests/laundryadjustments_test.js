@@ -91,9 +91,11 @@ assert(/if \(opts\.onChanged\) opts\.onChanged\(\);/.test(washBlock.slice(washBl
   let washesFixture = [];
   let swapCandidatesFor = { polo1: [{ id: 'green-polo', name: 'Green Polo' }] };
 
+  function tripsyShipHomeQtyBefore() { return 0; } // Ship Home stub: nothing shipped
   const Store = {
     getTripsyTripOutfits: async () => outfitsFixture,
     listTripsyLaundry: () => washesFixture,
+    listTripsyShipHome: () => [],
     listLaundryNotDirty: () => [],
     listWardrobe: async () => [{ id: 'polo1', name: 'Blue Polo', person: 'him', group: 'tops' }],
     getTripWardrobe: async () => [{ id: 'polo1', qty: 1 }],

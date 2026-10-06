@@ -29,6 +29,7 @@ const src = [
 ].join('\n');
 // Minimal Store + selection normalizer for the candidate finder.
 let wardrobe = [], selection = [], outfitBlocks = [];
+function tripsyShipHomeGoneIds() { return new Map(); } // Ship Home stub: nothing shipped
 const Store = {
   listWardrobe: async () => wardrobe,
   getTripWardrobe: async () => selection,
@@ -74,10 +75,10 @@ assert(JSON.stringify(tripsyOutfitMissingRoles([G('e', 'Silk Tie'), G('d', 'Loaf
 
 // ---- the outfit modal: Not packed → Swap + inline replacements; missing role → Add + candidates ----
 const modal = extractFn('showTripsyOutfitModal');
-assert(/const lostIds = packedIds \? cards\.filter\(g => !packedIds\.has\(g\.id\)\)\.map\(g => g\.id\) : \[\];/.test(modal),
+assert(/const lostIds = cards\.filter\(g => \(packedIds && !packedIds\.has\(g\.id\)\) \|\| shippedGone\.has\(g\.id\)\)\.map\(g => g\.id\);/.test(modal),
   'a garment in the outfit but no longer on the Packing List is the one that needs to go');
-assert(/data-tw-outfit-lost style="outline:3px solid var\(--red, #c0392b\)/.test(modal) && /Not packed<\/span>/.test(modal), 'its card is outlined red and badged');
-assert(/is no longer packed — replace it with…<\/div>\s*<button class="btn" data-tw-outfit-swap="\$\{esc\(lostId\)\}">Swap<\/button>/.test(modal),
+assert(/data-tw-outfit-lost style="outline:3px solid var\(--red, #c0392b\)/.test(modal) && /'Shipped home' : 'Not packed'\}<\/span>/.test(modal), 'its card is outlined red and badged');
+assert(/'is no longer packed'\} — replace it with…<\/div>\s*<button class="btn" data-tw-outfit-swap="\$\{esc\(lostId\)\}">Swap<\/button>/.test(modal),
   'THE ASK: a Swap button sits on the "replace it with…" row');
 assert(/tripsyOutfitSwapCandidates\(tripKey, block, lostId, person, liveTier\)/.test(modal) && /data-tw-outfit-replace-pick="\$\{esc\(g\.id\)\}" data-tw-outfit-replace-lost="\$\{esc\(lostId\)\}"/.test(modal),
   'THE ASK: the garments that could replace it are shown, pickable');
@@ -142,8 +143,8 @@ assert(/if \(currentView === 'tripsytrips'\) renderTripsyEventsList\(\); \/\/ th
 const need = extractFn('tripsyOutfitsNeedRecompose');
 assert(!/selMoved/.test(need) && !/outfits\.selectionFingerprint\.hash/.test(need) && /return lostSomething \|\| incomplete \|\| uncovered;/.test(need),
   'THE REPORT: a changed packing selection alone never raises the ⚠️ -- only an outfit that lost a garment, or an uncovered block');
-assert(/!selected\.has\(id\) && !\(garmentById\.has\(id\) && tripsyWardrobeGarmentExcludedFromOutfits\(garmentById\.get\(id\)\)\)/.test(need)
-  && /!selected\.has\(id\) && !\(garmentById\.has\(id\) && tripsyWardrobeGarmentExcludedFromOutfits\(garmentById\.get\(id\)\)\)/.test(extractFn('tripsyOutfitStaleReasons')),
+assert(/\(!selected\.has\(id\) \|\| shippedGone\.has\(id\)\) && !\(garmentById\.has\(id\) && tripsyWardrobeGarmentExcludedFromOutfits\(garmentById\.get\(id\)\)\)/.test(need)
+  && /\(!selected\.has\(id\) \|\| shippedGone\.has\(id\)\) && !\(garmentById\.has\(id\) && tripsyWardrobeGarmentExcludedFromOutfits\(garmentById\.get\(id\)\)\)/.test(extractFn('tripsyOutfitStaleReasons')),
   'the check and the reasons share one lost rule, so every flag has a row naming its outfit (a deleted garment counts as lost)');
 assert(/data-tw-outfit-remove-dangling="\$\{esc\(id\)\}"/.test(modal) && /applyOutfitChange\(btn\.dataset\.twOutfitRemoveDangling, TRIPSY_OUTFIT_SWAP_REMOVE\)/.test(modal),
   'an outfit still listing a deleted garment offers Remove it, so that problem can be cleared on the outfit too');

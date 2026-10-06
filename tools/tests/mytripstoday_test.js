@@ -106,8 +106,8 @@ assert(/if \(scrollToEventId\)[\s\S]{0,120}else if \(scrollToDayKey\)[\s\S]{0,80
 
 // ---- "Do Laundry Today" ----
 assert(/data-tripsy-laundry-day="\$\{esc\(day\.dayKey\)\}"/.test(html), 'the button carries its day');
-const lb = html.slice(html.indexOf('const laundryRow = '), html.indexOf('const laundryRow = ') + 600);
-assert(/i === 0 && isOwner/.test(lb),
+const lb = html.slice(html.indexOf('const laundryBtn = '), html.indexOf('const laundryRow = ') + 200);
+assert(/const laundryBtn = \(isOwner && /.test(lb) && /const laundryRow = \(i === 0 && \(laundryBtn \|\| shipBtn\)\)/.test(lb),
   'only after the day\'s FIRST instruction box, and only for the owner');
 // It is OUTSIDE the instruction bar now: its own row, appended after whichever shape of
 // bar was emitted, so neither variant contains it.

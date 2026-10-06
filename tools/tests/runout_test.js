@@ -17,11 +17,13 @@ function extractFn(name) {
 fs.writeFileSync('runout_run.js', `
 const assert=(c,m)=>{console.log((c?'ok   ':'FAIL ')+m); if(!c) process.exitCode=1;};
 let wardrobe = [], selection = [], generics = [], washes = [], notDirty = [], wearByGarment = {}, wearByLine = {};
+function tripsyShipHomeQtyBefore() { return 0; } // Ship Home stub: nothing shipped
 const Store = {
   listWardrobe: async () => wardrobe,
   getTripWardrobe: async () => selection,
   getTripGenericGarments: async () => generics,
   listTripsyLaundry: () => washes,
+  listTripsyShipHome: () => [],
   listLaundryNotDirty: () => notDirty,
 };
 const tripsyNormalizeTripSelection = sel => sel;

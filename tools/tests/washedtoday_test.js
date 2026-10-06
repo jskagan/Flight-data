@@ -116,7 +116,7 @@ assert(/tripsyWardrobeLoadPhotos\(ov\);/.test(washedDay), 'photos are actually l
 // ---- "only show it on the current day" (2026-10-01): today, or a day already washed ----
 assert(/const isToday = !!\(dgTodayKey && day\.dayKey === dgTodayKey\);/.test(guideRender),
   'each day checks whether it IS today, using the trip\'s own local today');
-assert(/const laundryRow = \(i === 0 && isOwner && \(washedToday \|\| isToday\)\)/.test(guideRender),
+assert(/const laundryBtn = \(isOwner && \(washedToday \|\| isToday\)\)/.test(guideRender),
   'THE ASK: the Laundry button shows on the current day only (plus any day already washed)');
 
 // ---- executed: the laundry-row visibility rule itself, against fixtures ----

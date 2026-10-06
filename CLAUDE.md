@@ -1808,6 +1808,45 @@ step 4; git history has it if ever needed.
   `tw-grid`/`tw-card`/`tw-photo` shape every other garment display in the app uses (the outfit view,
   Packing Status, …), loaded through the same `tripsyWardrobeLoadPhotos`; a "No Picture" generic
   (`x:`-keyed, no wardrobe record) falls back to the same 👕 glyph as everywhere else.
+- **📦 Ship Home — a dated box of clothes sent home mid-trip, with the app recommending what
+  you can spare** ("During long trips there may be times when I would like to ship some
+  clothes home. I want to be able to put a ship-home indicator at a specific date and have
+  the app help select which clothes should be shipped home at that point so I will have
+  enough clothes for the rest of the trip," 2026-10-06). The INDICATOR is a "📦 Ship Home"
+  button beside 🧺 Laundry on the Daily Dress Guide's day row (owner-only; every day not yet
+  over, and every day before the trip starts — a parcel is planned ahead, unlike a wash; a
+  day with a box keeps its button, reading "📦 Shipping Home · N" / "📦 Shipped Home · N",
+  slate-tinted). It opens `showTripsyShipHomeDay` (the laundry screen's shape, same overlay
+  node, z `2147483090` — deliberately BELOW `tripsyConfirmDialog`'s `2147483100`, since this
+  screen opens confirms of its own; the laundry screen's `2147483120` would hide them, the
+  documented trap): a **Ship-Home Box** card at the top, a **Recommended to ship** grid, and
+  a slate **Still needed for the trip** box. The recommendation is `tripsyShipHomeCandidates`
+  → `tripsyShipHomeSplit({qty, futureWears, limit})`: of the copies still with you on ship
+  day (packed minus any EARLIER box), the rest of the trip needs `ceil(futureWears / limit)`
+  (the same `tripsyWearsBeforeWash` cadence the laundry maths uses, assuming no wash after
+  the ship day; a never-laundered garment still worn is kept whole), and the surplus is what
+  to ship — a tee never worn again, the third of three shirts with two shirt-days left, one of
+  two pairs of chinos. Wear days come from `tripsyWardrobeWearDays`/`…FromLines`, so this
+  can never disagree with the laundry screen about what is worn when. "Add all recommended"
+  fills the box in one tap; a still-needed garment can go anyway after a confirm naming its
+  next wear day; "Mark Shipped" stamps `shippedAt` (read-only after; "Not Shipped Yet"
+  reopens it); an emptied box IS "Remove Marker". Records: `driveData.tripsyShipHome`
+  (`Store.listTripsyShipHome`/`getTripsyShipHome`/`saveTripsyShipHome`/
+  `markTripsyShipHomeShipped`; `{tripKey, person, dayKey, box:{key:qty}, shippedAt}` with
+  the laundry bag's `g:<id>`/`x:<name>` keys; pruned with its trip). **A box dated D takes its
+  contents out of the trip for every day AFTER D, planned or shipped alike** (D itself stays
+  wearable — wear it in the morning, post it in the afternoon), via one helper,
+  `tripsyShipHomeQtyBefore(records, person, key, dayKey)`, honored everywhere a garment's
+  availability is judged: the laundry list and both wear-debt walks (`tripsyLaundryRunOutByDay`,
+  `tripsyLaundryFindAdjustments` — a shipped garment worn later is a physical shortage, flagged
+  on the run-out bar even for a never-laundered type); and, through `tripsyShipHomeGoneIds`
+  (every packed copy boxed), the outfit side — Swap/Add candidates exclude it for a later
+  block, `tripsyOutfitsNeedRecompose`/`tripsyOutfitStaleReasons` count it as LOST ("shipped
+  home on <day>", so the problems dialog opens the outfit), the outfit modal badges it
+  "Shipped home" with replacements, the fix page agrees, and `composeTripsyOutfits` labels it
+  `SHIPPED HOME AFTER <day>` with a prompt rule keeping it out of later blocks. Any change on
+  the screen fires `onChanged` → `refreshLaundryInfo`, so the guide's buttons and run-out bar
+  repaint. `shiphome_test.js`.
 - **Tapping a garment's photo in the outfit view shows where it's actually packed**
   (`showTripsyGarmentCubeInfo`) — read-only, so every viewer gets it, not just the owner (unlike
   Swap, sitting right next to it in the same card). Reuses `tripsyCubesForEntry` exactly as Packing

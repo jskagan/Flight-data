@@ -62,6 +62,7 @@ assert(/const \{ candidates, current, isMixAndMatch, currentGroup \} =\s*\n\s*aw
   // unaffected by it. listWardrobe/getTripWardrobe are the two Promise.all calls inside
   // the real function.
   let wardrobeFixture = [];
+  function tripsyShipHomeGoneIds() { return new Map(); } // Ship Home stub: nothing shipped
   const Store = {
     getTripsyTripOutfits: async () => null,
     listWardrobe: async () => wardrobeFixture,
