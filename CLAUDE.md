@@ -2074,7 +2074,12 @@ step 4; git history has it if ever needed.
   every `Store.getTripsyAttireGuide` read (trip from `tripsyDecryptedTrips`, no-op when not
   loaded), so a saved guide retrofits in memory and persists on its next save — verified against
   the live Singapore GP data: Oct 7 took the Oct 6 flight outfit with the Oct 8 car link intact.
-  `flighttransferoutfit_test.js`.
+  **The marking must happen before the outfit sync reads the guide** ("October 7 still shows a
+  different outfit," same day — the first cut shipped the getter retrofit, but
+  `Store.getTripsyTripOutfits` looked the guide up RAW from `driveData` and synced against an
+  unmarked copy, so the in-flight block never linked): it now goes through
+  `Store.getTripsyAttireGuide`, and the My Trips card builder (the first guide touch on every
+  render) marks too, so the synchronous readers after it agree. `flighttransferoutfit_test.js`.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"
   2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day
