@@ -88,6 +88,34 @@ tripsyOutfitSyncFlightTransfers(guide, outfits, outfits.blocks[0]);
 assert(outfits.blocks[2].garmentIds[0] === 'trousers', 'a swap on the flight block carries to the transfer');
 assert(outfits.blocks[1].garmentIds[0] === 'shorts', 'unrelated blocks are untouched');
 
+// Connecting legs: "The flights on October 22-23 are different legs of a flight from Singapore
+// to Japan - there is no lodging in between legs, so the attire should be the same for both
+// legs" (2026-10-06). Leg 2 the next morning, then the airport car on landing, all ride leg 1.
+const connecting = [
+  { dayKey: '2030-04-01', events: [E('co', 'Beach Resort', '12:00 PM', 'casual'), T('r1', 'Car from Beach Resort → EEE Airport', '9:30 AM', 'casual'), T('l1', 'Flight from EEE to FFF • Air X171', '11:55 AM', 'casual')] },
+  { dayKey: '2030-04-02', events: [T('l2', 'Flight from FFF to GGG • Air X656', '1:20 AM', 'smart_casual'), T('c4', 'Car from GGG Airport → City Hotel', '9:00 AM', 'athletic'), E('h4', 'City Hotel', '3:00 PM', 'smart_casual')] },
+];
+const cl = tripsyAttireFlightTransferLinks(connecting);
+assert(cl.length === 2 && cl[0].transfer.id === 'l2' && cl[0].connectingLeg === true && cl[1].transfer.id === 'c4' && cl.every(l => l.flight.id === 'l1'),
+  'THE ASK: a connecting leg links to the first leg, and the arrival car after it links to the SAME root flight');
+const rc = computeTripsyAttireBlocks(connecting);
+assert(connecting[1].events[0].category === 'casual' && connecting[1].events[1].category === 'casual', 'leg 2 and the car take leg 1\'s dress code');
+assert(rc.counts.casual === 1 && rc.counts.smartCasual === 1, 'the second-leg day is not a new casual occasion; the hotel check-in later that day still is');
+const co = { blocks: [
+  { dayKey: '2030-04-01', eventIds: ['co', 'r1', 'l1'], garmentIds: ['gymshirt', 'navytrousers', 'chelsea'] },
+  { dayKey: '2030-04-02', eventIds: ['l2', 'c4'], garmentIds: ['polo', 'bluetrousers', 'oxfords'] },
+  { dayKey: '2030-04-02', eventIds: ['h4'], garmentIds: ['shirt', 'chinos', 'loafers'] },
+] };
+assert(tripsyOutfitSyncFlightTransfers({ days: connecting }, co) > 0 && JSON.stringify(co.blocks[1].garmentIds) === JSON.stringify(['gymshirt', 'navytrousers', 'chelsea'])
+  && co.blocks[1].wornFromFlightDayKey === '2030-04-01', 'THE ASK: the second leg wears the first leg\'s outfit');
+assert(co.blocks[2].garmentIds[0] === 'shirt', 'the hotel block after landing is its own outfit');
+// A night in a hotel between two flights breaks the chain: they are two journeys.
+const twoTrips = [
+  { dayKey: '2030-04-01', events: [T('l5', 'Flight from EEE to FFF', '9:00 AM', 'casual'), E('h5', 'Airport Hotel', '8:00 PM', 'casual')] },
+  { dayKey: '2030-04-02', events: [T('l6', 'Flight from FFF to GGG', '9:00 AM', 'smart_casual')] },
+];
+assert(tripsyAttireFlightTransferLinks(twoTrips).length === 0, 'lodging between the legs means no link');
+
 // Wiring.
 assert(/tripsyOutfitSyncFlightTransfers\(guide, rec\)/.test(html), 'every outfit read applies the sync');
 assert(/tripsyOutfitSyncFlightTransfers\(guide, outfits, block\);/.test(extractFn('showTripsyOutfitModal')), 'Swap syncs the partner block');

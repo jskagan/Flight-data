@@ -2080,6 +2080,19 @@ step 4; git history has it if ever needed.
   unmarked copy, so the in-flight block never linked): it now goes through
   `Store.getTripsyAttireGuide`, and the My Trips card builder (the first guide touch on every
   render) marks too, so the synchronous readers after it agree. `flighttransferoutfit_test.js`.
+  **A CONNECTING LEG wears the first leg's outfit too** ("The flights on October 22-23 are
+  different legs of a flight from Singapore to Japan - there is no lodging in between legs, so
+  the attire should be the same for both legs," 2026-10-06 — DAD→SIN on the 22nd and SIN→FUK at
+  1:20 AM on the 23rd were two blocks with two outfits). `tripsyAttireFlightTransferLinks` now
+  also links a FLIGHT whose previous real event is a flight, or a ride/placeholder already linked
+  to one (`prev.root`), within the same ≤2-day gap; anything else between two flights — a hotel
+  night, a dinner — breaks the chain, since `prev` is then that event. Every link in a chain
+  points at the ROOT flight (`connectingLeg: true` marks the flight links), so the second leg, an
+  in-flight day and the arrival car after it all share ONE outfit and count as one occasion;
+  everything downstream (tier match, `continuesFlight`, `wornFromFlightDayKey` copy, never sent
+  to compose) is unchanged. Verified live: Oct 23 took the Oct 22 outfit; the same-day Oct 12
+  (SIN→BKK→CEI) and Oct 17 (CEI→DMK→DAD) connections link as well, with no count change (same-day
+  legs were already one run). `flighttransferoutfit_test.js`.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"
   2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day
