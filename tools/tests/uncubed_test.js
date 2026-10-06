@@ -24,8 +24,7 @@ const src = extractConst('TRIPSY_UNCUBED_TYPES') + '\n'
   + ['tripsyGarmentTypeKey', 'tripsyGarmentSkipsCube'].map(extractFn).join('\n');
 
 const HANGS = ['Navy suit', 'Charcoal Suit', 'Tuxedo', 'Black tuxedos', 'Blue blazer',
-  'Sport coat', 'Sportcoat', 'Rain jacket', 'Raincoat', 'Packable travel coat',
-  'Puffer jacket', 'Windbreaker', 'Overcoat',
+  'Sport coat', 'Sportcoat', 'Raincoat', 'Overcoat', 'Down Parka', 'Navy Jacket', 'Wool coat',
   'Black dress', 'Cocktail dresses', 'Evening gown', 'Gowns',
   // Ties are uncubed too -- rolled or laid flat rather than folded into a cube.
   'Tie', 'Ties', 'Black bow tie', 'Bowties', 'Necktie', 'Silk neckties',
@@ -37,6 +36,10 @@ const HANGS = ['Navy suit', 'Charcoal Suit', 'Tuxedo', 'Black tuxedos', 'Blue bl
 const CUBED = ['Dress shirts', 'Casual tops', 'Chinos', 'Distressed Blue Boss Jeans',
   'Shorts', 'Socks', 'Dress socks', 'Underwear', 'T-shirts', 'Polo', 'Sweater',
   'Swim trunks', 'Bathing suit', 'Swimwear',
+  // Packable outerwear folds into a cube ("I packed a light fleece and rain jacket in a
+  // cube," 2026-10-06) -- these used to be listed as hanging, and the owner says no.
+  'Light fleece', 'Rain jacket', 'Packable travel coat', 'Puffer jacket', 'Windbreaker',
+  'Fleece', 'Anorak', 'Gilet', 'Lightweight coat', 'Travel jacket',
   // The near-collisions with the new bare 'dress' rule -- all of these contain the
   // word "dress" but fold, so every one must STILL go in a cube.
   'Dress pants', 'Formal socks', 'Evening socks',

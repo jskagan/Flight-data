@@ -2864,6 +2864,17 @@ would overwrite the glyph with the word.
   `TRIPSY_WEARS_BEFORE_WASH` (its per-type wash-cadence map) since the type has no entry there
   either and both fall back to the same `outerwear` group answer (`Infinity` — never washed on a
   trip), so no explicit entry was needed for correct behavior.
+  **PACKABLE outerwear is `light-jacket` too — a fleece, rain jacket, windbreaker, anorak,
+  puffer, gilet, overshirt/shacket, or anything "light"/"lightweight"/"packable"/"travel" +
+  an outerwear word** ("I packed a light fleece and rain jacket in a cube, but the app does
+  not allow me to show them as packed in a cube," 2026-10-06 — `fleeces?` and `rain ?jackets?`
+  sat in the HANGING `jacket` rule, so the cube picker was never offered for them). Only a
+  plain jacket, coat, overcoat, raincoat (a trench) or parka still types `jacket` and hangs;
+  both light-jacket rules sit BEFORE the hanging rule, or `\bjackets?\b` would catch "rain
+  jacket" first. The packing GROUP rule (`tripsyAttirePackingGroupOf`) was already outerwear
+  for all of these, and the need-line fold below keeps a "rain jacket" line offering and
+  counting them. `uncubed_test.js`'s fixture list moved those names from HANGS to CUBED —
+  that list IS the rule's spec, so edit it deliberately. `cubedfleece_test.js`.
   **For NEED-LINE matching, a light jacket is still a jacket** ("Why isn't the Loro Piana
   Traveler Jacket listed as a rain jacket," 2026-10-05): guide lines like "rain jacket" / "packable
   rain jacket" type as `jacket`, so after the split the traveler jacket matched none of them.

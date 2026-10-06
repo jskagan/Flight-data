@@ -49,7 +49,8 @@ assert(tripsyGarmentTypeKey('Packable Jacket') === 'light-jacket', '"packable ja
 
 // ---- a plain heavy jacket/coat/raincoat is UNCHANGED -- still the general bucket ----
 assert(tripsyGarmentTypeKey('Navy Wool Overcoat') === 'jacket', 'a plain overcoat stays "jacket", unaffected');
-assert(tripsyGarmentTypeKey('Black Rain Jacket') === 'jacket', 'a plain rain jacket stays "jacket" too');
+assert(tripsyGarmentTypeKey('Black Rain Jacket') === 'light-jacket', 'a rain jacket is packable outerwear -- light-jacket since 2026-10-06 (cubedfleece_test.js)');
+assert(tripsyGarmentTypeKey('Tan Raincoat') === 'jacket', 'a raincoat (a trench) still hangs');
 assert(tripsyGarmentTypeKey('Down Parka') === 'jacket', 'and a parka');
 
 // ---- the new type is registered everywhere the existing types are ----
