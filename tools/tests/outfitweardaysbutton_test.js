@@ -31,7 +31,8 @@ assert(/<button class="btn" data-tw-outfit-weardays="\$\{esc\(g\.id\)\}">Wear Da
 const cardBlock = modal.slice(modal.indexOf('const cardHtml = cards.length'), modal.indexOf('No garments were assigned'));
 assert(!/\$\{isOwner \? `<button class="btn" data-tw-outfit-weardays/.test(cardBlock),
   'unlike Swap, the Wear Days button is NOT behind the isOwner gate -- every viewer gets it');
-assert(/\$\{isOwner \? `<button class="btn" data-tw-outfit-swap="\$\{esc\(g\.id\)\}">Swap<\/button>` : ''\}/.test(cardBlock),
+// Swap (and, since 2026-10-07, Replace beside it) stay behind the isOwner gate.
+assert(/\$\{isOwner \? `<button class="btn" data-tw-outfit-swap="\$\{esc\(g\.id\)\}">Swap<\/button>/.test(cardBlock),
   'Swap right next to it stays owner-gated, unchanged');
 
 // ---- source-pattern checks: wiring closes the outfit modal before opening Wear Days ----

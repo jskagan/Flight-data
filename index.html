@@ -9040,7 +9040,7 @@ function tripsyWardrobeCardHtml(g, opts = {}) {
   const tierBadges = tripsyWardrobeGarmentTiers(g).map(t => tripsyAttireBadgeHtml(t)).join(' ');
   return `
     <div class="tw-card${opts.selectMode ? ' tw-card-select' : ''}${opts.selected ? ' tw-selected' : ''}" data-tw-id="${esc(g.id)}">
-      ${opts.wearDays ? `<div class="tw-actions tw-actions-top"><button class="btn" data-tw-wear-days="${esc(g.id)}">Wear Days</button></div>` : ''}
+      ${(opts.wearDays || opts.replaceable) ? `<div class="tw-actions tw-actions-top">${opts.wearDays ? `<button class="btn" data-tw-wear-days="${esc(g.id)}">Wear Days</button>` : ''}${opts.replaceable ? `<button class="btn" data-tw-replace="${esc(g.id)}" title="Replace this garment with another one everywhere it is used on this trip — Packing List, every outfit, ship-home boxes">Replace</button>` : ''}</div>` : ''}
       <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : tripsyGarmentGlyph(tripsyGarmentTypeKey(g.name), g.group, g.name)}</div>
       <div class="tw-info">
         <div class="tw-name">${esc(g.name || 'Untitled')}${(opts.selected && (g.quantity || 1) > 1) ? ` <span style="color:var(--muted);">×${opts.selectedQty || 1}</span>` : ''}</div>
@@ -12680,7 +12680,7 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
       <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}</div><div class="tw-meta">${esc(tripsyGarmentTypeBucket(g).label)}${g.color ? ` · ${esc(g.color)}` : ''}</div></div>
       <div class="tw-actions">
         <button class="btn" data-tw-outfit-weardays="${esc(g.id)}">Wear Days</button>
-        ${isOwner ? `<button class="btn" data-tw-outfit-swap="${esc(g.id)}">Swap</button>` : ''}
+        ${isOwner ? `<button class="btn" data-tw-outfit-swap="${esc(g.id)}">Swap</button><button class="btn" data-tw-outfit-replace="${esc(g.id)}" title="Replace this garment with another one everywhere it is used on this trip — Packing List, every outfit, ship-home boxes">Replace</button>` : ''}
       </div>
     </div>`).join('') : `<div style="color:var(--muted); padding:12px 0;">No garments were assigned to this block.</div>`;
   // Owner-only: the replacement strip per unpacked garment, and the Add strip per
@@ -12764,6 +12764,20 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
       const chosen = await tripsyOutfitSwapPicker(tripKey, block, currentId, person, liveTier);
       if (!chosen) return; // cancelled
       applyOutfitChange(currentId, chosen);
+    };
+  });
+  // Replace EVERYWHERE (2026-10-07): unlike Swap, which changes this one outfit and only
+  // offers packed garments, this picks ANY same-kind garment from the wardrobe and puts
+  // it in the old one's place across the whole trip -- Packing List, every outfit,
+  // planned ship-home boxes. The modal repaints from the saved records afterwards.
+  if (isOwner) ov.querySelectorAll('[data-tw-outfit-replace]').forEach(btn => {
+    btn.onclick = async () => {
+      const old = byId.get(btn.dataset.twOutfitReplace);
+      if (!old) return;
+      const counts = await tripsyRunReplaceGarment(tripKey, person, old);
+      if (!counts) return;
+      if (opts.onSwapped) opts.onSwapped();
+      if (ov.style.display !== 'none') showTripsyOutfitModal(tripKey, eventId, person, opts);
     };
   });
   // The inline strips: a tap on a replacement candidate swaps it in for the unpacked
@@ -13399,6 +13413,182 @@ async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person =
   });
 }
 
+// ---- Replace a garment EVERYWHERE it is used on a trip, in one step ----
+// "Let's make a one-step process for swapping one garment for another so the new one
+// automatically replaces the old one everywhere the old one was used" (2026-10-07).
+// Before this, swapping an UNPACKED garment in meant deselecting the old one on the
+// Packing List, selecting the new one, then Swap on every outfit the old one dressed.
+// `tripsyReplaceGarmentEverywhere` does all of it from one pick: every Packing List
+// allocation of the old garment moves to the new one (same tier/line/qty/packed/cubes --
+// the copies are already in the bag, only WHICH garment changes; two allocations that
+// collapse onto one key merge), every outfit block of this person wearing the old one
+// wears the new one in its place (already present -> the old id is simply dropped, never
+// duplicated; the flight/airport-ride sync is re-run so a linked pair stays one outfit),
+// and every PLANNED ship-home box holding the old one holds the new one instead (a box
+// already SHIPPED is history and is left alone, as are laundry bags, washes and Not
+// Dirty credits -- those record what happened to the OLD garment). Three stores, saved
+// in that order; a failure restores every in-memory record to its snapshot and reports
+// what did not land, so the three can never half-agree. Returns the counts touched.
+async function tripsyReplaceGarmentEverywhere(tripKey, person, oldId, newId) {
+  if (!oldId || !newId || oldId === newId) throw new Error('pick a different garment');
+  const snapshot = {
+    sel: ((driveData.tripsyTripWardrobe || {})[tripKey] || []).map(e => (typeof e === 'string' ? e : { ...e })),
+    outfits: JSON.parse(JSON.stringify((driveData.tripsyTripOutfits || []).find(o => o.tripKey === tripKey && (o.person || 'him') === person) || null)),
+    ship: JSON.parse(JSON.stringify((driveData.tripsyShipHome || []).filter(r => r.tripKey === tripKey && (r.person || 'him') === person))),
+  };
+  const counts = { lines: 0, outfits: 0, boxes: 0 };
+  // 1. Packing List allocations.
+  const entries = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey));
+  const merged = [];
+  const byKey = new Map();
+  for (const e of entries) {
+    const rekeyed = e.id === oldId ? { ...e, id: newId } : e;
+    if (e.id === oldId) counts.lines++;
+    const k = `${rekeyed.id}::${rekeyed.category}::${rekeyed.line}`;
+    const prior = byKey.get(k);
+    if (prior) {
+      prior.qty += rekeyed.qty;
+      prior.packed = Math.min(prior.qty, prior.packed + rekeyed.packed);
+      prior.cubes = [...(prior.cubes || []), ...(rekeyed.cubes || [])].slice(0, prior.packed);
+    } else { byKey.set(k, rekeyed); merged.push(rekeyed); }
+  }
+  if (counts.lines && !(await Store.setTripWardrobe(tripKey, merged.map(e => ({ id: e.id, category: e.category, line: e.line, qty: e.qty, packed: Math.min(e.qty, e.packed), cubes: (e.cubes || []).filter(Boolean).slice(0, e.qty) }))))) {
+    throw new Error('could not save the Packing List');
+  }
+  try {
+    // 2. Outfits.
+    const outfits = await Store.getTripsyTripOutfits(tripKey, person);
+    if (outfits) {
+      let guide = null;
+      try { guide = await Store.getTripsyAttireGuide(tripKey); } catch (e) { guide = null; }
+      for (const b of (outfits.blocks || [])) {
+        const ids = b.garmentIds || [];
+        const i = ids.indexOf(oldId);
+        if (i < 0) continue;
+        if (ids.includes(newId)) ids.splice(i, 1); else ids[i] = newId;
+        counts.outfits++;
+        if (guide) tripsyOutfitSyncFlightTransfers(guide, outfits, b);
+      }
+      if (counts.outfits && !(await Store.saveTripsyTripOutfits(outfits))) throw new Error('could not save the outfits');
+    }
+    // 3. Planned ship-home boxes.
+    for (const r of Store.listTripsyShipHome(tripKey)) {
+      if ((r.person || 'him') !== person || r.shippedAt) continue;
+      const box = r.box || {};
+      if (!box[`g:${oldId}`]) continue;
+      const next = { ...box };
+      next[`g:${newId}`] = (next[`g:${newId}`] || 0) + next[`g:${oldId}`];
+      delete next[`g:${oldId}`];
+      counts.boxes++;
+      if (!(await Store.saveTripsyShipHome(tripKey, person, r.dayKey, next))) throw new Error('could not save a ship-home box');
+    }
+    return counts;
+  } catch (err) {
+    // Restore every record to its snapshot in memory; the next ordinary save carries it.
+    try {
+      if (!driveData.tripsyTripWardrobe) driveData.tripsyTripWardrobe = {};
+      driveData.tripsyTripWardrobe[tripKey] = snapshot.sel;
+      if (snapshot.outfits) {
+        driveData.tripsyTripOutfits = (driveData.tripsyTripOutfits || []).filter(o => !(o.tripKey === tripKey && (o.person || 'him') === person)).concat([snapshot.outfits]);
+      }
+      driveData.tripsyShipHome = (driveData.tripsyShipHome || []).filter(r => !(r.tripKey === tripKey && (r.person || 'him') === person)).concat(snapshot.ship);
+    } catch (e) { console.error('replace rollback failed:', e); }
+    throw err;
+  }
+}
+// Where a garment is used on a trip, for the picker's heading: Packing List lines (by
+// tier), outfit blocks and planned ship-home boxes. Pure reads.
+async function tripsyGarmentTripUsage(tripKey, person, garmentId) {
+  const sel = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey)).filter(e => e.id === garmentId);
+  const outfits = await Store.getTripsyTripOutfits(tripKey, person);
+  const blocks = ((outfits && outfits.blocks) || []).filter(b => (b.garmentIds || []).includes(garmentId));
+  const boxes = Store.listTripsyShipHome(tripKey).filter(r => (r.person || 'him') === person && !r.shippedAt && (r.box || {})[`g:${garmentId}`]);
+  const tiers = [...new Set([...sel.map(e => e.category), ...blocks.map(b => b.category)].filter(Boolean))];
+  return { lines: sel.length, outfits: blocks.length, boxes: boxes.length, tiers };
+}
+// The one-step picker: every garment of this person in the SAME packing group as the
+// old one (a top for a top -- the Ship Home picker's lesson: a different kind is never a
+// replacement), packed or not, the old one excluded. Each card shows its dress-code
+// tags, and one not tagged for a tier the old garment is used at says so (shown, not
+// hidden -- the owner may re-tag it later; the outfit Swap rules are deliberately NOT
+// applied here, since the whole point is to bring in something not yet packed). The
+// heading says exactly what will change. Resolves a garment id, or null.
+async function tripsyReplaceGarmentPicker(tripKey, person, oldGarment) {
+  const [garments, usage] = await Promise.all([Store.listWardrobe(), tripsyGarmentTripUsage(tripKey, person, oldGarment.id)]);
+  const group = tripsyAttirePackingGroupOf(oldGarment);
+  const oldBucket = tripsyGarmentTypeBucket(oldGarment).key;
+  const candidates = garments
+    .filter(g => g.id !== oldGarment.id && (g.person || 'him') === person && tripsyAttirePackingGroupOf(g) === group)
+    .sort((a, b) => ((tripsyGarmentTypeBucket(b).key === oldBucket) - (tripsyGarmentTypeBucket(a).key === oldBucket))
+      || String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+  const parts = [];
+  if (usage.lines) parts.push(`${usage.lines} Packing List line${usage.lines === 1 ? '' : 's'}`);
+  if (usage.outfits) parts.push(`${usage.outfits} outfit${usage.outfits === 1 ? '' : 's'}`);
+  if (usage.boxes) parts.push(`${usage.boxes} ship-home box${usage.boxes === 1 ? '' : 'es'}`);
+  const where = parts.length ? parts.join(', ') : 'nothing on this trip yet';
+  const untagged = g => usage.tiers.filter(t => !(g.tiers || []).includes(t));
+  return new Promise(resolve => {
+    let ov = document.getElementById('tw-replace-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-replace-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    // Above the outfit modal (2147483080), its Swap/Add pickers and the fix page; below
+    // tripsyConfirmDialog (2147483100) and the count dialog (2147483200).
+    ov.style.zIndex = '2147483099';
+    const done = val => { ov.style.display = 'none'; ov.onclick = null; resolve(val); };
+    ov.innerHTML = `
+      <div class="tw-modal-paper tw-wide">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:4px;">
+          <h2 style="margin:0; font-size:17px;">Replace ${esc(oldGarment.name || 'this garment')} everywhere</h2>
+          <button class="btn" data-tw-replace-cancel>Cancel</button>
+        </div>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">The garment you pick takes its place in ${esc(where)}. Any ${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[group] || group).toLowerCase()} in your wardrobe can be chosen, packed or not.</div>
+        ${candidates.length
+          ? `<div class="tw-grid">${candidates.map(g => {
+              const miss = untagged(g);
+              return `
+              <div class="tw-card tw-card-select" data-tw-replace-pick="${esc(g.id)}" role="button" tabindex="0">
+                <div class="tw-photo" data-tw-photo="${esc(g.driveFileId || '')}">${g.driveFileId ? '' : '👕'}</div>
+                <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}</div><div class="tw-meta">${esc(tripsyGarmentTypeBucket(g).label)}${g.color ? ` · ${esc(g.color)}` : ''}</div>
+                  ${miss.length ? `<div style="font-size:11.5px; color:var(--amber); margin-top:4px;">Not tagged for ${esc(miss.map(t => TRIPSY_ATTIRE_CATEGORY_LABEL[t] || t).join(', '))}</div>` : ''}</div>
+              </div>`; }).join('')}</div>`
+          : `<div style="color:var(--muted); padding:8px 0 4px;">No other ${esc(TRIPSY_ATTIRE_PACKING_GROUP_LABEL[group] || group).toLowerCase()} in this wardrobe — add one under Utilities → Wardrobe first.</div>`}
+      </div>`;
+    ov.style.display = 'flex';
+    ov.querySelector('[data-tw-replace-cancel]').onclick = () => done(null);
+    ov.onclick = e => {
+      if (e.target === ov) { done(null); return; }
+      const pick = e.target.closest('[data-tw-replace-pick]');
+      if (pick) done(pick.dataset.twReplacePick);
+    };
+    ov.onkeydown = e => {
+      const pick = e.target.closest && e.target.closest('[data-tw-replace-pick]');
+      if (pick && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); done(pick.dataset.twReplacePick); }
+    };
+    tripsyWardrobeLoadPhotos(ov);
+  });
+}
+// The shared "pick, replace, say so" step both entry points run. Resolves the counts
+// when something changed, null when cancelled or failed (the failure is toasted).
+async function tripsyRunReplaceGarment(tripKey, person, oldGarment) {
+  const newId = await tripsyReplaceGarmentPicker(tripKey, person, oldGarment);
+  if (!newId) return null;
+  const garments = await Store.listWardrobe();
+  const g = garments.find(x => x.id === newId);
+  try {
+    const counts = await tripsyReplaceGarmentEverywhere(tripKey, person, oldGarment.id, newId);
+    const parts = [];
+    if (counts.lines) parts.push(`${counts.lines} Packing List line${counts.lines === 1 ? '' : 's'}`);
+    if (counts.outfits) parts.push(`${counts.outfits} outfit${counts.outfits === 1 ? '' : 's'}`);
+    if (counts.boxes) parts.push(`${counts.boxes} ship-home box${counts.boxes === 1 ? '' : 'es'}`);
+    toast(`${(g && g.name) || 'The new garment'} now replaces ${oldGarment.name || 'the old one'} in ${parts.length ? parts.join(', ') : 'nothing — it was not in use'}.`, 'success');
+    if (currentView === 'tripsytrips') renderTripsyEventsList();
+    return counts;
+  } catch (err) {
+    console.error('replace garment failed:', err);
+    toast(`Could not replace the garment (${String(err && err.message || err).slice(0, 120)}) — nothing was changed.`, 'error');
+    return null;
+  }
+}
+
 // ---- Incomplete outfits: which body ROLE is missing, and what could fill it ----
 // "When a garment is missing from an outfit, show an add button and show garments that
 // could be used to complete the outfit" (2026-10-05). An outfit is judged complete by
@@ -13920,7 +14110,10 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       <div class="tw-info"><div class="tw-name">Skip</div><div class="tw-meta">${skipped ? `<span style="color:var(--amber); font-weight:700;">×${skipped} skipped</span>` : 'Not packing these'}</div></div>
       <div class="tw-actions">${met ? '' : `<button class="btn">Skip</button>`}${skipped ? `<button class="btn" data-tw-skip-undo="1">Unskip</button>` : ''}</div>
     </div>` : '';
-    bodyEl.innerHTML = `<div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, wearDays: true, selected: sel.has(selKey(g.id, tier, ln.name)), selectedQty: sel.get(selKey(g.id, tier, ln.name)), availableQty: tripsyWardrobeGarmentIsPlaceholder(g) ? tripsyWardrobePlaceholderCap(ln.effectiveNeed) : availableFor(g, tier, ln.name) })).join('')}${noPicCard}${skipCard}</div>`;
+    // A SELECTED real garment also gets Replace (2026-10-07): one pick swaps it for any
+    // same-kind wardrobe garment everywhere on the trip -- this line, every outfit,
+    // ship-home boxes -- instead of deselect + select + Swap per outfit.
+    bodyEl.innerHTML = `<div class="tw-grid">${avail.map(g => tripsyWardrobeCardHtml(g, { selectMode: true, wearDays: true, replaceable: isOwner && sel.has(selKey(g.id, tier, ln.name)) && !tripsyWardrobeGarmentIsPlaceholder(g), selected: sel.has(selKey(g.id, tier, ln.name)), selectedQty: sel.get(selKey(g.id, tier, ln.name)), availableQty: tripsyWardrobeGarmentIsPlaceholder(g) ? tripsyWardrobePlaceholderCap(ln.effectiveNeed) : availableFor(g, tier, ln.name) })).join('')}${noPicCard}${skipCard}</div>`;
     tripsyWardrobeLoadPhotos(bodyEl);
   };
 
@@ -14032,6 +14225,19 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     if (wearBtn) {
       const wg = garmentById.get(wearBtn.getAttribute('data-tw-wear-days'));
       if (wg) showTripsyWearDaysOverlay(tripKey, wg, person);
+      return;
+    }
+    // Replace everywhere: the page's own selection state is a copy taken at open, so
+    // after the stores change it is REOPENED on this same line rather than patched.
+    const replaceBtn = e.target.closest('[data-tw-replace]');
+    if (replaceBtn) {
+      const rg = garmentById.get(replaceBtn.getAttribute('data-tw-replace'));
+      if (!rg) return;
+      const lnNow = (needLines[view.tier] || [])[view.lineIndex];
+      const counts = await tripsyRunReplaceGarment(tripKey, person, rg);
+      if (!counts) return;
+      ov.style.display = 'none';
+      tripsyWardrobePackForTrip(tripKey, tripName, person, onClose, lnNow ? { tier: view.tier, lineName: lnNow.name } : null);
       return;
     }
     // Same, for the "No Picture" additions on this line -- they have no wardrobe

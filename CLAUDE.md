@@ -1897,6 +1897,35 @@ step 4; git history has it if ever needed.
   swaps in place on the live block (flight-transfer sync, one save, rollback + toast on failure),
   fires `onChanged`, and re-renders the view; once every wearing is swapped away, Back returns to
   the ship screen, which recomputes and lists the garment under Recommended.
+- **🔁 Replace — one pick swaps a garment for another EVERYWHERE it is used on the trip**
+  ("Let's make a one-step process for swapping one garment for another so the new one
+  automatically replaces the old one everywhere the old one was used," 2026-10-07 — before
+  this, bringing in an UNPACKED garment meant deselect + select on the Packing List, then
+  Swap on every outfit, since Swap only offers packed garments). A **Replace** button sits
+  beside Swap on every outfit-modal garment card (`data-tw-outfit-replace`, owner-only) and
+  on a SELECTED real garment's card on the Packing List line page (`tripsyWardrobeCardHtml`'s
+  `replaceable` option, `data-tw-replace`; placeholders excluded). Both run
+  `tripsyRunReplaceGarment` → `tripsyReplaceGarmentPicker` (own overlay `tw-replace-overlay`,
+  z `2147483099` — above the outfit modal and its Swap/Add pickers, below `tripsyConfirmDialog`):
+  every garment of this person in the SAME packing group (a top for a top — the Ship Home
+  picker's "different kind is never a replacement" rule), packed or not, same-type bucket
+  first; the heading names exactly what will change (`tripsyGarmentTripUsage`: N Packing List
+  lines, M outfits, K planned ship-home boxes) and a candidate not tagged for a tier the old
+  garment is used at says "Not tagged for …" rather than being hidden. The outfit Swap rules
+  are deliberately NOT applied — the point is to bring in something not yet packed. The pick
+  runs `tripsyReplaceGarmentEverywhere(tripKey, person, oldId, newId)` over three stores in
+  order: **Packing List** allocations re-key to the new id with tier/line/qty/packed/cubes
+  intact (the copies are already in the bag; two allocations collapsing onto one key merge),
+  **outfits** — every block of this person wearing the old id wears the new one in its place
+  (already present → the old id is dropped, never duplicated; `tripsyOutfitSyncFlightTransfers`
+  re-runs per changed block), and **planned ship-home boxes** re-key `g:old` → `g:new` (a box
+  already `shippedAt` is history and is left alone, as are laundry bags, washes and Not Dirty
+  credits — they record what happened to the OLD garment). A failure anywhere restores all
+  three records to their in-memory snapshot and the toast says nothing changed; success
+  toasts the counts, repaints the open outfit modal (firing `onSwapped`), re-renders My Trips
+  so the attire ⚠️ re-judges, and the Packing List page — whose selection state is a copy
+  taken at open — closes and REOPENS on the same line rather than patching itself.
+  `replacegarment_test.js`.
 - **Tapping a garment's photo in the outfit view shows where it's actually packed**
   (`showTripsyGarmentCubeInfo`) — read-only, so every viewer gets it, not just the owner (unlike
   Swap, sitting right next to it in the same card). Reuses `tripsyCubesForEntry` exactly as Packing
