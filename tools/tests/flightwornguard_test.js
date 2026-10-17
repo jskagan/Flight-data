@@ -31,13 +31,13 @@ const f1 = extractFn('tripsyWardrobePackForTrip');
 const f2 = extractFn('showTripsyAttireCategoryEvents');
 
 // ---- Site 1: Plan Packing List ----
-assert(/if \(existing\) existing\.qty \+= n; else generics\.push\(\{ category: view\.tier,[\s\S]{0,700}if \(ln\.flightWorn\) \{[\s\S]{0,250}sel\.delete\(k\); packedByKey\.delete\(k\); \}[\s\S]{0,120}persistChosen\(\);/.test(f1),
+assert(/if \(existing\) existing\.qty \+= n; else generics\.push\(\{ category: view\.tier,[\s\S]{0,700}if \(ln\.flightWorn\) \{[\s\S]{0,250}sel\.delete\(k\); packedByKey\.delete\(k\); cubesByKey\.delete\(k\); \}[\s\S]{0,120}persistChosen\(\);/.test(f1),
   'adding a generic to a flight-worn line clears the matching real picks, then persists both');
 assert(/sel\.set\(key, qty\);\s*\n\s*\/\/ Mirror of the generic-add guard[\s\S]{0,250}if \(lnHere\.flightWorn\) \{[\s\S]{0,250}generics = generics\.filter\([\s\S]{0,150}persistGenerics\(\);/.test(f1),
   'picking a real garment for a flight-worn line clears the matching generic, then persists both');
 
 // ---- Site 2: category drill-down pack panel ----
-assert(/if \(existing\) existing\.qty \+= n; else generics\.push\(\{ category, typeKey, name,[\s\S]{0,300}if \(lnForName && lnForName\.flightWorn\) \{[\s\S]{0,250}sel\.delete\(k\); packedByKey\.delete\(k\); \}[\s\S]{0,80}persistChosen\(\);/.test(f2),
+assert(/if \(existing\) existing\.qty \+= n; else generics\.push\(\{ category, typeKey, name,[\s\S]{0,300}if \(lnForName && lnForName\.flightWorn\) \{[\s\S]{0,250}sel\.delete\(k\); packedByKey\.delete\(k\); cubesByKey\.delete\(k\); \}[\s\S]{0,80}persistChosen\(\);/.test(f2),
   'site 2: adding a generic to a flight-worn line clears the matching real picks');
 assert(/sel\.set\(key, qty\);\s*\n\s*if \(lnHere && lnHere\.flightWorn\) \{[\s\S]{0,200}generics = generics\.filter\([\s\S]{0,150}persistGenerics\(\);/.test(f2),
   'site 2: picking a real garment for a flight-worn line clears the matching generic');

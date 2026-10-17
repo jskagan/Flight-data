@@ -2537,6 +2537,37 @@ would overwrite the glyph with the word.
   impossible to deselect. That function also re-homes swim picks (see below).
   `tripsyWardrobeAssignGarments` honours an explicit `item.line`, falling back to its own matching
   when absent, which is what lets all five call sites share it.
+  **Every writer of that array must carry `cubes`, because every writer replaces the WHOLE array**
+  ("Why doesn't the app show which clothes are in which packing cubes? I set that when I packed,"
+  2026-10-17): the Packing List's `persistChosen` (and the category drill-down's embedded pack
+  panel, a copy of it) wrote `id/category/line/qty/packed` back and nothing else, so one pick on
+  either page — selecting, deselecting, Add Garment, Skip, the reopen after a Replace — silently
+  erased every cube assignment made on Packing Status; `packed` survived, so each copy then read
+  "cube not set" rather than unpacked. Both now load a `cubesByKey` map beside `packedByKey`
+  (deleted together on deselect) and write through **`tripsyWardrobeCarryCubes(entry, cubes)`**
+  (next to `tripsyCubesForEntry`): the loaded ids ride along unchanged, filled slots leading and
+  bounded by what is still packed. `cubescarry_test.js` also asserts that EVERY
+  `Store.setTripWardrobe` call site names `cubes` — a new writer that forgets is this bug again.
+  Assignments lost before the fix are gone (the data was overwritten); they need re-picking once.
+- **👔 → Garment Location: where every packed garment IS, read from the cube's side, plus
+  Laundry** ("a menu item … before the refresh option called 'Garment Location' … a list of each
+  packing cube used on that trip plus an option for 'Laundry'. If the user selects a cube, show
+  every garment in that packing cube. If he selects laundry, show all garments marked as needing
+  cleaning," 2026-10-17). `showTripsyGarmentLocation(tripKey, tripName)` (own overlay
+  `tw-garment-location-overlay`, same z tier as the Cubes page, red ✕ contextual Close: a
+  drill-down returns to the list, the list closes). Read-only, any viewer, listed once a guide
+  exists, directly before Refresh. The list is `tripsyGarmentLocationRows`: only the cubes that
+  HOLD something on this trip (library order; an owned-but-unused cube is not a location here,
+  unlike the Cubes page, which is the library's management view with Add/Edit/Delete), then "No
+  cube" / "Wearing on the flight" / "Cube not set" only when non-empty, then **Laundry always**.
+  Cube contents come from **`tripsyCubeContentsMap`**, factored OUT of `showTripsyCubeContents`
+  so the two pages can never disagree (`cubedetail_test.js`'s generator now extracts it too — the
+  grown-dependency lesson). Laundry is the Daily Dress Guide's own judgement,
+  `tripsyLaundryItemsForDay`, run for BOTH people as of the TRIP's local today
+  (`tripsyGarmentLocationLaundryDay`: today while in progress, the last day once over, nothing
+  before it starts — nothing has been worn) with each garment's "needed again"/`::nn` halves
+  merged (`tripsyGarmentLocationLaundryItems`) — here it is simply in the laundry. Computed
+  lazily on the Laundry tap, since it walks every garment's wear days. `garmentlocation_test.js`.
 - **"Add Garment" on Plan Packing List searches the whole wardrobe** rather than requiring the owner
   to first navigate into a specific line's own garment page. Its dialog (`tripsyWardrobeAddGarmentDialog`)
   filters by His/Hers, Type (`TRIPSY_ATTIRE_PACKING_GROUPS` — the same vocabulary the "+ Add Line"
@@ -3201,6 +3232,36 @@ pieces:
   SUCCESS after offline was entered returns early instead of clobbering the view (`renderHome`
   writes into the same `#main`), and a late FAILURE stays silent rather than painting the gate over
   the schedule being read.
+
+**A splash up for more than 3 seconds becomes the cached Travel View — a STAND-IN, not offline
+mode** ("When the splash screen displays for more than 3 seconds, automatically switch to the
+travel view displaying the cached view of the current trip or next upcoming trip if not on a
+current trip," 2026-10-12). `tripsyArmSplashPreview` starts a `TRIPSY_SPLASH_PREVIEW_MS` (3000)
+clock every time the splash is shown — page load (right before the GIS poll) and BOTH sign-in
+callbacks that swap back to the splash; `tripsyMaybeShowSplashPreview` fires only while the
+splash is still visible (a showing gate needs a tap, so no preview), sign-in is unfinished, no
+offline mode is entered, and `loadTripsyOfflineTrips` has a cache (no cache → the splash just
+stays). `enterSplashPreview` sets the SAME state `enterOfflineMode` does (cached trips,
+`tripsyTripsAreOffline`, minimal `driveData`, `appOfflineMode` so `navigate()` can't wander into a
+live-data view) but REMEMBERS the rail items it hid (`_tripsySplashPreviewHidden`), paints
+`navigate('travelview')` — which already picks the current or next upcoming trip via
+`tripsyTravelTripCandidates` — and the strip reads "⏳ Showing your saved schedule while the app
+signs in…" rather than claiming the device is offline. **The sign-in attempt keeps running
+behind it.** `completeSignIn` calls `tripsyEndSplashPreview` the moment the real data file is
+loaded — nulling `tripsyDecryptedTrips` so the LIVE file is fetched, lifting `appOfflineMode`,
+restoring the rail — and that is deliberately BEFORE the menu setup, Home, and above all
+`runBackgroundSyncs`, whose relay drains WRITE: against still-cached trips they would save stale
+data over live (the same hazard as the never-prune-against-a-cache rule). The painted view stays
+until the landing navigate replaces it (no same-view short-circuit in `navigate`, so Travel
+View re-renders live); a Travel-View-pref device skips the `renderHome` build, which would flash
+through an already-visible `#app-root`. Failure handling: a CONNECTIVITY failure (the catch
+with `!e.reachedServer`, or the GIS-never-loaded poll timeout) converts the preview into real
+offline mode in place via `tripsyPreviewBecomeOffline` (flags flipped, Travel View re-rendered so
+the strip re-words to Offline — no gate over the schedule); a failure that REACHED the server
+(expired sign-in, sharing) still shows the gate, since the reader has to act. The 12s watchdog
+paints nothing while a preview shows — the preview IS the fallback it existed to offer.
+`splashpreview_test.js` (runs the extracted lifecycle inside `with (ctx)` against a fake
+document); `offlinehang_test.js`'s catch-path pin was loosened for the new early-out.
 
 `tripsyTripsAreOffline` marks that the in-memory trips came from cache. It drives Travel View's
 `.tv-offline` strip — **"Offline — this schedule is not live. Last refreshed &lt;when&gt;"**, rendered

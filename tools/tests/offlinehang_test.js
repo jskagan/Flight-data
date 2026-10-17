@@ -44,7 +44,8 @@ assert(/_tripsySignedInDone = true;\s*\n\s*clearTimeout\(watchdog\);/.test(signI
 // The in-flight attempt must not clobber an entered offline view.
 assert(/if \(_tripsyOfflineEntered\) \{ clearTimeout\(watchdog\); return; \}/.test(signIn),
   'a sign-in limping to success AFTER offline Travel View was entered stops instead of overwriting the view');
-assert(/if \(_tripsyOfflineEntered\) return;\s*\n\s*\/\/ Surface the error/.test(signIn),
+// (The splash-preview early-out, 2026-10-12, sits between this return and the gate code.)
+assert(/if \(_tripsyOfflineEntered\) return;[\s\S]{0,900}\/\/ Surface the error/.test(signIn),
   'and a late FAILURE with offline already entered stays silent rather than painting the gate over the schedule');
 
 // ---- auto-open on Travel View devices ----

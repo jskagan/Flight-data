@@ -58,7 +58,7 @@ ${extractConst('TRIPSY_CUBE_NONE')}
 ${extractConst('TRIPSY_CUBE_FLIGHT_WORN')}
 ${['tripsyGarmentTypeKey','tripsyGarmentSkipsCube','tripsyGarmentGlyph','tripsyCubeById',
    'tripsyCubeName','tripsyCubesSorted','tripsyCubeTileHtml','tripsyCubeSlotLabel','tripsyCubeSlotGlyph',
-   'showTripsyCubeContents'].map(extractFn).join('\n')}
+   'tripsyCubeContentsMap', 'showTripsyCubeContents'].map(extractFn).join('\n')}
 
 const assert=(c,m)=>{console.log((c?'ok   ':'FAIL ')+m); if(!c) process.exitCode=1;};
 

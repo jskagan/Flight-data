@@ -9717,6 +9717,17 @@ function tripsyCubesForEntry(entry, packed) {
   for (let i = 0; i < packed; i++) out.push(typeof raw[i] === 'string' ? raw[i] : '');
   return out;
 }
+// The selection entry a page that does NOT edit cubes writes back: the cube ids it
+// loaded, ridden along unchanged and bounded by what is still packed. Every writer of
+// `driveData.tripsyTripWardrobe` replaces the WHOLE array, so a writer that omits `cubes`
+// erases every assignment made on Packing Status -- which is exactly what the Packing
+// List's save did until 2026-10-17 ("Why doesn't the app show which clothes are in which
+// packing cubes? I set that when I packed"). Filled slots lead (the stored shape is the
+// compacted list, see applyCubes), and a copy no longer packed drops its slot.
+function tripsyWardrobeCarryCubes(entry, cubes) {
+  const packed = Math.max(0, Math.min(entry.qty, entry.packed || 0));
+  return { ...entry, packed, cubes: (Array.isArray(cubes) ? cubes : []).filter(c => typeof c === 'string' && c).slice(0, packed) };
+}
 // A cube record by id, or null. Kept as its own helper because a DELETED cube is a
 // normal state here, not an error -- the copy stays packed and just loses its location.
 function tripsyCubeById(id) {
@@ -13905,6 +13916,13 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   // Legacy (category-less) picks are ignored -- the owner re-picks under this model.
   const sel = new Map();          // "id::tier::line" -> qty allocated to that line
   const packedByKey = new Map();  // "id::tier::line" -> packed (preserved across edits here)
+  // "id::tier::line" -> the per-copy cube list, carried EXACTLY like `packed`: this page
+  // never edits a cube, but persistChosen rewrites the whole selection array, so anything
+  // not carried here is erased by every pick -- which is how every cube assignment made on
+  // Packing Status used to vanish the moment a garment was selected or deselected here
+  // ("Why doesn't the app show which clothes are in which packing cubes? I set that when
+  // I packed," 2026-10-17). See tripsyWardrobeCarryCubes.
+  const cubesByKey = new Map();
   const selKey = (id, cat, line) => `${id}::${cat}::${line || ''}`;
   const parseSelKey = k => {
     const i = k.indexOf('::');
@@ -13916,6 +13934,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const k = selKey(e.id, e.category, e.line);
     sel.set(k, e.qty);
     packedByKey.set(k, e.packed);
+    cubesByKey.set(k, e.cubes || []);
   }
   // Copies of a garment allocated to any OTHER line (in this tier or another) --
   // available for `line` in `cat` = owned qty minus those.
@@ -13951,7 +13970,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const idx = (needLines[initialLine.tier] || []).findIndex(ln => ln.name === initialLine.lineName);
     if (idx >= 0) view = { mode: 'detail', tier: initialLine.tier, lineIndex: idx };
   }
-  const persistChosen = () => Store.setTripWardrobe(tripKey, [...sel].map(([k, qty]) => { const { id, category, line } = parseSelKey(k); return { id, category, line, qty, packed: Math.min(qty, packedByKey.get(k) || 0) }; }));
+  const persistChosen = () => Store.setTripWardrobe(tripKey, [...sel].map(([k, qty]) => { const { id, category, line } = parseSelKey(k); return tripsyWardrobeCarryCubes({ id, category, line, qty, packed: Math.min(qty, packedByKey.get(k) || 0) }, cubesByKey.get(k)); }));
   const persistGenerics = () => Store.setTripGenericGarments(tripKey, generics);
 
   const genericFilledFor = (tier, ln) => generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
@@ -14211,7 +14230,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       if (ln.flightWorn) {
         for (const k of [...sel.keys()]) {
           const { category: c, line } = parseSelKey(k);
-          if (c === view.tier && line === ln.name) { sel.delete(k); packedByKey.delete(k); }
+          if (c === view.tier && line === ln.name) { sel.delete(k); packedByKey.delete(k); cubesByKey.delete(k); }
         }
         persistChosen();
       }
@@ -14254,7 +14273,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const lnHere = (needLines[view.tier] || [])[view.lineIndex];
     if (!lnHere) return;
     const key = selKey(g.id, view.tier, lnHere.name);
-    if (sel.has(key)) { sel.delete(key); packedByKey.delete(key); } // deselect for THIS line
+    if (sel.has(key)) { sel.delete(key); packedByKey.delete(key); cubesByKey.delete(key); } // deselect for THIS line
     else {
       // Photoless placeholder -> the cap is what the LINE needs; a real garment -> owned
       // quantity minus copies already used on other lines.
@@ -14878,6 +14897,201 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
 // entries, so this is a different VIEW of the same data rather than a second copy that
 // could drift. Editing or deleting a cube here calls `onChanged` so the garment cards
 // behind it pick the change up.
+// cubeId -> Map(key -> {key, name, driveFileId, typeKey, group, count}) over a trip's
+// selection entries + generics: which copies sit in which cube. '' is the "cube not set"
+// bucket. Shared by the Cubes page and Garment Location so the two can never disagree
+// about what is where. A garment allocated across several tiers contributes each of its
+// entries, which is right: those are genuinely separate copies in the bag. Keyed by
+// garment ID rather than name so a drill-down can find each one's photo, and so two
+// wardrobe garments that happen to share a name stay separate. A garment that never goes
+// in a cube (a suit, a tie -- see tripsyGarmentSkipsCube) is skipped entirely: its entry
+// still carries a cubes array (tripsyNormalizeTripSelection pads every packed copy to a
+// slot, empty strings by construction), so without this a packed suit lands in the "Cube
+// not set" block, reading as a location you forgot to assign when there was never a cube
+// to assign.
+function tripsyCubeContentsMap(selEntries, generics, garmentById) {
+  const contents = new Map();
+  const add = (cubeId, item) => {
+    if (!contents.has(cubeId)) contents.set(cubeId, new Map());
+    const m = contents.get(cubeId);
+    const cur = m.get(item.key);
+    if (cur) cur.count += 1;
+    else m.set(item.key, { key: item.key, name: item.name, driveFileId: item.driveFileId, typeKey: item.typeKey, group: item.group, count: 1 });
+  };
+  for (const e of (selEntries || [])) {
+    const g = garmentById.get(e.id);
+    if (tripsyGarmentSkipsCube(g && g.name)) continue;
+    const name = (g && g.name) || 'Garment';
+    const item = { key: 'g:' + e.id, name, driveFileId: (g && g.driveFileId) || '', typeKey: tripsyGarmentTypeKey(name), group: (g && g.group) || '' };
+    for (const cid of (e.cubes || [])) add(cid || '', item);
+  }
+  for (const x of (generics || [])) {
+    if (tripsyGarmentSkipsCube(x.name, x.typeKey)) continue;
+    // A generic ("No Picture") line has no wardrobe record and so never has a photo --
+    // it renders its type glyph in the drill-down, exactly as it does everywhere else.
+    const name = x.name || 'Item';
+    const item = { key: 'x:' + name, name, driveFileId: '', typeKey: x.typeKey || tripsyGarmentTypeKey(name), group: '' };
+    for (const cid of (x.cubes || [])) add(cid || '', item);
+  }
+  return contents;
+}
+// The rows of the Garment Location page: every cube that actually holds something on
+// THIS trip (library order, so it matches the Cubes page), then the deliberate non-cube
+// locations and the unset bucket only when they hold something, then Laundry -- always,
+// since "what needs washing" is a location of its own. Pure, so the list can be tested.
+const TRIPSY_LOCATION_LAUNDRY = '__laundry__';
+function tripsyGarmentLocationRows(contents, cubes) {
+  const count = id => [...(contents.get(id) || new Map()).values()].reduce((n, it) => n + it.count, 0);
+  const rows = [];
+  for (const c of (cubes || [])) { const n = count(c.id); if (n > 0) rows.push({ id: c.id, label: tripsyCubeName(c), count: n, cube: c }); }
+  for (const [id, label] of [[TRIPSY_CUBE_NONE, 'No cube'], [TRIPSY_CUBE_FLIGHT_WORN, 'Wearing on the flight'], ['', 'Cube not set']]) {
+    const n = count(id); if (n > 0) rows.push({ id, label, count: n, cube: null });
+  }
+  rows.push({ id: TRIPSY_LOCATION_LAUNDRY, label: 'Laundry', count: null, cube: null });
+  return rows;
+}
+// The laundry day the Garment Location page asks about: the trip's own today while it is
+// in progress, its last day once it is over, and nothing before it starts (no wearing has
+// happened, so nothing can be dirty). Day keys are the guide's; `todayKey` is the trip's
+// local today (tripsyTravelViewTodayKey), never the device's.
+function tripsyGarmentLocationLaundryDay(dayKeys, todayKey) {
+  const keys = (dayKeys || []).filter(Boolean);
+  if (!keys.length || !todayKey) return null;
+  const first = keys[0], last = keys[keys.length - 1];
+  if (todayKey < first) return null;
+  return todayKey > last ? last : todayKey;
+}
+// Garments on the laundry row, merged per garment: tripsyLaundryItemsForDay splits one
+// garment into a "needed again" card and a "::nn" (not needed for the trip) card, a
+// distinction that matters when deciding what to wash but not when asking where a
+// garment IS -- here it is simply in the laundry, so the two halves add up.
+function tripsyGarmentLocationLaundryItems(items) {
+  const m = new Map();
+  for (const it of (items || [])) {
+    const key = String(it.key || '').replace(/::nn$/, '');
+    const cur = m.get(key);
+    if (cur) cur.count += it.count || 0;
+    else m.set(key, { key, name: it.name, driveFileId: it.driveFileId || '', typeKey: it.typeKey || '', group: it.group || '', count: it.count || 0 });
+  }
+  return [...m.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+// 👔 menu -> Garment Location ("pull up a list of each packing cube used on that trip
+// plus an option for Laundry. If the user selects a cube, show every garment in that
+// packing cube; if he selects Laundry, show all garments marked as needing cleaning,"
+// 2026-10-17). Read-only, any viewer: the SAME cube contents the Cubes page shows
+// (tripsyCubeContentsMap over the trip's live selection), and the SAME dirty-garment
+// judgement the Daily Dress Guide's laundry screen makes (tripsyLaundryItemsForDay), for
+// both people, as of the trip's own today. Contextual Close: a drill-down goes back to
+// the list, the list closes the page.
+async function showTripsyGarmentLocation(tripKey, tripName) {
+  let ov = document.getElementById('tw-garment-location-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tw-garment-location-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483140';
+  const title = `Garment Location${tripName ? ` — ${tripName}` : ''}`;
+  const shell = inner => `<div class="tw-modal-paper" style="max-width:560px;">${inner}</div>`;
+  const header = (h, sub) => `
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px;">
+      <div style="min-width:0;"><h2 style="margin:0; font-size:18px; overflow:hidden; text-overflow:ellipsis;">${h}</h2>${sub ? `<div style="font-size:12px; color:var(--muted);">${sub}</div>` : ''}</div>
+      <button class="tripsy-close-x" data-tw-location-close aria-label="Close" title="Close">&#10005;</button>
+    </div>`;
+  ov.innerHTML = shell(header(esc(title)) + `<div style="padding:16px 0; color:var(--muted);">Loading…</div>`);
+  ov.style.display = 'flex';
+  let view = { mode: 'list' };
+  const close = () => { ov.style.display = 'none'; ov.onclick = null; };
+  ov.onclick = e => { if (e.target.closest('[data-tw-location-close]') || e.target === ov) close(); };
+
+  const [garments, selectedRaw, genericRaw, guide] = await Promise.all([
+    Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey),
+  ]);
+  if (ov.style.display === 'none') return; // closed while loading
+  const garmentById = new Map((garments || []).map(g => [g.id, g]));
+  const selEntries = tripsyNormalizeTripSelection(selectedRaw);
+  const generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); const packed = Math.max(0, Math.min(qty, x.packed || 0)); return { ...x, qty, packed, cubes: tripsyCubesForEntry(x, packed) }; });
+  const contents = tripsyCubeContentsMap(selEntries, generics, garmentById);
+  const rows = tripsyGarmentLocationRows(contents, tripsyCubesSorted());
+  // Laundry is computed lazily, once -- it walks every garment's wear days.
+  let laundry = null;
+  const loadLaundry = async () => {
+    if (laundry) return laundry;
+    const dayKeys = ((guide && guide.days) || []).map(d => d.dayKey).filter(Boolean);
+    const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey) || null;
+    const todayKey = trip ? tripsyTravelViewTodayKey(trip, dayKeys[0] || null, dayKeys[dayKeys.length - 1] || null) : tripsyTodayDayKey();
+    const dayKey = tripsyGarmentLocationLaundryDay(dayKeys, todayKey);
+    const perPerson = {};
+    if (dayKey) {
+      for (const p of ['him', 'her']) {
+        try { perPerson[p] = tripsyGarmentLocationLaundryItems(await tripsyLaundryItemsForDay(tripKey, dayKey, p)); }
+        catch (e) { console.error('Garment Location laundry failed:', e); perPerson[p] = []; }
+      }
+    }
+    laundry = { dayKey, perPerson };
+    return laundry;
+  };
+  const cardHtml = it => `
+    <div class="tw-card">
+      <div class="tw-photo${it.driveFileId ? '' : ' tw-photo-glyph'}"${it.driveFileId ? ` data-tw-photo="${esc(it.driveFileId)}"` : ''}>${it.driveFileId ? '' : tripsyGarmentGlyph(it.typeKey, it.group, it.name)}</div>
+      <div class="tw-info"><div class="tw-name">${esc(it.name)}${it.count > 1 ? ` <span style="color:var(--muted);">×${it.count}</span>` : ''}</div></div>
+    </div>`;
+  const tile = row => row.cube
+    ? tripsyCubeTileHtml(row.cube, { size: 56 })
+    : `<div style="width:56px; height:56px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:24px; color:var(--muted); flex-shrink:0;">${row.id === TRIPSY_LOCATION_LAUNDRY ? '🧺' : (row.id === '' ? '?' : tripsyCubeSlotGlyph(row.id))}</div>`;
+  const render = async () => {
+    if (view.mode === 'cube') {
+      const row = rows.find(r => r.id === view.id);
+      const items = [...(contents.get(view.id) || new Map()).values()];
+      ov.innerHTML = shell(header(
+        `<span style="display:inline-flex; align-items:center; gap:10px;">${row ? tile(row) : ''}<span>${esc(row ? row.label : 'Cube')}</span></span>`,
+        `${items.reduce((n, it) => n + it.count, 0)} item${items.length === 1 && items[0].count === 1 ? '' : 's'}`)
+        + (items.length ? `<div class="tw-grid">${items.map(cardHtml).join('')}</div>` : `<div class="empty-state" style="margin-top:12px;">Nothing packed here.</div>`));
+      tripsyPaintCubePhotos(ov);
+      tripsyWardrobeLoadPhotos(ov);
+      return;
+    }
+    if (view.mode === 'laundry') {
+      ov.innerHTML = shell(header('🧺 Laundry', 'Garments that need cleaning') + `<div style="padding:16px 0; color:var(--muted);">Checking what has been worn…</div>`);
+      const { dayKey, perPerson } = await loadLaundry();
+      if (view.mode !== 'laundry' || ov.style.display === 'none') return;
+      let body;
+      if (!dayKey) body = `<div class="empty-state" style="margin-top:12px;">The trip hasn’t started yet — nothing has been worn, so nothing needs cleaning.</div>`;
+      else {
+        const sections = ['him', 'her'].map(p => {
+          const items = perPerson[p] || [];
+          if (!items.length) return '';
+          return `<div style="margin-bottom:16px;"><div class="tw-group-title" style="margin-bottom:6px;">${p === 'her' ? 'Hers' : 'His'}</div><div class="tw-grid">${items.map(cardHtml).join('')}</div></div>`;
+        }).join('');
+        body = sections || `<div class="empty-state" style="margin-top:12px;">Nothing needs cleaning as of ${esc(formatTripDateRange(dayKey, dayKey))}.</div>`;
+      }
+      ov.innerHTML = shell(header('🧺 Laundry', dayKey ? `Needing cleaning as of ${esc(formatTripDateRange(dayKey, dayKey))}` : '') + body);
+      tripsyWardrobeLoadPhotos(ov);
+      return;
+    }
+    const rowHtml = row => `
+      <button type="button" data-tw-location-open="${esc(row.id)}" style="display:flex; align-items:center; gap:12px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:10px; padding:8px 10px; margin:6px 0; cursor:pointer; color:var(--text);">
+        ${tile(row)}
+        <span style="flex:1; min-width:0; font-weight:700; font-size:14px; overflow:hidden; text-overflow:ellipsis;">${esc(row.label)}</span>
+        <span style="font-size:12px; color:var(--muted); white-space:nowrap;">${row.count == null ? 'needs cleaning' : `${row.count} item${row.count === 1 ? '' : 's'}`}</span>
+      </button>`;
+    const cubeRows = rows.filter(r => r.id !== TRIPSY_LOCATION_LAUNDRY);
+    ov.innerHTML = shell(header(esc(title), 'Where each packed garment is')
+      + (cubeRows.length ? cubeRows.map(rowHtml).join('') : `<div class="empty-state" style="margin:12px 0;">Nothing has been packed into a cube yet — mark garments packed on Packing Status to place them.</div>`)
+      + rowHtml(rows.find(r => r.id === TRIPSY_LOCATION_LAUNDRY)));
+    tripsyPaintCubePhotos(ov);
+  };
+  ov.onclick = e => {
+    if (e.target.closest('[data-tw-location-close]') || e.target === ov) {
+      if (view.mode !== 'list') { view = { mode: 'list' }; render(); return; }
+      close(); return;
+    }
+    const openEl = e.target.closest('[data-tw-location-open]');
+    if (openEl) {
+      const id = openEl.getAttribute('data-tw-location-open') || '';
+      view = id === TRIPSY_LOCATION_LAUNDRY ? { mode: 'laundry' } : { mode: 'cube', id };
+      render();
+    }
+  };
+  render();
+}
+
 function showTripsyCubeContents(getState, onChanged) {
   let ov = document.getElementById('tw-cube-contents-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tw-cube-contents-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -14894,35 +15108,7 @@ function showTripsyCubeContents(getState, onChanged) {
     // those are genuinely separate copies in the bag. Keyed by garment ID rather than
     // name so the drill-down can find each one's photo, and so two wardrobe garments
     // that happen to share a name stay separate.
-    const contents = new Map();
-    const add = (cubeId, item) => {
-      if (!contents.has(cubeId)) contents.set(cubeId, new Map());
-      const m = contents.get(cubeId);
-      const cur = m.get(item.key);
-      if (cur) cur.count += 1;
-      else m.set(item.key, { key: item.key, name: item.name, driveFileId: item.driveFileId, typeKey: item.typeKey, group: item.group, count: 1 });
-    };
-    // A garment that never goes in a cube (a suit, a tie -- see tripsyGarmentSkipsCube)
-    // is skipped entirely. Its entry still carries a cubes array, because
-    // tripsyNormalizeTripSelection pads every packed copy to a slot, and those slots are
-    // empty strings by construction -- so without this a packed suit lands in the
-    // "Cube not set" block, reading as a location you forgot to assign when in fact
-    // there was never a cube to assign.
-    for (const e of selEntries) {
-      const g = garmentById.get(e.id);
-      if (tripsyGarmentSkipsCube(g && g.name)) continue;
-      const name = (g && g.name) || 'Garment';
-      const item = { key: 'g:' + e.id, name, driveFileId: (g && g.driveFileId) || '', typeKey: tripsyGarmentTypeKey(name), group: (g && g.group) || '' };
-      for (const cid of (e.cubes || [])) add(cid || '', item);
-    }
-    for (const x of generics) {
-      if (tripsyGarmentSkipsCube(x.name, x.typeKey)) continue;
-      // A generic ("No Picture") line has no wardrobe record and so never has a photo --
-      // it renders its type glyph in the drill-down, exactly as it does everywhere else.
-      const name = x.name || 'Item';
-      const item = { key: 'x:' + name, name, driveFileId: '', typeKey: x.typeKey || tripsyGarmentTypeKey(name), group: '' };
-      for (const cid of (x.cubes || [])) add(cid || '', item);
-    }
+    const contents = tripsyCubeContentsMap(selEntries, generics, garmentById);
     const itemsIn = cubeId => [...(contents.get(cubeId) || new Map()).values()];
     const listFor = cubeId => {
       const items = itemsIn(cubeId);
@@ -30196,6 +30382,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
   // accounts for copies allocated to any OTHER line, in this tier or another.
   const sel = new Map();
   const packedByKey = new Map();
+  const cubesByKey = new Map(); // carried like `packed` -- see tripsyWardrobePackForTrip
   const selKey = (id, cat, line) => `${id}::${cat}::${line || ''}`;
   const parseSelKey = k => {
     const i = k.indexOf('::');
@@ -30207,6 +30394,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
     const k = selKey(e.id, e.category, e.line);
     sel.set(k, e.qty);
     packedByKey.set(k, e.packed);
+    cubesByKey.set(k, e.cubes || []);
   }
   const allocElsewhere = (id, cat, line) => { const self = selKey(id, cat, line); let s = 0; for (const [k, q] of sel) { if (k !== self && parseSelKey(k).id === id) s += q; } return s; };
   const availableFor = (g, cat, line) => (g.quantity || 1) - allocElsewhere(g.id, cat, line);
@@ -30215,7 +30403,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
   // reopening; events above are shared by both people, so only the pack re-renders.
   const isPerson = g => (g.person || 'him') === person;
   let lines = tripsyWardrobeNeedByTier(guide, person)[category] || [];
-  const persistChosen = () => Store.setTripWardrobe(guide.tripKey, [...sel].map(([k, qty]) => { const { id, category: c, line } = parseSelKey(k); return { id, category: c, line, qty, packed: Math.min(qty, packedByKey.get(k) || 0) }; }));
+  const persistChosen = () => Store.setTripWardrobe(guide.tripKey, [...sel].map(([k, qty]) => { const { id, category: c, line } = parseSelKey(k); return tripsyWardrobeCarryCubes({ id, category: c, line, qty, packed: Math.min(qty, packedByKey.get(k) || 0) }, cubesByKey.get(k)); }));
   const persistGenerics = () => Store.setTripGenericGarments(guide.tripKey, generics);
   const genericFilledFor = ln => generics.filter(x => (x.person || 'him') === person && x.category === category && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
 
@@ -30270,7 +30458,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
       if (lnForName && lnForName.flightWorn) {
         for (const k of [...sel.keys()]) {
           const { category: c, line } = parseSelKey(k);
-          if (c === category && line === name) { sel.delete(k); packedByKey.delete(k); }
+          if (c === category && line === name) { sel.delete(k); packedByKey.delete(k); cubesByKey.delete(k); }
         }
         persistChosen();
       }
@@ -30288,7 +30476,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
     const lineName = grid ? grid.getAttribute('data-tw-line') : '';
     if (!lineName) return;
     const key = selKey(g.id, category, lineName);
-    if (sel.has(key)) { sel.delete(key); packedByKey.delete(key); } // deselect for THIS line
+    if (sel.has(key)) { sel.delete(key); packedByKey.delete(key); cubesByKey.delete(key); } // deselect for THIS line
     else {
       const lnHere = (lines || []).find(l => l.name === lineName);
       const av = tripsyWardrobeGarmentIsPlaceholder(g)
@@ -35182,6 +35370,11 @@ async function renderTripsyEventsListImpl() {
       attireHasOutfits
         ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-key="${esc(trip.key)}"`, '✨', 'View Outfits', attireOutfitsGenHtml + `<span data-tripsy-outfits-warning="${esc(trip.key)}" class="tripsy-menu-flash" title="Your packing is complete, but these outfits were composed from an older plan" style="display:none; margin-left:auto; color:var(--amber); font-size:13px; line-height:1;">⚠️</span>`)
         : (attireOutfitsReady ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-mode="generate" data-key="${esc(trip.key)}"`, '✨', 'Generate Outfits', attireOutfitsGenHtml) : ''),
+      // Garment Location ("a list of each packing cube used on that trip plus an option
+      // for Laundry," 2026-10-17): read-only, any viewer, once a guide exists -- cube
+      // contents come from the packing selection and the laundry judgement from the
+      // guide's wear days. Sits directly before Refresh.
+      attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="location" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '📍', 'Garment Location') : '',
       isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="refresh" data-mode="${attireHasGuide ? 'refresh' : 'generate'}" data-key="${esc(trip.key)}"`, '🔄', attireHasGuide ? 'Refresh' : 'Generate') : '',
     ].join('');
     const attireButtonHtml = (!collapsed && (attireHasGuide || isOwner)) ? iconLabelButton(`
@@ -35617,6 +35810,7 @@ async function renderTripsyEventsListImpl() {
         case 'dressguide': go(); break;
         case 'pack': tripsyWardrobePackForTrip(key, name); break;
         case 'packlist': tripsyWardrobePackingList(key, name); break;
+        case 'location': showTripsyGarmentLocation(key, name); break;
         case 'outfits': { // per-person list; open on a person who can view/compose
           // GENERATE OUTFITS: ask, then compose in the background (2026-10-05).
           if (btn.dataset.mode === 'generate') {
@@ -38662,6 +38856,11 @@ async function renderTravelView(chosenTripKey) {
     if (!tripsyTripsAreOffline) return '';
     const info = tripsyOfflineCacheInfo || {};
     const when = formatSyncTimestamp(info.cachedAt || info.updatedAt);
+    // The splash preview (sign-in still running behind this view) is a stand-in, not
+    // offline mode -- say so, rather than claiming the device is offline.
+    if (_tripsySplashPreview && !_tripsyOfflineEntered) {
+      return `<div class="tv-offline">⏳ <span><b>Showing your saved schedule while the app signs in…</b> Last refreshed ${esc(when || 'earlier')}. It updates on its own once sign-in finishes.</span></div>`;
+    }
     return `<div class="tv-offline">📴 <span><b>Offline — this schedule is not live.</b> Last refreshed ${esc(when || 'earlier')}. Changes made since then won't be here; reconnect to update.</span></div>`;
   };
   const shell = (title, body) => wrap(`
@@ -39917,6 +40116,10 @@ async function completeSignIn() {
   // it -- a late success still lands normally unless offline was already entered.
   const watchdog = setTimeout(() => {
     if (_tripsySignedInDone || _tripsyOfflineEntered) return;
+    // The cached Travel View is already standing in for the splash (the 3s preview):
+    // nothing to paint -- the attempt keeps running, and a failure converts the
+    // preview to offline mode on its own.
+    if (_tripsySplashPreview) { console.log(`completeSignIn watchdog: still ${stage} after 12s -- the splash preview is already showing`); return; }
     console.log(`completeSignIn watchdog: still ${stage} after 12s -- offering the offline fallback`);
     document.getElementById('splash-screen').style.display = 'none';
     document.getElementById('signin-gate').style.display = 'flex';
@@ -39971,6 +40174,11 @@ async function completeSignIn() {
       err.reachedServer = true; // findDriveDataFile above succeeded -- this is a sharing/permissions problem, not connectivity
       throw err;
     }
+    // The real data is in hand: if the cached Travel View has been standing in for the
+    // splash (the 3s preview), dismantle it NOW -- before anything below could read the
+    // cached trips as live (the menu setup, Home, and above all runBackgroundSyncs'
+    // relay drains, which write). The painted view stays until the landing replaces it.
+    const wasSplashPreview = tripsyEndSplashPreview();
 
     // One-time cleanup: strip fields left over from the retired
     // Google-Calendar-based TripIt sync (superseded by Tripsy Trips). Only
@@ -40051,8 +40259,11 @@ async function completeSignIn() {
     stage = 'building the home screen';
     // A trips-only viewer never sees Home -- land them straight on My Trips
     // (the Travel View pref below can still override to Travel View).
+    // A device landing on Travel View straight from the splash preview skips the Home
+    // build: #app-root is already visible there, so Home would flash through before
+    // the Travel View landing below replaces it.
     if (isTripsOnlyUser) await navigate('tripsytrips');
-    else await renderHome();
+    else if (!(wasSplashPreview && loadTravelViewPref())) await renderHome();
 
     stage = 'refreshing menu counts';
     try {
@@ -40101,6 +40312,11 @@ async function completeSignIn() {
     // watchdog auto-opened it mid-attempt) has nothing left to surface -- the
     // gate would paint over the schedule they're reading.
     if (_tripsyOfflineEntered) return;
+    // Same for the splash preview, when the failure is connectivity: the cached
+    // schedule they are looking at simply becomes the offline view. A failure that
+    // REACHED the server (expired sign-in, a sharing problem) still needs the gate --
+    // the reader has to act -- so that case falls through to it below.
+    if (_tripsySplashPreview && !e.reachedServer) { tripsyPreviewBecomeOffline(); return; }
     // Surface the error on the actual sign-in screen -- if this failed
     // on the cached-token fast path (splash still showing, signin-gate
     // never shown yet), leaving the splash up forever with no visible
@@ -40188,6 +40404,7 @@ function initGoogleAuth() {
       // bounce back to the login screen right after entering credentials.
       document.getElementById('signin-gate').style.display = 'none';
       document.getElementById('splash-screen').style.display = 'flex';
+      tripsyArmSplashPreview(); // a splash shown again gets the same 3s clock
       completeSignIn();
     },
     // GIS's OWN failure notification -- without this registered, a silent
@@ -40254,6 +40471,7 @@ function initGoogleAuth() {
           else clearCachedToken();
           document.getElementById('signin-gate').style.display = 'none';
           document.getElementById('splash-screen').style.display = 'flex';
+          tripsyArmSplashPreview(); // a splash shown again gets the same 3s clock
           completeSignIn();
         },
         error_callback: () => {
@@ -40444,6 +40662,101 @@ async function enterOfflineMode(cached) {
   document.getElementById('app-root').style.display = '';
   try { await navigate(cached.trips ? 'travelview' : 'tripinsurance'); } catch (e) { console.error('Offline entry failed:', e); }
 }
+// ---- THE SPLASH PREVIEW: a splash up for more than 3s becomes the cached Travel View ----
+// "When the splash screen displays for more than 3 seconds, automatically switch to the
+// travel view displaying the cached view of the current trip or next upcoming trip if
+// not on a current trip" (2026-10-12). Sign-in is a chain of network calls (silent token
+// grant, Drive file lookup, a multi-MB data load) and on a travel device the splash
+// routinely sits for many seconds -- the schedule the reader wants is already on the
+// device in the offline trips cache. So `tripsyArmSplashPreview` starts a timer every
+// time the splash is shown (page load, and both "swap back to the splash" sign-in
+// callbacks); when it fires with sign-in still unfinished and the splash still up,
+// `enterSplashPreview` paints Travel View from the cache -- the same current-or-next
+// trip `tripsyTravelTripCandidates` always picks -- with a "saved schedule while the app
+// signs in" strip, while the sign-in attempt KEEPS RUNNING behind it. This is NOT
+// offline mode: it is a stand-in. `appOfflineMode` is set only so navigate() can't wander
+// into a view that needs live data, and the rail items it hides are REMEMBERED so
+// `tripsyEndSplashPreview` can put them back. The preview is dismantled by completeSignIn
+// the moment the real data file is loaded -- trips nulled so the live file is fetched,
+// flags cleared, rail restored -- which is deliberately BEFORE anything that could write
+// against trips (the relay drains in runBackgroundSyncs would otherwise apply edits onto
+// the cached copy and save stale data over live; the "never prune against an offline
+// cache" rule is the same hazard). A connectivity failure instead CONVERTS the preview
+// into real offline mode in place (`tripsyPreviewBecomeOffline`, no gate painted over
+// the schedule); a failure that reached the server (expired sign-in, a sharing problem)
+// still shows the gate, since the reader has to act. While a preview is showing, the
+// 12s watchdog and the GIS-never-loaded branch paint nothing -- the preview IS the
+// fallback they existed to offer.
+const TRIPSY_SPLASH_PREVIEW_MS = 3000;
+let _tripsySplashPreview = false;       // the cached Travel View is standing in for the splash
+let _tripsySplashPreviewTimer = null;
+let _tripsySplashPreviewHidden = [];    // rail elements hidden by the preview, to restore
+function tripsyArmSplashPreview() {
+  clearTimeout(_tripsySplashPreviewTimer);
+  _tripsySplashPreviewTimer = setTimeout(() => { tripsyMaybeShowSplashPreview().catch(e => console.error('splash preview failed (non-fatal):', e)); }, TRIPSY_SPLASH_PREVIEW_MS);
+}
+function tripsySplashVisible() {
+  const el = document.getElementById('splash-screen');
+  return !!el && el.style.display !== 'none';
+}
+async function tripsyMaybeShowSplashPreview() {
+  if (_tripsySignedInDone || _tripsyOfflineEntered || _tripsySplashPreview) return;
+  if (!tripsySplashVisible()) return; // the gate is up (a tap is needed) or the app is in
+  const tripsCache = await loadTripsyOfflineTrips();
+  if (!tripsCache) return; // nothing saved on this device yet -- the splash stays
+  // Re-check after the await: sign-in may have landed meanwhile.
+  if (_tripsySignedInDone || _tripsyOfflineEntered || _tripsySplashPreview || !tripsySplashVisible()) return;
+  await enterSplashPreview({ trips: tripsCache });
+}
+async function enterSplashPreview(cached) {
+  if (_tripsySplashPreview || _tripsyOfflineEntered || _tripsySignedInDone) return;
+  _tripsySplashPreview = true;
+  if (!driveData) driveData = { invoices: [], report: null, reservations: [], psBalanceDeductions: [], syncTimestamps: {} };
+  tripsyPsReservations = [];
+  tripsyDecryptedTrips = cached.trips.trips;
+  tripsyTripsAreOffline = true;
+  tripsyOfflineCacheInfo = { updatedAt: cached.trips.updatedAt, cachedAt: cached.trips.cachedAt };
+  appOfflineMode = true; // navigate() stays inside the cache-safe views until sign-in lands
+  _tripsySplashPreviewHidden = [];
+  document.querySelectorAll('.rail-item[data-view]').forEach(el => {
+    if (!OFFLINE_ALLOWED_VIEWS.has(el.dataset.view) && el.style.display !== 'none') { _tripsySplashPreviewHidden.push(el); el.style.display = 'none'; }
+  });
+  document.querySelectorAll('.rail-item[data-submenu-toggle], #passengers-submenu, #psreservations-submenu, #utilities-submenu, #ambiguities-submenu, #storage-health-banner').forEach(el => {
+    if (el.style.display !== 'none') { _tripsySplashPreviewHidden.push(el); el.style.display = 'none'; }
+  });
+  document.getElementById('splash-screen').style.display = 'none';
+  document.getElementById('signin-gate').style.display = 'none';
+  document.getElementById('app-root').style.display = '';
+  try { await navigate('travelview'); } catch (e) { console.error('Splash preview render failed:', e); }
+}
+// Called by completeSignIn the moment the real data file is in hand: the cached trips
+// are dropped so the live file is fetched, the navigate() lock lifts, and the rail
+// items the preview hid come back. The Travel View already painted stays on screen
+// until the landing navigate replaces it -- nothing blanks.
+function tripsyEndSplashPreview() {
+  if (!_tripsySplashPreview) return false;
+  _tripsySplashPreview = false;
+  clearTimeout(_tripsySplashPreviewTimer);
+  if (!_tripsyOfflineEntered) {
+    appOfflineMode = false;
+    tripsyDecryptedTrips = null;
+    tripsyTripsAreOffline = false;
+    tripsyOfflineCacheInfo = null;
+    for (const el of _tripsySplashPreviewHidden) el.style.display = '';
+  }
+  _tripsySplashPreviewHidden = [];
+  return true;
+}
+// A connectivity failure while the preview is showing: the stand-in becomes the real
+// offline view, in place -- same state, now permanent for this page's life, and the
+// strip re-words itself from "while the app signs in" to "Offline".
+async function tripsyPreviewBecomeOffline() {
+  if (!_tripsySplashPreview || _tripsyOfflineEntered) return;
+  _tripsyOfflineEntered = true;
+  _tripsySplashPreview = false;
+  _tripsySplashPreviewHidden = [];
+  try { if (currentView === 'travelview') await navigate('travelview'); } catch (e) { console.error('offline re-render failed (non-fatal):', e); }
+}
 async function maybeOfferOfflineMode(force = false) {
   try {
     if (_tripsyOfflineEntered || _tripsySignedInDone) return;
@@ -40503,11 +40816,17 @@ if ('serviceWorker' in navigator) {
 // Google Identity Services loads asynchronously (the <script> tag has
 // `defer`); poll briefly for it to be ready rather than assuming it's
 // already there by the time this script runs.
+// The splash is visible from the HTML itself -- start its 3s preview clock now.
+tripsyArmSplashPreview();
 (function waitForGoogleIdentity(triesLeft = 50) {
   if (window.google && window.google.accounts && window.google.accounts.oauth2) {
     initGoogleAuth();
   } else if (triesLeft > 0) {
     setTimeout(() => waitForGoogleIdentity(triesLeft - 1), 100);
+  } else if (_tripsySplashPreview) {
+    // The cached schedule is already on screen (the 3s preview beat this 5s poll) --
+    // it becomes the offline view; no gate painted over it.
+    tripsyPreviewBecomeOffline();
   } else {
     document.getElementById('splash-screen').style.display = 'none';
     document.getElementById('signin-gate').style.display = 'flex';
