@@ -1804,6 +1804,14 @@ step 4; git history has it if ever needed.
   `tripsyTravelViewTodayKey`; superseded the earlier hide-past-days-only rule on 2026-10-01). A washed
   day keeps its button regardless of how far past it is, since that's a record worth looking back at,
   not an instruction to follow.
+  **…and so does any day holding an UNWASHED bag** ("Keep the laundry button on any day with an
+  unwashed bag," 2026-10-18 — a bag gathered on Oct 18 and never marked washed became unreachable
+  once the trip's today moved to Oct 19: no button on its day, Travel View's Laundry opens today's
+  own empty bag, so its garments stayed dirty everywhere with no screen left to press Wash Now
+  from). `tripsyUnwashedLaundryBagsByDay(records, person)` (dayKey → copies, washed and empty
+  records excluded) feeds the button rule `washedToday || isToday || bagCount > 0`; such a day's
+  button reads "🧺 Laundry · N in bag" and opens the LIVE laundry screen, where the bag can be
+  added to or washed. `unwashedbag_test.js`.
   **`showTripsyWashedDay` shows the actual garment PHOTOS**, not a plain text list — the same
   `tw-grid`/`tw-card`/`tw-photo` shape every other garment display in the app uses (the outfit view,
   Packing Status, …), loaded through the same `tripsyWardrobeLoadPhotos`; a "No Picture" generic

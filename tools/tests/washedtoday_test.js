@@ -38,7 +38,7 @@ assert(/Store\.listTripsyLaundry\(guide\.tripKey\)\s*\n\s*\.filter\(r => r\.wash
 assert(/const washedToday = washedDayKeys\.has\(day\.dayKey\);/.test(guideRender), 'each day checks its own washed state');
 assert(/data-tripsy-laundry-washed="\$\{washedToday \? '1' : ''\}"/.test(guideRender),
   'the button carries the washed state as a data attribute for the click handler to read');
-assert(/\$\{washedToday \? 'Washed Today' : '🧺 Laundry'\}/.test(guideRender) && !/'Do Laundry Today'/.test(guideRender),
+assert(/\$\{washedToday \? 'Washed Today' : \(bagCount > 0 \? `🧺 Laundry · \$\{bagCount\} in bag` : '🧺 Laundry'\)\}/.test(guideRender) && !/'Do Laundry Today'/.test(guideRender),
   'THE FIX: the button label switches once a wash is confirmed for that day');
 
 // ---- the click handler branches on that attribute ----
@@ -116,7 +116,7 @@ assert(/tripsyWardrobeLoadPhotos\(ov\);/.test(washedDay), 'photos are actually l
 // ---- "only show it on the current day" (2026-10-01): today, or a day already washed ----
 assert(/const isToday = !!\(dgTodayKey && day\.dayKey === dgTodayKey\);/.test(guideRender),
   'each day checks whether it IS today, using the trip\'s own local today');
-assert(/const laundryBtn = \(isOwner && \(washedToday \|\| isToday\)\)/.test(guideRender),
+assert(/const laundryBtn = \(isOwner && \(washedToday \|\| isToday \|\| bagCount > 0\)\)/.test(guideRender),
   'THE ASK: the Laundry button shows on the current day only (plus any day already washed)');
 
 // ---- executed: the laundry-row visibility rule itself, against fixtures ----

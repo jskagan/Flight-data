@@ -11890,6 +11890,19 @@ function tripsyLaundryWearDebtStep(wearDebt, { washedQty, credited, wornToday, q
 // it runs out -- i.e. a day it is needed with nothing clean left. Only meaningful once a
 // wash has actually happened: before that, the guide's own "best day for laundry" advice
 // is what's on offer, and this would just restate the packing maths.
+// dayKey -> copies in a laundry bag that has been GATHERED but not washed, for one person.
+// An emptied bag is deleted rather than stored empty, so any surviving unwashed record with
+// a non-empty bag is one the owner still has to act on. Pure, so the guide's button rule
+// can be tested without a DOM.
+function tripsyUnwashedLaundryBagsByDay(records, person) {
+  const out = new Map();
+  for (const r of (records || [])) {
+    if (!r || r.washedAt || !r.dayKey || (r.person || 'him') !== person) continue;
+    const n = Object.values(r.bag || {}).reduce((a, v) => a + (Number(v) || 0), 0);
+    if (n > 0) out.set(r.dayKey, (out.get(r.dayKey) || 0) + n);
+  }
+  return out;
+}
 // The run-out bar's sentence, pure for the tests: the garment is on the day's wear
 // schedule but unavailable because it is dirty, plus the last day it was worn.
 function tripsyRunOutNoteText(name, lastWornDayKey) {
@@ -31179,6 +31192,12 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
     Store.listTripsyLaundry(guide.tripKey)
       .filter(r => r.washedAt && (r.person || 'him') === tripsyDressGuidePerson)
       .map(r => r.dayKey));
+  // A bag GATHERED but not yet washed keeps its day's button too ("Keep the laundry button
+  // on any day with an unwashed bag," 2026-10-18): the button used to show on today and
+  // washed days only, so a bag gathered yesterday and never marked washed became
+  // unreachable once the trip's today moved on -- its garments stayed dirty everywhere
+  // with no screen left to press Wash Now from. dayKey -> copies in the bag.
+  const unwashedBagByDay = tripsyUnwashedLaundryBagsByDay(Store.listTripsyLaundry(guide.tripKey), tripsyDressGuidePerson);
   // Ship-home boxes for this person, by day (planned or shipped).
   const shipHomeByDay = new Map(
     Store.listTripsyShipHome(guide.tripKey)
@@ -31249,8 +31268,9 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
       // Today" button wherever it falls -- a record to look back at, not an instruction.
       // No trip in progress (no today key) means no Laundry button anywhere.
       const isToday = !!(dgTodayKey && day.dayKey === dgTodayKey);
-      const laundryBtn = (isOwner && (washedToday || isToday))
-        ? `<button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn" data-tripsy-laundry-day="${esc(day.dayKey)}" data-tripsy-laundry-washed="${washedToday ? '1' : ''}">${washedToday ? 'Washed Today' : '🧺 Laundry'}</button>`
+      const bagCount = unwashedBagByDay.get(day.dayKey) || 0;
+      const laundryBtn = (isOwner && (washedToday || isToday || bagCount > 0))
+        ? `<button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn" data-tripsy-laundry-day="${esc(day.dayKey)}" data-tripsy-laundry-washed="${washedToday ? '1' : ''}">${washedToday ? 'Washed Today' : (bagCount > 0 ? `🧺 Laundry · ${bagCount} in bag` : '🧺 Laundry')}</button>`
         : '';
       // SHIP HOME ("put a ship-home indicator at a specific date", 2026-10-06): unlike
       // laundry, a parcel is PLANNED ahead, so every day not yet over offers the button
