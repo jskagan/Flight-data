@@ -48,6 +48,7 @@ const tripsyGarmentTypeBucket = g => ({ key: g.bucket || 'tops', label: 'Tops' }
 const tripsyAttirePackingGroupOf = g => g.group || 'tops';
 const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
 eval(['tripsyShipHomeQtyBefore', 'tripsyShipHomeSplit', 'tripsyShipHomeCandidates', 'tripsyShipHomeGoneIds',
+  'tripsyLaundryBagBaseCounts', 'tripsyLaundryReturnCredits', 'tripsyLaundryCreditOn', 'tripsyLaundryLastReturnDay', 'tripsyLaundryOutOn',
   'tripsyLaundryWearDebtStep', 'tripsyLaundryRunOutByDay', 'tripsyOutfitSwapCandidates', 'tripsyShipHomeConsolidationPlan', 'tripsyShipHomeSwapOptions'].map(extractFn).join('\n'));
 
 (async () => {
@@ -226,7 +227,7 @@ eval(['tripsyShipHomeQtyBefore', 'tripsyShipHomeSplit', 'tripsyShipHomeCandidate
   assert(/if \(shipped\) return; \/\/ read-only once it has gone/.test(screen), 'a shipped box is read-only');
   // Laundry: shipped copies are not there to wash.
   const laundryItems = extractFn('tripsyLaundryItemsForDay');
-  assert(/const qty = qtyPacked - tripsyShipHomeQtyBefore\(shipRecords, person, 'g:' \+ id, dayKey\);\s*\n\s*if \(qty <= 0\) continue;/.test(laundryItems), 'the laundry list drops shipped copies');
+  assert(/const qty = qtyPacked - tripsyShipHomeQtyBefore\(shipRecords, person, 'g:' \+ id, dayKey\)[^\n]*;\s*\n\s*if \(qty <= 0\) continue;/.test(laundryItems), 'the laundry list drops shipped copies');
   assert(/const qty = qtyPacked - tripsyShipHomeQtyBefore\(shipRecords, person, 'g:' \+ id, dayKey\);/.test(extractFn('tripsyLaundryFindAdjustments')), 'and so does the post-wash adjustment finder');
   // Outfits: shipped = lost, with its own wording, everywhere a lost garment is judged.
   const modal = extractFn('showTripsyOutfitModal');

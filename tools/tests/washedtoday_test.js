@@ -42,7 +42,7 @@ assert(/\$\{washedToday \? 'Washed Today' : \(bagCount > 0 \? `🧺 Laundry · \
   'THE FIX: the button label switches once a wash is confirmed for that day');
 
 // ---- the click handler branches on that attribute ----
-assert(/if \(el\.getAttribute\('data-tripsy-laundry-washed'\) === '1'\) \{ showTripsyWashedDay\(guide\.tripKey, dayKey, person\); return; \}/.test(guideRender),
+assert(/if \(el\.getAttribute\('data-tripsy-laundry-washed'\) === '1'\) \{ showTripsyWashedDay\(guide\.tripKey, dayKey, person, \{ collectDayKey: dayKey, onChanged: refreshLaundryInfo \}\); return; \}/.test(guideRender),
   'a washed day opens the read-only list instead of the dirty-items screen');
 assert(/showTripsyLaundryDay\(guide\.tripKey, dayKey, person, \{ onChanged: refreshLaundryInfo \}\);/.test(guideRender),
   'an unwashed day still opens the ordinary Do Laundry Today screen, unchanged');
@@ -50,7 +50,7 @@ assert(/showTripsyLaundryDay\(guide\.tripKey, dayKey, person, \{ onChanged: refr
 // ---- showTripsyWashedDay itself: read-only, merges the ::nn split, resolves names ----
 const washedDay = extractFn('showTripsyWashedDay');
 assert(/r\.dayKey === dayKey && r\.washedAt/.test(washedDay), 'finds the specific day\'s confirmed wash record');
-assert(/const base = key\.endsWith\('::nn'\) \? key\.slice\(0, -4\) : key;/.test(washedDay),
+assert(/const counts = tripsyLaundryBagBaseCounts\(record && record\.bag\);/.test(washedDay) && /const base = key\.endsWith\('::nn'\) \? key\.slice\(0, -4\) : key;/.test(extractFn('tripsyLaundryBagBaseCounts')),
   'merges a garment\'s "needed again" and "not needed" bag entries back into one line -- the split only mattered before washing');
 assert(/if \(key\.startsWith\('g:'\)\) \{\s*\n\s*const g = garmentById\.get\(key\.slice\(2\)\);\s*\n\s*return \{ name: \(g && g\.name\) \|\| 'Garment', driveFileId: g && g\.driveFileId \};/.test(washedDay),
   'a real wardrobe garment resolves to its name AND its photo -- THE ASK: show the individual garment images');
@@ -62,7 +62,7 @@ assert(!/data-laundry-wash\b/.test(washedDay) && !/data-laundry-pick\b/.test(was
 // THE ASK, explicitly: image cards, not a plain text list -- same grid/card/photo
 // classes every other garment display in the app uses, so a missing photo falls back
 // to the same glyph and the photos actually load via the same shared loader.
-assert(/<div class="tw-grid">\$\{items\.map\(it => `/.test(washedDay), 'renders as a photo-card grid');
+assert(/<div class="tw-grid">\$\{items\.map\(cardHtml\)\.join\(''\)\}<\/div>/.test(washedDay), 'renders as a photo-card grid');
 assert(/<div class="tw-photo" data-tw-photo="\$\{esc\(it\.driveFileId \|\| ''\)\}">\$\{it\.driveFileId \? '' : '👕'\}<\/div>/.test(washedDay),
   'each card shows the garment\'s real photo, falling back to the glyph when there is none');
 assert(/tripsyWardrobeLoadPhotos\(ov\);/.test(washedDay), 'photos are actually loaded, not just referenced by id');

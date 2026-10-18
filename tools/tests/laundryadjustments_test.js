@@ -81,6 +81,8 @@ assert(/if \(opts\.onChanged\) opts\.onChanged\(\);/.test(washBlock.slice(washBl
 // logic that's unique to this function.)
 (async () => {
   eval(extractFn('tripsyLaundryWearDebtStep').replace(/^function tripsyLaundryWearDebtStep/, 'var tripsyLaundryWearDebtStep = function'));
+  // Wash credits now land on the RETURN day (2026-10-18) -- the finder reads them through these helpers.
+  for (const h of ['tripsyLaundryBagBaseCounts', 'tripsyLaundryReturnCredits', 'tripsyLaundryCreditOn']) eval(extractFn(h).replace(new RegExp('^function ' + h), 'var ' + h + ' = function'));
   eval(findSrc.replace(/^async function tripsyLaundryFindAdjustments/, 'var tripsyLaundryFindAdjustments = async function'));
 
   const guide = { days: [{ dayKey: 'd1' }, { dayKey: 'd2' }, { dayKey: 'd3' }] };

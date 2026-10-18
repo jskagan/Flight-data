@@ -33,6 +33,9 @@ const tripsyWardrobeWearDaysFromLines = (g, p, lines) => ({ days: (wearByLine[li
 // assertion below -- all written against one-wear garments -- is unaffected.
 let limitByName = {};
 const tripsyWearsBeforeWash = (name) => (limitByName[name] !== undefined ? limitByName[name] : 1);
+${extractFn('tripsyLaundryBagBaseCounts')}
+${extractFn('tripsyLaundryReturnCredits')}
+${extractFn('tripsyLaundryCreditOn')}
 ${extractFn('tripsyLaundryWearDebtStep')}
 ${extractFn('tripsyLaundryRunOutByDay')}
 

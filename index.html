@@ -1406,6 +1406,8 @@
   .tripsy-dg-laundry-row { gap: 6px; flex-wrap: wrap; }
   /* Ship Home sits beside Laundry on the same row; a box already planned/shipped reads
      slate (a record), an offer stays amber like its neighbour. */
+  /* "Laundry back · N out" on the days after a wash whose garments are not all back yet. */
+  .tripsy-dg-collect-btn { background: rgba(227,164,56,0.14); border-color: var(--amber); color: var(--amber); }
   .tripsy-dg-ship-btn[data-tripsy-ship-state="planned"],
   .tripsy-dg-ship-btn[data-tripsy-ship-state="shipped"] { background: rgba(96,135,175,0.16); border-color: #7FA8CC; color: #7FA8CC; }
   .tripsy-dg-ship-btn[data-tripsy-ship-state="planned"]:hover,
@@ -3607,10 +3609,38 @@ const Store = {
       const rec = Store.getTripsyLaundryBag(tripKey, person, dayKey);
       if (!rec || !Object.keys(rec.bag || {}).length) return false;
       rec.washedAt = new Date().toISOString();
+      // Washed is not yet BACK ("add a button to later days for when I get the washed
+      // items back … After an item is confirmed received back, then update the dress
+      // guides to make those items available," 2026-10-18): the garments stay out until
+      // each is confirmed returned (markTripsyLaundryReturned). A record without this
+      // flag is a wash from before the rule and counts as returned on its wash day.
+      rec.awaitingReturn = true;
+      rec.returned = {};
       await persistDriveData();
       return true;
     } catch (e) {
       console.error('Store.washTripsyLaundryBag failed:', e);
+      return false;
+    }
+  },
+  // Confirms `qty` copies of one garment (BASE key -- the '::nn' half of a bag merges
+  // into it once washed) came back from the wash recorded on `washDayKey`, available
+  // from `returnDayKey` on. Optimistic: the record is updated in memory before the
+  // write, so the screen that called it can repaint at once. Capped at what went in.
+  async markTripsyLaundryReturned(tripKey, person, washDayKey, key, qty, returnDayKey) {
+    try {
+      const rec = Store.getTripsyLaundryBag(tripKey, person, washDayKey);
+      if (!rec || !rec.washedAt) return false;
+      const base = key.endsWith('::nn') ? key.slice(0, -4) : key;
+      const sent = tripsyLaundryBagBaseCounts(rec.bag).get(base) || 0;
+      if (!rec.returned) rec.returned = {};
+      const prev = rec.returned[base] || { qty: 0, dayKey: null };
+      const next = Math.max(0, Math.min(sent, (prev.qty || 0) + (Number(qty) || 0)));
+      rec.returned[base] = { qty: next, dayKey: returnDayKey || prev.dayKey || washDayKey };
+      await persistDriveData();
+      return true;
+    } catch (e) {
+      console.error('Store.markTripsyLaundryReturned failed:', e);
       return false;
     }
   },
@@ -11502,8 +11532,8 @@ async function tripsyShipHomeConsolidationPlan(tripKey, dayKey, person, excludeK
   const qtyById = new Map();
   for (const e of tripsyNormalizeTripSelection(selectedRaw)) qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
   const qtyLeft = id => (qtyById.get(id) || 0) - tripsyShipHomeQtyBefore(shipRecords, person, 'g:' + id, dayKey) - (excludeKeys.has('g:' + id) ? Infinity : 0);
-  const washes = Store.listTripsyLaundry(tripKey).filter(r => r.washedAt && (r.person || 'him') === person && r.dayKey);
-  const lastWashFor = id => washes.reduce((best, r) => (((r.bag || {})['g:' + id] || (r.bag || {})['g:' + id + '::nn']) && (!best || r.dayKey > best)) ? r.dayKey : best, null);
+  const returnCredits = tripsyLaundryReturnCredits(Store.listTripsyLaundry(tripKey), person);
+  const lastWashFor = id => tripsyLaundryLastReturnDay(returnCredits, 'g:' + id, null);
   const usable = g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g);
   // Working copy of every block's garments; wear days per garment from those copies.
   const plan = new Map((outfits.blocks || []).map(b => [b, (b.garmentIds || []).slice()]));
@@ -11577,8 +11607,8 @@ async function tripsyShipHomeSwapOptions(tripKey, block, currentGarmentId, perso
   const shipRecords = Store.listTripsyShipHome(tripKey);
   const qtyById = new Map();
   for (const e of tripsyNormalizeTripSelection(selectedRaw)) qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
-  const washes = Store.listTripsyLaundry(tripKey).filter(r => r.washedAt && (r.person || 'him') === person && r.dayKey);
-  const lastWashFor = id => washes.reduce((best, r) => (((r.bag || {})['g:' + id] || (r.bag || {})['g:' + id + '::nn']) && (!best || r.dayKey > best)) ? r.dayKey : best, null);
+  const returnCredits = tripsyLaundryReturnCredits(Store.listTripsyLaundry(tripKey), person);
+  const lastWashFor = id => tripsyLaundryLastReturnDay(returnCredits, 'g:' + id, null);
   const wearDaysOf = id => { const s = new Set(); for (const b of ((outfits && outfits.blocks) || [])) if ((b.garmentIds || []).includes(id) && (b.wornFromFlightDayKey || b.dayKey)) s.add(b.wornFromFlightDayKey || b.dayKey); return s; };
   const tierLabel = t => TRIPSY_ATTIRE_CATEGORY_LABEL[t] || t;
   const options = [];
@@ -11774,12 +11804,11 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
   // A garment is only dirty for the wears SINCE the last wash that included it -- washing
   // resets its clock, and per garment rather than globally, since a wash is a specific
   // bagful and not everything you own.
-  const washes = Store.listTripsyLaundry(tripKey)
-    .filter(r => r.washedAt && (r.person || 'him') === person && r.dayKey && r.dayKey <= dayKey);
-  // '::nn' is the "Not Needed for Trip" card's key suffix (see pushSplit) -- a wash
-  // that bagged copies under either key still resets this garment's clock.
-  const lastWashFor = key => washes.reduce((best, r) =>
-    (((r.bag || {})[key] || (r.bag || {})[key + '::nn']) && (!best || r.dayKey > best)) ? r.dayKey : best, null);
+  // The clock resets when the copies come BACK from the wash, not when they went in
+  // (tripsyLaundryReturnCredits -- a pre-returns wash counts as back on its wash day).
+  const laundryRecords = Store.listTripsyLaundry(tripKey);
+  const returnCredits = tripsyLaundryReturnCredits(laundryRecords, person);
+  const lastWashFor = key => tripsyLaundryLastReturnDay(returnCredits, key, dayKey);
   // One garment can genuinely straddle the two sections: with 3 shirts dirty and only
   // 2 more shirt-days on the schedule, washing 2 matters and the third is optional.
   // Dirty copies are fungible, so the split is COMPUTED: future wearings need
@@ -11811,7 +11840,8 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
   for (const [id, qtyPacked] of qtyById) {
     const g = byId.get(id);
     if (!g || !isPerson(g)) continue;
-    const qty = qtyPacked - tripsyShipHomeQtyBefore(shipRecords, person, 'g:' + id, dayKey);
+    // Copies away at the laundry on this day are neither clean nor here to re-bag.
+    const qty = qtyPacked - tripsyShipHomeQtyBefore(shipRecords, person, 'g:' + id, dayKey) - tripsyLaundryOutOn(laundryRecords, person, 'g:' + id, dayKey);
     if (qty <= 0) continue;
     const { days } = await tripsyWardrobeWearDays(tripKey, id, person);
     const since = lastWashFor('g:' + id);
@@ -11837,7 +11867,7 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
     const worn = Math.max(0, (days || []).filter(d => d.dayKey && d.dayKey <= dayKey && (!sinceX || d.dayKey > sinceX)).length
       - creditFor('x:' + (x.name || ''), sinceX));
     const limitX = tripsyWearsBeforeWash(x.name, x.typeKey, '');
-    const qtyX = Math.max(1, x.qty || 1) - tripsyShipHomeQtyBefore(shipRecords, person, 'x:' + (x.name || ''), dayKey);
+    const qtyX = Math.max(1, x.qty || 1) - tripsyShipHomeQtyBefore(shipRecords, person, 'x:' + (x.name || ''), dayKey) - tripsyLaundryOutOn(laundryRecords, person, 'x:' + (x.name || ''), dayKey);
     if (qtyX <= 0) continue;
     const dirtyX = tripsyDirtyCopies(worn, limitX, qtyX);
     if (!dirtyX) continue;
@@ -11890,6 +11920,81 @@ function tripsyLaundryWearDebtStep(wearDebt, { washedQty, credited, wornToday, q
 // it runs out -- i.e. a day it is needed with nothing clean left. Only meaningful once a
 // wash has actually happened: before that, the guide's own "best day for laundry" advice
 // is what's on offer, and this would just restate the packing maths.
+// A bag's counts per BASE key: the '::nn' ("Not Needed for Trip") half of a garment merges
+// into its base key -- once washed, both halves are the same copies coming back.
+function tripsyLaundryBagBaseCounts(bag) {
+  const m = new Map();
+  for (const [key, n] of Object.entries(bag || {})) {
+    const base = key.endsWith('::nn') ? key.slice(0, -4) : key;
+    m.set(base, (m.get(base) || 0) + (Number(n) || 0));
+  }
+  return m;
+}
+// When washed copies become AVAILABLE again -- the RETURN, not the wash ("after an item is
+// confirmed received back, then update the dress guides to make those items available,"
+// 2026-10-18). One credit per garment per wash: `{washDayKey, dayKey, key, qty}` where `key`
+// is the base key and `dayKey` is the day the copies came back. A wash recorded before
+// returns existed (no `awaitingReturn`) is credited in full on its wash day, exactly as
+// before; a wash awaiting return credits only what has been confirmed, on the day it was.
+function tripsyLaundryReturnCredits(records, person) {
+  const out = [];
+  for (const r of (records || [])) {
+    if (!r || !r.washedAt || !r.dayKey || (r.person || 'him') !== person) continue;
+    const sent = tripsyLaundryBagBaseCounts(r.bag);
+    if (!r.awaitingReturn) {
+      for (const [key, qty] of sent) if (qty > 0) out.push({ washDayKey: r.dayKey, dayKey: r.dayKey, key, qty });
+      continue;
+    }
+    for (const [key, ret] of Object.entries(r.returned || {})) {
+      const qty = Math.min(sent.get(key) || 0, Number(ret && ret.qty) || 0);
+      if (qty > 0) out.push({ washDayKey: r.dayKey, dayKey: (ret && ret.dayKey) || r.dayKey, key, qty });
+    }
+  }
+  return out;
+}
+// Copies of `key` credited back ON `dayKey` (the walks' per-day wash credit).
+function tripsyLaundryCreditOn(credits, key, dayKey) {
+  const base = key.endsWith('::nn') ? key.slice(0, -4) : key;
+  return (credits || []).filter(c => c.key === base && c.dayKey === dayKey).reduce((n, c) => n + c.qty, 0);
+}
+// The latest day `key` came back from a wash on or before `uptoDayKey` (null = never) --
+// the "clock reset" the laundry list and ship-home maths key on.
+function tripsyLaundryLastReturnDay(credits, key, uptoDayKey) {
+  const base = key.endsWith('::nn') ? key.slice(0, -4) : key;
+  return (credits || []).filter(c => c.key === base && (!uptoDayKey || c.dayKey <= uptoDayKey))
+    .reduce((best, c) => (!best || c.dayKey > best ? c.dayKey : best), null);
+}
+// Washes still awaiting return, for one person: washDayKey -> { total, byKey: Map(base key
+// -> copies not yet back) }. Only awaiting-return washes count; a fully returned wash drops
+// out, which is what retires the "Laundry back" button on the later days.
+function tripsyLaundryOutstandingByWash(records, person) {
+  const out = new Map();
+  for (const r of (records || [])) {
+    if (!r || !r.washedAt || !r.awaitingReturn || !r.dayKey || (r.person || 'him') !== person) continue;
+    const byKey = new Map();
+    let total = 0;
+    for (const [key, sent] of tripsyLaundryBagBaseCounts(r.bag)) {
+      const back = Math.min(sent, Number((r.returned || {})[key] && r.returned[key].qty) || 0);
+      const left = sent - back;
+      if (left > 0) { byKey.set(key, left); total += left; }
+    }
+    if (total > 0) out.set(r.dayKey, { total, byKey });
+  }
+  return out;
+}
+// Copies of `key` away at the laundry ON `dayKey`: washed on or before it, not yet back by it.
+function tripsyLaundryOutOn(records, person, key, dayKey) {
+  const base = key.endsWith('::nn') ? key.slice(0, -4) : key;
+  let n = 0;
+  for (const r of (records || [])) {
+    if (!r || !r.washedAt || !r.awaitingReturn || !r.dayKey || r.dayKey > dayKey || (r.person || 'him') !== person) continue;
+    const sent = tripsyLaundryBagBaseCounts(r.bag).get(base) || 0;
+    const ret = (r.returned || {})[base];
+    const back = (ret && ret.dayKey && ret.dayKey <= dayKey) ? Math.min(sent, Number(ret.qty) || 0) : 0;
+    n += Math.max(0, sent - back);
+  }
+  return n;
+}
 // dayKey -> copies in a laundry bag that has been GATHERED but not washed, for one person.
 // An emptied bag is deleted rather than stored empty, so any surviving unwashed record with
 // a non-empty bag is one the owner still has to act on. Pure, so the guide's button rule
@@ -11923,11 +12028,12 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
     Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey),
   ]);
   const dayKeys = ((guide && guide.days) || []).map(d => d.dayKey).filter(Boolean);
-  const washedOn = (key, dayKey) => washes
-    .filter(r => r.dayKey === dayKey)
-    // '::nn' = copies bagged from the "Not Needed for Trip" card; once washed they are
-    // clean stock like any other, so the projection must count them returning.
-    .reduce((n, r) => n + ((r.bag || {})[key] || 0) + ((r.bag || {})[key + '::nn'] || 0), 0);
+  // Clean stock returns on the day the copies come BACK, not the wash day -- until a
+  // garment is confirmed received it stays dirty-and-away in this walk, which is exactly
+  // what keeps it off the day's available list (tripsyLaundryReturnCredits merges the
+  // '::nn' half into its base key, so both halves of a garment come back together).
+  const returnCredits = tripsyLaundryReturnCredits(washes, person);
+  const washedOn = (key, dayKey) => tripsyLaundryCreditOn(returnCredits, key, dayKey);
   // THE BUG JUST REPORTED: "Not Dirty" forgives wearings on the day-by-day wash list
   // (tripsyLaundryItemsForDay's creditFor), but this SEPARATE forward projection never
   // consulted the credit at all -- so a garment marked Not Dirty today still projected
@@ -12011,8 +12117,8 @@ async function tripsyLaundryFindAdjustments(tripKey, person, guide) {
   const notDirty = Store.listLaundryNotDirty(tripKey).filter(r => (r.person || 'him') === person && r.dayKey);
   const [garments, selectedRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
   const dayKeys = ((guide && guide.days) || []).map(d => d.dayKey).filter(Boolean);
-  const washedOn = (key, dayKey) => washes.filter(r => r.dayKey === dayKey)
-    .reduce((n, r) => n + ((r.bag || {})[key] || 0) + ((r.bag || {})[key + '::nn'] || 0), 0);
+  const returnCredits = tripsyLaundryReturnCredits(washes, person); // credited on the RETURN day, as in tripsyLaundryRunOutByDay
+  const washedOn = (key, dayKey) => tripsyLaundryCreditOn(returnCredits, key, dayKey);
   const creditedOn = (key, dayKey) => notDirty.filter(r => r.dayKey === dayKey && (r.key === key || r.key === key + '::nn'))
     .reduce((n, r) => n + (r.count || 0), 0);
   const byId = new Map((garments || []).map(g => [g.id, g]));
@@ -12324,9 +12430,14 @@ async function showTripsyLaundryDay(tripKey, dayKey, person, opts = {}) {
 // shows this READ-ONLY list of what went in, rather than reopening the dirty-items
 // screen (there's nothing left to gather; the wash already happened). Reuses the same
 // overlay node as showTripsyLaundryDay since the two are never open at once.
-async function showTripsyWashedDay(tripKey, dayKey, person) {
+// `opts.collectDayKey` is the day the owner is confirming returns FROM (the later day's
+// "Laundry back" button, or the wash day's own "Washed Today"); `opts.onChanged` fires
+// after each confirmation so the guide behind recomputes availability.
+async function showTripsyWashedDay(tripKey, dayKey, person, opts = {}) {
   let ov = document.getElementById('tripsy-laundry-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-laundry-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  // Below tripsyWardrobeChoosePackedCount (2147483200), which the Received button opens
+  // for a multi-copy garment -- the documented z-index trap.
   ov.style.zIndex = '2147483120';
   const heading = `Washed — ${tripsyDayHeaderLabel(dayKey)}`;
   const record = (driveData.tripsyLaundry || [])
@@ -12336,11 +12447,14 @@ async function showTripsyWashedDay(tripKey, dayKey, person) {
   // The bag's '::nn' suffix (the "Not Needed for Trip" card) only mattered while
   // deciding what to wash -- once it's actually washed, both halves of one garment
   // are the same result, so they're merged back to one line here.
-  const counts = new Map();
-  for (const [key, n] of Object.entries((record && record.bag) || {})) {
-    const base = key.endsWith('::nn') ? key.slice(0, -4) : key;
-    counts.set(base, (counts.get(base) || 0) + (n || 0));
-  }
+  const counts = tripsyLaundryBagBaseCounts(record && record.bag);
+  // RETURNS ("open up the list of items I sent to wash so I can check them off
+  // individually to confirm I got them back," 2026-10-18): a wash awaiting return shows,
+  // per garment, how many are back and a Received button for the rest; a wash from
+  // before returns existed is already available and shows the plain list.
+  const awaiting = !!(record && record.awaitingReturn);
+  const collectDayKey = opts.collectDayKey || dayKey;
+  const returnedOf = key => (record && record.returned && record.returned[key]) || null;
   // A real wardrobe garment carries its own photo; a "No Picture" generic (an "x:"-keyed
   // entry, never a wardrobe record) has none and falls back to the plain glyph, same as
   // every other garment-card grid in the app.
@@ -12352,23 +12466,62 @@ async function showTripsyWashedDay(tripKey, dayKey, person) {
     if (key.startsWith('x:')) return { name: key.slice(2) || 'Item', driveFileId: null };
     return { name: key, driveFileId: null };
   };
-  const items = [...counts.entries()].map(([key, count]) => ({ ...itemFor(key), count })).filter(it => it.count > 0);
+  const items = [...counts.entries()].map(([key, count]) => {
+    const ret = returnedOf(key);
+    const back = awaiting ? Math.min(count, Number(ret && ret.qty) || 0) : count;
+    return { key, ...itemFor(key), count, back, backDayKey: ret && ret.dayKey, left: count - back };
+  }).filter(it => it.count > 0);
+  const outstanding = items.reduce((n, it) => n + it.left, 0);
+  const cardHtml = it => {
+    const status = !awaiting ? ''
+      : it.left === 0 ? `<div class="tw-meta" style="color:var(--home-green); font-weight:700;">✓ Back${it.backDayKey ? ` · ${esc(tripsyDayHeaderLabel(it.backDayKey))}` : ''}</div>`
+      : it.back > 0 ? `<div class="tw-meta" style="color:var(--amber);">${it.back} back · ${it.left} still out</div>`
+      : `<div class="tw-meta" style="color:var(--muted);">Still at the laundry</div>`;
+    const btn = (awaiting && isOwner && it.left > 0)
+      ? `<div class="tw-actions"><button class="btn primary" data-laundry-received="${esc(it.key)}" style="font-size:12px; padding:4px 10px;">✓ Received${it.left > 1 ? ` (${it.left})` : ''}</button></div>`
+      : '';
+    return `
+            <div class="tw-card" style="position:relative;">
+              <div class="tw-photo" data-tw-photo="${esc(it.driveFileId || '')}">${it.driveFileId ? '' : '👕'}</div>
+              <div class="tw-info"><div class="tw-name">${esc(it.name)}</div>${it.count > 1 ? `<div class="tw-meta">×${it.count}</div>` : ''}${status}</div>
+              ${btn}
+            </div>`;
+  };
+  const subtitle = !awaiting || !items.length ? ''
+    : outstanding > 0
+      ? `<div style="font-size:12.5px; color:var(--muted); margin:-6px 0 10px;">${outstanding} piece${outstanding === 1 ? '' : 's'} still out — tap <b>Received</b> as they come back${collectDayKey !== dayKey ? ` (recorded for ${esc(tripsyDayHeaderLabel(collectDayKey))})` : ''}. A garment is available again from the day it is received.</div>`
+      : `<div style="font-size:12.5px; color:var(--home-green); margin:-6px 0 10px;">Everything from this wash is back.</div>`;
   ov.innerHTML = `
     <div class="tw-modal-paper tw-wide">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
         <h2 style="margin:0; font-size:18px; min-width:0; overflow:hidden; text-overflow:ellipsis;">${esc(heading)}</h2>
         <button class="tripsy-close-x" data-laundry-close aria-label="Close" title="Close">&#10005;</button>
       </div>
+      ${subtitle}
       ${items.length
-        ? `<div class="tw-grid">${items.map(it => `
-            <div class="tw-card">
-              <div class="tw-photo" data-tw-photo="${esc(it.driveFileId || '')}">${it.driveFileId ? '' : '👕'}</div>
-              <div class="tw-info"><div class="tw-name">${esc(it.name)}</div>${it.count > 1 ? `<div class="tw-meta">×${it.count}</div>` : ''}</div>
-            </div>`).join('')}</div>`
+        ? `<div class="tw-grid">${items.map(cardHtml).join('')}</div>`
         : `<div style="padding:12px 0; color:var(--muted);">Nothing recorded for this wash.</div>`}
     </div>`;
   ov.style.display = 'flex';
-  ov.onclick = e => { if (e.target === ov || e.target.closest('[data-laundry-close]')) { ov.style.display = 'none'; ov.onclick = null; } };
+  ov.onclick = async e => {
+    if (e.target === ov || e.target.closest('[data-laundry-close]')) { ov.style.display = 'none'; ov.onclick = null; return; }
+    const rb = e.target.closest('[data-laundry-received]');
+    if (!rb) return;
+    e.stopPropagation();
+    const it = items.find(x => x.key === rb.getAttribute('data-laundry-received'));
+    if (!it || it.left <= 0) return;
+    let n = 1;
+    if (it.left > 1) {
+      n = await tripsyWardrobeChoosePackedCount(it.name, it.left, it.left, { title: 'How many came back?', subtitle: 'still out' });
+      if (n == null || n <= 0) return;
+    }
+    // Optimistic (the record mutates before the write); the guide behind recomputes, and
+    // this screen rebuilds from the recorded truth rather than patching the card.
+    const p = Store.markTripsyLaundryReturned(tripKey, person, dayKey, it.key, n, collectDayKey);
+    if (opts.onChanged) { try { opts.onChanged(); } catch (err) { console.error(err); } }
+    showTripsyWashedDay(tripKey, dayKey, person, opts);
+    p.then(ok => { if (!ok) toast('Could not save that return — please try again.', 'error'); });
+  };
   tripsyWardrobeLoadPhotos(ov);
 }
 
@@ -31198,6 +31351,10 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
   // unreachable once the trip's today moved on -- its garments stayed dirty everywhere
   // with no screen left to press Wash Now from. dayKey -> copies in the bag.
   const unwashedBagByDay = tripsyUnwashedLaundryBagsByDay(Store.listTripsyLaundry(guide.tripKey), tripsyDressGuidePerson);
+  // Washes whose garments are not all BACK yet (washDayKey -> {total, byKey}): every day
+  // after such a wash offers a "Laundry back" button until everything is confirmed
+  // received ("add a button to later days for when I get the washed items back," 2026-10-18).
+  const outstandingByWash = tripsyLaundryOutstandingByWash(Store.listTripsyLaundry(guide.tripKey), tripsyDressGuidePerson);
   // Ship-home boxes for this person, by day (planned or shipped).
   const shipHomeByDay = new Map(
     Store.listTripsyShipHome(guide.tripKey)
@@ -31282,8 +31439,15 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
       const shipBtn = (isOwner && (shipRec || !dayIsPast))
         ? `<button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn tripsy-dg-ship-btn" data-tripsy-ship-day="${esc(day.dayKey)}" data-tripsy-ship-state="${shipRec ? (shipRec.shippedAt ? 'shipped' : 'planned') : ''}">${shipRec ? (shipRec.shippedAt ? `📦 Shipped Home · ${shipCount}` : `📦 Shipping Home · ${shipCount}`) : '📦 Ship Home'}</button>`
         : '';
-      const laundryRow = (i === 0 && (laundryBtn || shipBtn))
-        ? `<div class="tripsy-dg-laundry-row">${shipBtn}${laundryBtn}</div>`
+      // One "Laundry back" button per outstanding wash dated BEFORE this day (an owner
+      // confirms returns from the day they happen; the wash day's own "Washed Today"
+      // button covers a same-day return).
+      const collectBtns = isOwner ? [...outstandingByWash.entries()]
+        .filter(([washDay]) => washDay < day.dayKey)
+        .map(([washDay, o]) => `<button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn tripsy-dg-collect-btn" data-tripsy-laundry-collect="${esc(washDay)}" data-tripsy-collect-day="${esc(day.dayKey)}" title="Confirm what came back from the ${esc(tripsyDayHeaderLabel(washDay))} wash">🧺 Laundry back · ${o.total} out</button>`)
+        .join('') : '';
+      const laundryRow = (i === 0 && (laundryBtn || shipBtn || collectBtns))
+        ? `<div class="tripsy-dg-laundry-row">${shipBtn}${laundryBtn}${collectBtns}</div>`
         : '';
       const leadIn = (leadInText == null ? '' : (hasOutfit
         ? `<div class="tripsy-attire-dressguide-instruction tripsy-attire-dressguide-instruction--outfit" role="button" tabindex="0" data-tripsy-outfit-block="${esc(ev.id)}" title="Tap to see the outfit for this block">${leadInText}<span class="tripsy-attire-outfit-cue">👔 See outfit</span></div>`
@@ -31383,8 +31547,17 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
       const dayKey = el.getAttribute('data-tripsy-laundry-day');
       // Already washed today -- a read-only look at what went in, not the dirty-items
       // screen (there's nothing left to gather; Wash Now already happened).
-      if (el.getAttribute('data-tripsy-laundry-washed') === '1') { showTripsyWashedDay(guide.tripKey, dayKey, person); return; }
+      if (el.getAttribute('data-tripsy-laundry-washed') === '1') { showTripsyWashedDay(guide.tripKey, dayKey, person, { collectDayKey: dayKey, onChanged: refreshLaundryInfo }); return; }
       showTripsyLaundryDay(guide.tripKey, dayKey, person, { onChanged: refreshLaundryInfo });
+    });
+  });
+  // "Laundry back" on a later day: the wash's item list, confirming returns as of THAT day.
+  content.querySelectorAll('[data-tripsy-laundry-collect]').forEach(el => {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      showTripsyWashedDay(guide.tripKey, el.getAttribute('data-tripsy-laundry-collect'), person, {
+        collectDayKey: el.getAttribute('data-tripsy-collect-day'), onChanged: refreshLaundryInfo,
+      });
     });
   });
   content.querySelectorAll('[data-tripsy-ship-day]').forEach(el => {

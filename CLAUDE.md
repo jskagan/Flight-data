@@ -1812,6 +1812,33 @@ step 4; git history has it if ever needed.
   records excluded) feeds the button rule `washedToday || isToday || bagCount > 0`; such a day's
   button reads "🧺 Laundry · N in bag" and opens the LIVE laundry screen, where the bag can be
   added to or washed. `unwashedbag_test.js`.
+- **A wash is not BACK until each garment is confirmed received — and only then is it available
+  again** ("After I select wash now, add a button to later days for when I get the washed items
+  back. When I select that button, open up the list of items I sent to wash so I can check them off
+  individually to confirm I got them back. After an item is confirmed received back, then update the
+  dress guides to make those items available," 2026-10-18). **Data**: `Store.washTripsyLaundryBag`
+  now also stamps `awaitingReturn: true, returned: {}` on the record; `Store.markTripsyLaundryReturned
+  (tripKey, person, washDayKey, key, qty, returnDayKey)` accumulates `returned[baseKey] = {qty,
+  dayKey}` (the `::nn` half merges into its base key via `tripsyLaundryBagBaseCounts`; capped at what
+  went in; optimistic). A record WITHOUT `awaitingReturn` is a wash from before the rule and counts
+  as returned on its wash day — no migration, nothing already clean turns dirty. **Availability**:
+  every reader of wash credits goes through `tripsyLaundryReturnCredits(records, person)` (one
+  `{washDayKey, dayKey, key, qty}` per garment per wash, `dayKey` = the RETURN day) —
+  `tripsyLaundryRunOutByDay` and `tripsyLaundryFindAdjustments` credit `tripsyLaundryCreditOn` on
+  that day (so an unreturned garment stays dirty-and-away in the walk, exactly what keeps it off
+  the day's available list), `tripsyLaundryItemsForDay` resets a garment's clock with
+  `tripsyLaundryLastReturnDay` and subtracts copies still away (`tripsyLaundryOutOn`) from its pile
+  so they are never re-bagged, and both ship-home readers key on the return day. **UI**:
+  `tripsyLaundryOutstandingByWash` (washDayKey → `{total, byKey}`, awaiting-return washes only)
+  puts an amber **"🧺 Laundry back · N out"** button (`data-tripsy-laundry-collect`, one per
+  outstanding wash dated BEFORE the day) on every later day until everything is back; it opens
+  `showTripsyWashedDay(tripKey, washDayKey, person, {collectDayKey, onChanged})` — the wash's item
+  list, each card showing back/still-out and a **✓ Received** button (several copies ask "How many
+  came back?") — recording the return as of the day the button was pressed from; the wash day's own
+  "Washed Today" passes itself as `collectDayKey`, so a same-day return is confirmable too. Each
+  confirmation fires `onChanged` → `refreshLaundryInfo`, so the run-out bar and buttons repaint.
+  Travel View's laundry-suggestion retirement still keys on `washedAt` (the wash happened).
+  `laundryreturn_test.js`.
   **`showTripsyWashedDay` shows the actual garment PHOTOS**, not a plain text list — the same
   `tw-grid`/`tw-card`/`tw-photo` shape every other garment display in the app uses (the outfit view,
   Packing Status, …), loaded through the same `tripsyWardrobeLoadPhotos`; a "No Picture" generic

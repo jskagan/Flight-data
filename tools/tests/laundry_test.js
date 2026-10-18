@@ -39,6 +39,10 @@ ${(html.match(/const TRIPSY_WEARS_BEFORE_WASH = \{[\s\S]*?\};/) || [''])[0]}
 ${(html.match(/const TRIPSY_WEARS_BEFORE_WASH_BY_GROUP = \{[\s\S]*?\};/) || [''])[0]}
 ${extractFn('tripsyWearsBeforeWash')}
 ${extractFn('tripsyDirtyCopies')}
+${extractFn('tripsyLaundryBagBaseCounts')}
+${extractFn('tripsyLaundryReturnCredits')}
+${extractFn('tripsyLaundryLastReturnDay')}
+${extractFn('tripsyLaundryOutOn')}
 ${extractFn('tripsyLaundryItemsForDay')}
 
 const G = (id, name, person, driveFileId) => ({ id, name, person, driveFileId });

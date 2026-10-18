@@ -107,7 +107,7 @@ assert(/if \(scrollToEventId\)[\s\S]{0,120}else if \(scrollToDayKey\)[\s\S]{0,80
 // ---- "Do Laundry Today" ----
 assert(/data-tripsy-laundry-day="\$\{esc\(day\.dayKey\)\}"/.test(html), 'the button carries its day');
 const lb = html.slice(html.indexOf('const laundryBtn = '), html.indexOf('const laundryRow = ') + 200);
-assert(/const laundryBtn = \(isOwner && /.test(lb) && /const laundryRow = \(i === 0 && \(laundryBtn \|\| shipBtn\)\)/.test(lb),
+assert(/const laundryBtn = \(isOwner && /.test(lb) && /const laundryRow = \(i === 0 && \(laundryBtn \|\| shipBtn \|\| collectBtns\)\)/.test(lb),
   'only after the day\'s FIRST instruction box, and only for the owner');
 // It is OUTSIDE the instruction bar now: its own row, appended after whichever shape of
 // bar was emitted, so neither variant contains it.
@@ -119,7 +119,7 @@ assert(!/dressguide-instruction--wide/.test(html),
   'so the stretch-the-bar variant is gone with it');
 // Nothing above it is a tap target now, but a bubble would still reach the outfit bar's
 // handler on the way up, so the guard stays.
-const lw = html.slice(html.indexOf("[data-tripsy-laundry-day]"), html.indexOf("[data-tripsy-laundry-day]") + 800);
+const lw = html.slice(html.indexOf("[data-tripsy-laundry-day]"), html.indexOf("[data-tripsy-laundry-day]") + 1200);
 assert(/e\.stopPropagation\(\)/.test(lw), 'tapping it does not open a block outfit behind it');
 assert(/showTripsyLaundryDay\(guide\.tripKey, dayKey, person, \{ onChanged: refreshLaundryInfo \}\)/.test(lw),
   'and it opens that day for the person being shown, wired to refresh the guide\'s run-out bar on a wash/Not Dirty');
