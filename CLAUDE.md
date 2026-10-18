@@ -2070,6 +2070,22 @@ step 4; git history has it if ever needed.
   BEFORE it when populating `tvAttireLaundry`. So washing once retires that suggestion (and any
   earlier one) even if the wash didn't land on the exact suggested date, while a LATER suggestion —
   still genuinely pending, further into the trip — keeps showing its banner.
+- **Travel View's 👔 header button opens an ATTIRE MENU — Today's Outfit and Laundry** ("On the
+  travel view, show the attire option on the header. If the user selects it show two options:
+  today's outfit and laundry. If the user selects today's outfit, show the outfits selected for
+  that day. If he selects laundry, open the page for doing laundry that day," 2026-10-18). The
+  button (`#tv-attire-btn`) shows with a saved guide OR composed outfits (`tvHasOutfits`); a tap
+  drops `#tv-attire-menu` under the title row (a second tap or an outside click closes it).
+  **Today's Outfit**: `tripsyTodayOutfitBlocks(outfits, todayKey)` — the person's composed blocks
+  on the TRIP's today (`todayKey`, the trip-local day Travel View already jumps to), garments and
+  events both present — one block opens `showTripsyOutfitModal` straight away, several (an outfit
+  change) are offered as a pick in the same menu, none toasts. **Laundry**: `showTripsyLaundryDay
+  (trip.key, todayKey, person)`, the Daily Dress Guide's own screen. Both ask His/Hers once via
+  `tripsyChooseOutfitPersonDialog` and remember it (`tripsySetTvOutfitPerson`, the colour mode's
+  existing store); outside the trip's days (`tvTripInProgress`) both explain instead of opening an
+  empty screen. The older colour-by-dress-code overlay (`tvAttireMode`, `.tv-attire-on`) is NOT
+  gone: it is the menu's third row, "Dress codes: on/off", below a divider — no longer what a tap
+  does. The 2s press-and-hold person picker is unchanged. `travelattiremenu_test.js`.
 - **The Daily Dress Guide has a multi-select dress-code filter** (`Filter` in its toolbar;
   `tripsyDressGuideFilter`, a Set, empty = show everything). The dropdown
   (`tripsyDressGuideOpenFilterMenu`, same `positionTripsyFixedMenu` shell as every other Tripsy
@@ -2584,6 +2600,15 @@ would overwrite the glyph with the word.
   they share the IndexedDB doc store with attachments (`cacheTripInsuranceDocsOffline`) but are not
   attachments, so the sweep deleted them on every sign-in, racing the re-cache `completeSignIn`
   fires right after it. `insurancedocs_test.js`.
+  **The Trip Insurance PAGE lives under Utilities** ("Move the trip insurance menu to the
+  utilities section," 2026-10-18): the rail item is a `rail-subitem` of `#utilities-submenu`
+  (after Favorites), and `setActiveNav`'s `isUtilitiesView` includes it so the submenu stays open
+  on the page. The view id stays `tripinsurance` — offline entry with no trips cache and the
+  Travel View exit in offline mode both route to it by name, and `OFFLINE_ALLOWED_VIEWS` still
+  lists it. Two consequences to know: the Utilities toggle is owner-only, so a read-only viewer no
+  longer has a rail entry for the page (its documents still reach every viewer through each trip's
+  📄 Documents menu), and in offline mode the submenu is hidden, so the page is reached only by the
+  automatic offline landing. `insurancenav_test.js`.
 - **"Add Garment" on Plan Packing List searches the whole wardrobe** rather than requiring the owner
   to first navigate into a specific line's own garment page. Its dialog (`tripsyWardrobeAddGarmentDialog`)
   filters by His/Hers, Type (`TRIPSY_ATTIRE_PACKING_GROUPS` — the same vocabulary the "+ Add Line"

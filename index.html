@@ -1742,7 +1742,6 @@
       <button class="rail-item rail-subitem" data-view="psinvoices">Invoices</button>
     </div>
     <button class="rail-item" data-view="travelview"><span class="nav-icon">🧳</span>Travel View</button>
-    <button class="rail-item" data-view="tripinsurance"><span class="nav-icon">🛡️</span>Trip Insurance</button>
     <div id="storage-health-banner"></div>
     <button class="rail-item" data-submenu-toggle="utilities" id="utilities-toggle" style="display:none; margin-top:auto;">
       <span class="nav-icon">🛠️</span>Utilities
@@ -1753,6 +1752,7 @@
       <button class="rail-item rail-subitem" data-view="utilitiestripsonly">Trips-Only Access</button>
       <button class="rail-item rail-subitem" data-view="utilitieswardrobe">Wardrobe</button>
       <button class="rail-item rail-subitem" data-view="utilitiesfavorites">Favorites</button>
+      <button class="rail-item rail-subitem" data-view="tripinsurance">Trip Insurance</button>
       <div class="rail-submenu-heading">P/S</div>
       <button class="rail-item rail-subitem rail-subitem-nested" data-view="utilitiesdeletepsreservations">Delete Reservations</button>
       <button class="rail-item rail-subitem rail-subitem-nested" data-view="utilitiesreparsepsreservations">Re-Parse Reservations</button>
@@ -6570,7 +6570,9 @@ function setActiveNav(view, param) {
   document.getElementById("psreservations-submenu").classList.toggle("collapsed", !isPsReservationsView);
   document.getElementById("psreservations-caret").textContent = isPsReservationsView ? "▾" : "▸";
 
-  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiestripsonly" || view === "utilitieswardrobe" || view === "utilitiesfavorites" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiesparsingdocs" || view === "utilitiesitineraryphotos";
+  // Trip Insurance keeps its `tripinsurance` view id (offline mode and the Travel View
+  // exit route to it by name) but lives in the Utilities submenu since 2026-10-18.
+  const isUtilitiesView = view === "utilitiesusers" || view === "utilitiestripsonly" || view === "utilitieswardrobe" || view === "utilitiesfavorites" || view === "tripinsurance" || view === "utilitiesdeletepsreservations" || view === "utilitiesreparsepsreservations" || view === "utilitiesreparsepsinvoices" || view === "utilitiesparsingdocs" || view === "utilitiesitineraryphotos";
   document.getElementById("utilities-toggle").classList.toggle("active", isUtilitiesView);
   document.getElementById("utilities-submenu").classList.toggle("collapsed", !isUtilitiesView);
   document.getElementById("utilities-caret").textContent = isUtilitiesView ? "▾" : "▸";
@@ -38637,6 +38639,13 @@ let tvAttireMode = false;
 // PERSISTENT per-device preference (localStorage = longest-lived client storage),
 // chosen the first time attire mode is turned on and changeable via a 2s press-and-
 // hold on the 👔 button. null until the user has ever chosen.
+// The composed outfit blocks worn on ONE day, in order -- Travel View's "Today's Outfit"
+// (2026-10-18). Only a block that actually has garments and at least one event (the
+// outfit modal is opened by event id) counts; an empty/gaps-only block is not an outfit.
+function tripsyTodayOutfitBlocks(outfits, dayKey) {
+  if (!outfits || !Array.isArray(outfits.blocks) || !dayKey) return [];
+  return outfits.blocks.filter(b => b && b.dayKey === dayKey && Array.isArray(b.garmentIds) && b.garmentIds.length && Array.isArray(b.eventIds) && b.eventIds.length);
+}
 function tripsyGetTvOutfitPerson() { try { const v = localStorage.getItem('tripsyTvOutfitPerson'); return v === 'her' ? 'her' : (v === 'him' ? 'him' : null); } catch (e) { return null; } }
 function tripsySetTvOutfitPerson(p) { try { localStorage.setItem('tripsyTvOutfitPerson', p === 'her' ? 'her' : 'him'); } catch (e) {} }
 // His/Hers picker dialog (reuses the shared confirm overlay node). Resolves
@@ -39116,6 +39125,7 @@ async function renderTravelView(chosenTripKey) {
       });
     }
   } catch (e) { console.error('Travel View: outfits load failed', e); }
+  const tvHasOutfits = tvOutfitEventsByPerson.him.size > 0 || tvOutfitEventsByPerson.her.size > 0;
 
   // ---- Day strip (horizontal) ----
   const stripCellHtml = dayKey => {
@@ -39287,7 +39297,7 @@ async function renderTravelView(chosenTripKey) {
       <div class="tv-titlerow">
         <div class="tv-title">${esc(trip.name || 'Trip')}</div>
         <div class="tv-head-actions">
-          ${tvHasAttire ? `<button class="tv-iconbtn${tvAttireMode ? ' tv-active' : ''}" id="tv-attire-btn" title="Attire mode — color events by dress code, show change-into cues + laundry day">👔</button>` : ''}
+          ${(tvHasAttire || tvHasOutfits) ? `<button class="tv-iconbtn${tvAttireMode ? ' tv-active' : ''}" id="tv-attire-btn" title="Attire — today's outfit, laundry">👔</button>` : ''}
           <button class="tv-iconbtn" id="tv-search-btn" title="Search">🔍</button>
           ${categories.length ? `<button class="tv-iconbtn" id="tv-filter-btn" title="Filter by category">${TV_FUNNEL_SVG}</button>` : ''}
           ${closeBtnHtml}
@@ -39402,13 +39412,76 @@ async function renderTravelView(chosenTripKey) {
     attireBtn.addEventListener('mousedown', startHold);
     attireBtn.addEventListener('touchstart', startHold, { passive: true });
     ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach(evName => attireBtn.addEventListener(evName, cancelHold));
+    // A tap opens the ATTIRE MENU ("On the travel view, show the attire option on the
+    // header. If the user selects it show two options: today's outfit and laundry,"
+    // 2026-10-18): Today's Outfit opens the outfit composed for the trip's today (one
+    // block → straight to it; several → a pick of the day's blocks), Laundry opens the
+    // Daily Dress Guide's own laundry screen for today. The older colour-by-dress-code
+    // overlay survives as a third, smaller toggle row rather than as the tap itself.
+    // "Today" is the TRIP's today (todayKey above); outside the trip there is no
+    // today's outfit and nothing worn to wash, and both options say so.
+    const tvTripInProgress = !!(eventsFirstDay && eventsLastDay && todayKey >= eventsFirstDay && todayKey <= eventsLastDay);
+    const tvPersonForAttire = async () => {
+      let p = tripsyGetTvOutfitPerson();
+      if (!p) { p = await tripsyChooseOutfitPersonDialog('him'); tripsySetTvOutfitPerson(p); }
+      return p || 'him';
+    };
+    const closeAttireMenu = () => { const m = main.querySelector('#tv-attire-menu'); if (m) m.remove(); document.removeEventListener('click', onDocClickCloseMenu, true); };
+    const onDocClickCloseMenu = e => { const m = main.querySelector('#tv-attire-menu'); if (m && !m.contains(e.target) && e.target !== attireBtn) closeAttireMenu(); };
+    const menuRow = (attr, glyph, label, sub) => `
+      <button type="button" ${attr} style="display:flex; align-items:center; gap:10px; width:100%; text-align:left; background:none; border:none; border-radius:8px; padding:9px 10px; cursor:pointer; color:var(--text); font-size:14px;">
+        <span style="font-size:18px; line-height:1;">${glyph}</span>
+        <span style="flex:1; min-width:0;"><span style="display:block; font-weight:700;">${esc(label)}</span>${sub ? `<span style="display:block; font-size:11.5px; color:var(--muted);">${esc(sub)}</span>` : ''}</span>
+      </button>`;
+    const openAttireMenu = (bodyHtml) => {
+      closeAttireMenu();
+      const topbar = main.querySelector('.tv-topbar');
+      if (!topbar) return;
+      const m = document.createElement('div');
+      m.id = 'tv-attire-menu';
+      m.setAttribute('style', 'position:absolute; right:0; top:100%; z-index:30; min-width:240px; max-width:320px; background:var(--panel-2); border:1px solid var(--line); border-radius:10px; padding:6px; box-shadow:0 8px 24px rgba(0,0,0,0.4);');
+      m.innerHTML = bodyHtml;
+      // The menu hangs off the title row so it sits under the 👔 button.
+      const titleRow = main.querySelector('.tv-titlerow') || topbar;
+      titleRow.style.position = 'relative';
+      titleRow.appendChild(m);
+      setTimeout(() => document.addEventListener('click', onDocClickCloseMenu, true), 0);
+    };
+    const mainMenuHtml = () => menuRow('data-tv-attire-today', '👔', "Today's Outfit", tvTripInProgress ? tripsyDayHeaderLabel(todayKey) : 'The trip is not in progress')
+      + menuRow('data-tv-attire-laundry', '🧺', 'Laundry', tvTripInProgress ? 'What needs washing today' : 'The trip is not in progress')
+      + `<div style="height:1px; background:var(--line); margin:4px 0;"></div>`
+      + menuRow('data-tv-attire-mode', tvAttireMode ? '🎨' : '○', `Dress codes: ${tvAttireMode ? 'on' : 'off'}`, 'Color events by dress code');
+    const openTodayOutfit = async () => {
+      if (!tvTripInProgress) { toast('The trip is not in progress — there is no outfit for today.'); return; }
+      const person = await tvPersonForAttire();
+      let blocks = [];
+      try { blocks = tripsyTodayOutfitBlocks(await Store.getTripsyTripOutfits(trip.key, person), todayKey); } catch (e) { console.error('Travel View: today outfit lookup failed', e); }
+      if (!blocks.length) { toast(`No outfit has been composed for ${person === 'her' ? 'her' : 'him'} today.`); return; }
+      const open = b => showTripsyOutfitModal(trip.key, b.eventIds[0], person);
+      if (blocks.length === 1) { open(blocks[0]); return; }
+      // Several outfits today (an outfit change) -- pick which one.
+      openAttireMenu(`<div style="font-size:11.5px; color:var(--muted); padding:4px 10px 2px;">Today's outfits</div>` + blocks.map((b, i) =>
+        menuRow(`data-tv-attire-block="${i}"`, '👔', b.label || `Outfit ${i + 1}`, TRIPSY_ATTIRE_CATEGORY_LABEL[b.category] || '')).join(''));
+      main.querySelectorAll('[data-tv-attire-block]').forEach(btn => btn.addEventListener('click', () => { const b = blocks[Number(btn.getAttribute('data-tv-attire-block'))]; closeAttireMenu(); if (b) open(b); }));
+    };
+    const openLaundry = async () => {
+      if (!tvTripInProgress) { toast('The trip is not in progress — nothing has been worn yet.'); return; }
+      const person = await tvPersonForAttire();
+      showTripsyLaundryDay(trip.key, todayKey, person);
+    };
     attireBtn.addEventListener('click', async () => {
       if (longPressed) { longPressed = false; return; } // this click was the long-press
-      tvAttireMode = !tvAttireMode;
-      applyAttireMode(tvAttireMode);
-      if (tvAttireMode && !tripsyGetTvOutfitPerson() && (tvOutfitEventsByPerson.him.size || tvOutfitEventsByPerson.her.size)) {
-        tripsySetTvOutfitPerson(await tripsyChooseOutfitPersonDialog('him'));
-      }
+      if (main.querySelector('#tv-attire-menu')) { closeAttireMenu(); return; }
+      openAttireMenu(mainMenuHtml());
+      const q = sel => main.querySelector(sel);
+      q('[data-tv-attire-today]').addEventListener('click', () => { closeAttireMenu(); openTodayOutfit(); });
+      q('[data-tv-attire-laundry]').addEventListener('click', () => { closeAttireMenu(); openLaundry(); });
+      q('[data-tv-attire-mode]').addEventListener('click', async () => {
+        closeAttireMenu();
+        tvAttireMode = !tvAttireMode;
+        applyAttireMode(tvAttireMode);
+        if (tvAttireMode && !tripsyGetTvOutfitPerson() && tvHasOutfits) tripsySetTvOutfitPerson(await tripsyChooseOutfitPersonDialog('him'));
+      });
     });
     if (tvAttireMode) applyAttireMode(true); // persist across re-renders this session
   }
