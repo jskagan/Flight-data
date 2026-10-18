@@ -25,20 +25,34 @@ const build = (win, stored) => {
     fnSource('tripsyIsPhoneDevice'), fnSource('loadTravelViewPref'),
     'return { phone: tripsyIsPhoneDevice, pref: loadTravelViewPref };'].join('\n'))(win, localStorage);
 };
-const mm = matches => ({ matchMedia: q => ({ matches: matches && /max-width: 600px/.test(q) }), innerWidth: 9999 });
+// The device's SCREEN decides ("The app defaulted to travel view on my iPad," 2026-10-18 --
+// an iPad in Split View has a phone-width WINDOW but is no phone).
+const dev = ({ screenW, screenH, ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit Safari', innerWidth = 9999, mmMatches = false }) => ({
+  screen: screenW ? { width: screenW, height: screenH } : undefined,
+  navigator: { userAgent: ua },
+  matchMedia: q => ({ matches: mmMatches && /max-width: 600px/.test(q) }),
+  innerWidth,
+});
 {
-  const api = build(mm(true), '0');
-  assert(api.phone() === true, 'a viewport at or under the phone breakpoint is a phone');
+  const api = build(dev({ screenW: 390, screenH: 844, ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)' }), '0');
+  assert(api.phone() === true, 'an iPhone is a phone');
   assert(api.pref() === true, 'THE ASK: on a phone the Travel View landing is on, whatever was stored');
+  assert(build(dev({ screenW: 412, screenH: 915, ua: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) Mobile Safari' }), '0').phone() === true, 'an Android phone is a phone');
 }
 {
-  const api = build(mm(false), '0');
-  assert(api.phone() === false && api.pref() === false, 'a wider viewport is not a phone, and the stored "off" stands');
-  assert(build(mm(false), '1').pref() === true, 'a wider viewport with the stored "on" still lands on Travel View');
+  // iPad in Split View / Slide Over: narrow WINDOW, full-size SCREEN -- the reported case.
+  const api = build(dev({ screenW: 1024, screenH: 1366, innerWidth: 375, mmMatches: true }), '0');
+  assert(api.phone() === false, 'THE FIX: an iPad with the app in a narrow pane is NOT a phone');
+  assert(api.pref() === false, 'so its landing follows the stored choice (off here)');
+  assert(build(dev({ screenW: 744, screenH: 1133 }), '0').phone() === false, 'the smallest iPad (mini, 744px short side) is not a phone');
+  assert(build(dev({ screenW: 1024, screenH: 1366 }), '1').pref() === true, 'an iPad with the stored "on" still lands on Travel View');
+  assert(build(dev({ screenW: 1920, screenH: 1080 }), '0').phone() === false, 'a desktop is not a phone');
 }
 {
-  assert(build({ innerWidth: 390 }, '0').phone() === true, 'no matchMedia (an old WebView): a 390px window is a phone');
-  assert(build({ innerWidth: 1024 }, '0').phone() === false, 'no matchMedia: a 12.9" iPad in portrait (1024px) is NOT a phone');
+  // No screen size at all (some WebViews): the viewport is the fallback.
+  assert(build(dev({ innerWidth: 390, mmMatches: true }), '0').phone() === true, 'no screen info: a phone-width viewport counts');
+  assert(build(dev({ innerWidth: 1024 }), '0').phone() === false, 'no screen info: a wide viewport does not');
+  assert(build({ innerWidth: 390 }, '0').phone() === true, 'no screen, no matchMedia: innerWidth decides');
   assert(build({ innerWidth: 0 }, '0').phone() === false, 'an unmeasurable window is not called a phone');
   assert(build({ matchMedia: () => { throw new Error('nope'); }, innerWidth: 390 }, '0').phone() === true, 'a throwing matchMedia falls back to the width');
 }

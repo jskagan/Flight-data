@@ -3305,11 +3305,14 @@ paints nothing while a preview shows — the preview IS the fallback it existed 
 document); `offlinehang_test.js`'s catch-path pin was loosened for the new early-out.
 
 **A PHONE always lands on Travel View** ("Anytime the app is opened on a phone, default to the
-travel view," 2026-10-18). `tripsyIsPhoneDevice()` judges it by the VIEWPORT — `matchMedia` against
-`TRIPSY_PHONE_MAX_WIDTH` (600, the phone-only layout breakpoint's width; a 12.9" iPad in portrait is
-1024px so it is never a phone, a sideways phone still is), `innerWidth` as the fallback for a
-WebView without `matchMedia` — and `loadTravelViewPref()` returns true on one before it ever reads
-`localStorage`. Every landing path already reads that one preference (sign-in's `navigate
+travel view," 2026-10-18). `tripsyIsPhoneDevice()` judges it by the DEVICE, not the window
+("The app defaulted to travel view on my iPad," same day — the first cut read the viewport, and an
+iPad showing the app in Split View / Slide Over / the Claude app's narrow pane is under the phone
+width while being no phone): an iPhone/iPod or Android-`Mobile` user agent is a yes; otherwise the
+SCREEN's short side against `TRIPSY_PHONE_MAX_WIDTH` (600 — the largest iPhone is ~440 CSS px, the
+smallest iPad, the mini, is 744, so no iPad ever qualifies); only a WebView reporting NO screen size
+falls back to the viewport (`matchMedia`, then `innerWidth`). `loadTravelViewPref()` returns true on
+one before it ever reads `localStorage`. Every landing path already reads that one preference (sign-in's `navigate
 ('travelview')`, the splash preview's Home skip, the offline auto-open), so nothing else changed.
 Leaving Travel View mid-session (which stores `0`) still works: the stored value only decides where
 the NEXT open lands, and on a phone that is Travel View again by rule. The sign-in gate highlights
