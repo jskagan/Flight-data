@@ -39100,8 +39100,17 @@ function tripsyTravelViewTodayKey(trip, firstDay, lastDay) {
   if (Math.abs(dayIndex(zoneToday) - dayIndex(deviceToday)) > 1) return deviceToday; // implausibly far off
   return zoneToday;
 }
+// A Travel View render that STARTED as the splash preview (the 3s stand-in) can still be
+// awaiting its loads when sign-in finishes and paints Home into the same #main; its late
+// paint then put Travel View back over Home ("When I opened the app on my iPad it went
+// straight to travel view," 2026-10-18). Once the preview has ended and this device does
+// NOT land on Travel View, such a render abandons its paint.
+function tripsyPreviewPaintSuperseded(startedAsPreview) {
+  return !!startedAsPreview && !_tripsySplashPreview && !_tripsyOfflineEntered && !loadTravelViewPref();
+}
 async function renderTravelView(chosenTripKey) {
   ensureTravelViewStyles();
+  const startedAsPreview = !!_tripsySplashPreview;
   // Offline mode has no working 'home' to land on (see navigate()'s own
   // redirect for that case) -- send the exit button to the other offline-safe
   // page instead, so it actually goes somewhere rather than bouncing right
@@ -39145,6 +39154,7 @@ async function renderTravelView(chosenTripKey) {
   wireExit(); armMeasure();
 
   const decrypted = await ensureTripsyDecrypted();
+  if (tripsyPreviewPaintSuperseded(startedAsPreview)) return;
   // The failure message names the REAL reason (a trips-only viewer hit the
   // old "open My Trips to unlock" wording here, 2026-09-29 — it survived
   // from the encrypted-snapshot era, and its advice could never help: her
@@ -39502,6 +39512,7 @@ async function renderTravelView(chosenTripKey) {
   tripsyEnsureWeatherChipHandler();
 
   const bodyDays = allDays.map(daySectionHtml).filter(Boolean).join('');
+  if (tripsyPreviewPaintSuperseded(startedAsPreview)) return; // sign-in landed on Home while this was loading
   main.innerHTML = wrap(`
     <div class="tv-topbar">
       ${offlineNoticeHtml()}
@@ -40636,8 +40647,13 @@ async function completeSignIn() {
     // A device landing on Travel View straight from the splash preview skips the Home
     // build: #app-root is already visible there, so Home would flash through before
     // the Travel View landing below replaces it.
+    // After a splash preview the preview's navigate('travelview') left currentView at
+    // 'travelview'; painting Home with a bare renderHome() kept that stale value, so any
+    // later navigate(currentView) re-render (a Drive write conflict, say) brought Travel
+    // View back over Home. Going through navigate('home') sets both the view and the rail.
     if (isTripsOnlyUser) await navigate('tripsytrips');
-    else if (!(wasSplashPreview && loadTravelViewPref())) await renderHome();
+    else if (wasSplashPreview) { if (!loadTravelViewPref()) await navigate('home'); }
+    else await renderHome();
 
     stage = 'refreshing menu counts';
     try {

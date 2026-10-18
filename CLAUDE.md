@@ -3347,6 +3347,17 @@ the strip re-words to Offline — no gate over the schedule); a failure that REA
 paints nothing while a preview shows — the preview IS the fallback it existed to offer.
 `splashpreview_test.js` (runs the extracted lifecycle inside `with (ctx)` against a fake
 document); `offlinehang_test.js`'s catch-path pin was loosened for the new early-out.
+**A preview render still loading when sign-in lands must not paint over Home** ("When I opened the
+app on my iPad it went straight to travel view," 2026-10-18): `renderTravelView` awaits its loads
+(trips, guide, outfits, weather) before its one big paint, and a render that STARTED as the preview
+could finish after `completeSignIn` had painted Home into the same `#main` — Travel View came back
+over it. `tripsyPreviewPaintSuperseded(startedAsPreview)` (preview ended, not offline, device does not
+land on Travel View) is checked after the loads and again right before the final paint, and such a
+render abandons its paint. Related: a Home landing after a preview now goes through `navigate('home')`
+rather than a bare `renderHome()`, since the preview's own `navigate('travelview')` had left
+`currentView` at `travelview` and any later `navigate(currentView)` re-render (a Drive write conflict)
+would have brought Travel View back. A stored Travel-View preference still lands there by design — the
+✕ in Travel View, or "Use Travel Tracker" at the gate, clears it.
 
 **A PHONE always lands on Travel View** ("Anytime the app is opened on a phone, default to the
 travel view," 2026-10-18). `tripsyIsPhoneDevice()` judges it by the DEVICE, not the window

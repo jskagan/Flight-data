@@ -132,7 +132,18 @@ const build = opts => {
   assert(endAt > 0 && endAt > csi.indexOf('driveData = await loadDriveDataFile(driveFileId);'), 'the preview ends right after the real data file loads');
   assert(endAt < csi.indexOf("stage = 'setting up the menu'") && endAt < csi.indexOf('runBackgroundSyncs();') && endAt < csi.indexOf('renderHome()'),
     'and BEFORE the menu setup, Home, and the background syncs that could read or write the cached trips as live');
-  assert(/else if \(!\(wasSplashPreview && loadTravelViewPref\(\)\)\) await renderHome\(\);/.test(csi), 'a Travel-View landing from the preview skips the Home build (no flash through)');
+  assert(/else if \(wasSplashPreview\) \{ if \(!loadTravelViewPref\(\)\) await navigate\('home'\); \}\n\s*else await renderHome\(\);/.test(csi),
+    'a Travel-View landing from the preview skips the Home build (no flash through); a Home landing after a preview goes through navigate() so currentView is home, not the preview\'s travelview');
+  // ---- a preview render still loading when sign-in lands on Home must not paint over it ----
+  const tv = fnSource('renderTravelView');
+  assert(/const startedAsPreview = !!_tripsySplashPreview;/.test(tv) && (tv.match(/if \(tripsyPreviewPaintSuperseded\(startedAsPreview\)\) return;/g) || []).length === 2,
+    'THE IPAD REPORT (2026-10-18): a Travel View render that began as the preview checks, after its loads and again before its final paint, that the preview has not since ended');
+  const sup = new Function('_tripsySplashPreview', '_tripsyOfflineEntered', 'loadTravelViewPref', fnSource('tripsyPreviewPaintSuperseded') + '\nreturn tripsyPreviewPaintSuperseded;');
+  assert(sup(false, false, () => false)(true) === true, 'preview ended, device lands on Home -> the late paint is abandoned');
+  assert(sup(true, false, () => false)(true) === false, 'preview still showing -> paint');
+  assert(sup(false, false, () => true)(true) === false, 'device lands on Travel View anyway -> paint');
+  assert(sup(false, true, () => false)(true) === false, 'the preview became offline mode -> paint (it IS the view now)');
+  assert(sup(false, false, () => false)(false) === false, 'a render that did not start as the preview is never abandoned');
   assert(/if \(_tripsySplashPreview\) \{ console\.log\(`completeSignIn watchdog: still \$\{stage\} after 12s -- the splash preview is already showing`\); return; \}/.test(csi),
     'the 12s watchdog paints nothing over a showing preview');
   assert(/if \(_tripsySplashPreview && !e\.reachedServer\) \{ tripsyPreviewBecomeOffline\(\); return; \}/.test(csi), 'a connectivity failure converts the preview to offline; a server-reached failure still shows the gate');

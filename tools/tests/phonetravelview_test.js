@@ -60,7 +60,7 @@ assert(/const TRIPSY_PHONE_MAX_WIDTH = 600;/.test(html) && /@media \(max-width: 
 // ---- every landing path reads the one preference, so a phone lands on Travel View everywhere ----
 const csi = fnSource('completeSignIn');
 assert(/if \(loadTravelViewPref\(\)\) \{\n\s*try \{ await navigate\('travelview'\); \}/.test(csi), 'sign-in lands on Travel View through the preference');
-assert(/wasSplashPreview && loadTravelViewPref\(\)/.test(csi), 'the splash-preview landing reads the same preference');
+assert(/else if \(wasSplashPreview\) \{ if \(!loadTravelViewPref\(\)\) await navigate\('home'\); \}/.test(csi), 'the splash-preview landing reads the same preference');
 assert(/if \(force && loadTravelViewPref\(\) && tripsCache\)/.test(html), 'the offline auto-open reads the same preference');
 const gate = fnSource('applyTripsOnlySignInGate');
 assert(/\(tripsOnly \|\| tripsyIsPhoneDevice\(\)\) \? 'btn primary' : 'btn'/.test(gate) && /fullBtn\.style\.display = tripsOnly \? 'none' : ''/.test(gate),
