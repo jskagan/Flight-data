@@ -52,7 +52,7 @@ assert(hintFor(false, false) === false && hintFor(false, true) === false, 'an or
     'signin-travelview-btn': { style: { display: '' }, className: 'btn' },
     'signin-show-all-btn': { style: { display: 'none' } },
   };
-  const apply = new Function('document', extractFn('applyTripsOnlySignInGate') + '\nreturn applyTripsOnlySignInGate;')({ getElementById: id => els[id] || null });
+  const apply = new Function('document', 'tripsyIsPhoneDevice', extractFn('applyTripsOnlySignInGate') + '\nreturn applyTripsOnlySignInGate;')({ getElementById: id => els[id] || null }, () => false); // a desktop-width device
   apply(true);
   assert(els['signin-btn'].style.display === 'none', 'THE ASK: the full "Use Travel Tracker" option is hidden');
   assert(els['signin-travelview-btn'].className === 'btn primary', 'Travel View becomes the one primary button');

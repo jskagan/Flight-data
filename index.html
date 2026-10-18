@@ -2906,8 +2906,12 @@ async function reconcileTripsyOfflineDocs() {
     const cached = await listTripsyOfflineDocsMeta();
     const cachedDriveFileIds = new Set(cached.map(d => d.driveFileId));
 
+    // The Trip Insurance documents share this store (cacheTripInsuranceDocsOffline) but
+    // are not attachments, so without this exemption the orphan sweep deleted them on
+    // every sign-in -- racing the re-cache that completeSignIn fires right after this.
+    const insuranceDriveFileIds = tripsyInsuranceDriveFileIds(driveData && driveData.tripInsuranceDocs);
     for (const doc of cached) {
-      if (!attachmentByDriveFileId.has(doc.driveFileId)) {
+      if (!attachmentByDriveFileId.has(doc.driveFileId) && !insuranceDriveFileIds.has(doc.driveFileId)) {
         // Orphaned -- the attachment itself was deleted elsewhere.
         await deleteTripsyOfflineDoc(doc.driveFileId);
       }
@@ -19618,6 +19622,50 @@ function tripsyDocumentMenuRowHtml(a, isCachedLocally) {
   `;
 }
 
+// The Trip Insurance documents (the policy and the confirmation of benefits, uploaded
+// once on the Trip Insurance page) belong on EVERY trip's Downloaded Documents list
+// ("For every trip, automatically add the trip insurance documents policy and
+// confirmation of benefits to the list of downloaded documents," 2026-10-18). They are
+// not attachments -- one shared set, read straight from driveData.tripInsuranceDocs at
+// render -- so a row is read-only (open + copy link; rename/delete live on the Trip
+// Insurance page) and its download state is this device's cache, which
+// cacheTripInsuranceDocsOffline fills at every sign-in; no per-trip toggle, since they
+// are downloaded for every trip by rule.
+function tripsyInsuranceDriveFileIds(docs) {
+  return new Set((docs || []).map(d => d && d.driveFileId).filter(Boolean));
+}
+function tripsyInsuranceDocMenuRowHtml(d, isCachedLocally) {
+  const name = d.fileName || 'Insurance document';
+  const state = isCachedLocally
+    ? `<span style="font-size:14px; display:flex; align-items:center; color:var(--home-green);" title="Downloaded to this device">✓</span>`
+    : `<span style="font-size:14px; display:flex; align-items:center;" title="Downloads to this device automatically at sign-in">⬇️</span>`;
+  return `
+    <div style="display:flex; align-items:center; gap:8px; padding:6px 4px; border-top:1px solid var(--line);">
+      <div style="min-width:0; flex:1;">
+        <div data-tripsy-open-attachment data-drive-file-id="${esc(d.driveFileId)}" style="font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" title="${esc(name)}">🛡️ ${esc(name)}</div>
+      </div>
+      <div style="display:flex; gap:4px; flex-shrink:0; align-items:center;">
+        <button class="btn" data-tripsy-copy-attachment data-drive-file-id="${esc(d.driveFileId)}" style="font-size:18px; padding:4px 9px;" title="Copy link">📋</button>
+        ${state}
+      </div>
+    </div>
+  `;
+}
+// The whole Trip Insurance section of a trip's Documents menu: a labelled block after
+// the trip's own documents (a divider when there are any), alphabetical by name.
+// Empty when nothing has been uploaded to Trip Insurance.
+function tripsyInsuranceDocsMenuHtml(docs, offlineDriveFileIds, hasOtherDocs) {
+  const list = (docs || []).filter(d => d && d.driveFileId)
+    .slice().sort((a, b) => String(a.fileName || '').localeCompare(String(b.fileName || ''), undefined, { sensitivity: 'base', numeric: true }));
+  if (!list.length) return '';
+  const cached = offlineDriveFileIds || new Set();
+  return `
+    ${hasOtherDocs ? `<div style="height:1px; background:var(--line); margin:8px 0;"></div>` : ''}
+    <div style="font-family:var(--mono); font-size:13px; color:var(--muted); margin:0 0 4px;">Trip Insurance</div>
+    ${list.map(d => tripsyInsuranceDocMenuRowHtml(d, cached.has(d.driveFileId))).join('')}
+  `;
+}
+
 // Small form for attaching a document to a trip or event -- follows the same
 // open/close and Save/Cancel shape as renderTripsyEditPanel/
 // renderTripsyEditTripPanel above. `target` is { scope: 'trip'|'event',
@@ -35500,13 +35548,18 @@ async function renderTripsyEventsListImpl() {
         `;
       }).join('')}
     ` : '';
-    const documentButtonHtml = (!collapsed && (tripAttachments.length || eventAttachmentEntries.length)) ? iconLabelButton(`
+    // The Trip Insurance documents ride on EVERY trip's list (2026-10-18) -- read-only
+    // rows after the trip's own, so a trip with nothing attached still has a Documents
+    // menu once insurance documents exist. Not for a not-yet-created placeholder trip.
+    const insuranceDocsHtml = isPendingCreateTrip ? '' : tripsyInsuranceDocsMenuHtml(driveData.tripInsuranceDocs, offlineDriveFileIds, !!(tripAttachments.length || eventAttachmentEntries.length));
+    const documentButtonHtml = (!collapsed && (tripAttachments.length || eventAttachmentEntries.length || insuranceDocsHtml)) ? iconLabelButton(`
       <div style="position:relative;">
         <button class="btn" data-tripsy-document-menu-toggle data-key="${esc(trip.key)}" title="Documents" style="width:28px; height:28px; border-radius:50%; padding:0; font-size:20px; display:flex; align-items:center; justify-content:center;">📄</button>
         <div data-tripsy-document-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px; z-index:20; min-width:360px; max-width:440px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           <div style="font-family:var(--mono); font-size:13px; color:var(--amber); font-weight:700; margin-bottom:8px;">Downloaded Documents</div>
           ${tripAttachments.map(a => tripsyDocumentMenuRowHtml(a, offlineDriveFileIds.has(a.driveFileId))).join('')}
           ${documentEventDocsHtml}
+          ${insuranceDocsHtml}
         </div>
       </div>
     `, 'Document') : '';
@@ -39975,7 +40028,31 @@ function saveScopeTierHint(tier) {
 // app, not shared app state. When on, completeSignIn() routes straight to the
 // current trip's readable view instead of the Home dashboard.
 const TRAVEL_VIEW_KEY = 'flightlog_travel_view';
+// A PHONE always lands on Travel View ("Anytime the app is opened on a phone, default to
+// the travel view," 2026-10-18). Judged by the viewport, the same way the phone-only
+// layout breakpoint is (TRIPSY_PHONE_MAX_WIDTH = the `@media (max-width: 600px)` rule's
+// width): a 12.9" iPad in portrait is 1024 CSS px, so it is never mistaken for a phone,
+// and a phone held sideways is still under it. `matchMedia` is the live answer where it
+// exists; `innerWidth` is the fallback for a WebView without it.
+const TRIPSY_PHONE_MAX_WIDTH = 600;
+function tripsyIsPhoneDevice(win) {
+  const w = win || (typeof window !== 'undefined' ? window : null);
+  if (!w) return false;
+  try {
+    if (typeof w.matchMedia === 'function') {
+      const m = w.matchMedia(`(max-width: ${TRIPSY_PHONE_MAX_WIDTH}px)`);
+      if (m && typeof m.matches === 'boolean') return m.matches;
+    }
+  } catch (e) { /* fall through */ }
+  return Number(w.innerWidth) > 0 && Number(w.innerWidth) <= TRIPSY_PHONE_MAX_WIDTH;
+}
+// The stored choice still decides on a tablet/desktop; on a phone the answer is always
+// yes, so every landing path (sign-in, the splash preview's Home skip, the offline
+// auto-open) opens Travel View. Leaving Travel View mid-session (which stores `0`)
+// still works -- it only decides where the NEXT open lands, and on a phone that is
+// Travel View again by rule.
 function loadTravelViewPref() {
+  if (tripsyIsPhoneDevice()) return true;
   try { return localStorage.getItem(TRAVEL_VIEW_KEY) === '1'; } catch (e) { return false; }
 }
 function saveTravelViewPref(on) {
@@ -40006,7 +40083,9 @@ function applyTripsOnlySignInGate(tripsOnly) {
   const allLink = document.getElementById('signin-show-all-btn');
   if (!fullBtn || !tvBtn) return;
   fullBtn.style.display = tripsOnly ? 'none' : '';
-  tvBtn.className = tripsOnly ? 'btn primary' : 'btn';
+  // On a phone Travel View is where sign-in lands either way, so it is the highlighted
+  // button; the full-app button stays, since the app is still reachable from there.
+  tvBtn.className = (tripsOnly || tripsyIsPhoneDevice()) ? 'btn primary' : 'btn';
   if (allLink) allLink.style.display = tripsOnly ? '' : 'none';
 }
 // The one account allowed to upload/edit/delete -- everyone else who

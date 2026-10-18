@@ -2568,6 +2568,22 @@ would overwrite the glyph with the word.
   before it starts — nothing has been worn) with each garment's "needed again"/`::nn` halves
   merged (`tripsyGarmentLocationLaundryItems`) — here it is simply in the laundry. Computed
   lazily on the Laundry tap, since it walks every garment's wear days. `garmentlocation_test.js`.
+- **The Trip Insurance documents ride on EVERY trip's 📄 Documents menu** ("For every trip,
+  automatically add the trip insurance documents policy and confirmation of benefits to the list
+  of downloaded documents," 2026-10-18). The menu is titled "Downloaded Documents"; the policy and
+  confirmation of benefits are the Trip Insurance page's uploads (`driveData.tripInsuranceDocs`,
+  one shared set, not attachments), so every trip card (not a pending-create placeholder) appends
+  `tripsyInsuranceDocsMenuHtml(driveData.tripInsuranceDocs, offlineDriveFileIds, hasOtherDocs)` —
+  a "Trip Insurance" block after the trip's own and event documents, alphabetical, read-only rows
+  (`tripsyInsuranceDocMenuRowHtml`: open + copy link through the SAME `data-tripsy-open-attachment`
+  / `data-tripsy-copy-attachment` handlers, which key only on the Drive file id; no rename/delete —
+  those live on the Trip Insurance page — and no per-trip offline toggle, since they are downloaded
+  for every trip by rule) with a ✓ when this device holds the bytes, else ⬇️ "downloads at
+  sign-in". A trip with nothing attached now gets the Documents button once insurance documents
+  exist. **The orphan sweep in `reconcileTripsyOfflineDocs` exempts them** (`tripsyInsuranceDriveFileIds`):
+  they share the IndexedDB doc store with attachments (`cacheTripInsuranceDocsOffline`) but are not
+  attachments, so the sweep deleted them on every sign-in, racing the re-cache `completeSignIn`
+  fires right after it. `insurancedocs_test.js`.
 - **"Add Garment" on Plan Packing List searches the whole wardrobe** rather than requiring the owner
   to first navigate into a specific line's own garment page. Its dialog (`tripsyWardrobeAddGarmentDialog`)
   filters by His/Hers, Type (`TRIPSY_ATTIRE_PACKING_GROUPS` — the same vocabulary the "+ Add Line"
@@ -3262,6 +3278,18 @@ the strip re-words to Offline — no gate over the schedule); a failure that REA
 paints nothing while a preview shows — the preview IS the fallback it existed to offer.
 `splashpreview_test.js` (runs the extracted lifecycle inside `with (ctx)` against a fake
 document); `offlinehang_test.js`'s catch-path pin was loosened for the new early-out.
+
+**A PHONE always lands on Travel View** ("Anytime the app is opened on a phone, default to the
+travel view," 2026-10-18). `tripsyIsPhoneDevice()` judges it by the VIEWPORT — `matchMedia` against
+`TRIPSY_PHONE_MAX_WIDTH` (600, the phone-only layout breakpoint's width; a 12.9" iPad in portrait is
+1024px so it is never a phone, a sideways phone still is), `innerWidth` as the fallback for a
+WebView without `matchMedia` — and `loadTravelViewPref()` returns true on one before it ever reads
+`localStorage`. Every landing path already reads that one preference (sign-in's `navigate
+('travelview')`, the splash preview's Home skip, the offline auto-open), so nothing else changed.
+Leaving Travel View mid-session (which stores `0`) still works: the stored value only decides where
+the NEXT open lands, and on a phone that is Travel View again by rule. The sign-in gate highlights
+the Travel View button on a phone but keeps "Use Travel Tracker" (`applyTripsOnlySignInGate`'s
+second arm; `tripsonlygate_test.js` stubs the detector as a desktop). `phonetravelview_test.js`.
 
 `tripsyTripsAreOffline` marks that the in-memory trips came from cache. It drives Travel View's
 `.tv-offline` strip — **"Offline — this schedule is not live. Last refreshed &lt;when&gt;"**, rendered
