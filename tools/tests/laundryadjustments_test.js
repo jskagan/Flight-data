@@ -58,22 +58,35 @@ assert(/return await Store\.saveTripsyTripOutfits\(outfits\);/.test(applySrc), '
 
 const dialogSrc = extractFn('tripsyLaundryAdjustmentsDialog');
 assert(/data-adjust-skip/.test(dialogSrc) && /data-adjust-apply/.test(dialogSrc), 'the dialog offers Skip and Apply');
-assert(/if \(e\.target === ov \|\| e\.target\.closest\('\[data-adjust-skip\]'\)\) \{ done\(false\); return; \}/.test(dialogSrc),
-  'Skip (or tapping outside) resolves false -- nothing gets applied');
+assert(/if \(e\.target === ov \|\| e\.target\.closest\('\[data-adjust-skip\]'\)\) \{ done\(null\); return; \}/.test(dialogSrc),
+  'Skip (or tapping outside) resolves null -- nothing gets applied');
+// 2026-10-18: each suggestion is accepted as-is or re-picked from the other clean garments
+// of the same kind, and later suggestions re-derive around the pick.
+assert(/data-adjust-accept="\$\{esc\(p\.oldId\)\}"/.test(dialogSrc) && /done\(proposals\.filter\(p => accepted\.has\(p\.oldId\)\)\)/.test(dialogSrc),
+  'THE ASK: every suggestion has its own Accept tick, and Apply resolves with exactly the accepted rows');
+assert(/data-adjust-other="\$\{esc\(p\.oldId\)\}"/.test(dialogSrc) && /data-adjust-pick="\$\{esc\(p\.oldId\)\}" data-adjust-new="\$\{esc\(a\.id\)\}"/.test(dialogSrc),
+  'THE ASK: "Choose another" lists the other clean garments of the same kind as pickable buttons');
+assert(/decided\.set\(oldId, newId\);[\s\S]*?proposals = await opts\.recompute\(decided\);/.test(dialogSrc),
+  'THE ASK: a pick is pinned and the finder re-runs, so all later suggestions adjust around it');
 
-// ---- wiring: Wash Now triggers the whole flow, owner-only, proposal-gated ----
+// ---- wiring: the offer runs when a RETURNED wash's list closes, not at Wash Now ----
 const laundryDay = extractFn('showTripsyLaundryDay');
 const washBlock = laundryDay.slice(laundryDay.indexOf('[data-laundry-wash]'), laundryDay.indexOf('[data-laundry-unpick]'));
-assert(/if \(isOwner\) \{/.test(washBlock), 'only the owner triggers this (writing outfits needs write access)');
-assert(/const \{ proposals, outfits \} = await tripsyLaundryFindAdjustments\(tripKey, person, guide\);/.test(washBlock),
-  'Wash Now runs the adjustment finder');
-assert(/if \(!proposals\.length\) return;/.test(washBlock), 'nothing found -> no dialog, no interruption');
-assert(/const accepted = await tripsyLaundryAdjustmentsDialog\(proposals\);/.test(washBlock),
-  'THE ASK: adjustments are PROPOSED for approval, never applied silently');
-assert(/if \(!accepted\) return;/.test(washBlock), 'declining leaves outfits untouched');
-assert(/const ok = await tripsyLaundryApplyAdjustments\(outfits, proposals\);/.test(washBlock), 'accepting applies them');
-assert(/if \(opts\.onChanged\) opts\.onChanged\(\);/.test(washBlock.slice(washBlock.indexOf('tripsyLaundryApplyAdjustments'))),
+assert(!/tripsyLaundryFindAdjustments\(/.test(washBlock) && !/tripsyLaundryAdjustmentsDialog\(/.test(washBlock),
+  'THE ASK (2026-10-18): Wash Now no longer offers the swap box -- nothing clean is back yet');
+const offer = extractFn('tripsyLaundryOfferAdjustments');
+assert(/if \(!isOwner\) return;/.test(offer), 'only the owner triggers this (writing outfits needs write access)');
+assert(/let \{ proposals, outfits \} = await tripsyLaundryFindAdjustments\(tripKey, person, guide\);/.test(offer), 'the offer runs the adjustment finder');
+assert(/if \(!proposals\.length\) return;/.test(offer), 'nothing found -> no dialog, no interruption');
+assert(/const accepted = await tripsyLaundryAdjustmentsDialog\(proposals, \{\n\s*recompute: async decided => \{/.test(offer),
+  'THE ASK: adjustments are PROPOSED for approval, never applied silently -- with the re-pick recompute wired in');
+assert(/if \(!accepted \|\| !accepted\.length\) return;/.test(offer), 'declining leaves outfits untouched');
+assert(/const ok = await tripsyLaundryApplyAdjustments\(outfits, accepted\);/.test(offer), 'accepting applies the accepted rows');
+assert(/if \(onChanged\) onChanged\(\);/.test(offer.slice(offer.indexOf('tripsyLaundryApplyAdjustments'))),
   'and refreshes the guide\'s run-out bar afterward, same callback the rest of the laundry flow uses');
+const washedDay = extractFn('showTripsyWashedDay');
+assert(/opts\.confirmedReturn = true;/.test(washedDay) && /if \(opts\.confirmedReturn\) \{ opts\.confirmedReturn = false; tripsyLaundryOfferAdjustments\(tripKey, person, opts\.onChanged\); \}/.test(washedDay),
+  'THE ASK: the box is offered when the washed list closes after garments were checked as returned');
 
 // ---- executed: tripsyLaundryFindAdjustments' own orchestration, against fixtures ----
 // (tripsyWardrobeWearDays and tripsyOutfitSwapCandidates are stubbed -- both are

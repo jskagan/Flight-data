@@ -79,7 +79,8 @@ assert(/Store\.markTripsyLaundryReturned\(tripKey, person, dayKey, it\.key, n, c
   'a confirmation is written against the wash, dated the day it was confirmed from, and the screen rebuilds');
 assert(/const collectDayKey = opts\.collectDayKey \|\| dayKey;/.test(washedDay), 'the return day is the day whose button opened the list (the wash day itself from Washed Today)');
 const dg = fnSource('renderTripsyDressGuideInto');
-assert(/\.filter\(\(\[washDay\]\) => washDay < day\.dayKey\)/.test(dg) && /🧺 Laundry back · \$\{o\.total\} out/.test(dg), 'THE ASK: every later day shows a "Laundry back · N out" button while a wash is outstanding');
+assert(/const collectBtns = \(isOwner && isToday\) \? \[\.\.\.outstandingByWash\.entries\(\)\]\n\s*\.filter\(\(\[washDay\]\) => washDay < day\.dayKey\)/.test(dg) && /🧺 Laundry back · \$\{o\.total\} out/.test(dg),
+  'THE ASK (revised same day): the "Laundry back · N out" button shows on TODAY only, for an earlier wash still outstanding -- returns are confirmed the day they happen');
 assert(/data-tripsy-laundry-collect="\$\{esc\(washDay\)\}" data-tripsy-collect-day="\$\{esc\(day\.dayKey\)\}"/.test(dg), 'the button carries the wash it belongs to and the day it is pressed from');
 assert(/showTripsyWashedDay\(guide\.tripKey, el\.getAttribute\('data-tripsy-laundry-collect'\), person, \{\n\s*collectDayKey: el\.getAttribute\('data-tripsy-collect-day'\), onChanged: refreshLaundryInfo,/.test(dg),
   'pressing it opens that wash\'s list, and a confirmation recomputes the guide (run-out bar, availability)');
@@ -93,3 +94,11 @@ const items = fnSource('tripsyLaundryItemsForDay');
 assert(/tripsyLaundryLastReturnDay\(returnCredits, key, dayKey\)/.test(items) && (items.match(/tripsyLaundryOutOn\(laundryRecords, person, /g) || []).length === 2,
   'the laundry list resets a garment\'s clock on its return and leaves copies still away out of the day\'s pile');
 assert((html.match(/tripsyLaundryLastReturnDay\(returnCredits, 'g:' \+ id, null\)/g) || []).length === 2, 'both ship-home readers key on the return day too');
+
+// ---- the adjustments finder honours the owner's picks (2026-10-18) ----
+const finder = fnSource('tripsyLaundryFindAdjustments');
+assert(/const decided = \(opts && opts\.decided instanceof Map\) \? opts\.decided : new Map\(\);/.test(finder), 'the finder takes the dialog\'s decisions');
+assert(/if \(decided\.has\(id\)\) \{[\s\S]*?usable = chosenId \? \(candidates\.find\(c => c\.id === chosenId\) \|\| null\) : null;/.test(finder),
+  'a decided garment takes exactly the chosen replacement (or none), not the least-worn default');
+assert(/alternatives: ranked\.filter\(a => a\.id !== usable\.id\), decided: decided\.has\(id\)/.test(finder), 'each proposal carries the other clean candidates, least-worn first, for "Choose another"');
+assert(finder.indexOf('claimed.add(usable.id)') < finder.indexOf('proposals.push('), 'a chosen garment is claimed before the next row is judged, so later suggestions never reuse it');

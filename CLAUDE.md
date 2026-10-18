@@ -1831,7 +1831,9 @@ step 4; git history has it if ever needed.
   so they are never re-bagged, and both ship-home readers key on the return day. **UI**:
   `tripsyLaundryOutstandingByWash` (washDayKey → `{total, byKey}`, awaiting-return washes only)
   puts an amber **"🧺 Laundry back · N out"** button (`data-tripsy-laundry-collect`, one per
-  outstanding wash dated BEFORE the day) on every later day until everything is back; it opens
+  outstanding wash dated BEFORE the day) on TODAY only ("only display it on the current date, as I
+  can't select something into the future or back in the past," same day — `isToday`, the same guard
+  the 🧺 Laundry button uses) until everything is back; it opens
   `showTripsyWashedDay(tripKey, washDayKey, person, {collectDayKey, onChanged})` — the wash's item
   list, each card showing back/still-out and a **✓ Received** button (several copies ask "How many
   came back?") — recording the return as of the day the button was pressed from; the wash day's own
@@ -2071,6 +2073,23 @@ step 4; git history has it if ever needed.
   attempt per garment per pass (the first short day only — later short days for the same garment
   depend on whether this fix actually lands, so speculating further isn't worth the complexity), and
   a candidate already used by an earlier proposal in the same pass isn't offered to a second one.
+  **Since 2026-10-18 the box is offered when a RETURNED wash's list closes, not at Wash Now, and
+  each row is re-pickable** ("Only show the swap clean items for dirty items box when a wash has
+  been returned and the items checked as returned. When you show the box, allow each individual
+  garment suggestion to be either accepted as-is, or allow the user to select any other clean
+  garment in the same category to replace it, and then adjust all later suggestions"): a wash sends
+  the garments AWAY, so nothing clean has arrived at Wash Now — `showTripsyWashedDay` sets
+  `opts.confirmedReturn` on each Received confirmation and, when the list closes with it set, runs
+  `tripsyLaundryOfferAdjustments(tripKey, person, onChanged)` (the whole find → dialog → apply →
+  refresh flow, factored out of the old Wash Now block; `tripsyOutfitAutoAdjustAfterSwap` still
+  uses the finder directly). `tripsyLaundryFindAdjustments(…, {decided})` takes a Map
+  oldId → newId (or null = leave it) and, for a decided garment, uses exactly that candidate —
+  claimed, so later rows cannot reuse it — and every proposal carries `alternatives` (the other
+  Swap candidates, least-worn first). `tripsyLaundryAdjustmentsDialog(proposals, {recompute})`
+  gives each row an Accept tick (on by default) and a "Choose another" list of those alternatives;
+  a pick pins it in `decided`, calls `recompute(decided)` (the finder re-run), and re-renders, so
+  later suggestions adjust around it. It resolves with the ACCEPTED proposals (null = Skip).
+  `laundryadjustments_test.js`, `laundryreturn_test.js`.
   **`tripsyOutfitSwapCandidates` is factored out of `tripsyOutfitSwapPicker` for this reuse** — the
   picker now just calls it and renders the result; behavior is unchanged, but the two callers (the
   manual picker and this automatic finder) can now never drift apart on what counts as a valid

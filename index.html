@@ -12109,7 +12109,14 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
 // something the owner could equally have picked by hand. Nothing is applied here --
 // callers show the list via tripsyLaundryAdjustmentsDialog first (the owner asked to
 // approve outfit changes rather than have them made silently).
-async function tripsyLaundryFindAdjustments(tripKey, person, guide) {
+// `opts.decided` (Map oldId -> newId, or null to leave that garment alone) replays the
+// owner's choices from the adjustments dialog: a decided garment takes exactly that
+// replacement (claimed, so later rows cannot reuse it) instead of the least-worn pick,
+// which is what makes "adjust all later suggestions" after a re-pick a plain re-run.
+// Every proposal also carries `alternatives` -- the other clean candidates Swap would
+// offer for that slot, least-worn first -- for the dialog's "choose another" list.
+async function tripsyLaundryFindAdjustments(tripKey, person, guide, opts = {}) {
+  const decided = (opts && opts.decided instanceof Map) ? opts.decided : new Map();
   const proposals = [];
   const outfits = await Store.getTripsyTripOutfits(tripKey, person);
   if (!outfits || !(outfits.blocks || []).length) return { proposals, outfits };
@@ -12166,18 +12173,26 @@ async function tripsyLaundryFindAdjustments(tripKey, person, guide) {
         // genuinely used up, not to keep a lucky few pristine while others sit
         // untouched -- and evening out the wear is also what keeps any ONE garment
         // from running out early and forcing a mid-trip wash in the first place.
-        let usable = null;
+        let usable = null, ranked = [];
         if (usableCandidates.length) {
           const withWear = await Promise.all(usableCandidates.map(async c => {
             const { days: cDays } = await tripsyWardrobeWearDays(tripKey, c.id, person);
             return { c, wornSoFar: (cDays || []).length };
           }));
           withWear.sort((a, b) => a.wornSoFar - b.wornSoFar);
+          ranked = withWear.map(w => ({ id: w.c.id, name: w.c.name || 'Garment', driveFileId: w.c.driveFileId || '', wornSoFar: w.wornSoFar }));
           usable = withWear[0].c;
+        }
+        if (decided.has(id)) {
+          // The owner already chose for this garment: that pick, or none at all.
+          const chosenId = decided.get(id);
+          usable = chosenId ? (candidates.find(c => c.id === chosenId) || null) : null;
+          if (chosenId && !usable) usable = null; // no longer a valid candidate -- drop the row
         }
         if (usable) {
           claimed.add(usable.id);
-          proposals.push({ dayKey, block, oldId: id, oldName: g.name || 'Garment', newId: usable.id, newName: usable.name || 'Garment' });
+          proposals.push({ dayKey, block, oldId: id, oldName: g.name || 'Garment', newId: usable.id, newName: usable.name || 'Garment',
+            alternatives: ranked.filter(a => a.id !== usable.id), decided: decided.has(id) });
         }
       }
       break; // one fix attempt per garment -- later short days depend on whether this one lands
@@ -12217,39 +12232,115 @@ async function tripsyOutfitAutoAdjustAfterSwap(tripKey, person, guide) {
     return 0;
   }
 }
-// Confirmation for tripsyLaundryFindAdjustments' proposals -- Apply makes every swap
-// listed, Skip makes none. Above the laundry-day screen (2147483120) that triggers this.
-function tripsyLaundryAdjustmentsDialog(proposals) {
+// The "swap clean items for dirty items" box ("allow each individual garment suggestion
+// to be either accepted as-is, or allow the user to select any other clean garment in the
+// same category to replace it, and then adjust all later suggestions," 2026-10-18). Each
+// row is a suggestion with an Accept tick (on by default) and a "Choose another" list of
+// the other clean garments Swap would offer for that slot; picking one calls
+// `opts.recompute(decided)` -- the finder re-run with the owner's choices pinned -- so
+// every LATER row re-derives around it (a garment chosen here is claimed, so it is not
+// suggested again below). Resolves with the accepted proposals, or null for Skip. Above
+// the washed-list screen (2147483120) that triggers it.
+function tripsyLaundryAdjustmentsDialog(initialProposals, opts = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-laundry-adjust-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-laundry-adjust-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
     ov.style.zIndex = '2147483130';
-    const rows = proposals.map(p => `
-      <div style="padding:8px 0; border-bottom:1px solid var(--line); font-size:13.5px;">
-        <div style="font-weight:700; margin-bottom:2px;">${esc(tripsyDayHeaderLabel(p.dayKey))}</div>
-        <div style="color:var(--muted);">${esc(p.oldName)} <span style="color:var(--text);">&#8594;</span> ${esc(p.newName)}</div>
-      </div>`).join('');
-    const many = proposals.length > 1;
-    ov.innerHTML = `
-      <div class="tw-modal-paper" style="max-width:440px;">
+    let proposals = initialProposals || [];
+    const decided = new Map();           // oldId -> newId the owner picked
+    const accepted = new Set(proposals.map(p => p.oldId)); // rows ticked to apply
+    let openPicker = null;               // oldId whose "Choose another" list is open
+    let busy = false;
+    const render = () => {
+      const many = proposals.length > 1;
+      const rows = proposals.map(p => {
+        const on = accepted.has(p.oldId);
+        const alts = p.alternatives || [];
+        const picker = openPicker === p.oldId ? `
+          <div style="margin-top:6px; display:flex; flex-wrap:wrap; gap:6px;">
+            ${alts.length ? alts.map(a => `<button type="button" class="btn" data-adjust-pick="${esc(p.oldId)}" data-adjust-new="${esc(a.id)}" style="font-size:12px; padding:4px 9px;">${esc(a.name)}<span style="color:var(--muted);"> · worn ${a.wornSoFar}×</span></button>`).join('')
+              : `<span style="font-size:12px; color:var(--muted);">No other clean garment of this kind is free that day.</span>`}
+          </div>` : '';
+        return `
+      <div style="padding:8px 0; border-bottom:1px solid var(--line); font-size:13.5px; opacity:${on ? 1 : 0.55};">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <label style="display:flex; align-items:center; gap:8px; flex:1; min-width:0; cursor:pointer;">
+            <input type="checkbox" data-adjust-accept="${esc(p.oldId)}" ${on ? 'checked' : ''}>
+            <span style="min-width:0;">
+              <span style="display:block; font-weight:700;">${esc(tripsyDayHeaderLabel(p.dayKey))}</span>
+              <span style="display:block; color:var(--muted);">${esc(p.oldName)} <span style="color:var(--text);">&#8594;</span> <b style="color:var(--text);">${esc(p.newName)}</b>${p.decided ? ' <span style="font-size:11px; color:var(--home-green);">(your pick)</span>' : ''}</span>
+            </span>
+          </label>
+          <button type="button" class="btn" data-adjust-other="${esc(p.oldId)}" style="font-size:12px; padding:4px 9px; flex-shrink:0;">${openPicker === p.oldId ? 'Close' : 'Choose another'}</button>
+        </div>
+        ${picker}
+      </div>`;
+      }).join('');
+      ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:480px;">
         <h2 style="margin:0 0 8px; font-size:18px;">Avoid ${many ? 'more washing' : 'another wash day'}?</h2>
         <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">
-          Swapping ${many ? 'these outfits' : 'this outfit'} would use what's already clean, so no extra wash
-          is needed${many ? ' for these days' : ' that day'}.
+          Now that clean garments are back, swapping ${many ? 'these outfits' : 'this outfit'} would use them, so no extra wash
+          is needed${many ? ' for these days' : ' that day'}. Accept each suggestion as-is, or choose another clean garment of the same kind — later suggestions adjust around your pick.
         </div>
-        <div>${rows}</div>
+        <div>${rows || `<div style="padding:12px 0; color:var(--muted);">Nothing to adjust.</div>`}</div>
         <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:16px;">
           <button class="btn" data-adjust-skip>Skip</button>
-          <button class="btn primary" data-adjust-apply>Apply</button>
+          <button class="btn primary" data-adjust-apply ${busy ? 'disabled' : ''}>Apply${accepted.size && proposals.length ? ` (${proposals.filter(p => accepted.has(p.oldId)).length})` : ''}</button>
         </div>
       </div>`;
+    };
+    render();
     ov.style.display = 'flex';
-    const done = v => { ov.style.display = 'none'; resolve(v); };
-    ov.onclick = e => {
-      if (e.target === ov || e.target.closest('[data-adjust-skip]')) { done(false); return; }
-      if (e.target.closest('[data-adjust-apply]')) done(true);
+    const done = v => { ov.style.display = 'none'; ov.onclick = null; resolve(v); };
+    ov.onclick = async e => {
+      if (e.target === ov || e.target.closest('[data-adjust-skip]')) { done(null); return; }
+      if (e.target.closest('[data-adjust-apply]')) { if (!busy) done(proposals.filter(p => accepted.has(p.oldId))); return; }
+      const acc = e.target.closest('[data-adjust-accept]');
+      if (acc) { const id = acc.getAttribute('data-adjust-accept'); if (acc.checked) accepted.add(id); else accepted.delete(id); render(); return; }
+      const other = e.target.closest('[data-adjust-other]');
+      if (other) { const id = other.getAttribute('data-adjust-other'); openPicker = openPicker === id ? null : id; render(); return; }
+      const pick = e.target.closest('[data-adjust-pick]');
+      if (pick && opts.recompute && !busy) {
+        const oldId = pick.getAttribute('data-adjust-pick'), newId = pick.getAttribute('data-adjust-new');
+        decided.set(oldId, newId);
+        accepted.add(oldId);
+        openPicker = null; busy = true; render();
+        try { proposals = await opts.recompute(decided); }
+        catch (err) { console.error('adjustment recompute failed:', err); toast('Could not recompute the later suggestions.', 'error'); }
+        // A row that no longer exists after the re-run cannot stay accepted.
+        for (const id of [...accepted]) if (!proposals.some(p => p.oldId === id)) accepted.delete(id);
+        for (const p of proposals) if (!decided.has(p.oldId) && !accepted.has(p.oldId) && !initialProposals.some(q => q.oldId === p.oldId)) accepted.add(p.oldId);
+        busy = false; render();
+      }
     };
   });
+}
+// The whole offer, shared by its triggers: find the swaps, show the box, apply what the
+// owner accepted, tell the guide to recompute. Shown ONLY once a wash has come BACK and
+// its garments were checked as returned ("Only show the swap clean items for dirty items
+// box when a wash has been returned and the items checked as returned," 2026-10-18) --
+// before that nothing clean had actually arrived to swap in. Best-effort, owner-only.
+async function tripsyLaundryOfferAdjustments(tripKey, person, onChanged) {
+  if (!isOwner) return;
+  try {
+    const guide = await Store.getTripsyAttireGuide(tripKey);
+    if (!guide) return;
+    let { proposals, outfits } = await tripsyLaundryFindAdjustments(tripKey, person, guide);
+    if (!proposals.length) return;
+    const accepted = await tripsyLaundryAdjustmentsDialog(proposals, {
+      recompute: async decided => {
+        const r = await tripsyLaundryFindAdjustments(tripKey, person, guide, { decided });
+        outfits = r.outfits; // the live records the re-run's proposals point into
+        return r.proposals;
+      },
+    });
+    if (!accepted || !accepted.length) return;
+    const ok = await tripsyLaundryApplyAdjustments(outfits, accepted);
+    if (!ok) { toast('Could not save the adjustment.', 'error'); return; }
+    toast(accepted.length > 1 ? 'Outfits adjusted — no extra wash needed for those days.' : 'Outfit adjusted — no extra wash needed that day.');
+    if (onChanged) onChanged();
+  } catch (err) { console.error('tripsyLaundryOfferAdjustments failed:', err); }
 }
 
 async function showTripsyLaundryDay(tripKey, dayKey, person, opts = {}) {
@@ -12339,27 +12430,10 @@ async function showTripsyLaundryDay(tripKey, dayKey, person, opts = {}) {
       // kept showing a garment as run-out on a later day even after it was washed
       // clean, since this screen only ever rebuilt itself, never the guide behind it.
       if (opts.onChanged) opts.onChanged();
-      // After a wash, check whether the trip still needs another one, and whether
-      // swapping a garment into a different outfit could avoid it -- propose it rather
-      // than applying it silently, since it changes what the owner actually wears on a
-      // given day. Owner-only: writing outfits needs write access anyway. Best-effort
-      // and never blocks the wash itself finishing.
-      if (isOwner) {
-        (async () => {
-          try {
-            const guide = await Store.getTripsyAttireGuide(tripKey);
-            if (!guide) return;
-            const { proposals, outfits } = await tripsyLaundryFindAdjustments(tripKey, person, guide);
-            if (!proposals.length) return;
-            const accepted = await tripsyLaundryAdjustmentsDialog(proposals);
-            if (!accepted) return;
-            const ok = await tripsyLaundryApplyAdjustments(outfits, proposals);
-            if (!ok) { toast('Could not save the adjustment.', 'error'); return; }
-            toast(proposals.length > 1 ? 'Outfits adjusted — no extra wash needed for those days.' : 'Outfit adjusted — no extra wash needed that day.');
-            if (opts.onChanged) opts.onChanged();
-          } catch (err) { console.error('tripsyLaundryFindAdjustments failed:', err); }
-        })();
-      }
+      // The "swap clean items in" offer used to run HERE, right after Wash Now -- but a
+      // wash sends the garments away; nothing clean is back yet. It now runs when the
+      // washed list is closed after garments were checked as returned
+      // (tripsyLaundryOfferAdjustments, from showTripsyWashedDay).
       showTripsyLaundryDay(tripKey, dayKey, person, opts);
       return;
     }
@@ -12504,7 +12578,13 @@ async function showTripsyWashedDay(tripKey, dayKey, person, opts = {}) {
     </div>`;
   ov.style.display = 'flex';
   ov.onclick = async e => {
-    if (e.target === ov || e.target.closest('[data-laundry-close]')) { ov.style.display = 'none'; ov.onclick = null; return; }
+    if (e.target === ov || e.target.closest('[data-laundry-close]')) {
+      ov.style.display = 'none'; ov.onclick = null;
+      // Garments came back during this visit: now there is something clean to swap in,
+      // so offer the adjustments box (once, after the list closes, not per tick).
+      if (opts.confirmedReturn) { opts.confirmedReturn = false; tripsyLaundryOfferAdjustments(tripKey, person, opts.onChanged); }
+      return;
+    }
     const rb = e.target.closest('[data-laundry-received]');
     if (!rb) return;
     e.stopPropagation();
@@ -12518,6 +12598,7 @@ async function showTripsyWashedDay(tripKey, dayKey, person, opts = {}) {
     // Optimistic (the record mutates before the write); the guide behind recomputes, and
     // this screen rebuilds from the recorded truth rather than patching the card.
     const p = Store.markTripsyLaundryReturned(tripKey, person, dayKey, it.key, n, collectDayKey);
+    opts.confirmedReturn = true; // carried through this screen's own rebuilds (same opts object)
     if (opts.onChanged) { try { opts.onChanged(); } catch (err) { console.error(err); } }
     showTripsyWashedDay(tripKey, dayKey, person, opts);
     p.then(ok => { if (!ok) toast('Could not save that return — please try again.', 'error'); });
@@ -31439,10 +31520,11 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
       const shipBtn = (isOwner && (shipRec || !dayIsPast))
         ? `<button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn tripsy-dg-ship-btn" data-tripsy-ship-day="${esc(day.dayKey)}" data-tripsy-ship-state="${shipRec ? (shipRec.shippedAt ? 'shipped' : 'planned') : ''}">${shipRec ? (shipRec.shippedAt ? `📦 Shipped Home · ${shipCount}` : `📦 Shipping Home · ${shipCount}`) : '📦 Ship Home'}</button>`
         : '';
-      // One "Laundry back" button per outstanding wash dated BEFORE this day (an owner
-      // confirms returns from the day they happen; the wash day's own "Washed Today"
-      // button covers a same-day return).
-      const collectBtns = isOwner ? [...outstandingByWash.entries()]
+      // One "Laundry back" button per outstanding wash dated BEFORE this day -- on TODAY
+      // only ("only display it on the current date, as I can't select something into the
+      // future or back in the past," 2026-10-18): a return is confirmed on the day it
+      // happens, and the wash day's own "Washed Today" button covers a same-day return.
+      const collectBtns = (isOwner && isToday) ? [...outstandingByWash.entries()]
         .filter(([washDay]) => washDay < day.dayKey)
         .map(([washDay, o]) => `<button type="button" class="tripsy-update-btn tripsy-dg-laundry-btn tripsy-dg-collect-btn" data-tripsy-laundry-collect="${esc(washDay)}" data-tripsy-collect-day="${esc(day.dayKey)}" title="Confirm what came back from the ${esc(tripsyDayHeaderLabel(washDay))} wash">🧺 Laundry back · ${o.total} out</button>`)
         .join('') : '';
