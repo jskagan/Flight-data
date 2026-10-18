@@ -21586,6 +21586,27 @@ function tripsyTripGeographySummary(placeEvents, tripLocation) {
   return tripLocation || '';
 }
 
+// Home's "Upcoming Trips" rows: any trip CURRENTLY IN PROGRESS first ("the first trip listed
+// should be any trip that is currently active," 2026-10-18 -- the box used to list only trips
+// whose start was still ahead, so the trip you were on vanished from it the day it began),
+// then the trips starting within the window, each group by start date. A trip is active
+// from its start through the END of its last day (`end`, falling back to `start`); dates
+// are the trip's stored day stamps read as UTC midnights, the same reading the old filter
+// used. Active rows are stamped `_active` for the ● Now marker. Pure, for the tests.
+function tripsyHomeUpcomingTrips(trips, nowMs, cutoffMs) {
+  const DAY = 86400000;
+  const startOf = t => (t && t.start ? new Date(t.start).getTime() : NaN);
+  const endOf = t => { const e = t && (t.end || t.start) ? new Date(t.end || t.start).getTime() : NaN; return isNaN(e) ? NaN : e + DAY; };
+  const active = [], upcoming = [];
+  for (const t of (trips || [])) {
+    const st = startOf(t);
+    if (isNaN(st)) continue;
+    if (st <= nowMs && endOf(t) > nowMs) active.push(Object.assign({}, t, { _active: true }));
+    else if (st >= nowMs && st <= cutoffMs) upcoming.push(Object.assign({}, t, { _active: false }));
+  }
+  const byStart = (a, b) => startOf(a) - startOf(b);
+  return [...active.sort(byStart), ...upcoming.sort(byStart)];
+}
 // Home's "Upcoming Trips" Location column: the trip's primary two cities (the two
 // with the most events on them), each shown as just the city when it's in the US,
 // or "City, Country" when it's abroad. So a domestic trip reads "Aspen & Denver",
@@ -40143,13 +40164,7 @@ async function renderHome() {
         const cutoffDate = new Date();
         cutoffDate.setFullYear(cutoffDate.getFullYear() + HOME_UPCOMING_TRIPS_YEARS);
         const cutoff = cutoffDate.getTime();
-        const upcomingTrips = decrypted
-          .filter(t => !isTripsyTripEffectivelyHidden(t))
-          .filter(t => {
-            const start = t.start ? new Date(t.start).getTime() : null;
-            return start != null && start >= now && start <= cutoff;
-          })
-          .sort((a, b) => new Date(a.start) - new Date(b.start));
+        const upcomingTrips = tripsyHomeUpcomingTrips(decrypted.filter(t => !isTripsyTripEffectivelyHidden(t)), now, cutoff);
 
         if (!upcomingTrips.length) {
           tripsHost.innerHTML = `<div class="empty-state">No trips scheduled in the next ${HOME_UPCOMING_TRIPS_YEARS} years.</div>`;
@@ -40160,8 +40175,8 @@ async function renderHome() {
               <thead><tr><th>Date</th><th>Name</th><th>Location</th></tr></thead>
               <tbody>
                 ${upcomingTrips.map(t => `
-                  <tr data-home-trip-row style="cursor:pointer;">
-                    <td>${esc(formatTripDateRange(t.start, t.end))}</td>
+                  <tr data-home-trip-row style="cursor:pointer;${t._active ? ' background:rgba(46,158,91,0.10);' : ''}">
+                    <td>${esc(formatTripDateRange(t.start, t.end))}${t._active ? ` <span style="font-size:11px; font-weight:700; color:var(--home-green); margin-left:6px;">● Now</span>` : ''}</td>
                     <td>${esc(t.name)}</td>
                     <td>${esc(tripsyTripHomeLocation(t) || "—")}</td>
                   </tr>

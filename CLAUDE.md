@@ -3243,6 +3243,16 @@ not.**
   file both render as nothing rather than a broken figure. Printing blurs the focused paragraph
   first — the snapshot is synchronous, so an unserialized edit would otherwise print stale.
 
+### Home's Upcoming Trips box
+
+An in-progress trip is listed FIRST ("the first trip listed should be any trip that is currently
+active," 2026-10-18 — the box filtered on `start >= now`, so the trip you were on vanished from it
+the day it began). `tripsyHomeUpcomingTrips(trips, nowMs, cutoffMs)` (pure) returns every active
+trip (start ≤ now < end of its last day, `end` falling back to `start`) in start order, stamped
+`_active` for the row's green "● Now" marker and tint, then the trips starting within
+`HOME_UPCOMING_TRIPS_YEARS` in start order, as before; hidden trips are filtered by the caller.
+`homeactivetrip_test.js`.
+
 ### Review / ambiguity resolution
 
 Parsed invoice legs that couldn't be fully/confidently parsed get `_warnings` and show up in the
