@@ -57,6 +57,8 @@ assert(r.hasWash === true, 'a recorded wash switches the projection on');
 assert(r.runOut.get(D(5)) && r.runOut.get(D(5)).includes('Blue shirt'),
   'the wash covers days 3 and 4, so it runs out on day 5 -> ' + JSON.stringify([...r.runOut]));
 assert(r.runOut.size === 1, 'and only the FIRST short day is flagged, not every one after it');
+assert(r.lastWorn && r.lastWorn.get(D(5)) && r.lastWorn.get(D(5)).get('Blue shirt') === D(4),
+  'THE ASK (2026-10-18): the short day records the LAST day the garment was worn before it (day 4) -> ' + JSON.stringify([...(r.lastWorn.get(D(5)) || new Map())]));
 
 // ---- washing enough means never running out ----
 washes = [

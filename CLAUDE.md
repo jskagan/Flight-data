@@ -1989,6 +1989,15 @@ step 4; git history has it if ever needed.
   `{runOut, hasWash:false}` before any wash, which is what keeps the orange bar until then.
   Computed ONCE per opening (it walks every garment's wear days) and threaded through re-renders on
   `renderOpts`, exactly like the weather bar; a failure there is caught so the guide still renders.
+  **The bar's wording names the condition and the last wearing** ("change the message to say that
+  an item on the wear schedule is not available because it is dirty. Also show the last day I wore
+  the item," 2026-10-18 — the old "You run out of X today — nothing clean left" read as ambiguous
+  about whether the day itself or only later days were affected): `tripsyRunOutNoteText(name,
+  lastWornDayKey)` renders "X is on today's wear schedule but isn't available — it's dirty. Last
+  worn Sat, Oct 17." The walk records that date beside each flagged name in a parallel `lastWorn`
+  map (dayKey → Map(name → the latest wear day strictly BEFORE the short day, `null` when there is
+  none — a shipped-home garment, which reads "No clean copy is with you today")); `runOut` itself
+  stays a plain list of names, which every other reader and test expects. `runoutwording_test.js`.
   **A Swap made from the guide's own "👔 See outfit" cue recomputes and re-renders this**, or the
   bar kept naming a garment already swapped away — swapping only ever saved the outfit and
   repainted the outfit modal itself, never touched `renderOpts.laundryInfo` or told the guide behind

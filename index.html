@@ -11890,6 +11890,12 @@ function tripsyLaundryWearDebtStep(wearDebt, { washedQty, credited, wornToday, q
 // it runs out -- i.e. a day it is needed with nothing clean left. Only meaningful once a
 // wash has actually happened: before that, the guide's own "best day for laundry" advice
 // is what's on offer, and this would just restate the packing maths.
+// The run-out bar's sentence, pure for the tests: the garment is on the day's wear
+// schedule but unavailable because it is dirty, plus the last day it was worn.
+function tripsyRunOutNoteText(name, lastWornDayKey) {
+  const when = lastWornDayKey ? `Last worn ${tripsyDayHeaderLabel(lastWornDayKey)}.` : 'No clean copy is with you today.';
+  return `${name} is on today's wear schedule but isn't available — it's dirty. ${when}`;
+}
 async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   const runOut = new Map();
   const washes = Store.listTripsyLaundry(tripKey)
@@ -11899,7 +11905,7 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   // Not Dirty (never Wash Now) would be stuck seeing the orange advisory forever.
   const notDirty = Store.listLaundryNotDirty(tripKey)
     .filter(r => (r.person || 'him') === person && r.dayKey);
-  if (!washes.length && !notDirty.length) return { runOut, hasWash: false };
+  if (!washes.length && !notDirty.length) return { runOut, lastWorn: new Map(), hasWash: false };
   const [garments, selectedRaw, genericRaw] = await Promise.all([
     Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey),
   ]);
@@ -11918,9 +11924,16 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   const creditedOn = (key, dayKey) => notDirty
     .filter(r => r.dayKey === dayKey && (r.key === key || r.key === key + '::nn'))
     .reduce((n, r) => n + (r.count || 0), 0);
-  const note = (dayKey, name) => {
+  // `lastWorn` rides beside `runOut` (dayKey -> Map(name -> the last day it was worn
+  // BEFORE the short day, or null)) so the bar can say when the garment went dirty
+  // ("show the last day I wore the item," 2026-10-18); runOut itself stays a plain list of
+  // names, which is what every other reader expects.
+  const lastWorn = new Map();
+  const note = (dayKey, name, lastWornDayKey = null) => {
     if (!runOut.has(dayKey)) runOut.set(dayKey, []);
     if (!runOut.get(dayKey).includes(name)) runOut.get(dayKey).push(name);
+    if (!lastWorn.has(dayKey)) lastWorn.set(dayKey, new Map());
+    lastWorn.get(dayKey).set(name, lastWornDayKey);
   };
   // WEAR-LIMIT AWARE: a garment isn't dirty after one wearing unless its own limit is 1
   // (tripsyWearsBeforeWash). A tie/tailoring (Infinity -- restyled, never laundered) or a
@@ -11933,17 +11946,18 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   const shipRecords = Store.listTripsyShipHome(tripKey);
   const walk = (key, name, qtyPacked, wornDays, limit) => {
     const worn = new Set(wornDays);
+    const lastWornBefore = dayKey => wornDays.filter(d => d && d < dayKey).sort().pop() || null;
     let wearDebt = 0;
     for (const dayKey of dayKeys) {
       const qty = qtyPacked - tripsyShipHomeQtyBefore(shipRecords, person, key, dayKey);
-      if (qty <= 0) { if (worn.has(dayKey)) { note(dayKey, name); return; } continue; }
+      if (qty <= 0) { if (worn.has(dayKey)) { note(dayKey, name, lastWornBefore(dayKey)); return; } continue; }
       if (!(limit > 0) || !isFinite(limit)) continue; // can never go dirty -- can never run out
       const step = tripsyLaundryWearDebtStep(wearDebt, {
         washedQty: washedOn(key, dayKey), credited: creditedOn(key, dayKey),
         wornToday: worn.has(dayKey), qty, limit,
       });
       wearDebt = step.wearDebt;
-      if (step.short) { note(dayKey, name); return; } // the FIRST day it runs short is the one worth flagging
+      if (step.short) { note(dayKey, name, lastWornBefore(dayKey)); return; } // the FIRST day it runs short is the one worth flagging
     }
   };
   const byId = new Map((garments || []).map(g => [g.id, g]));
@@ -11962,7 +11976,7 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
     walk('x:' + (x.name || ''), x.name || 'Item', Math.max(1, x.qty || 1), (days || []).map(d => d.dayKey).filter(Boolean),
       tripsyWearsBeforeWash(x.name, x.typeKey, ''));
   }
-  return { runOut, hasWash: true };
+  return { runOut, lastWorn, hasWash: true };
 }
 
 // After a wash, check whether the trip STILL needs another one, and whether swapping a
@@ -31281,8 +31295,13 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
     // (wash it, wear something else, buy one), and a merged line reads as a single event.
     // Each garment appears on one day only -- the first it comes up short -- so a day with
     // three bars means three different things ran out at once, which is worth seeing.
+    // Says what the walk actually found ("does it mean I do not have the item available
+    // to wear on that day…?", 2026-10-18): the garment is on THIS day's wear schedule and
+    // every packed copy is dirty -- with the day it was last worn, so the reader knows when
+    // it went dirty. A garment never worn before this day (shipped home, say) says so.
+    const runOutLastWorn = (laundryInfo.lastWorn && laundryInfo.lastWorn.get(day.dayKey)) || new Map();
     const runOutHtml = runOutNames
-      .map(n => `<div class="tripsy-attire-runout-note"><span style="font-size:15px;">⚠️</span><span>You run out of <b>${esc(n)}</b> today — nothing clean left for it.</span></div>`)
+      .map(n => `<div class="tripsy-attire-runout-note"><span style="font-size:15px;">⚠️</span><span>${esc(tripsyRunOutNoteText(n, runOutLastWorn.get(n)))}</span></div>`)
       .join('');
     const laundryHtml = laundryReason !== undefined
       ? `<div class="tripsy-attire-laundry-note"><div class="tripsy-attire-laundry-date">${esc(tripsyDayHeaderLabel(day.dayKey))}</div><div class="tripsy-attire-laundry-main"><span style="font-size:30px; line-height:1; flex-shrink:0;">🧺</span><span>Best day for laundry${laundryReason ? ` — ${esc(laundryReason)}` : ''}</span></div></div>`
