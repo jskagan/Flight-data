@@ -52,9 +52,9 @@ const washedDay = extractFn('showTripsyWashedDay');
 assert(/r\.dayKey === dayKey && r\.washedAt/.test(washedDay), 'finds the specific day\'s confirmed wash record');
 assert(/const counts = tripsyLaundryBagBaseCounts\(record && record\.bag\);/.test(washedDay) && /const base = key\.endsWith\('::nn'\) \? key\.slice\(0, -4\) : key;/.test(extractFn('tripsyLaundryBagBaseCounts')),
   'merges a garment\'s "needed again" and "not needed" bag entries back into one line -- the split only mattered before washing');
-assert(/if \(key\.startsWith\('g:'\)\) \{\s*\n\s*const g = garmentById\.get\(key\.slice\(2\)\);\s*\n\s*return \{ name: \(g && g\.name\) \|\| 'Garment', driveFileId: g && g\.driveFileId \};/.test(washedDay),
+assert(/const g = garmentById\.get\(key\.slice\(2\)\);[\s\S]*?return \{ name, driveFileId: g && g\.driveFileId, typeKey: tripsyGarmentTypeKey\(name\), group: \(g && g\.group\) \|\| '' \};/.test(washedDay),
   'a real wardrobe garment resolves to its name AND its photo -- THE ASK: show the individual garment images');
-assert(/if \(key\.startsWith\('x:'\)\) return \{ name: key\.slice\(2\) \|\| 'Item', driveFileId: null \};/.test(washedDay),
+assert(/if \(key\.startsWith\('x:'\)\) \{ const name = key\.slice\(2\) \|\| 'Item'; return \{ name, driveFileId: null, typeKey: tripsyGarmentTypeKey\(name\), group: '' \}; \}/.test(washedDay),
   'a "No Picture" generic resolves to the name embedded in its key, with no photo');
 assert(/Nothing recorded for this wash\./.test(washedDay), 'an empty/missing record still renders something sane, not a blank modal');
 assert(!/data-laundry-wash\b/.test(washedDay) && !/data-laundry-pick\b/.test(washedDay) && !/data-laundry-clean\b/.test(washedDay),
@@ -63,7 +63,7 @@ assert(!/data-laundry-wash\b/.test(washedDay) && !/data-laundry-pick\b/.test(was
 // classes every other garment display in the app uses, so a missing photo falls back
 // to the same glyph and the photos actually load via the same shared loader.
 assert(/<div class="tw-grid">\$\{items\.map\(cardHtml\)\.join\(''\)\}<\/div>/.test(washedDay), 'renders as a photo-card grid');
-assert(/<div class="tw-photo" data-tw-photo="\$\{esc\(it\.driveFileId \|\| ''\)\}">\$\{it\.driveFileId \? '' : '👕'\}<\/div>/.test(washedDay),
+assert(/<div class="tw-photo\$\{it\.driveFileId \? '' : ' tw-photo-glyph'\}"\$\{it\.driveFileId \? ` data-tw-photo="\$\{esc\(it\.driveFileId\)\}"` : ''\}>\$\{it\.driveFileId \? '' : tripsyGarmentGlyph\(it\.typeKey, it\.group, it\.name\)\}<\/div>/.test(washedDay),
   'each card shows the garment\'s real photo, falling back to the glyph when there is none');
 assert(/tripsyWardrobeLoadPhotos\(ov\);/.test(washedDay), 'photos are actually loaded, not just referenced by id');
 

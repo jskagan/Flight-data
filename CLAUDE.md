@@ -1843,8 +1843,10 @@ step 4; git history has it if ever needed.
   `laundryreturn_test.js`.
   **`showTripsyWashedDay` shows the actual garment PHOTOS**, not a plain text list — the same
   `tw-grid`/`tw-card`/`tw-photo` shape every other garment display in the app uses (the outfit view,
-  Packing Status, …), loaded through the same `tripsyWardrobeLoadPhotos`; a "No Picture" generic
-  (`x:`-keyed, no wardrobe record) falls back to the same 👕 glyph as everywhere else.
+  Packing Status, …), loaded through the same `tripsyWardrobeLoadPhotos`; a garment with no photo
+  falls back to the SAME type glyph the laundry screen shows (`tripsyGarmentGlyph` — 🧦 socks, 🩲
+  underwear; "use the same images to depict those items in the returned screen," 2026-10-18 — it
+  used to show a generic 👕 for everything photo-less).
 - **📦 Ship Home — a dated box of clothes sent home mid-trip, with the app recommending what
   you can spare** ("During long trips there may be times when I would like to ship some
   clothes home. I want to be able to put a ship-home indicator at a specific date and have
