@@ -1144,6 +1144,31 @@
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9100;
     overflow-y: auto; overscroll-behavior: contain; padding: 32px 16px; flex-direction: column; align-items: center;
   }
+  /* The guide's A− / A+ text-size control (tripsyDgScaleApply). The whole paper is scaled
+     with CSS `zoom`, not a font-size, because the guide's rows carry their sizes as inline
+     px (the day bar, badges, chips) -- zoom scales type, padding and layout together, so
+     the page simply renders smaller or larger as one piece. This exists because iOS never
+     lets a page pinch-zoom OUT below fit-to-width ("When I pinch to shrink the screen stays
+     the same size," 2026-10-19): the guide is a full-screen fixed panel sized to the phone,
+     so its default size IS the smallest the system allows -- this control is the zoom-out. */
+  .tripsy-dg-scale { display: inline-flex; align-items: center; gap: 4px; }
+  .tripsy-dg-scale-label { font-family: var(--mono); font-size: 11.5px; color: var(--muted); min-width: 36px; text-align: center; }
+  .tripsy-dg-scale .tripsy-update-btn { padding: 4px 9px; font-weight: 700; }
+  .tripsy-dg-scale .tripsy-update-btn:disabled { opacity: 0.4; cursor: default; }
+  /* Phone layout for the guide (same day): its desktop spacing -- 32px of overlay padding
+     plus 28px of paper padding -- left ~300px of content on a 390px iPhone, so every day
+     bar and event row wrapped onto two or three lines. The day bar's sizes are inline
+     styles, hence the !important on its rule. */
+  @media (max-width: 600px) {
+    #tripsy-attire-dressguide-overlay { padding: 8px 6px; }
+    #tripsy-attire-dressguide-overlay .tripsy-attire-toolbar { flex-wrap: wrap; row-gap: 6px; margin-bottom: 8px; }
+    #tripsy-attire-dressguide-overlay .tripsy-attire-toolbar-actions { flex-wrap: wrap; gap: 6px; }
+    #tripsy-attire-dressguide-overlay .tripsy-attire-paper { padding: 12px 12px; border-radius: 10px; }
+    #tripsy-attire-dressguide-overlay .tripsy-attire-daybar { font-size: 12.5px !important; padding: 5px 8px !important; margin: 10px 0 6px !important; }
+    #tripsy-attire-dressguide-overlay .tripsy-attire-dressguide-event { gap: 8px; row-gap: 4px; padding: 6px 0; font-size: 13px; }
+    #tripsy-attire-dressguide-overlay .tripsy-attire-dressguide-instruction { margin: 10px 0 4px; padding: 4px 8px; font-size: 12px; }
+    #tripsy-attire-dressguide-overlay .tripsy-dg-approve-btn { padding: 10px 24px; font-size: 15px; }
+  }
   @media print {
     #tripsy-attire-overlay, #tripsy-attire-dressguide-overlay { display: none !important; }
   }
@@ -31245,7 +31270,7 @@ function tripsyAttireDayBarHtml(dayKey, weatherTargetsByDay, tripStartDayKey) {
   const wxRec = wxArr && wxArr.length ? tripsyGetWeather(wxArr[0].city, wxArr[0].country, dayKey) : null;
   const wxBox = wxRec && wxRec.kind === 'typical' ? ' border:1px solid var(--muted); border-radius:5px; padding:1px 6px;' : '';
   const wxHtml = wxRec ? tripsyWeatherChipHtml(wxRec, wxArr[0].city, wxArr[0].country, dayKey, `color:var(--text); font-weight:600; font-size:12px; letter-spacing:0;${wxBox}`) : '';
-  return `<div style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}</span>${wxHtml}${dayNumHtml}</div>`;
+  return `<div class="tripsy-attire-daybar" style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}</span>${wxHtml}${dayNumHtml}</div>`;
 }
 function renderTripsyAttireOverlayContent(guide, renderOpts) {
   const { stale, weatherTargetsByDay, tripStartDayKey } = renderOpts || {};
@@ -31776,6 +31801,48 @@ function tripsyDressGuideOpenFilterMenu(btn, guide, renderOpts) {
 // showTripsyDailyDressGuide rather than the in-place rerender closure.
 let tripsyDressGuidePerson = 'him';
 // The Daily Dress Guide as its OWN page (own overlay, opened from the Attire toolbar).
+// ---- Daily Dress Guide text size (A− / A+ in its toolbar) ----
+// A per-DEVICE display preference like the Travel View landing or a trip card's collapse
+// state -- never in driveData (viewers can't write it, and it describes a screen, not the
+// trip). Steps are fixed so the stored value always round-trips exactly; 1 is "as designed"
+// and is stored as nothing at all.
+const TRIPSY_DG_SCALE_KEY = 'flightlog_dg_scale';
+const TRIPSY_DG_SCALE_STEPS = [0.7, 0.8, 0.9, 1, 1.1, 1.2];
+function tripsyDgScaleLoad() {
+  try {
+    const v = parseFloat(localStorage.getItem(TRIPSY_DG_SCALE_KEY));
+    return TRIPSY_DG_SCALE_STEPS.includes(v) ? v : 1;
+  } catch (e) { return 1; }
+}
+function tripsyDgScaleSave(v) {
+  try {
+    if (v === 1) localStorage.removeItem(TRIPSY_DG_SCALE_KEY);
+    else localStorage.setItem(TRIPSY_DG_SCALE_KEY, String(v));
+  } catch (e) { /* private mode / blocked storage: the control still works for this open */ }
+}
+// The next step in `dir` (<0 smaller, else larger), clamped to the ends; an unknown
+// current value steps from 1.
+function tripsyDgScaleStep(current, dir) {
+  const steps = TRIPSY_DG_SCALE_STEPS;
+  let i = steps.indexOf(current);
+  if (i < 0) i = steps.indexOf(1);
+  return steps[Math.min(steps.length - 1, Math.max(0, i + (dir < 0 ? -1 : 1)))];
+}
+// Applies a scale to the guide's paper via CSS zoom (see the .tripsy-dg-scale CSS note for
+// why zoom and not font-size) and repaints the control: % label, and the end buttons
+// disabled at the limits.
+function tripsyDgScaleApply(overlay, v) {
+  if (!overlay) return;
+  const steps = TRIPSY_DG_SCALE_STEPS;
+  const content = overlay.querySelector('#tripsy-attire-dressguide-content');
+  if (content) content.style.zoom = v === 1 ? '' : String(v);
+  const label = overlay.querySelector('[data-tripsy-dg-scale-label]');
+  if (label) label.textContent = `${Math.round(v * 100)}%`;
+  const down = overlay.querySelector('[data-tripsy-dg-scale-down]');
+  const up = overlay.querySelector('[data-tripsy-dg-scale-up]');
+  if (down) down.disabled = v <= steps[0];
+  if (up) up.disabled = v >= steps[steps.length - 1];
+}
 function getOrCreateTripsyDressGuideOverlay() {
   let overlay = document.getElementById('tripsy-attire-dressguide-overlay');
   if (overlay) return overlay;
@@ -31785,6 +31852,11 @@ function getOrCreateTripsyDressGuideOverlay() {
     <div class="tripsy-attire-toolbar">
       <div class="tripsy-attire-toolbar-title" data-tripsy-dressguide-title></div>
       <div class="tripsy-attire-toolbar-actions">
+        <span class="tripsy-dg-scale" title="Text size">
+          <button class="tripsy-update-btn" data-tripsy-dg-scale-down aria-label="Smaller text">A&minus;</button>
+          <span class="tripsy-dg-scale-label" data-tripsy-dg-scale-label>100%</span>
+          <button class="tripsy-update-btn" data-tripsy-dg-scale-up aria-label="Larger text">A+</button>
+        </span>
         <button class="tripsy-update-btn" id="tripsy-attire-dressguide-filter-btn">Filter</button>
         <span id="tripsy-attire-dressguide-person"></span>
         <button class="tripsy-update-btn" id="tripsy-attire-dressguide-regen-btn" style="display:none;">Regenerate</button>
@@ -31796,6 +31868,14 @@ function getOrCreateTripsyDressGuideOverlay() {
   document.body.appendChild(overlay);
   overlay.querySelector('#tripsy-attire-dressguide-close-btn').addEventListener('click', () => { overlay.style.display = 'none'; });
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.style.display = 'none'; });
+  const bumpScale = dir => {
+    const v = tripsyDgScaleStep(tripsyDgScaleLoad(), dir);
+    tripsyDgScaleSave(v);
+    tripsyDgScaleApply(overlay, v);
+  };
+  overlay.querySelector('[data-tripsy-dg-scale-down]').addEventListener('click', () => bumpScale(-1));
+  overlay.querySelector('[data-tripsy-dg-scale-up]').addEventListener('click', () => bumpScale(1));
+  tripsyDgScaleApply(overlay, tripsyDgScaleLoad());
   return overlay;
 }
 // The Daily Dress Guide's green "Approved" button ("When the user selects that button,
@@ -31822,6 +31902,7 @@ async function showTripsyDailyDressGuide(tripKey, scrollToEventId, scrollToDayKe
   const overlay = getOrCreateTripsyDressGuideOverlay();
   overlay.querySelector('[data-tripsy-dressguide-title]').textContent = `Daily Dress Guide${trip && trip.name ? ` — ${trip.name}` : ''}`;
   overlay.style.display = 'flex';
+  tripsyDgScaleApply(overlay, tripsyDgScaleLoad()); // the stored text size, on every open
   const content = overlay.querySelector('#tripsy-attire-dressguide-content');
   const { weatherTargetsByDay, tripStartDayKey } = trip ? await tripsyAttireLoadWeatherBar(trip, guide) : { weatherTargetsByDay: new Map(), tripStartDayKey: null };
   const renderOpts = { weatherTargetsByDay, tripStartDayKey };

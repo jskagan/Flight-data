@@ -2151,6 +2151,25 @@ step 4; git history has it if ever needed.
   empty screen. The older colour-by-dress-code overlay (`tvAttireMode`, `.tv-attire-on`) is NOT
   gone: it is the menu's third row, "Dress codes: on/off", below a divider — no longer what a tap
   does. The 2s press-and-hold person picker is unchanged. `travelattiremenu_test.js`.
+- **The Daily Dress Guide has an A− / A+ text-size control and a phone layout** ("I am having
+  difficulty shrinking the screen zoom level when I am in the daily dress guide on my iPhone.
+  When I pinch to shrink the screen stays the same size," 2026-10-19). Nothing in the app blocks
+  pinching (the viewport tag allows zoom, no `touch-action`, only passive touch listeners) —
+  iOS itself never lets a page pinch-zoom OUT below fit-to-width, and the guide is a full-screen
+  fixed panel sized to the phone, so its default size is the smallest the system allows. Two
+  fixes: **(1)** the toolbar control (`tripsyDgScaleLoad`/`Save`/`Step`/`Apply`, steps
+  `TRIPSY_DG_SCALE_STEPS` 70–120%, stored per DEVICE in `localStorage` under
+  `TRIPSY_DG_SCALE_KEY` like the other display preferences — 100% is stored as nothing) scales
+  the paper (`#tripsy-attire-dressguide-content`) with CSS **`zoom`**, not a font-size, because
+  the rows carry inline px sizes (day bar, badges, chips) and zoom scales type, padding and
+  layout as one piece; applied on every open, end buttons disabled at the limits. The fixed
+  menus/dialogs are appended to `body` outside the zoomed node, and the scroll helpers use
+  `getBoundingClientRect`, which WebKit reports in zoomed coordinates, so neither needs to know.
+  **(2)** a `@media (max-width: 600px)` block drops the overlay's 32px padding and the paper's
+  28px (which left ~300px of content on a 390px iPhone, wrapping every row), tightens the day
+  bar (now carrying class `tripsy-attire-daybar`; its sizes are inline, so `!important`), event
+  rows and instruction bars, and lets the toolbar wrap so the extra control never pushes the ✕
+  off-screen. `dgtextsize_test.js`.
 - **The Daily Dress Guide has a multi-select dress-code filter** (`Filter` in its toolbar;
   `tripsyDressGuideFilter`, a Set, empty = show everything). The dropdown
   (`tripsyDressGuideOpenFilterMenu`, same `positionTripsyFixedMenu` shell as every other Tripsy
