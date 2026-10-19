@@ -2666,9 +2666,19 @@ would overwrite the glyph with the word.
   `tripsyPlanPackingIsComplete` (dress codes only), shows no Skip card, and caps a photoless
   placeholder at `TRIPSY_WARDROBE_OPEN_LINE_PLACEHOLDER_CAP` (10) instead of need+2. What a
   line OFFERS is `tripsyWardrobeGarmentFillsGymLine` (the first branch of
-  `tripsyWardrobeGarmentFillsLine`): tops = group tops TAGGED `athletic`; shorts = athletic +
-  type `shorts`; pants = athletic + group pants, never shorts/swim; socks/underwear = by TYPE
-  with no tag (the Wardrobe form never tags essentials; dress socks are a different type). The
+  `tripsyWardrobeGarmentFillsLine`): tops = group tops TAGGED **Gym**; shorts = Gym + type
+  `shorts`; pants = Gym + group pants, never shorts/swim; socks/underwear = by TYPE with no tag
+  (the Wardrobe form never tags essentials; dress socks are a different type). **Gym is a
+  WARDROBE-ONLY tag like General, never a dress code** ("Add a new category before athletic
+  called 'Gym'. Show me all clothes currently in the athletic category and let me decide which
+  ones to also include in the gym category," same day — the first cut read the athletic tag,
+  which swept in every hiking boot and polo): `tripsyWardrobeTierOptions()` lists
+  `TRIPSY_WARDROBE_GYM_TIER` FIRST, directly before Athletic, and the form/filter chips show it
+  through `tripsyWardrobeTagLabel` ("Gym" — the packing SECTION keeps "Gym Clothes" via
+  `tripsyWardrobeTierLabel`); `TRIPSY_ATTIRE_CATEGORY_ORDER` is untouched, so the attire guide,
+  outfit Swap (`tiers.includes(liveTier)`) and every dress-code picker never see it. The owner
+  tags garments Gym on the Wardrobe's bulk Edit page (filter Dress level = Athletic) — a session
+  cannot write the wardrobe. The
   tier gate is the new `tripsyWardrobeGarmentEligibleForTier` (General and Gym open, a dress
   code wants its tag), used by both pages' fill math and garment pages. **Socks/underwear
   combine**: a gym Socks/Underwear pick is its own selection entry (`id::gym::Socks`) — so on

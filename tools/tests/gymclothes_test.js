@@ -64,16 +64,27 @@ const api = new Function('driveData', [
 }
 // ---- what each line offers ----
 {
+  // The lines read the wardrobe-only GYM tag ("Add a new category before athletic called
+  // 'Gym' … let me decide which ones to also include in the gym category," 2026-10-19), so an
+  // athletic-tagged piece the owner did NOT tag Gym is left out.
   const g = (name, tiers, extra = {}) => ({ id: name, name, tiers, person: 'him', quantity: 1, ...extra });
-  const athTee = g('Black gym tee', ['athletic']), casTee = g('White tee', ['casual']);
-  const athShorts = g('Running shorts', ['athletic']), casShorts = g('Chino shorts', ['casual']);
-  const athPants = g('Track pants', ['athletic']), jeans = g('Jeans', ['casual', 'smart_casual']), swim = g('Board shorts', ['athletic']);
+  const athTee = g('Black gym tee', ['gym', 'athletic']), casTee = g('White tee', ['casual']), athOnlyTee = g('Hiking tee', ['athletic']);
+  const athShorts = g('Running shorts', ['gym', 'athletic']), casShorts = g('Chino shorts', ['casual']);
+  const athPants = g('Track pants', ['gym']), jeans = g('Jeans', ['casual', 'smart_casual']), swim = g('Board shorts', ['gym', 'athletic']);
   const socks = g('Socks', [], { group: 'essentials', quantity: 10 }), dressSocks = g('Dress socks', ['formal']), underwear = g('Boxer briefs', [], { group: 'essentials', quantity: 10 });
   const lines = api.gymLines();
   const [tops, shorts, pants, sock, under] = lines;
-  assert(api.fills(athTee, tops, lines) && !api.fills(casTee, tops, lines), 'THE ASK: Gym Tops offers tops MARKED athletic, not a casual tee');
-  assert(api.fills(athShorts, shorts, lines) && !api.fills(casShorts, shorts, lines) && !api.fills(athPants, shorts, lines), 'Gym Shorts: athletic shorts only');
-  assert(api.fills(athPants, pants, lines) && !api.fills(jeans, pants, lines) && !api.fills(athShorts, pants, lines) && !api.fills(swim, pants, lines), 'Gym Pants: athletic long bottoms -- never shorts or swimwear');
+  assert(api.fills(athTee, tops, lines) && !api.fills(casTee, tops, lines) && !api.fills(athOnlyTee, tops, lines), 'THE ASK: Gym Tops offers tops tagged GYM -- not a casual tee, and not an athletic piece the owner left out of Gym');
+  assert(api.fills(athShorts, shorts, lines) && !api.fills(casShorts, shorts, lines) && !api.fills(athPants, shorts, lines), 'Gym Shorts: Gym-tagged shorts only');
+  assert(api.fills(athPants, pants, lines) && !api.fills(jeans, pants, lines) && !api.fills(athShorts, pants, lines) && !api.fills(swim, pants, lines), 'Gym Pants: Gym-tagged long bottoms -- never shorts or swimwear');
+  // ---- the Gym tag itself ----
+  const opts = new Function([extractConst('TRIPSY_WARDROBE_GENERAL_TIER'), extractConst('TRIPSY_WARDROBE_GYM_TIER'), extractConst('TRIPSY_ATTIRE_CATEGORY_ORDER'),
+    'const TRIPSY_ATTIRE_CATEGORY_LABEL = { athletic: "Athletic" };', extractFn('tripsyWardrobeTierLabel'), extractFn('tripsyWardrobeTierOptions'), extractFn('tripsyWardrobeTagLabel'),
+    'return { options: tripsyWardrobeTierOptions(), tag: tripsyWardrobeTagLabel };'].join('\n'))();
+  assert(opts.options[0] === 'gym' && opts.options[1] === 'athletic' && opts.options[opts.options.length - 1] === 'general', 'THE ASK: the garment form lists Gym first, directly before Athletic, General still last');
+  assert(opts.tag('gym') === 'Gym' && opts.tag('athletic') === 'Athletic' && opts.tag('general') === 'General', 'the tag reads "Gym" on the form (the packing section stays "Gym Clothes")');
+  assert(/<label class="tw-tier-opt"><input type="checkbox" data-tw-tier="\$\{t\}" \$\{tierSet\.has\(t\) \? 'checked' : ''\}>\$\{esc\(tripsyWardrobeTagLabel\(t\)\)\}<\/label>/.test(html), 'the garment form and the bulk-edit rows render the tag label');
+  assert(!/TRIPSY_ATTIRE_CATEGORY_ORDER = \['gym'/.test(html), 'Gym is NOT a dress code: the attire guide\'s own category list is untouched');
   assert(api.fills(socks, sock, lines) && !api.fills(dressSocks, sock, lines) && !api.fills(underwear, sock, lines), 'Socks: by type, no athletic tag required (essentials carry none); dress socks are a different type');
   assert(api.fills(underwear, under, lines) && !api.fills(socks, under, lines), 'Underwear: by type');
   assert(api.eligible(casTee, api.GYM) && api.eligible(casTee, api.GENERAL) && !api.eligible(casTee, 'formal'), 'the tier gate is open for Gym Clothes (the line rule does the filtering), as for General');
