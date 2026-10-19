@@ -47,6 +47,7 @@ const tripsyWardrobeGarmentExcludedFromOutfits = () => false;
 const tripsyGarmentTypeBucket = g => ({ key: g.bucket || 'tops', label: 'Tops' });
 const tripsyAttirePackingGroupOf = g => g.group || 'tops';
 const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
+const TRIPSY_WARDROBE_GYM_TIER = 'gym';
 eval(['tripsyShipHomeQtyBefore', 'tripsyShipHomeSplit', 'tripsyShipHomeCandidates', 'tripsyShipHomeGoneIds',
   'tripsyLaundryBagBaseCounts', 'tripsyLaundryReturnCredits', 'tripsyLaundryCreditOn', 'tripsyLaundryLastReturnDay', 'tripsyLaundryOutOn',
   'tripsyLaundryWearDebtStep', 'tripsyLaundryRunOutByDay', 'tripsyOutfitSwapCandidates', 'tripsyShipHomeConsolidationPlan', 'tripsyShipHomeSwapOptions'].map(extractFn).join('\n'));

@@ -40,6 +40,7 @@ const asVar = (fnName, src) => src.replace(new RegExp(`^function ${fnName}`), `v
 const asVarConst = src => src.replace(/^const /, 'var ');
 eval(asVarConst(extractConst('TRIPSY_FLIGHT_WORN_SUFFIX')));
 eval(asVarConst(extractConst('TRIPSY_WARDROBE_GENERAL_TIER')));
+eval(asVarConst(extractConst('TRIPSY_WARDROBE_GYM_TIER')));
 eval(asVarConst(extractConst('TRIPSY_ATTIRE_ITEMIZED_CATEGORIES')));
 eval(asVar('tripsyWardrobeLineIsFlightWorn', extractFn('tripsyWardrobeLineIsFlightWorn')));
 eval(asVar('tripsyWardrobeFlightDepartureEvent', extractFn('tripsyWardrobeFlightDepartureEvent')));

@@ -2649,6 +2649,47 @@ would overwrite the glyph with the word.
   bounded by what is still packed. `cubescarry_test.js` also asserts that EVERY
   `Store.setTripWardrobe` call site names `cubes` — a new writer that forgets is this bug again.
   Assignments lost before the fix are gone (the data was overwritten); they need re-picking once.
+- **Gym Clothes: a fixed, open-ended section before General on both packing screens** ("In
+  the packing list view, before the general section, add a section called gym clothes. In
+  that section, show 5 garments: Gym Tops, Gym Shorts, Gym Pants, Socks, and Underwear. For
+  gym tops, gym pants, and gym shorts, show all garments of each type marked as athletic, and
+  allow the user to select as many as he wants. For socks and underwear, combine the number
+  of each selected in the gym clothes section with those selected in general, but allow the
+  user to put them in different packing cubes," 2026-10-19). A pseudo-tier like General
+  (`TRIPSY_WARDROBE_GYM_TIER` = `'gym'`, label "Gym Clothes"), appended LAST by
+  `tripsyWardrobeNeedByTier` (after the flight claimer and its `need > 0` filter, which would
+  drop these) as `tripsyWardrobeGymLines()` — the five FIXED lines of
+  `TRIPSY_WARDROBE_GYM_LINES`, each `need: 0, open: true` and tagged `gym:
+  'tops'|'shorts'|'pants'|'socks'|'underwear'`; the guide sizes nothing here. An OPEN line
+  reads "any" in the Needed column, its Selected is plain text (never red/amber), it ticks
+  once anything is picked, never counts toward the trip-wide Selected/Needed or toward
+  `tripsyPlanPackingIsComplete` (dress codes only), shows no Skip card, and caps a photoless
+  placeholder at `TRIPSY_WARDROBE_OPEN_LINE_PLACEHOLDER_CAP` (10) instead of need+2. What a
+  line OFFERS is `tripsyWardrobeGarmentFillsGymLine` (the first branch of
+  `tripsyWardrobeGarmentFillsLine`): tops = group tops TAGGED `athletic`; shorts = athletic +
+  type `shorts`; pants = athletic + group pants, never shorts/swim; socks/underwear = by TYPE
+  with no tag (the Wardrobe form never tags essentials; dress socks are a different type). The
+  tier gate is the new `tripsyWardrobeGarmentEligibleForTier` (General and Gym open, a dress
+  code wants its tag), used by both pages' fill math and garment pages. **Socks/underwear
+  combine**: a gym Socks/Underwear pick is its own selection entry (`id::gym::Socks`) — so on
+  Packing Status it packs into its OWN cube — and `tripsyWardrobeGymEssentialsForGeneral`
+  re-addresses those entries to General's same-type line (`tripsyWardrobeGymEssentialTarget`:
+  typeKey `socks`/`underwear`; no such General line → the pick lives in the gym section alone)
+  so General's Selected/Packed INCLUDE them — **and each adds 1 to that line's NEEDED too**
+  ("for each socks and underwear that the user selects from the gym clothes section, add 1
+  to the 'needed' column for that garment," same day: the gym pairs are extra, so General's
+  own need is still to be filled by General picks; `gymExtraFor` on both pages, so Needed
+  agrees); the Packing List's General page notes "incl. N from Gym Clothes (needed +N)", and
+  Packing Status lists them on General's page as "from Gym Clothes"
+  cards (each card now carries `data-tw-entry-cat`/`data-tw-entry-line`, and `entryFor`/
+  `markGarmentPacked` pack EXACTLY that entry — the same placeholder garment can sit on the
+  page twice, once per section) while hiding the gym Socks/Underwear rows there
+  (`statusLineHidden`) so nothing lists twice. Wear days: a gym allocation has NONE
+  (`tripsyWardrobeWearDaysFromLines` basis `'gym'` — the gym is on no itinerary; rule 4 would
+  wrongly call gym socks "worn every day"), and Ship Home skips gym allocations for the same
+  reason (they would all read "never worn again"). The three scaffolds that extract
+  `tripsyWardrobeNeedByTier`/`WearDaysFromLines`/`ShipHomeCandidates` gained the new const
+  (the grown-dependency lesson). `gymclothes_test.js`.
 - **👔 → Garment Location: where every packed garment IS, read from the cube's side, plus
   Laundry** ("a menu item … before the refresh option called 'Garment Location' … a list of each
   packing cube used on that trip plus an option for 'Laundry'. If the user selects a cube, show
