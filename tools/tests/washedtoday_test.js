@@ -62,7 +62,7 @@ assert(!/data-laundry-wash\b/.test(washedDay) && !/data-laundry-pick\b/.test(was
 // THE ASK, explicitly: image cards, not a plain text list -- same grid/card/photo
 // classes every other garment display in the app uses, so a missing photo falls back
 // to the same glyph and the photos actually load via the same shared loader.
-assert(/<div class="tw-grid">\$\{items\.map\(cardHtml\)\.join\(''\)\}<\/div>/.test(washedDay), 'renders as a photo-card grid');
+assert(/<div class="tw-grid">\$\{shown\.map\(cardHtml\)\.join\(''\)\}<\/div>/.test(washedDay), 'renders as a photo-card grid (of the items still out while returns are pending, 2026-10-20)');
 assert(/<div class="tw-photo\$\{it\.driveFileId \? '' : ' tw-photo-glyph'\}"\$\{it\.driveFileId \? ` data-tw-photo="\$\{esc\(it\.driveFileId\)\}"` : ''\}>\$\{it\.driveFileId \? '' : tripsyGarmentGlyph\(it\.typeKey, it\.group, it\.name\)\}<\/div>/.test(washedDay),
   'each card shows the garment\'s real photo, falling back to the glyph when there is none');
 assert(/tripsyWardrobeLoadPhotos\(ov\);/.test(washedDay), 'photos are actually loaded, not just referenced by id');

@@ -1904,7 +1904,15 @@ step 4; git history has it if ever needed.
   "Washed Today" passes itself as `collectDayKey`, so a same-day return is confirmable too. Each
   confirmation fires `onChanged` → `refreshLaundryInfo`, so the run-out bar and buttons repaint.
   Travel View's laundry-suggestion retirement still keys on `washedAt` (the wash happened).
-  `laundryreturn_test.js`.
+  `laundryreturn_test.js`. **A garment confirmed fully back leaves that list at once** ("When I
+  mark an item received back from laundry, that item should be immediately removed from the
+  list of items that are out for laundry," 2026-10-20): while a wash is still partly out, the
+  grid is the list of what is OUT — `tripsyWashedDayListSplit(items, awaiting, outstanding)`
+  (pure) keeps only `left > 0` as cards and names the fully-returned garments in one compact
+  "✓ Back: …" line beneath; once nothing is out, or on a pre-returns wash, every item is a
+  card again (the full list is the record of the wash). The screen already rebuilt from the
+  optimistically mutated record right after each Received press, so the removal is immediate.
+  `laundryreceived_test.js`.
   **`showTripsyWashedDay` shows the actual garment PHOTOS**, not a plain text list — the same
   `tw-grid`/`tw-card`/`tw-photo` shape every other garment display in the app uses (the outfit view,
   Packing Status, …), loaded through the same `tripsyWardrobeLoadPhotos`; a garment with no photo
