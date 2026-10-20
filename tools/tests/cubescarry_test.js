@@ -19,7 +19,9 @@ const fnSource = name => {
   }
   throw new Error('unterminated ' + name);
 };
-const api = new Function([fnSource('tripsyCubesForEntry'), fnSource('tripsyNormalizeTripSelection'), fnSource('tripsyWardrobeCarryCubes'),
+const api = new Function(["const TRIPSY_FLIGHT_WORN_SUFFIX = ' — wearing on the flight'; const TRIPSY_CUBE_FLIGHT_WORN = '__cube_flight_worn__';",
+  fnSource('tripsyWardrobeLineIsFlightWorn'), fnSource('tripsyWardrobeFlightWornEntry'), // the normalizer's flight-worn rule (2026-10-20)
+  fnSource('tripsyCubesForEntry'), fnSource('tripsyNormalizeTripSelection'), fnSource('tripsyWardrobeCarryCubes'),
   'return { carry: tripsyWardrobeCarryCubes, normalize: tripsyNormalizeTripSelection };'].join('\n'))();
 
 // ---- the carry helper ----

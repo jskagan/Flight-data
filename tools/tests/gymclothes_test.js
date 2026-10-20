@@ -137,7 +137,10 @@ const api = new Function('driveData', [
   assert(/const TIER_ROWS = \[\.\.\.TRIPSY_ATTIRE_CATEGORY_ORDER\.slice\(\)\.reverse\(\), TRIPSY_WARDROBE_GYM_TIER, TRIPSY_WARDROBE_GENERAL_TIER\];/.test(status), 'Packing Status lists Gym Clothes before General too');
   assert(/items\.push\(\.\.\.tripsyWardrobeGymEssentialsForGeneral\(selEntries, needLines\[tier\] \|\| \[\]\)/.test(status) && /entryLine: e\.gymLine, fromGym: true/.test(status),
     'Packing Status shows the gym socks/underwear picks on General\'s pages as their own entries');
-  assert(/const statusLineHidden = \(tier, ln\) => tier === TRIPSY_WARDROBE_GYM_TIER && !!tripsyWardrobeGymEssentialTarget/.test(status), 'a gym sock/underwear line counted on General is not listed twice');
+  // "The packing status page layout for gym clothes should match the packing list page"
+  // (2026-10-20): all five gym rows list on Packing Status too (the first cut hid the gym
+  // Socks/Underwear rows there).
+  assert(!/statusLineHidden/.test(status), 'THE ASK: Packing Status lists every Gym Clothes line, as the Packing List does -- no row is hidden');
   assert(/data-tw-entry-cat="\$\{esc\(entryCategory \|\| ''\)\}" data-tw-entry-line="\$\{esc\(entryLine \|\| ''\)\}"/.test(status)
     && /markGarmentPacked\(gEl\.getAttribute\('data-tw-detail-garment'\), gEl\.getAttribute\('data-tw-entry-cat'\), gEl\.getAttribute\('data-tw-entry-line'\)\)/.test(status)
     && /const exact = selEntries\.find\(x => x\.id === id && x\.category === entryCategory && x\.line === entryLine\);/.test(status),

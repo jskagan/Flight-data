@@ -99,7 +99,9 @@ const generics = [{ category: 'general', typeKey: 'socks', name: 'Socks', qty: 3
   assert(/data-tw-photo=/.test(page) && /tripsyWardrobeLoadPhotos\(ov\)/.test(page), 'garments are shown as photo cards');
   const menuAt = html.indexOf(`data-tripsy-attire-nav="location"`);
   const refreshAt = html.indexOf(`data-tripsy-attire-nav="refresh"`);
-  assert(menuAt > 0 && refreshAt > menuAt && refreshAt - menuAt < 900, 'THE ASK: the 👔 menu item sits directly before Refresh');
+  // Only the Laundry rows (2026-10-19) sit between it and Refresh now.
+  const between = html.slice(menuAt, refreshAt);
+  assert(menuAt > 0 && refreshAt > menuAt && !/data-tripsy-attire-nav="(?!laundry|laundryback)/.test(between.slice(40)), 'THE ASK: the 👔 menu item sits directly before Refresh (the Laundry rows aside)');
   assert(/attireHasGuide \? menuListButtonHtml\(`data-tripsy-attire-nav="location"[^`]*`, '📍', 'Garment Location'\)/.test(html), 'labelled "Garment Location", shown once a guide exists (any viewer)');
   assert(/case 'location': showTripsyGarmentLocation\(key, name\); break;/.test(html), 'pressing it opens the page');
 }

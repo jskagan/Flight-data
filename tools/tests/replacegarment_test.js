@@ -54,7 +54,9 @@ function makeWorld({ failOutfits = false } = {}) {
     },
   };
   const api = new Function('driveData', 'Store', 'tripsyOutfitSyncFlightTransfers',
-    [fnSource('tripsyCubesForEntry'), fnSource('tripsyNormalizeTripSelection'), fnSource('tripsyReplaceGarmentEverywhere'), fnSource('tripsyGarmentTripUsage'),
+    ["const TRIPSY_FLIGHT_WORN_SUFFIX = ' — wearing on the flight'; const TRIPSY_CUBE_FLIGHT_WORN = '__cube_flight_worn__';",
+     fnSource('tripsyWardrobeLineIsFlightWorn'), fnSource('tripsyWardrobeFlightWornEntry'), // the normalizer's flight-worn rule (2026-10-20)
+     fnSource('tripsyCubesForEntry'), fnSource('tripsyNormalizeTripSelection'), fnSource('tripsyReplaceGarmentEverywhere'), fnSource('tripsyGarmentTripUsage'),
      'return { replace: tripsyReplaceGarmentEverywhere, usage: tripsyGarmentTripUsage };'].join('\n'))(
     driveData, Store, (guide, outfits, block) => syncCalls.push(block.dayKey));
   return { driveData, api, syncCalls };

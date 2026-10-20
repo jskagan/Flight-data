@@ -2693,8 +2693,11 @@ would overwrite the glyph with the word.
   Packing Status lists them on General's page as "from Gym Clothes"
   cards (each card now carries `data-tw-entry-cat`/`data-tw-entry-line`, and `entryFor`/
   `markGarmentPacked` pack EXACTLY that entry — the same placeholder garment can sit on the
-  page twice, once per section) while hiding the gym Socks/Underwear rows there
-  (`statusLineHidden`) so nothing lists twice. Wear days: a gym allocation has NONE
+  page twice, once per section). Packing Status lists ALL FIVE gym rows, like the Packing
+  List ("The packing status page layout for gym clothes should match the packing list page,"
+  2026-10-20 — the first cut hid the gym Socks/Underwear rows there as already counted on
+  General; a gym sock entry is now packable from either its gym row or General's page, one
+  entry and one cube either way). Wear days: a gym allocation has NONE
   (`tripsyWardrobeWearDaysFromLines` basis `'gym'` — the gym is on no itinerary; rule 4 would
   wrongly call gym socks "worn every day"), and Ship Home skips gym allocations for the same
   reason (they would all read "never worn again"). The three scaffolds that extract
@@ -2719,6 +2722,25 @@ would overwrite the glyph with the word.
   before it starts — nothing has been worn) with each garment's "needed again"/`::nn` halves
   merged (`tripsyGarmentLocationLaundryItems`) — here it is simply in the laundry. Computed
   lazily on the Laundry tap, since it walks every garment's wear days. `garmentlocation_test.js`.
+- **The 👔 menu is labelled "Clothes"** ("Change the name of the attire menu to Clothes,"
+  2026-10-19): the trip card's button label and tooltip, and the two messages that point at
+  the menu (the Packing List's "Select Packing Status from the 👔 Clothes menu…" and the stale
+  glyph's "Something in the Clothes menu is out of date"). Everything else — function names,
+  `data-tripsy-attire-*` attributes, the guide/summary page titles and this file — keeps
+  "attire".
+- **👔 → Laundry, and a "Laundry back · N out" row per wash still out** ("In the attire menu,
+  add a menu item called 'Laundry'. Have this bring up the same page as the laundry button from
+  the daily dress guide. When laundry is out, also show the laundry back option from this
+  menu," 2026-10-19). Owner-only, once a guide exists, after Garment Location and before Refresh.
+  `tripsyAttireMenuLaundry(guide, trip, records, person)` (pure) gives the laundry DAY by Garment
+  Location's rule (`tripsyGarmentLocationLaundryDay`: the trip's today, its last day once over,
+  null before it starts) and the outstanding washes (`tripsyLaundryOutstandingByWash`, oldest
+  first), for the person the Daily Dress Guide is showing (`tripsyDressGuidePerson`, read at
+  render and at click). **Laundry** opens `showTripsyLaundryDay` for that day — the guide's own
+  screen (a null day toasts "the trip has not started yet"); each **Laundry back** row opens
+  `showTripsyWashedDay` for its wash with `collectDayKey` = today, so a Received confirmation is
+  dated like the guide's button. Both pass `onChanged` → `renderTripsyEventsList`, so the "N out"
+  rows re-judge after a wash or a return. `attirelaundrymenu_test.js`.
 - **The Trip Insurance documents ride on EVERY trip's 📄 Documents menu** ("For every trip,
   automatically add the trip insurance documents policy and confirmation of benefits to the list
   of downloaded documents," 2026-10-18). The menu is titled "Downloaded Documents"; the policy and
@@ -3161,7 +3183,30 @@ would overwrite the glyph with the word.
   behaviour and only misled. A role name is also stable across regenerations, which the
   `id::tier::line` selection key wants. `tripsyWardrobePackedNeedLines` strips them for **Packing
   Status**, which is a checklist of things to physically put in a bag; **Plan Packing List** keeps
-  them, since picking which jeans you fly in is the whole point. `composeTripsyOutfits` reads the
+  them, since picking which jeans you fly in is the whole point. **And a flight-worn pick COUNTS
+  AS PACKED** ("Count all garments selected for wear on flight as having been packed,"
+  2026-10-20 — Packing Status' "N/X packed" tally summed every entry, so the flight outfit added
+  to X with no row to tick and the tally could never reach X): `tripsyWardrobeFlightWornEntry`,
+  applied inside `tripsyNormalizeTripSelection` — the ONE place every reader loads selection
+  entries through — rewrites such an entry to `packed = qty` with every copy located
+  `TRIPSY_CUBE_FLIGHT_WORN`, so the tally, the Cubes page and Garment Location ("Wearing on
+  the flight") all agree, and a pick saved before the rule reads as packed with no migration.
+  The four scaffolds that extract the normalizer (`cubes`/`cubescarry`/`orphan`/
+  `replacegarment`) gained the two consts + two helpers. `flightwornpacked_test.js`.
+  **And the cube picker's "Wear on flight" tile MOVES the garment onto that flight-worn line**
+  (same day, closing the gap the rule left: the tile and the lines were independent records,
+  so two different tops could each claim to be the flight top): Packing Status'
+  `markGarmentPacked`, on a pick containing `TRIPSY_CUBE_FLIGHT_WORN`, runs the pure
+  `tripsyWardrobeAdoptFlightWornPick(entries, g, fromCategory, fromLine, needByTier)` — the
+  garment's ROLE (`tripsyOutfitGarmentRoles`: top / bottoms / shoes) names the companion line
+  (`TRIPSY_FLIGHT_WORN_ROLE_LABEL` + suffix) in whichever tier holds it; that copy leaves the
+  ordinary entry (dropped when it was the last), any garment already on the companion line is
+  REPLACED, and the mover is stored exactly as a Packing List pick there — so outfit
+  composition, wear days and every screen see one flight outfit. Null (nothing moves, the pick
+  stays a plain location) when the trip has no flight-worn line for that role, the garment has
+  no role (a tie, a jacket), or the entry already is the companion line. Toasts "X is now the
+  garment you wear on the flight." `flightwornadopt_test.js`.
+  `composeTripsyOutfits` reads the
   selection's stored line name through `tripsyWardrobeLineIsFlightWorn` to label those garments
   `WORN ON THE DEPARTING FLIGHT` in the prompt, and the re-wear rules say the flight counts as one
   wear: the flight-worn **top** is used up and must not be assigned to any block before the first

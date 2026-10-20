@@ -9764,8 +9764,63 @@ function tripsyNormalizeTripSelection(arr) {
     // or one whose cube was later deleted). Length is always exactly `packed`, so
     // "how many are packed" and "where each one is" can never disagree -- see
     // tripsyCubesForEntry, which is the only place this is derived.
-    return { id: e.id, category: e.category || '', line: e.line || '', qty, packed, cubes: tripsyCubesForEntry(e, packed) };
+    const entry = { id: e.id, category: e.category || '', line: e.line || '', qty, packed, cubes: tripsyCubesForEntry(e, packed) };
+    return tripsyWardrobeLineIsFlightWorn(entry.line) ? tripsyWardrobeFlightWornEntry(entry) : entry;
   }).filter(e => e.id);
+}
+// A pick on a "— wearing on the flight" line is on your body when you leave, so it counts
+// as PACKED ("Count all garments selected for wear on flight as having been packed,"
+// 2026-10-20): every copy packed, located "Wear on flight" (the cube picker's own sentinel,
+// so Garment Location and the Cubes page file it there). Applied in the normalizer above,
+// the one place every reader loads selection entries through, so Packing Status' tally, the
+// cube views and the Packing List all agree -- and a pick saved before this rule reads as
+// packed with no migration.
+function tripsyWardrobeFlightWornEntry(entry) {
+  if (!entry || !tripsyWardrobeLineIsFlightWorn(entry.line)) return entry;
+  const qty = Math.max(1, entry.qty || 1);
+  return { ...entry, qty, packed: qty, cubes: Array.from({ length: qty }, () => TRIPSY_CUBE_FLIGHT_WORN) };
+}
+// ONE flight outfit, whichever path chose it (2026-10-20, closing the gap the rule above
+// left: the cube picker's "Wear on flight" tile and the Packing List's "— wearing on the
+// flight" lines were independent records, so two different tops could each claim to be the
+// flight top). When "Wear on flight" is picked for a copy of garment `g` sitting on an
+// ordinary entry (`fromCategory`/`fromLine`), and the person's need lines carry a flight-worn
+// companion line for the garment's ROLE (top / bottoms / shoes), that copy MOVES onto the
+// companion line: the ordinary entry loses one copy (dropped when it was the last), any
+// garment already on the companion line is replaced, and the mover is stored exactly as a
+// Packing List pick on that line would be. Pure; returns the new entries array, or null when
+// nothing applies (no flight-worn line for that role -- the trip doesn't start with a flight,
+// or the garment is a tie/jacket with no role -- or the entry IS the companion line).
+function tripsyWardrobeAdoptFlightWornPick(entries, g, fromCategory, fromLine, needByTier) {
+  if (!g || !entries) return null;
+  if (tripsyWardrobeLineIsFlightWorn(fromLine)) return null;
+  const role = tripsyOutfitGarmentRoles(g)[0];
+  const label = role && TRIPSY_FLIGHT_WORN_ROLE_LABEL[role];
+  if (!label) return null;
+  const lineName = `${label}${TRIPSY_FLIGHT_WORN_SUFFIX}`;
+  let tier = null;
+  for (const [t, lines] of Object.entries(needByTier || {})) {
+    if ((lines || []).some(ln => ln && ln.flightWorn && ln.name === lineName)) { tier = t; break; }
+  }
+  if (!tier) return null;
+  const out = [];
+  for (const e of entries) {
+    if (!e) continue;
+    if (e.category === tier && e.line === lineName) continue; // whoever was the flight garment before
+    if (e.id === g.id && e.category === fromCategory && e.line === fromLine) {
+      const qty = (e.qty || 1) - 1;
+      if (qty <= 0) continue;
+      const cubes = (e.cubes || []).slice();
+      const i = cubes.indexOf(TRIPSY_CUBE_FLIGHT_WORN);
+      if (i >= 0) cubes.splice(i, 1);
+      const kept = cubes.filter(Boolean).slice(0, qty);
+      out.push({ ...e, qty, packed: Math.min(qty, kept.length), cubes: kept });
+      continue;
+    }
+    out.push(e);
+  }
+  out.push({ id: g.id, category: tier, line: lineName, qty: 1, packed: 1, cubes: [TRIPSY_CUBE_FLIGHT_WORN] });
+  return out;
 }
 // The per-copy cube list for a selection/generic entry, normalised to exactly `packed`
 // slots. Truncates a list longer than the packed count (copies were un-packed) and pads
@@ -11381,7 +11436,7 @@ async function tripsyPackingCompleteDialog(tripKey, person) {
     { title: 'Congratulations! 🎉', yes: 'Start packing', no: 'Not yet' });
   if (currentView === 'tripsytrips') renderTripsyEventsList();
   if (!startNow) {
-    await tripsyConfirmDialog('Select Packing Status from the 👔 Attire menu when you are ready to start packing.', { title: 'Packing List saved', yes: 'OK', no: null });
+    await tripsyConfirmDialog('Select Packing Status from the 👔 Clothes menu when you are ready to start packing.', { title: 'Packing List saved', yes: 'OK', no: null });
     return;
   }
   const sel = document.getElementById('tw-select-overlay');
@@ -14969,9 +15024,11 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   };
   // The Gym Clothes rows shown HERE: a gym Socks/Underwear line whose picks are counted on
   // a General line is listed there (with its own cube), not twice.
-  // A predicate rather than a filtered list, so line INDICES (which the row and detail
-  // addressing use) stay those of needLines[tier].
-  const statusLineHidden = (tier, ln) => tier === TRIPSY_WARDROBE_GYM_TIER && !!tripsyWardrobeGymEssentialTarget(needLines[TRIPSY_WARDROBE_GENERAL_TIER] || [], ln.name);
+  // The Gym Clothes section lists all five of its lines here, exactly as the Packing List
+  // does ("The packing status page layout for gym clothes should match the packing list
+  // page," 2026-10-20) -- the first cut hid the gym Socks/Underwear rows because their picks
+  // are also counted on General's lines; they are now packable from EITHER row (one entry,
+  // one cube), and General's page still lists them as "from Gym Clothes" cards.
   // Generics selected for a tier+line, carrying their ORIGINAL array index (for packed toggling).
   const genericsForLine = (tier, ln) => generics.map((x, i) => ({ x, i })).filter(({ x }) => (x.person || 'him') === person && x.category === tier && x.name === ln.name);
   // Mark packed from the detail view. A single copy (qty 1) just toggles packed<->
@@ -15040,6 +15097,16 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
       const picked = await showTripsyCubePicker(label, cubeSlotsFor(e));
       if (picked == null) return; // cancelled -- leave the entry exactly as it was
       applyCubes(e, picked);
+      // "Wear on flight" picked for a top / bottoms / shoes: that copy becomes THE flight
+      // garment -- moved onto the Packing List's flight-worn line, replacing whatever was
+      // there -- so both paths describe one flight outfit (2026-10-20).
+      if (picked.includes(TRIPSY_CUBE_FLIGHT_WORN)) {
+        const moved = tripsyWardrobeAdoptFlightWornPick(selEntries, g, e.category, e.line, tripsyWardrobeNeedByTier(guide, person));
+        if (moved) {
+          selEntries.splice(0, selEntries.length, ...moved);
+          toast(`${label} is now the garment you wear on the flight.`);
+        }
+      }
     }
     chosen = aggregate(); persist(); render();
   };
@@ -15094,7 +15161,6 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
       if (!lines.length) return '';
       const { fill, byLine } = tripsyWardrobeAssignGarments(lines, selectedForTier(tier));
       const rows = lines.map((ln, i) => {
-        if (statusLineHidden(tier, ln)) return '';
         const need = effectiveNeed(tier, ln);
         const selected = (fill[i] || 0) + genericFilledFor(tier, ln);
         const packed = (byLine[i] || []).reduce((a, it) => a + Math.min(it.packed || 0, it.qty), 0) + genericPackedFor(tier, ln);
@@ -15422,6 +15488,23 @@ function tripsyGarmentLocationLaundryDay(dayKeys, todayKey) {
   const first = keys[0], last = keys[keys.length - 1];
   if (todayKey < first) return null;
   return todayKey > last ? last : todayKey;
+}
+// 👔 menu -> Laundry / Laundry back ("In the attire menu, add a menu item called 'Laundry'.
+// Have this bring up the same page as the laundry button from the daily dress guide. When
+// laundry is out, also show the laundry back option from this menu," 2026-10-19). Pure: the
+// laundry DAY is the trip's own today (the last day once the trip is over, null before it
+// starts -- nothing has been worn), exactly as Garment Location judges it, and the
+// outstanding washes are every awaiting-return wash with copies still out
+// (tripsyLaundryOutstandingByWash), oldest first, so the menu can show one "Laundry back"
+// row per wash just as the guide's today row does.
+function tripsyAttireMenuLaundry(guide, trip, records, person) {
+  const dayKeys = ((guide && guide.days) || []).map(d => d.dayKey).filter(Boolean);
+  const todayKey = trip ? tripsyTravelViewTodayKey(trip, dayKeys[0] || null, dayKeys[dayKeys.length - 1] || null) : tripsyTodayDayKey();
+  const dayKey = tripsyGarmentLocationLaundryDay(dayKeys, todayKey);
+  const outstanding = [...tripsyLaundryOutstandingByWash(records, person)]
+    .map(([washDayKey, o]) => ({ washDayKey, total: o.total }))
+    .sort((a, b) => a.washDayKey.localeCompare(b.washDayKey));
+  return { dayKey, outstanding };
 }
 // Garments on the laundry row, merged per garment: tripsyLaundryItemsForDay splits one
 // garment into a "needed again" card and a "::nn" (not needed for the trip) card, a
@@ -26994,7 +27077,7 @@ function tripsySetAttireStaleBadge(btn, state) {
   badge.className = `tripsy-attire-stale-badge${generating ? ' tripsy-attire-stale-badge--generating' : ' tripsy-menu-flash'}`;
   badge.title = generating
     ? 'Building this trip’s attire guide…'
-    : 'Something in the Attire menu is out of date — open the menu to see what.';
+    : 'Something in the Clothes menu is out of date — open the menu to see what.';
   badge.setAttribute('aria-label', generating ? 'Attire guide is being generated' : 'Attire may be out of date');
 }
 // Applies the blinking badge to the 👔 buttons of every trip currently generating, without
@@ -35991,16 +36074,29 @@ async function renderTripsyEventsListImpl() {
       // contents come from the packing selection and the laundry judgement from the
       // guide's wear days. Sits directly before Refresh.
       attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="location" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '📍', 'Garment Location') : '',
+      // Laundry ("add a menu item called 'Laundry' … the same page as the laundry button
+      // from the daily dress guide. When laundry is out, also show the laundry back
+      // option," 2026-10-19): the guide's own screens for the trip's today, for the person
+      // the guide is showing; one "Laundry back" row per wash with copies still out.
+      // Owner-only like the guide's buttons (both screens write).
+      ...(isOwner && attireHasGuide ? (() => {
+        const lp = tripsyDressGuidePerson;
+        const { dayKey: laundryDay, outstanding } = tripsyAttireMenuLaundry(attireGuideObj, trip, Store.listTripsyLaundry(trip.key), lp);
+        return [
+          menuListButtonHtml(`data-tripsy-attire-nav="laundry" data-key="${esc(trip.key)}" data-day="${esc(laundryDay || '')}"`, '🧺', 'Laundry'),
+          ...outstanding.map(o => menuListButtonHtml(`data-tripsy-attire-nav="laundryback" data-key="${esc(trip.key)}" data-day="${esc(laundryDay || '')}" data-wash="${esc(o.washDayKey)}"`, '🧺', `Laundry back · ${o.total} out`)),
+        ];
+      })() : []),
       isOwner ? menuListButtonHtml(`data-tripsy-attire-nav="refresh" data-mode="${attireHasGuide ? 'refresh' : 'generate'}" data-key="${esc(trip.key)}"`, '🔄', attireHasGuide ? 'Refresh' : 'Generate') : '',
     ].join('');
     const attireButtonHtml = (!collapsed && (attireHasGuide || isOwner)) ? iconLabelButton(`
       <div style="position:relative;">
-        <button class="btn" data-tripsy-attire-menu-toggle data-key="${esc(trip.key)}" title="Attire" style="position:relative; width:28px; height:28px; border-radius:50%; padding:0; font-size:16px; display:flex; align-items:center; justify-content:center;">👔</button>
+        <button class="btn" data-tripsy-attire-menu-toggle data-key="${esc(trip.key)}" title="Clothes" style="position:relative; width:28px; height:28px; border-radius:50%; padding:0; font-size:16px; display:flex; align-items:center; justify-content:center;">👔</button>
         <div data-tripsy-attire-menu="${esc(trip.key)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:180px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
           ${attireMenuItems}
         </div>
       </div>
-    `, 'Attire') : '';
+    `, 'Clothes') : '';
     // 🔍 Search this trip -- toggles the find-in-page bar (searchBarHtml below,
     // placed just above the timeline) that highlights + steps through matches
     // in this trip's own timeline. Sits right of the Itinerary button.
@@ -36432,6 +36528,19 @@ async function renderTripsyEventsListImpl() {
         case 'pack': tripsyWardrobePackForTrip(key, name); break;
         case 'packlist': tripsyWardrobePackingList(key, name); break;
         case 'location': showTripsyGarmentLocation(key, name); break;
+        // Laundry / Laundry back (2026-10-19): the Daily Dress Guide's own screens, for the
+        // trip's today (data-day; empty = the trip hasn't started, nothing worn yet) and
+        // the person the guide is showing. A change re-renders My Trips so the "N out"
+        // rows re-judge.
+        case 'laundry': {
+          if (!btn.dataset.day) { toast('The trip has not started yet — nothing has been worn.'); break; }
+          showTripsyLaundryDay(key, btn.dataset.day, tripsyDressGuidePerson, { onChanged: () => renderTripsyEventsList() });
+          break;
+        }
+        case 'laundryback': {
+          showTripsyWashedDay(key, btn.dataset.wash, tripsyDressGuidePerson, { collectDayKey: btn.dataset.day || btn.dataset.wash, onChanged: () => renderTripsyEventsList() });
+          break;
+        }
         case 'outfits': { // per-person list; open on a person who can view/compose
           // GENERATE OUTFITS: ask, then compose in the background (2026-10-05).
           if (btn.dataset.mode === 'generate') {

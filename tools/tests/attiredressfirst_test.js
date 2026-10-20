@@ -86,7 +86,7 @@ const done = extractFn('tripsyPackingCompleteDialog');
 assert(/'Your packing list is complete! Would you like to start packing now\?'/.test(done) && /yes: 'Start packing', no: 'Not yet'/.test(done),
   'THE ASK: completing the list asks whether to start packing now');
 assert(done.indexOf("renderTripsyEventsList()") < done.indexOf('if (!startNow)'), 'both answers re-render My Trips so Packing Status joins the 👔 menu');
-assert(/Select Packing Status from the 👔 Attire menu when you are ready to start packing\./.test(done), 'No says where to find Packing Status');
+assert(/Select Packing Status from the 👔 Clothes menu when you are ready to start packing\./.test(done), 'No says where to find Packing Status (the menu is labelled Clothes, 2026-10-19)');
 assert(/tripsyWardrobePackingList\(tripKey, trip \? trip\.name : '', person\)/.test(done) && done.indexOf("sel.style.display = 'none'") < done.indexOf('tripsyWardrobePackingList('),
   'Yes closes the Packing List and opens Packing Status for the same person');
 assert(!/runTripsyOutfitComposition/.test(done), 'outfits are no longer offered here (Compose Outfits stays on the menu)');

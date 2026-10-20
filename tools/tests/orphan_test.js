@@ -19,8 +19,9 @@ function extractConst(name) {
     else if (c === ';' && depth === 0) return html.slice(start, j + 1);
   }
 }
-const src = extractConst('TRIPSY_UNCUBED_TYPES') + '\n'
+const src = extractConst('TRIPSY_UNCUBED_TYPES') + '\n' + extractConst('TRIPSY_FLIGHT_WORN_SUFFIX') + '\n' + extractConst('TRIPSY_CUBE_FLIGHT_WORN') + '\n'
   + ['tripsyGarmentTypeKey', 'tripsyGarmentSkipsCube', 'tripsyCubesForEntry',
+     'tripsyWardrobeLineIsFlightWorn', 'tripsyWardrobeFlightWornEntry', // the normalizer's flight-worn rule (2026-10-20)
      'tripsyNormalizeTripSelection'].map(extractFn).join('\n');
 
 fs.writeFileSync('orphan_run.js', `

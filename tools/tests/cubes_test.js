@@ -20,7 +20,8 @@ function extractConst(name) {
     else if (c === ';' && depth === 0) return html.slice(start, j + 1);
   }
 }
-const consts = ['TRIPSY_CUBE_BRANDS','TRIPSY_CUBE_SIZES','TRIPSY_CUBE_COLORS','TRIPSY_CUBE_NONE','TRIPSY_CUBE_FLIGHT_WORN'].map(extractConst).join('\n');
+const consts = ['TRIPSY_CUBE_BRANDS','TRIPSY_CUBE_SIZES','TRIPSY_CUBE_COLORS','TRIPSY_CUBE_NONE','TRIPSY_CUBE_FLIGHT_WORN','TRIPSY_FLIGHT_WORN_SUFFIX'].map(extractConst).join('\n')
+  + '\n' + ['tripsyWardrobeLineIsFlightWorn', 'tripsyWardrobeFlightWornEntry'].map(extractFn).join('\n'); // the normalizer's flight-worn rule (2026-10-20)
 // tripsyCubeLabel delegates to tripsyCubeSlotLabel since the "No cube"/"Wear
 // on flight" sentinels -- omitting the slot helpers crashed the generated run
 // at its first tripsyCubeLabel call, silently truncating this suite until the
