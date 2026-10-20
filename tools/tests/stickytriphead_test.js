@@ -23,20 +23,18 @@ const rule = sel => { const m = css.match(new RegExp(sel.replace(/[.*+?^${}()|[\
   assert(/background:\s*var\(--panel\)/.test(head), 'it is opaque, so the days scroll UNDER it rather than through it');
   const z = parseInt((head.match(/z-index:\s*(\d+)/) || [])[1] || '0', 10);
   assert(z > 2 && z < 100, `its z-index clears the day bars (z 2) and connectors but stays below every fixed menu/modal (got ${z})`);
-  assert(/margin:\s*-22px -24px 0/.test(head) && /padding:\s*20px 22px/.test(head), 'its negative margins reach the card\'s OUTER edge (20px 22px padding + 2px border) so nothing peeks above it');
+  assert(/margin:\s*0 -24px 0/.test(head) && /padding:\s*20px 22px/.test(head), 'its side margins reach the card\'s OUTER edge (22px padding + 2px border); NO negative top margin (Safari pins a sticky box by its margin edge, which left a band above the header)');
+  const tripCard = rule('.card.tripsy-trip-card');
+  assert(/padding-top:\s*0/.test(tripCard) && /border-top:\s*none/.test(tripCard), 'the trip card hands its top padding and top border to the header instead');
   assert(/border:\s*2px solid var\(--muted\);\s*border-bottom:\s*none;\s*border-radius:\s*10px 10px 0 0/.test(head),
     'THE ASK: the header carries the card\'s 2px top/side border, rounded like the card while in place');
-  assert(/border-radius:\s*0/.test(rule('.tripsy-trip-head.tripsy-trip-head--stuck')), 'and SQUARE corners only while PINNED (a rounded corner lets the days show through the sliver outside the arc)');
-  // The pinned decision: ratio < 1 under the -1px rootMargin AND the top edge at/above 0 --
-  // a header merely entering from the bottom of the window is not pinned.
-  const isStuck = new Function(fnSource('tripsyStickyHeadIsStuck') + '; return tripsyStickyHeadIsStuck;')();
-  assert(isStuck({ intersectionRatio: 0.98, boundingClientRect: { top: 0 } }) === true, 'pinned at top:0 -> stuck');
-  assert(isStuck({ intersectionRatio: 1, boundingClientRect: { top: 240 } }) === false, 'fully visible in place -> not stuck');
-  assert(isStuck({ intersectionRatio: 0.5, boundingClientRect: { top: 650 } }) === false, 'half off the BOTTOM of the window -> not stuck');
-  const watch = fnSource('tripsyWatchStickyTripHeads');
-  assert(/rootMargin: '-1px 0px 0px 0px'/.test(watch) && /threshold: \[1\]/.test(watch) && /classList\.add\('tripsy-trip-head--stuck'\)/.test(watch),
-    'the observer uses the -1px trick, and a browser without IntersectionObserver falls back to always-square (the safe side)');
-  assert(/tripsyWatchStickyTripHeads\(container\);/.test(fnSource('renderTripsyEventsListImpl')), 'armed on every My Trips render');
+  // Rounded corners survive the pin ("Is it now possible to keep rounded corners on the
+  // scroll?"): a page-background strip behind the header's top edge fills the slivers outside
+  // the arcs, so the days scrolling beneath never show there -- no observer, no class.
+  const before = rule('.tripsy-trip-head::before');
+  assert(/position:\s*absolute/.test(before) && /z-index:\s*-1/.test(before) && /background:\s*var\(--bg\)/.test(before), 'THE ASK: the header\'s ::before is a page-background strip BEHIND the header (z -1 in its own stacking context)');
+  assert(/left:\s*-2px;\s*right:\s*-2px;\s*top:\s*-2px;\s*height:\s*12px/.test(before), 'it spans the border box and covers the 10px corner radius');
+  assert(!/tripsy-trip-head--stuck/.test(html) && !/tripsyWatchStickyTripHeads/.test(html), 'the square-while-pinned observer is gone');
   const cardPad = (rule('.card').match(/padding:\s*([^;]+);/) || [])[1];
   const cardBorder = (rule('.card').match(/border:\s*([^;]+);/) || [])[1];
   assert(cardPad === '20px 22px' && cardBorder === '2px solid var(--muted)', `sanity: .card is still padding 20px 22px / border 2px (got ${cardPad} / ${cardBorder}) -- the header margins and border mirror them`);
