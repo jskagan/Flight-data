@@ -42,8 +42,8 @@ assert(/window\.scrollY \+ el\.getBoundingClientRect\(\)\.top/.test(fn),
   'it scrolls to an ABSOLUTE position, not by a relative delta');
 assert(/\[120, 350, 800\]\.forEach/.test(fn) && /requestAnimationFrame/.test(fn),
   'and re-runs, since cards grow as photos and weather arrive');
-assert(/const el = document\.querySelector\('\[data-tripsy-today-day\]'\)/.test(fn),
-  'each pass re-queries the target, which a re-render may have replaced');
+assert(/const selector = tripsyMyTripsTodaySelector\(\);/.test(fn) && /const el = document\.querySelector\(selector\)/.test(fn),
+  'each pass re-queries the target (by the armed trip\'s selector, 2026-10-20), which a re-render may have replaced');
 assert(/Math\.max\(0, y\)/.test(fn), 'and never asks for a negative scroll position');
 // The latch has to be re-armed when the page is entered afresh.
 assert(/resetTripsyMyTripsTodayScroll\(\); \/\/ a fresh visit/.test(html), 'navigating to My Trips re-arms it');

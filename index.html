@@ -302,6 +302,17 @@
     width: 230px; flex-shrink: 0; background: var(--panel);
     border-right: 1px solid var(--line); padding: 24px 0;
     display: flex; flex-direction: column;
+    /* Pinned on wide screens ("freeze the left side navigation page, with all items always
+       displayed when viewing on a wide device," 2026-10-20): sticky against the window, so
+       the page scrolls while the rail stays. A flex child is STRETCHED to the whole .app
+       height by default, and an element as tall as its container has nowhere to stick --
+       so it is pinned to its own content height (align-self:flex-start) and sized to the
+       viewport: min-height keeps the panel background filling the window's full height,
+       max-height + overflow-y let a rail taller than a short window scroll WITHIN itself
+       rather than lose its lower items. The box-sizing matters: the 24px vertical padding
+       must count inside those 100vh bounds. The <=1100px top-bar layout below undoes this. */
+    position: sticky; top: 0; align-self: flex-start;
+    box-sizing: border-box; min-height: 100vh; max-height: 100vh; overflow-y: auto;
   }
   .rail-brand {
     font-family: var(--mono); font-weight: 600; font-size: 13px;
@@ -352,6 +363,9 @@
       width: 100%; flex-direction: row; flex-wrap: wrap; align-items: center;
       overflow-x: auto; -webkit-overflow-scrolling: touch;
       padding: 8px 0; border-right: none; border-bottom: 1px solid var(--line);
+      /* The top bar scrolls away with the page, as before -- the wide-screen pin above is
+         undone here. */
+      position: static; align-self: auto; min-height: 0; max-height: none;
     }
     .rail-brand { display: none; }
     .rail-item {
@@ -387,6 +401,22 @@
   .card-title {
     font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
     color: var(--muted); margin: 0 0 14px;
+  }
+  /* My Trips: a trip card's HEADER (name, dates, the action buttons) stays pinned at the
+     top of the window while its days scroll beneath it ("freeze the header and just allow
+     the scroll to apply to the days of the trip," 2026-10-20). The page itself is what
+     scrolls (the rail is in normal flow), so position:sticky against the window is enough
+     -- EXCEPT that .card's overflow-x:auto makes every card its own scrollport, inside
+     which a sticky child never moves with the page; a trip card therefore restores
+     overflow:visible (its timeline is never wider than the card; body's overflow-x:hidden
+     is the backstop). The header's negative margins re-cover the card's own padding so
+     nothing peeks above it, and its z-index clears the day bars (z 2) and the timeline
+     connectors while staying far below every fixed menu/modal layer. Sticky is bounded by
+     the card, so each card's header gives way to the next card's. */
+  .card.tripsy-trip-card { overflow: visible; }
+  .tripsy-trip-head {
+    position: sticky; top: 0; z-index: 5; background: var(--panel);
+    margin: -20px -22px 0; padding: 20px 22px 10px; border-radius: 10px 10px 0 0;
   }
 
   /* ---- Upload dropzone ---- */
@@ -35557,22 +35587,40 @@ function tripsyCreateFindInPage(scope, countEl) {
 // tripsyTravelViewTodayKey pass that dims past days, so the scroll and the graying can
 // never disagree about which day is today.
 let _tripsyMyTripsScrolledToToday = false;
-function resetTripsyMyTripsTodayScroll() { _tripsyMyTripsScrolledToToday = false; }
+// Which trip the next jump is for (null = whichever in-progress trip is marked). Set when
+// the owner EXPANDS a trip card ("When I am currently on a trip and view that trip from
+// the my trips page, have the current day show as the top scrolled date by default,"
+// 2026-10-20): trips open collapsed, so the once-per-visit jump had no marked day on the
+// first render, and expanding the trip later -- the moment the days actually appear --
+// is when the jump must happen; re-arming per expand also covers collapse-and-reopen.
+let _tripsyMyTripsTodayScrollTrip = null;
+function resetTripsyMyTripsTodayScroll(tripKey = null) { _tripsyMyTripsScrolledToToday = false; _tripsyMyTripsTodayScrollTrip = tripKey || null; }
+function tripsyMyTripsTodaySelector() {
+  return _tripsyMyTripsTodayScrollTrip ? `[data-tripsy-today-day="${CSS.escape(_tripsyMyTripsTodayScrollTrip)}"]` : '[data-tripsy-today-day]';
+}
+// Height of the sticky header of the trip card holding `el` (0 when there is none), so a
+// programmatic scroll can land a day bar BELOW the pinned header instead of under it.
+function tripsyStickyTripHeaderHeight(el) {
+  const card = el && el.closest ? el.closest('.tripsy-trip-card') : null;
+  const head = card && card.querySelector('.tripsy-trip-head');
+  return head ? head.getBoundingClientRect().height : 0;
+}
 function tripsyScrollMyTripsToToday() {
   if (_tripsyMyTripsScrolledToToday) return;
-  const target = document.querySelector('[data-tripsy-today-day]');
-  if (!target) return; // no trip is in progress -- leave the page where it opened
+  const selector = tripsyMyTripsTodaySelector();
+  const target = document.querySelector(selector);
+  if (!target) return; // no trip is in progress (or the armed trip has no today) -- leave the page where it is
   _tripsyMyTripsScrolledToToday = true;
   // Absolute target rather than scrollBy, and re-run a few times: trip cards grow after
   // first paint as photos and weather chips arrive, so a single early scroll lands short.
   // Same lesson as Travel View's open-on-today, which took several passes to get right.
   const scrollToIt = () => {
-    const el = document.querySelector('[data-tripsy-today-day]');
+    const el = document.querySelector(selector);
     if (!el) return;
-    // No sticky-header offset to subtract: the nav rail is a normal flow element (a
-    // column on wide screens, a scrolling top bar below 1100px), so it scrolls away with
-    // the page rather than covering the top of it.
-    const y = window.scrollY + el.getBoundingClientRect().top - 8;
+    // The nav rail is a normal flow element (a column on wide screens, a scrolling top
+    // bar below 1100px), so it scrolls away with the page -- but the trip card's own
+    // header is STICKY (2026-10-20), so the day bar must land just below it, not under it.
+    const y = window.scrollY + el.getBoundingClientRect().top - 8 - tripsyStickyTripHeaderHeight(el);
     window.scrollTo({ top: Math.max(0, y), behavior: 'auto' });
   };
   requestAnimationFrame(() => requestAnimationFrame(scrollToIt));
@@ -36478,8 +36526,8 @@ async function renderTripsyEventsListImpl() {
       <button data-tripsy-review-proposals data-key="${esc(trip.key)}" title="${pendingParseCount} item${pendingParseCount === 1 ? '' : 's'} from a parsed doc or email awaiting your review for this trip" style="background:var(--home-green); color:#04210F; border:none; border-radius:50%; width:22px; height:22px; padding:0; font-size:13px; font-weight:800; line-height:1; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">✓</button>
     `) : '';
     return `
-      <div class="card" style="margin-bottom:14px;">
-        <div data-tripsy-header-toggle="${esc(trip.key)}" style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; cursor:pointer;">
+      <div class="card tripsy-trip-card" style="margin-bottom:14px;">
+        <div class="tripsy-trip-head" data-tripsy-header-toggle="${esc(trip.key)}" style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; cursor:pointer;">
           <div>
             <div style="display:flex; align-items:center; gap:8px;">
               <div style="font-family:var(--mono); font-size:18px; font-weight:700; color:var(--amber);">${esc(effectiveTrip.name)}</div>
@@ -36563,7 +36611,12 @@ async function renderTripsyEventsListImpl() {
   if (isOwner) showTripsyPsDriftAlertIfNeeded(psDriftMatches);
 
   const toggleTripsyCollapse = key => {
-    setTripsyTripCollapsed(key, !isTripsyTripCollapsed(key));
+    const expanding = isTripsyTripCollapsed(key);
+    setTripsyTripCollapsed(key, !expanding);
+    // Expanding an in-progress trip opens it on TODAY, at the top (just below the pinned
+    // header) -- re-armed on every expand, scoped to this trip; a trip not in progress
+    // has no marked day, so the jump simply does not fire.
+    if (expanding) resetTripsyMyTripsTodayScroll(key);
     renderTripsyEventsList();
   };
   // The whole header row (name, subtitle, and the empty space around/

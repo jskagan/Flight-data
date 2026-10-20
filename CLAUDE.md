@@ -1121,7 +1121,15 @@ step 4; git history has it if ever needed.
   back while you're reading; it scrolls to an ABSOLUTE position and re-runs on rAF + 120/350/800ms,
   since trip cards grow as photos and weather chips arrive — the same lesson Travel View's
   open-on-today took several passes to learn. No trip in progress means no marked day, and the
-  page simply opens where it was. The wrapper carries only a class, so the timeline connectors
+  page simply opens where it was. **EXPANDING a trip card re-arms the jump for that trip**
+  ("When I am currently on a trip and view that trip from the my trips page, have the current
+  day show as the top scrolled date by default," 2026-10-20 — trips open collapsed, so the
+  once-per-visit jump saw no marked day on the first render, and the moment the days appear
+  is when it must fire): `toggleTripsyCollapse`, when going collapsed → expanded, calls
+  `resetTripsyMyTripsTodayScroll(key)`, which clears the once flag and scopes the selector
+  (`tripsyMyTripsTodaySelector`) to `[data-tripsy-today-day="key"]`; the post-render jump then
+  lands that trip's today bar at the top, just below the sticky header, and collapse-and-reopen
+  jumps again. A trip not in progress has no marked day, so nothing fires. `expandtoday_test.js`. The wrapper carries only a class, so the timeline connectors
   (which measure rows, not their parents) are unaffected by the wrapper's opacity — **but the
   connecting line itself still needs its own dimming**, or it stays full-bright running through
   grayed-out rows. `positionTripsyTimelineConnectors` builds the line from many small per-gap
@@ -1131,6 +1139,33 @@ step 4; git history has it if ever needed.
   (per the owner's explicit ask: "I want the line dim when it starts from a grayed out event," 2026-08-14
   — an earlier version required BOTH endpoints past specifically to keep that one boundary segment
   bright as a "now begins here" marker, which read as the wrong half of the line staying lit).
+- **A trip card's header is STICKY — the name, dates and action buttons stay pinned while
+  the days scroll** ("When I am viewing a trip from the my trips menu, can you freeze the
+  header and just allow the scroll to apply to the days of the trip," 2026-10-20). The page
+  itself scrolls (the rail is in normal flow), so `.tripsy-trip-head` (the
+  `data-tripsy-header-toggle` row) is `position:sticky; top:0` against the window, opaque
+  (`var(--panel)`), z 5 (above the day bars' z 2 and the connectors, far below every fixed
+  menu/modal), with negative margins re-covering the card's `20px 22px` padding. **The trap**:
+  `.card` has `overflow-x:auto`, which makes every card its own scrollport inside which a
+  sticky child never moves with the page — so the trip card (`.card.tripsy-trip-card`)
+  restores `overflow:visible` (its timeline is never wider than the card; body's
+  `overflow-x:hidden` is the backstop). Sticky is bounded by its card, so each header gives
+  way to the next card's. `tripsyScrollMyTripsToToday` subtracts
+  `tripsyStickyTripHeaderHeight(el)` so the open-on-today jump lands the day bar BELOW the
+  pinned header; `tripsyGoToTripDay` centers its target, which the header never covers.
+  **The left nav rail is pinned too, on wide screens** ("Also freeze the left side navigation
+  page, with all items always displayed when viewing on a wide device," same day): `.rail` is
+  `position:sticky; top:0; align-self:flex-start` — a flex child is stretched to the whole
+  `.app` height by default and an element as tall as its container has nowhere to stick, so
+  it is pinned at its own height and sized to the viewport (`box-sizing:border-box;
+  min-height:100vh` keeps the panel background filling the window; `max-height:100vh;
+  overflow-y:auto` lets a rail taller than a short window scroll WITHIN itself rather than
+  lose its lower items). The `≤1100px` top-bar layout sets `position:static; min-height:0;
+  max-height:none` and scrolls away as before. `tripsyScrollMyTripsToToday`'s comment that
+  the rail scrolls away now holds only for that layout; its offset is the trip header's,
+  which is the one thing that can cover a day bar in either layout. Both pins were verified
+  in Chromium against a page built from the live stylesheet (1300×900, 1300×500, 900×700).
+  `stickytriphead_test.js`.
 - **The My Trips render never waits on weather — chips paint from cache and heal in place**
   ("Sometimes when I open the app and select my trips there is a delay when I select a trip to
   open," 2026-09-28): expanding/collapsing a trip re-runs `renderTripsyEventsListImpl`, which
