@@ -1160,9 +1160,21 @@ step 4; git history has it if ever needed.
   the header's `::before` is a 12px strip of PAGE background (`var(--bg)`) spanning its border
   box at `z-index:-1` inside the header's own stacking context — beneath the header's paint,
   above everything scrolling under it — so in place it is invisible and pinned it fills the
-  corner slivers. (An earlier cut squared the corners while pinned via an `IntersectionObserver`;
-  that observer and `.tripsy-trip-head--stuck` are gone.) Pixel-probed in Chromium with red day
-  bars: no red at either corner, in place or pinned. **The trap**:
+  corner slivers (`isolation:isolate` guarantees the stacking context). Pixel-probed in Chromium
+  with red day bars: no red at either corner, in place or pinned. **While PINNED that strip
+  grows into a CAP reaching 60px (+ `env(safe-area-inset-top)`) ABOVE the header** ("This is
+  still not working as shown on this image," same day, iPad screenshot: the Claude app's web
+  view scrolls the page UNDER the translucent iOS status bar while pinned elements — the rail
+  too — stop at the bar's bottom edge, ~28px down, so already-scrolled rows showed in that
+  band above the header; no CSS value names that inset here since the viewport meta has no
+  `viewport-fit=cover`, hence the fixed 60px). Pinned, nothing legitimate is above the
+  header, so the cap hides only that band; in place it is OFF (it would paint over the
+  previous card's bottom), which is why `tripsyWatchStickyTripHeads(container)` (armed at the
+  end of every My Trips render) toggles `.tripsy-trip-head--stuck` from one
+  `IntersectionObserver` (`threshold:[1]`, `rootMargin:'-1px 0px 0px 0px'`) through the pure
+  `tripsyStickyHeadIsStuck(entry)` (ratio < 1 AND top edge ≤ 0, so a header entering from the
+  window's bottom is not pinned); no observer support → no cap, the corner strip still applies.
+  Corners stay rounded in both states. **The trap**:
   `.card` has `overflow-x:auto`, which makes every card its own scrollport inside which a
   sticky child never moves with the page — so the trip card (`.card.tripsy-trip-card`)
   restores `overflow:visible` (its timeline is never wider than the card; body's

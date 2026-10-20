@@ -430,16 +430,27 @@
      scrolling beneath would show through, so the header's ::before paints a strip of PAGE
      background behind its top edge, below the header's own paint (z-index:-1 inside the
      header's stacking context) but above everything scrolling under it. In place that strip
-     sits on page background and is invisible; pinned, it is what fills the corner slivers. No
-     observer, no class toggling. */
+     sits on page background and is invisible; pinned, it is what fills the corner slivers.
+     WHILE PINNED the strip grows into a CAP reaching 60px (+ any safe-area inset) ABOVE the
+     header ("This is still not working as shown on this image," same day, with an iPad
+     screenshot: the Claude app's web view scrolls the page UNDER the translucent iOS status
+     bar while pinned elements stop at the bar's bottom edge, so already-scrolled rows showed
+     in that band above the header). Pinned, the only thing above the header is that obscured
+     band, so the cap hides nothing legitimate; in place the cap is off (it would paint over
+     the previous card's bottom edge). tripsyWatchStickyTripHeads toggles .tripsy-trip-head--stuck
+     from an IntersectionObserver; isolation:isolate guarantees the header is a stacking context
+     for the z:-1 strip even where sticky alone would not make one. */
   .tripsy-trip-head {
-    position: sticky; top: 0; z-index: 5; background: var(--panel);
+    position: sticky; top: 0; z-index: 5; isolation: isolate; background: var(--panel);
     margin: 0 -24px 0; padding: 20px 22px 10px;
     border: 2px solid var(--muted); border-bottom: none; border-radius: 10px 10px 0 0;
   }
   .tripsy-trip-head::before {
     content: ''; position: absolute; z-index: -1; left: -2px; right: -2px; top: -2px; height: 12px;
     background: var(--bg);
+  }
+  .tripsy-trip-head.tripsy-trip-head--stuck::before {
+    top: calc(-62px - env(safe-area-inset-top, 0px)); height: calc(72px + env(safe-area-inset-top, 0px));
   }
 
   /* ---- Upload dropzone ---- */
@@ -35628,6 +35639,25 @@ function tripsyStickyTripHeaderHeight(el) {
   const head = card && card.querySelector('.tripsy-trip-head');
   return head ? head.getBoundingClientRect().height : 0;
 }
+// Marks each trip card header .tripsy-trip-head--stuck while it is PINNED at the top of the
+// window (its page-background cap then reaches up over the band the iPad status bar scrolls
+// content under), and clears it when it scrolls back into place. One observer per page,
+// re-armed on every My Trips render; rootMargin -1px makes a header sitting exactly at top:0
+// report ratio < 1, and the top-edge test keeps a header merely entering from the bottom of
+// the window from counting as pinned. Pure decision in tripsyStickyHeadIsStuck for the test.
+function tripsyStickyHeadIsStuck(entry) {
+  return entry.intersectionRatio < 1 && entry.boundingClientRect.top <= 0;
+}
+let _tripsyStickyHeadObserver = null;
+function tripsyWatchStickyTripHeads(container) {
+  const heads = [...(container || document).querySelectorAll('.tripsy-trip-head')];
+  if (!('IntersectionObserver' in window)) return; // no cap, the corner strip still applies
+  if (_tripsyStickyHeadObserver) _tripsyStickyHeadObserver.disconnect();
+  _tripsyStickyHeadObserver = new IntersectionObserver(entries => {
+    for (const e of entries) e.target.classList.toggle('tripsy-trip-head--stuck', tripsyStickyHeadIsStuck(e));
+  }, { threshold: [1], rootMargin: '-1px 0px 0px 0px' });
+  heads.forEach(h => _tripsyStickyHeadObserver.observe(h));
+}
 function tripsyScrollMyTripsToToday() {
   if (_tripsyMyTripsScrolledToToday) return;
   const selector = tripsyMyTripsTodaySelector();
@@ -36659,6 +36689,7 @@ async function renderTripsyEventsListImpl() {
       toggleTripsyCollapse(el.dataset.tripsyHeaderToggle);
     });
   });
+  tripsyWatchStickyTripHeads(container); // the pinned header's cap over the status-bar band
   container.querySelectorAll('[data-tripsy-year-toggle]').forEach(el => {
     el.addEventListener('click', () => {
       const y = el.dataset.tripsyYearToggle;

@@ -34,7 +34,20 @@ const rule = sel => { const m = css.match(new RegExp(sel.replace(/[.*+?^${}()|[\
   const before = rule('.tripsy-trip-head::before');
   assert(/position:\s*absolute/.test(before) && /z-index:\s*-1/.test(before) && /background:\s*var\(--bg\)/.test(before), 'THE ASK: the header\'s ::before is a page-background strip BEHIND the header (z -1 in its own stacking context)');
   assert(/left:\s*-2px;\s*right:\s*-2px;\s*top:\s*-2px;\s*height:\s*12px/.test(before), 'it spans the border box and covers the 10px corner radius');
-  assert(!/tripsy-trip-head--stuck/.test(html) && !/tripsyWatchStickyTripHeads/.test(html), 'the square-while-pinned observer is gone');
+  assert(/isolation:\s*isolate/.test(head), 'the header is an explicit stacking context, so the z:-1 strip is behind the header even where sticky alone would not make one');
+  // WHILE PINNED the strip becomes a cap reaching above the header: the iPad app scrolls the
+  // page under the translucent status bar while pinned elements stop at its bottom edge, so
+  // already-scrolled rows showed in that band ("This is still not working as shown on this image").
+  const cap = rule('.tripsy-trip-head.tripsy-trip-head--stuck::before');
+  assert(/top:\s*calc\(-62px - env\(safe-area-inset-top, 0px\)\)/.test(cap) && /height:\s*calc\(72px \+ env\(safe-area-inset-top, 0px\)\)/.test(cap),
+    'THE ASK: pinned, the cap reaches 60px (+ any safe-area inset) above the header to cover the status-bar band');
+  const isStuck = new Function(fnSource('tripsyStickyHeadIsStuck') + '; return tripsyStickyHeadIsStuck;')();
+  assert(isStuck({ intersectionRatio: 0.98, boundingClientRect: { top: 0 } }) === true, 'pinned at top:0 -> stuck');
+  assert(isStuck({ intersectionRatio: 1, boundingClientRect: { top: 240 } }) === false, 'fully visible in place -> not stuck (the cap would paint over the previous card)');
+  assert(isStuck({ intersectionRatio: 0.5, boundingClientRect: { top: 650 } }) === false, 'half off the BOTTOM of the window -> not stuck');
+  const watch = fnSource('tripsyWatchStickyTripHeads');
+  assert(/rootMargin: '-1px 0px 0px 0px'/.test(watch) && /threshold: \[1\]/.test(watch), 'the observer uses the -1px trick');
+  assert(/tripsyWatchStickyTripHeads\(container\);/.test(fnSource('renderTripsyEventsListImpl')), 'armed on every My Trips render');
   const cardPad = (rule('.card').match(/padding:\s*([^;]+);/) || [])[1];
   const cardBorder = (rule('.card').match(/border:\s*([^;]+);/) || [])[1];
   assert(cardPad === '20px 22px' && cardBorder === '2px solid var(--muted)', `sanity: .card is still padding 20px 22px / border 2px (got ${cardPad} / ${cardBorder}) -- the header margins and border mirror them`);
