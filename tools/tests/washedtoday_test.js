@@ -49,7 +49,7 @@ assert(/showTripsyLaundryDay\(guide\.tripKey, dayKey, person, \{ onChanged: refr
 
 // ---- showTripsyWashedDay itself: read-only, merges the ::nn split, resolves names ----
 const washedDay = extractFn('showTripsyWashedDay');
-assert(/r\.dayKey === dayKey && r\.washedAt/.test(washedDay), 'finds the specific day\'s confirmed wash record');
+assert(/Store\.getTripsyWashedRecord\(tripKey, person, dayKey\)/.test(washedDay), 'finds the specific day\'s confirmed wash record (through the washed-record getter, 2026-10-20)');
 assert(/const counts = tripsyLaundryBagBaseCounts\(record && record\.bag\);/.test(washedDay) && /const base = key\.endsWith\('::nn'\) \? key\.slice\(0, -4\) : key;/.test(extractFn('tripsyLaundryBagBaseCounts')),
   'merges a garment\'s "needed again" and "not needed" bag entries back into one line -- the split only mattered before washing');
 assert(/const g = garmentById\.get\(key\.slice\(2\)\);[\s\S]*?return \{ name, driveFileId: g && g\.driveFileId, typeKey: tripsyGarmentTypeKey\(name\), group: \(g && g\.group\) \|\| '' \};/.test(washedDay),

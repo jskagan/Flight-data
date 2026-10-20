@@ -1912,7 +1912,16 @@ step 4; git history has it if ever needed.
   "✓ Back: …" line beneath; once nothing is out, or on a pre-returns wash, every item is a
   card again (the full list is the record of the wash). The screen already rebuilt from the
   optimistically mutated record right after each Received press, so the removal is immediate.
-  `laundryreceived_test.js`.
+  **And the Received press now actually RECORDS** ("I just marked that I had 7 sets of socks
+  returned, but this is what the screen shows," same day): `markTripsyLaundryReturned` looked
+  the wash up through `getTripsyLaundryBag`, which by design returns only an UNWASHED bag
+  (`!r.washedAt`), so it found nothing, returned false and changed nothing on every press —
+  the earlier suite drove the credit maths on records directly and never ran that lookup. It
+  and the washed-day screen now share **`Store.getTripsyWashedRecord`** (the washed
+  counterpart of the bag getter), and `laundryreceived_test.js` runs the REAL Store methods
+  against a fake `driveData` holding both a washed record and the same day's unwashed bag.
+  Lesson: a Store method that finds its record through another getter needs a test that runs
+  the lookup, not just the arithmetic.
   **`showTripsyWashedDay` shows the actual garment PHOTOS**, not a plain text list — the same
   `tw-grid`/`tw-card`/`tw-photo` shape every other garment display in the app uses (the outfit view,
   Packing Status, …), loaded through the same `tripsyWardrobeLoadPhotos`; a garment with no photo
