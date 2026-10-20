@@ -63,6 +63,7 @@ assert(/async function tripsyGetCachedPhotoBlob[\s\S]*?catch \(e\) \{\s*\n\s*ret
   const idb = new Map([['warm', { name: 'warm-blob' }]]);
   const f = new Function('calls', 'idb',
     'var tripsyPhotoObjectUrlCache = new Map();\n'
+    + 'var TRIPSY_FLYOVER_LAX_PHOTO_ID = "builtin:lax"; var PS_RESERVATION_PHOTO_B64 = "LAXB64";\n'
     + 'var tripsyPruneCachedPhotoBlobs = () => { calls.prunes++; };\n'
     + 'var tripsyGetCachedPhotoBlob = async id => { calls.idbGets++; return idb.get(id) || null; };\n'
     + 'var tripsyPutCachedPhotoBlob = (id, blob) => { calls.puts++; idb.set(id, blob); };\n'

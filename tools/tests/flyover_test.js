@@ -239,7 +239,9 @@ assert(/askPlace: st => \{[^}]*tripsyFlyoverAskPlace\(trip, st\)/.test(extractFn
 assert(/data-flyover-set-place/.test(extractFn('showTripsyFlyover')), 'an unplaced stop on the setup page has a Set location button');
 
 // ---- each visited destination starts with the itinerary's photo for its first event ----
-eval([extractFn('tripsyFlyoverItineraryPhotoFor'), extractFn('tripsyFlyoverSeedItineraryPhotos')].join('\n'));
+eval([(html.match(/const TRIPSY_FLYOVER_LAX_PHOTO_ID = [^\n]*/) || [''])[0].replace(/^const /, 'var '),
+  (html.match(/const TRIPSY_FLYOVER_LAX_LATLNG = [^\n]*/) || [''])[0].replace(/^const /, 'var '),
+  extractFn('tripsyFlyoverStopIsLax'), extractFn('tripsyFlyoverItineraryPhotoFor'), extractFn('tripsyFlyoverSeedItineraryPhotos')].join('\n'));
 {
   const t = { key: 'T8', events: [
     stay(1, 'Hotel One', '1 A St, Alpha, Land', '2030-05-01T15:00:00', '2030-05-04T11:00:00'),
@@ -280,6 +282,28 @@ eval([extractFn('tripsyFlyoverItineraryPhotoFor'), extractFn('tripsyFlyoverSeedI
   const noDup = tripsyFlyoverSeedItineraryPhotos({ stops: [stops[0], { ...stops[1], photos: [{ driveFileId: 'f-hotel1' }] }, stops[2]] }, t, '2030-05-09', cache);
   assert(noDup.record.stops[1].photos.length === 1 && noDup.record.stops[1].autoPhotoSeeded, 'a photo already there is not added twice');
 }
+// ---- an LAX departure / home airport starts with the app's own LAX picture ----
+{
+  const t = { key: 'T9', events: [] };
+  const stops = [
+    { id: 'origin', kind: 'origin', label: 'Los Angeles', query: 'LAX airport', start: '2030-05-01T08:00:00', photos: [] },
+    { id: 'h1', kind: 'stay', label: 'Alpha', start: '2030-05-01T15:00:00', photos: [] },
+    { id: 'return', kind: 'return', label: 'Los Angeles', lat: 33.94, lng: -118.41, start: '2030-05-08T18:00:00', photos: [] },
+  ];
+  assert(tripsyFlyoverStopIsLax(stops[0]) && tripsyFlyoverStopIsLax(stops[2]), 'LAX is recognised by its code or by where it was geocoded');
+  assert(!tripsyFlyoverStopIsLax({ kind: 'return', label: 'San Francisco', query: 'SFO airport', lat: 37.62, lng: -122.38 })
+    && !tripsyFlyoverStopIsLax({ kind: 'stay', label: 'Los Angeles', query: 'LAX airport' }), 'another airport, or a hotel stay, is not');
+  const mid = tripsyFlyoverSeedItineraryPhotos({ stops }, t, '2030-05-03', {});
+  assert(mid.record.stops[0].photos[0].driveFileId === TRIPSY_FLYOVER_LAX_PHOTO_ID && mid.record.stops[0].autoPhotoSeeded,
+    'THE ASK: leaving from LAX starts with the default LAX picture');
+  assert(mid.record.stops[2].photos.length === 0, 'the trip home is not visited yet, so it waits');
+  const home = tripsyFlyoverSeedItineraryPhotos(mid.record, t, '2030-05-09', {});
+  assert(home.record.stops[2].photos[0].driveFileId === TRIPSY_FLYOVER_LAX_PHOTO_ID, 'THE ASK: arriving home at LAX gets it too');
+  const del = { stops: home.record.stops.map(s => s.id === 'origin' ? { ...s, photos: [] } : s) };
+  assert(tripsyFlyoverSeedItineraryPhotos(del, t, '2030-05-09', {}).record.stops[0].photos.length === 0, 'deleting it keeps it deleted');
+  assert(/driveFileId === TRIPSY_FLYOVER_LAX_PHOTO_ID\) return Promise\.resolve\(`data:image\/jpeg;base64,\$\{PS_RESERVATION_PHOTO_B64\}`\)/.test(extractFn('tripsyPlacePhotoDisplayUrl')),
+    'the built-in id resolves to the embedded LAX photo wherever fly-over photos are drawn');
+}
 assert(/autoPhotoSeeded: !!p\.autoPhotoSeeded/.test(extractFn('tripsyFlyoverCarryOver')), 'a rebuild carries the offered flag, so a deleted photo stays deleted');
 assert(/tripsyFlyoverSeedItineraryPhotos\(record, trip, tripsyTodayDayKey\(\), driveData\.tripsyPlacePhotoCache\)/.test(extractFn('showTripsyFlyover')), 'the setup page seeds on open and after a build');
 
@@ -304,9 +328,9 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
 }
 {
   const player = extractFn('playTripsyFlyover');
-  assert(/const cfg = tripsyFlyoverSlideshowConfig\(s\);\s*for \(const group of tripsyFlyoverPhotoGroups\(photos, cfg\.layout\)\)/.test(player), 'each destination plays with its OWN settings');
-  assert(/const ms = Math\.round\(cfg\.seconds \* 1000\);[\s\S]*const ok = await wait\(r, ms\);/.test(player), 'each screen holds for the chosen seconds, pause-aware');
-  assert(/g\.dataset\.layout = cfg\.layout;\s*g\.dataset\.tr = cfg\.transition;/.test(player), 'the layout and transition drive the screen\'s CSS');
+  assert(/const pages = tripsyFlyoverPages\(s\);[\s\S]*const enter = tripsyFlyoverEnterTransitions\(s, pages\);[\s\S]*showPage\(r, pages\[k\], enter\[k\]\)/.test(player), 'each destination plays its OWN pages');
+  assert(/const ms = Math\.round\(page\.seconds \* 1000\);[\s\S]*return wait\(r, Math\.max\(0, ms - tMs\)\);/.test(player), 'each page holds for its own seconds, pause-aware');
+  assert(/g\.dataset\.layout = layout;\s*g\.dataset\.tr = enterTr;/.test(player), 'the page\'s layout and entering transition drive its CSS');
   assert(/ov\.classList\.toggle\('tfo-paused', run\.paused\)/.test(player) && /\.tfo-paused \* \{ animation-play-state: paused !important; \}/.test(html), 'pause also freezes the pan-and-zoom animation');
   assert(/if \(preview\) stops = stops\.filter\(s => s\.id === opts\.previewStopId\);/.test(player), 'Preview plays just that destination');
   for (const k of ['slide', 'zoom', 'none']) assert(html.includes(`.tfo-group[data-tr="${k}"]`), `the ${k} transition has its CSS`);
@@ -314,7 +338,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   const setup = extractFn('showTripsyFlyover');
   assert(/data-flyover-slideshow/.test(setup) && /data-flyover-preview/.test(setup) && /tripsyFlyoverSlideshowSummary\(s\)/.test(setup),
     'each destination shows how its photos play, with Slideshow options and Preview buttons');
-  assert(/updateStop\(id, \{ slideshow: r\.slideshow, photos: r\.photos \}\);/.test(setup), 'Save in the options box writes onto that one stop');
+  assert(/updateStop\(id, \{ pages: r\.pages, photos: r\.photos \}\);/.test(setup), 'Save in the options box writes the pages onto that one stop');
 }
 
 // ---- map tiles: keyless, with a fallback (2026-10-20: "I get a message saying api key
@@ -350,7 +374,9 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   (html.match(/const TRIPSY_FLYOVER_LAYOUTS = \[[\s\S]*?\];/) || [''])[0],
   (html.match(/const TRIPSY_FLYOVER_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0],
   extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverPhotoGroups'),
-  extractFn('tripsyFlyoverGroupLayout'), extractFn('tripsyFlyoverSlideshowSummary')].join('\n'));
+  extractFn('tripsyFlyoverGroupLayout'), constLine('TRIPSY_FLYOVER_PAGE_MAX'), extractFn('tripsyFlyoverPageLayout'),
+  extractFn('tripsyFlyoverNormalizePage'), extractFn('tripsyFlyoverPages'), extractFn('tripsyFlyoverEnterTransitions'),
+  extractFn('tripsyFlyoverDialogPages'), extractFn('tripsyFlyoverTogglePagePhoto'), extractFn('tripsyFlyoverSlideshowSummary')].join('\n'));
 {
   const P = (n, solo) => ({ driveFileId: 'p' + n, solo: !!solo });
   const ph = [P(1), P(2, true), P(3), P(4), P(5), P(6, true), P(7)];
@@ -361,14 +387,49 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(tripsyFlyoverGroupLayout([P(1)], 'grid') === 'single' && tripsyFlyoverGroupLayout([P(1), P(2)], 'grid') === 'pair'
     && tripsyFlyoverGroupLayout([P(1), P(2), P(3)], 'grid') === 'grid' && tripsyFlyoverGroupLayout([P(1), P(2)], 'collage') === 'collage',
     'a lone photo fills the screen (never one cell of a grid), and two in a grid show as a pair');
-  assert(/Grid of four · Fade · 3\.2 s per screen · 5 screens/.test(tripsyFlyoverSlideshowSummary({ slideshow: { layout: 'grid' }, photos: ph })),
+  assert(tripsyFlyoverSlideshowSummary({ slideshow: { layout: 'grid' }, photos: ph }) === '5 pages: 1 · 1 · 3 · 1 · 1 photos per page',
     'the setup card says how the photos will play -> ' + tripsyFlyoverSlideshowSummary({ slideshow: { layout: 'grid' }, photos: ph }));
+  // A stop saved before pages existed plays exactly as before.
+  const legacy = tripsyFlyoverPages({ slideshow: { layout: 'grid', transition: 'slide', seconds: 4 }, photos: ph });
+  assert(legacy.map(pg => pg.ids.join('')).join('|') === 'p1|p2|p3p4p5|p6|p7' && legacy.every(pg => pg.transition === 'slide' && pg.seconds === 4),
+    'old per-destination settings become the same pages');
+  // ---- pages, each configured on its own ----
+  const Q = [1, 2, 3, 4, 5, 6].map(n => ({ driveFileId: 'q' + n }));
+  const stop = { photos: Q, pages: [
+    { ids: ['q2', 'q1'], count: 2, transition: 'zoom', seconds: 5 },
+    { ids: ['q3', 'q4', 'q5'], count: 3, style: 'collage', transition: 'none', seconds: 2 },
+    { ids: ['q1', 'gone'], count: 1 },
+  ] };
+  const pg = tripsyFlyoverPages(stop);
+  assert(pg.map(x => x.ids.join(',')).join('|') === 'q2,q1|q3,q4,q5|q6',
+    'THE ASK: each page plays the photos chosen for it, in order; a photo is on one page only; a removed photo drops off; one on no page plays after -> ' + pg.map(x => x.ids.join(',')).join('|'));
+  assert(pg[0].layout === 'pair' && pg[1].layout === 'collage' && pg[2].layout === 'single' && pg[2].auto,
+    'how many are on a page decides how it is drawn');
+  assert(pg[0].seconds === 5 && pg[1].seconds === 2, 'each page has its own time on screen');
+  assert(tripsyFlyoverEnterTransitions(stop, pg).join(',') === 'fade,zoom,none',
+    'THE ASK: "the transition to the next page" is the way the NEXT page comes in');
+  assert(tripsyFlyoverPageLayout(3, 'grid') === 'grid' && tripsyFlyoverPageLayout(5, 'grid') === 'collage' && tripsyFlyoverPageLayout(1, 'collage') === 'single',
+    'three or four can be a grid or a collage; five or six are a collage');
+  let t = tripsyFlyoverTogglePagePhoto([{ ids: ['q1'], count: 2 }, { ids: ['q2'], count: 1 }], 0, 'q2');
+  assert(t.pages[0].ids.join() === 'q1,q2' && t.pages[1].ids.length === 0, 'tapping a photo from another page moves it here');
+  t = tripsyFlyoverTogglePagePhoto(t.pages, 0, 'q3');
+  assert(t.full, 'a page never holds more than the number chosen for it');
+  t = tripsyFlyoverTogglePagePhoto([{ ids: ['q1', 'q2'], count: 2 }], 0, 'q1');
+  assert(t.pages[0].ids.join() === 'q2', 'tapping a photo on this page takes it off');
+  assert(tripsyFlyoverDialogPages(stop).map(x => x.ids.join()).join('|') === 'q2,q1|q3,q4,q5',
+    'the dialog edits only the saved pages; a newly added photo waits for a page of its own');
   const player = extractFn('playTripsyFlyover');
-  assert(/layout: tripsyFlyoverGroupLayout\(group, cfg\.layout\)/.test(player), 'the player draws each screen with its own layout');
+  assert(/const prev = shownEl;\s*shownEl = g;[\s\S]*if \(prev\) prev\.remove\(\);/.test(player),
+    'THE ASK: the next page goes over the one showing, which only then is removed -- no map between pictures');
+  assert(/veilEl\.classList\.add\('tfo-show'\)/.test(player) && /const endSlideshow = async r => \{\s*veilEl\.classList\.remove\('tfo-show'\)/.test(player)
+    && /\.tfo-group \{[^}]*background: #0b1020/.test(html), 'a dark backdrop stays up for the whole slideshow and every page is opaque');
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
-  assert(/data-ss-layout/.test(dlg) && /data-ss-tr/.test(dlg) && /data-ss-seconds/.test(dlg) && /data-ss-solo/.test(dlg) && /data-ss-preview/.test(dlg),
-    'the options box offers layout pictures, transitions, timing, per-photo Own page and a Preview');
-  assert(/done\(\{ slideshow: \{ \.\.\.cfg \}, photos \}\)/.test(dlg) && /data-ss-cancel[\s\S]*done\(null\)/.test(dlg), 'Save returns the choices, Cancel changes nothing');
+  assert(/How many pictures on page/.test(dlg) && /data-ss-count/.test(dlg) && /data-ss-photo/.test(dlg) && /Transition to page \$\{cur \+ 2\}/.test(dlg)
+    && /data-ss-seconds/.test(dlg) && /data-ss-next/.test(dlg) && /data-ss-prev/.test(dlg) && /data-ss-preview/.test(dlg),
+    'THE ASK: page by page -- how many pictures, which ones, the transition to the next page and the time on screen');
+  assert(/done\(\{ pages: cleaned\(\), photos \}\)/.test(dlg) && /data-ss-cancel[\s\S]*done\(null\)/.test(dlg), 'Save returns the pages, Cancel changes nothing');
+  assert(/slideshow: \{ \.\.\.p\.slideshow \}/.test(extractFn('tripsyFlyoverCarryOver')) && /pages: p\.pages\.map/.test(extractFn('tripsyFlyoverCarryOver')),
+    'rebuilding the destinations keeps each one\'s pages and settings');
   const setup = extractFn('showTripsyFlyover');
   assert(/if \(!closed\) \{ render\(\); openSlideshowOptions\(id, `\$\{done\} photo/.test(setup), 'THE ASK: adding your own photos opens the options box straight away');
   assert(/added => \{\s*if \(added && !closed\) openSlideshowOptions\(id,/.test(setup), 'and so does closing the suggested photos after picking some');
@@ -377,14 +438,39 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
 
 // ---- music by genre ----
 eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[0].replace(/^const /, 'var '),
+  (html.match(/const TRIPSY_FLYOVER_MUSIC_SPOKEN_WORDS = \[[\s\S]*?\];/) || [''])[0].replace(/^const /, 'var '),
+  (html.match(/const TRIPSY_FLYOVER_MUSIC_SPOKEN_PHRASES = \[[\s\S]*?\];/) || [''])[0].replace(/^const /, 'var '),
+  constLine('TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS').replace(/^const /, 'var '), extractFn('tripsyFlyoverMusicPreviewStart'),
+  extractFn('tripsyFlyoverMusicLooksSpoken'),
   extractFn('tripsyFlyoverMusicSearchUrl'), extractFn('tripsyFlyoverParseLength'), extractFn('tripsyFlyoverPickArchiveTrack'),
   extractFn('tripsyFlyoverLicenseLabel'), extractFn('tripsyFlyoverMusicLabel')].join('\n'));
 {
   assert(TRIPSY_FLYOVER_MUSIC_GENRES.length >= 6 && new Set(TRIPSY_FLYOVER_MUSIC_GENRES.map(g => g.key)).size === TRIPSY_FLYOVER_MUSIC_GENRES.length,
     'THE ASK: music is offered across several genres');
   const regions = TRIPSY_FLYOVER_MUSIC_GENRES.filter(g => g.group === 'region').map(g => g.key);
-  assert(['african', 'middleeastern', 'eastasian', 'indian', 'latin'].every(k => regions.includes(k)),
-    'THE ASK: regional music too — African, Middle Eastern, Asian and more -> ' + regions.join(','));
+  assert(['westafrican', 'northafrican', 'arabic', 'persianturkish', 'indian', 'chinese', 'japanese', 'korean', 'southeastasian',
+    'brazilian', 'andean', 'mexican', 'cuban', 'tango', 'caribbean', 'spanish', 'greek', 'balkan', 'nordic', 'celtic'].every(k => regions.includes(k))
+    && regions.length >= 25,
+    'THE ASK: many regional options -- ' + regions.length + ': ' + regions.join(','));
+  // ---- spoken word (language lessons) is never offered ----
+  const sq = new URL(tripsyFlyoverMusicSearchUrl('arabic')).searchParams.get('q');
+  assert(/AND NOT subject:\([^)]*\blesson\b[^)]*\blanguage\b/.test(sq) && /AND NOT title:\([^)]*\blearn\b/.test(sq),
+    'THE ASK: the search itself rules out lessons and language courses');
+  assert(tripsyFlyoverMusicLooksSpoken(['Learn Arabic: Lesson 1']) && tripsyFlyoverMusicLooksSpoken([['japanese', 'language']])
+    && tripsyFlyoverMusicLooksSpoken('Japanese Pronunciation for Beginners'), 'a language lesson is recognised by title or subject');
+  assert(!tripsyFlyoverMusicLooksSpoken(['Talking Drums of Ghana', ['afrobeat', 'west african']]) && !tripsyFlyoverMusicLooksSpoken(['Oud Improvisations']),
+    'music is not mistaken for it (whole words only: "Talking" is not "talk")');
+  assert(!tripsyFlyoverMusicLooksSpoken('Of course this album speaks a musical language all its own.', TRIPSY_FLYOVER_MUSIC_SPOKEN_PHRASES)
+    && tripsyFlyoverMusicLooksSpoken('A language course for travellers.', TRIPSY_FLYOVER_MUSIC_SPOKEN_PHRASES),
+    'a description is judged on phrases only, so ordinary prose never drops a song');
+  const search = extractFn('tripsyFlyoverSearchMusic');
+  assert(/\.filter\(doc => !tripsyFlyoverMusicLooksSpoken\(\[doc\.title, doc\.subject\]\)\)/.test(search)
+    && /tripsyFlyoverMusicLooksSpoken\(md\.description, TRIPSY_FLYOVER_MUSIC_SPOKEN_PHRASES\)/.test(search)
+    && /!tripsyFlyoverMusicLooksSpoken\(t\.title\)/.test(search), 'results are checked again, item and track, before they are offered');
+  // ---- Preview ----
+  assert(tripsyFlyoverMusicPreviewStart(240) === 45 && tripsyFlyoverMusicPreviewStart(100) === 25 && tripsyFlyoverMusicPreviewStart(35) === 0
+    && tripsyFlyoverMusicPreviewStart(NaN) === 0 && tripsyFlyoverMusicPreviewStart(60) + 30 <= 60,
+    'a preview starts a little way into the song and never runs past its end');
   assert(TRIPSY_FLYOVER_MUSIC_GENRES.every(g => g.group === 'style' || g.group === 'region'), 'every genre is a style or a region');
   for (const k of regions) {
     const q = new URL(tripsyFlyoverMusicSearchUrl(k)).searchParams.get('q');
@@ -392,6 +478,12 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
     assert(q.includes(`subject:(${g.terms})`), 'each region searches its own subject words: ' + k);
   }
   const muPicker = extractFn('tripsyFlyoverMusicPicker');
+  assert(/data-mu-play="\$\{i\}"[^>]*>\$\{playingUrl === t\.url \? '■ Stop' : '▶ Preview'\}/.test(muPicker) && /data-mu-preview-current/.test(muPicker),
+    'THE ASK: every track, and the song already chosen, has a Preview button');
+  assert(/left = Math\.ceil\(TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS - elapsed\)/.test(muPicker) && /if \(left <= 0\) \{ stopAudio\(\);/.test(muPicker)
+    && /Previewing — \$\{left\} s left/.test(muPicker), 'a preview counts down and stops by itself');
+  assert(/if \(!audio\.paused && audio\.readyState >= 3\) elapsed \+=/.test(muPicker) && !/previewFrom/.test(muPicker),
+    'the countdown counts time actually played, so a song that cannot be seeked still stops after the clip');
   assert(/TRIPSY_FLYOVER_MUSIC_GROUPS\.map/.test(muPicker) && /g\.group === gr\.key/.test(muPicker) && /data-mu-group/.test(muPicker),
     'the picker shows Styles and Regions as two rows');
   assert(/key: 'style'[^}]*Styles[\s\S]*key: 'region'[^}]*Regions/.test(html), 'the two rows are labelled Styles and Regions');

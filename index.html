@@ -1328,7 +1328,6 @@
   .tfo-ss-choice { display: inline-flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 10px; font-size: 12px; min-width: 110px; }
   .tfo-ss-chip { font-size: 12px; padding: 5px 10px; }
   .tfo-ss-on { outline: 2px solid #3AA76D; outline-offset: 1px; font-weight: 700; }
-  .tfo-ss-screen { display: inline-block; padding: 1px 6px; margin: 2px 2px 0 0; border: 1px solid var(--line); border-radius: 5px; font-family: var(--mono); }
   .tfo-layout-icon { position: relative; display: block; width: 56px; height: 40px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
   .tfo-layout-icon i { position: absolute; background: #7c9cd6; border-radius: 2px; box-sizing: border-box; border: 1px solid var(--panel); }
   #tripsy-flyover-player .tfo-card { position: absolute; left: 16px; bottom: calc(28px + env(safe-area-inset-bottom, 0px)); z-index: 1000; max-width: calc(100% - 32px);
@@ -1338,9 +1337,13 @@
   #tripsy-flyover-player .tfo-card-sub { font-size: 13px; opacity: 0.8; margin-top: 2px; }
   #tripsy-flyover-player .tfo-photo { position: absolute; inset: 70px 16px 120px; z-index: 999; display: flex; align-items: center; justify-content: center; pointer-events: none; }
   #tripsy-flyover-player .tfo-photo img { border-radius: 10px; border: 4px solid #fff; box-shadow: 0 10px 40px rgba(0,0,0,0.6); box-sizing: border-box; }
-  /* One SCREEN of photos; layout and transition are per-destination (tripsyFlyoverSlideshowConfig). */
+  /* The dark backdrop that stays up through a destination's whole slideshow, so pages go
+     straight from one to the next without the map showing between them. */
+  #tripsy-flyover-player .tfo-veil { position: absolute; inset: 0; z-index: 998; background: #0b1020; opacity: 0; transition: opacity 0.5s ease; pointer-events: none; }
+  #tripsy-flyover-player .tfo-veil.tfo-show { opacity: 1; }
+  /* One PAGE of photos (tripsyFlyoverPages); opaque, so the next page covers the last. */
   #tripsy-flyover-player .tfo-group { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 12px;
-    opacity: 0; transition: opacity 0.5s ease, transform 0.6s ease; }
+    background: #0b1020; opacity: 0; transition: opacity 0.5s ease, transform 0.6s ease; }
   #tripsy-flyover-player .tfo-group.tfo-in { opacity: 1; transform: none; }
   #tripsy-flyover-player .tfo-group[data-tr="slide"] { transform: translateX(80px); }
   #tripsy-flyover-player .tfo-group[data-tr="slide"].tfo-out { transform: translateX(-80px); opacity: 0; }
@@ -17596,6 +17599,64 @@ function tripsyFlyoverGroupLayout(group, layout) {
   return layout;
 }
 
+// ---- Pages: each screen of photos configured on its own ----
+// ("allow users to configure each picture or page of pictures separately … show page 1 of
+// photos, ask how many pictures to display on that page, allow users to select how many and
+// which photos, and ask about the transition to the next page," 2026-10-20.) A stop's
+// `pages` is [{ids:[driveFileId…], count, style:'grid'|'collage', transition, seconds}] in
+// play order. `count` is how many the page holds (1-6), `style` how 3+ are arranged, and
+// `transition` how THIS page gives way to the NEXT one. A stop saved before pages existed
+// has none, and plays exactly as its old per-destination settings did.
+const TRIPSY_FLYOVER_PAGE_MAX = 6;
+function tripsyFlyoverPageLayout(n, style) {
+  if (n <= 1) return 'single';
+  if (n === 2) return 'pair';
+  return style === 'collage' || n > 4 ? 'collage' : 'grid';
+}
+function tripsyFlyoverNormalizePage(pg, fallback) {
+  const f = fallback || tripsyFlyoverSlideshowConfig(null);
+  const transition = TRIPSY_FLYOVER_TRANSITIONS.some(t => t.key === (pg && pg.transition)) ? pg.transition : f.transition;
+  let seconds = Number(pg && pg.seconds);
+  if (!isFinite(seconds) || seconds <= 0) seconds = f.seconds;
+  seconds = Math.min(TRIPSY_FLYOVER_SECONDS_MAX, Math.max(TRIPSY_FLYOVER_SECONDS_MIN, seconds));
+  const ids = Array.isArray(pg && pg.ids) ? pg.ids.slice() : [];
+  let count = Math.round(Number(pg && pg.count));
+  if (!isFinite(count) || count < 1) count = Math.max(1, ids.length);
+  count = Math.min(TRIPSY_FLYOVER_PAGE_MAX, Math.max(count, Math.min(ids.length, TRIPSY_FLYOVER_PAGE_MAX)));
+  const style = (pg && pg.style) === 'collage' ? 'collage' : 'grid';
+  return { ids, count, style, transition, seconds };
+}
+// The pages a stop actually plays, in order, each with its `photos` (the stop's photo
+// records) and drawn `layout`. Saved pages lose photos no longer on the stop (and a photo
+// can be on one page only); photos on no page yet play after them, grouped the old
+// per-destination way. Empty pages drop out. Pure.
+function tripsyFlyoverPages(stop) {
+  const cfg = tripsyFlyoverSlideshowConfig(stop);
+  const photos = (stop && stop.photos) || [];
+  const byId = new Map(photos.map(p => [p.driveFileId, p]));
+  const used = new Set();
+  const out = [];
+  for (const raw of ((stop && Array.isArray(stop.pages)) ? stop.pages : [])) {
+    const pg = tripsyFlyoverNormalizePage(raw, cfg);
+    const ids = pg.ids.filter(id => byId.has(id) && !used.has(id) && used.add(id)).slice(0, TRIPSY_FLYOVER_PAGE_MAX);
+    if (!ids.length) continue;
+    out.push({ ...pg, ids, photos: ids.map(id => byId.get(id)), layout: tripsyFlyoverPageLayout(ids.length, pg.style) });
+  }
+  const rest = photos.filter(p => !used.has(p.driveFileId));
+  for (const g of tripsyFlyoverPhotoGroups(rest, cfg.layout)) {
+    const ids = g.map(p => p.driveFileId);
+    out.push({ ids, count: ids.length, style: cfg.layout === 'collage' ? 'collage' : 'grid', transition: cfg.transition,
+      seconds: cfg.seconds, photos: g, layout: tripsyFlyoverGroupLayout(g, cfg.layout), auto: true });
+  }
+  return out;
+}
+// The transition each page ENTERS with: the first comes in from the map the destination's
+// own way (fade by default); every later one the way the page before it asked for.
+function tripsyFlyoverEnterTransitions(stop, pages) {
+  const first = tripsyFlyoverSlideshowConfig(stop).transition;
+  return (pages || []).map((_, i) => i === 0 ? first : pages[i - 1].transition);
+}
+
 function tripsyFlyoverDistanceKm(a, b) {
   const R = 6371, rad = x => x * Math.PI / 180;
   const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
@@ -17634,7 +17695,9 @@ function tripsyFlyoverCarryOver(stops, prevStops) {
     if (!p) return { ...s, autoLabel: s.label, photos: [] };
     used.add(p);
     return { ...s, autoLabel: s.label, label: p.labelEdited ? p.label : s.label, labelEdited: !!p.labelEdited,
-      removed: !!(p.removed || s.removed), autoPhotoSeeded: !!p.autoPhotoSeeded, photos: [...(p.photos || [])] };
+      removed: !!(p.removed || s.removed), autoPhotoSeeded: !!p.autoPhotoSeeded, photos: [...(p.photos || [])],
+      ...(p.slideshow ? { slideshow: { ...p.slideshow } } : {}),
+      ...(Array.isArray(p.pages) ? { pages: p.pages.map(pg => ({ ...pg, ids: [...(pg.ids || [])] })) } : {}) };
   });
 }
 
@@ -17670,11 +17733,36 @@ function tripsyFlyoverItineraryPhotoFor(trip, stop, nextStop, photoCache) {
 // Gives each VISITED stay its itinerary photo, once. `autoPhotoSeeded` records that it was
 // offered, so a photo the owner deletes never comes back; a stay with nothing in the
 // itinerary yet stays unseeded and is tried again on the next open. Pure (tested).
+// The departure / home airport is LAX ("For trips that have lax as a destination, select
+// the default picture for lax for the fly-over," 2026-10-20): it starts with the app's own
+// LAX picture, the Theme Building photo every P/S card already uses
+// (PS_RESERVATION_PHOTO_B64). A built-in photo has no Drive file, so it rides under this
+// sentinel id, which tripsyPlacePhotoDisplayUrl resolves to the embedded image.
+const TRIPSY_FLYOVER_LAX_PHOTO_ID = 'builtin:lax';
+const TRIPSY_FLYOVER_LAX_LATLNG = { lat: 33.9416, lng: -118.4085 };
+// An airport stop at LAX: named LAX / Los Angeles International, or geocoded within 4 km
+// of it (the label has usually become "Los Angeles" by then). Pure.
+function tripsyFlyoverStopIsLax(stop) {
+  if (!stop || (stop.kind !== 'origin' && stop.kind !== 'return')) return false;
+  const text = [stop.query, stop.label, stop.autoLabel, stop.manualPlace].filter(Boolean).join(' ');
+  if (/\bLAX\b|los angeles international/i.test(text)) return true;
+  if (stop.lat == null || stop.lng == null) return false;
+  const dLat = (stop.lat - TRIPSY_FLYOVER_LAX_LATLNG.lat) * 111;
+  const dLng = (stop.lng - TRIPSY_FLYOVER_LAX_LATLNG.lng) * 111 * Math.cos(TRIPSY_FLYOVER_LAX_LATLNG.lat * Math.PI / 180);
+  return Math.sqrt(dLat * dLat + dLng * dLng) <= 4;
+}
 function tripsyFlyoverSeedItineraryPhotos(record, trip, todayKey, photoCache) {
   if (!record || !Array.isArray(record.stops)) return { record, changed: false };
   let changed = false;
   const stops = record.stops.map((s, i) => {
-    if (s.kind !== 'stay' || s.removed || s.autoPhotoSeeded || !tripsyFlyoverStopVisited(s, todayKey)) return s;
+    if (s.removed || s.autoPhotoSeeded || !tripsyFlyoverStopVisited(s, todayKey)) return s;
+    if (s.kind !== 'stay') {
+      if (!tripsyFlyoverStopIsLax(s)) return s;
+      changed = true;
+      const photos = s.photos || [];
+      if (photos.some(p => p.driveFileId === TRIPSY_FLYOVER_LAX_PHOTO_ID)) return { ...s, autoPhotoSeeded: true };
+      return { ...s, autoPhotoSeeded: true, photos: [{ driveFileId: TRIPSY_FLYOVER_LAX_PHOTO_ID, source: 'default', addedAt: new Date().toISOString() }, ...photos] };
+    }
     const id = tripsyFlyoverItineraryPhotoFor(trip, s, record.stops[i + 1] || null, photoCache);
     if (!id) return s;
     changed = true;
@@ -17947,7 +18035,7 @@ async function showTripsyFlyover(tripKey) {
       },
     });
     if (!r || closed) return;
-    updateStop(id, { slideshow: r.slideshow, photos: r.photos });
+    updateStop(id, { pages: r.pages, photos: r.photos });
     save(); render();
   };
   if (record && record.music) tripsyFlyoverPrefetchMusic(record.music);
@@ -18217,9 +18305,9 @@ async function tripsyFlyoverSuggestedPhotos(stop, onPicked, onClosed) {
 // Opened right after photos are added to a destination, and from its "🎞 Slideshow
 // options" button ("When the user selects photos for each location, present him with
 // options as to how he wants photos displayed - some may be one per page and others
-// several in a page, and how to transition between photos," 2026-10-20). Layout, transition
-// and timing are per destination; "Own page" is per photo -- that photo takes the whole
-// screen while the rest share screens in the destination's layout.
+// several in a page, and how to transition between photos," 2026-10-20). Since the same day
+// it configures each PAGE on its own (see tripsyFlyoverPages); the icons draw a page's
+// grid / collage choice.
 const TRIPSY_FLYOVER_LAYOUT_ICON = {
   single: [[0, 0, 100, 100]],
   pair: [[0, 0, 47, 100], [53, 0, 47, 100]],
@@ -18232,14 +18320,34 @@ function tripsyFlyoverLayoutIconHtml(key) {
 }
 // One line describing how a destination's photos will play, for its card on the setup page.
 function tripsyFlyoverSlideshowSummary(stop) {
-  const cfg = tripsyFlyoverSlideshowConfig(stop);
-  const screens = tripsyFlyoverPhotoGroups((stop && stop.photos) || [], cfg.layout).length;
-  const layout = (TRIPSY_FLYOVER_LAYOUTS.find(l => l.key === cfg.layout) || {}).label || '';
-  const tr = (TRIPSY_FLYOVER_TRANSITIONS.find(t => t.key === cfg.transition) || {}).label || '';
-  return `${layout} · ${tr} · ${cfg.seconds} s per ${cfg.layout === 'single' ? 'photo' : 'screen'} · ${screens} screen${screens === 1 ? '' : 's'}`;
+  const pages = tripsyFlyoverPages(stop);
+  const n = pages.length;
+  return `${n} page${n === 1 ? '' : 's'}: ${pages.map(pg => pg.ids.length).join(' · ')} photo${pages.length === 1 && pages[0].ids.length === 1 ? '' : 's'} per page`;
 }
-// Resolves {slideshow, photos} on Save, null on Cancel. `playPreview(stopDraft)` plays the
-// draft without saving it.
+// The page being edited in the dialog, as plain data. Pure.
+function tripsyFlyoverDialogPages(stop) {
+  const saved = Array.isArray(stop && stop.pages);
+  return tripsyFlyoverPages(stop)
+    .filter(pg => saved ? !pg.auto : true)
+    .map(({ ids, count, style, transition, seconds }) => ({ ids: [...ids], count, style, transition, seconds }));
+}
+// Taps a photo on the page being edited: on this page -> off it; elsewhere -> moved here,
+// when the page has room. Returns {pages, full} without touching its input. Pure.
+function tripsyFlyoverTogglePagePhoto(pages, cur, id) {
+  const out = pages.map(pg => ({ ...pg, ids: [...pg.ids] }));
+  const page = out[cur];
+  if (!page) return { pages: out, full: false };
+  if (page.ids.includes(id)) { page.ids = page.ids.filter(x => x !== id); return { pages: out, full: false }; }
+  if (page.ids.length >= page.count) return { pages, full: true };
+  for (const pg of out) pg.ids = pg.ids.filter(x => x !== id);
+  page.ids.push(id);
+  return { pages: out, full: false };
+}
+// Configures a destination's photos ONE PAGE AT A TIME ("show page 1 of photos, ask how
+// many pictures to display on that page, allow users to select how many and which photos,
+// and ask about the transition to the next page," 2026-10-20). Resolves {pages, photos} on
+// Save, null on Cancel; nothing changes until Save. Photos left on no page play after the
+// pages, one per page. `playPreview(stopDraft)` plays the draft without saving it.
 function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-slideshow-overlay');
@@ -18247,67 +18355,125 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
     // Above the setup page and the suggested-photos grid, below the player (2147483090), so
     // Preview plays on top of the dialog and drops back to it.
     ov.style.zIndex = '2147483065';
-    let cfg = tripsyFlyoverSlideshowConfig(stop);
-    let photos = ((stop && stop.photos) || []).map(p => ({ ...p }));
+    const photos = ((stop && stop.photos) || []).map(p => ({ ...p }));
+    const cfg = tripsyFlyoverSlideshowConfig(stop);
+    let pages = tripsyFlyoverDialogPages(stop);
+    const onPage = () => new Set(pages.flatMap(pg => pg.ids));
+    const blank = () => ({ ids: [], count: 1, style: 'grid', transition: cfg.transition, seconds: cfg.seconds });
+    // Photos on no page yet (just added) get a new page at the end, opened straight away.
+    let cur = 0;
+    const unplaced0 = photos.filter(p => !onPage().has(p.driveFileId));
+    if (!pages.length || unplaced0.length) {
+      const pg = blank();
+      pg.ids = unplaced0.slice(0, 1).map(p => p.driveFileId);
+      pages.push(pg);
+      cur = pages.length - 1;
+    }
+    const cleaned = () => pages.filter(pg => pg.ids.length).map(pg => ({ ...pg, ids: [...pg.ids], count: Math.max(pg.ids.length, 1) }));
     const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
-    const draft = () => ({ ...stop, slideshow: { ...cfg }, photos });
+    const draft = () => ({ ...stop, photos, pages: cleaned() });
     const render = () => {
-      const groups = tripsyFlyoverPhotoGroups(photos, cfg.layout);
-      const index = new Map(photos.map((p, i) => [p, i + 1]));
-      const secOpts = [...new Set([...TRIPSY_FLYOVER_SECONDS_OPTIONS, cfg.seconds])].sort((a, b) => a - b);
+      if (cur >= pages.length) cur = pages.length - 1;
+      const page = pages[cur];
+      const where = new Map();
+      pages.forEach((pg, k) => pg.ids.forEach(id => where.set(id, k)));
+      const unplaced = photos.filter(p => !where.has(p.driveFileId));
+      const maxCount = Math.max(1, Math.min(TRIPSY_FLYOVER_PAGE_MAX, photos.length));
+      const secOpts = [...new Set([...TRIPSY_FLYOVER_SECONDS_OPTIONS, page.seconds])].sort((a, b) => a - b);
+      const isLast = cur === pages.length - 1 && !unplaced.length;
       ov.innerHTML = `
-        <div class="tw-modal-paper tw-wide" style="max-width:640px;">
+        <div class="tw-modal-paper tw-wide" style="max-width:660px;">
           <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
-            <h2 style="margin:0; font-size:17px; flex:1;">🎞 How should ${esc(stop.label || 'these photos')} play?</h2>
+            <h2 style="margin:0; font-size:17px; flex:1;">🎞 ${esc(stop.label || 'Photos')} — page ${cur + 1} of ${pages.length}</h2>
             <button class="tripsy-close-x" data-ss-cancel aria-label="Close">✕</button>
           </div>
           ${intro ? `<div style="font-size:13px; color:var(--muted); margin-bottom:10px;">${esc(intro)}</div>` : ''}
-          <div class="tfo-ss-label">Photos on screen at once</div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;">
+            ${pages.map((pg, k) => `<button class="btn tfo-ss-chip${k === cur ? ' tfo-ss-on' : ''}" data-ss-goto="${k}" title="Page ${k + 1}">${k + 1}<span style="opacity:0.6;"> · ${pg.ids.length}</span></button>`).join('')}
+          </div>
+          <div class="tfo-ss-label">How many pictures on page ${cur + 1}?</div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:${page.count >= 3 ? 8 : 14}px;">
+            ${Array.from({ length: maxCount }, (_, k) => k + 1).map(n => `<button class="btn tfo-ss-chip${n === page.count ? ' tfo-ss-on' : ''}" data-ss-count="${n}">${n}</button>`).join('')}
+          </div>
+          ${page.count >= 3 ? `
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+              ${(page.count > 4 ? ['collage'] : ['grid', 'collage']).map(st => `<button class="btn tfo-ss-choice${tripsyFlyoverPageLayout(page.count, page.style) === st ? ' tfo-ss-on' : ''}" data-ss-style="${st}">${tripsyFlyoverLayoutIconHtml(st)}<span>${st === 'grid' ? 'Grid' : 'Collage'}</span></button>`).join('')}
+            </div>` : ''}
+          <div class="tfo-ss-label">Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)</div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here.</div>
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
-            ${TRIPSY_FLYOVER_LAYOUTS.map(l => `<button class="btn tfo-ss-choice${l.key === cfg.layout ? ' tfo-ss-on' : ''}" data-ss-layout="${l.key}">${tripsyFlyoverLayoutIconHtml(l.key)}<span>${esc(l.label)}</span></button>`).join('')}
+            ${photos.map(p => {
+              const k = where.get(p.driveFileId);
+              const here = k === cur;
+              const order = here ? page.ids.indexOf(p.driveFileId) + 1 : 0;
+              return `
+              <button class="btn" data-ss-photo="${esc(p.driveFileId)}" style="padding:3px; position:relative; ${here ? 'outline:3px solid #3AA76D; outline-offset:1px;' : k != null ? 'opacity:0.55;' : ''}">
+                <div style="width:84px; height:64px; border-radius:5px; background:var(--panel-2) center/cover no-repeat;" data-diary-img="${esc(p.driveFileId)}"></div>
+                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:${here ? '#3AA76D' : 'rgba(0,0,0,0.65)'}; color:#fff;">${here ? `✓ ${order}` : k != null ? `Page ${k + 1}` : 'Not on a page'}</span>
+              </button>`;
+            }).join('')}
           </div>
-          <div class="tfo-ss-label">Transition between screens</div>
+          <div class="tfo-ss-label">${isLast ? 'After this page (the last), back to the map' : `Transition to page ${cur + 2}`}</div>
+          ${isLast ? '<div style="font-size:12px; color:var(--muted); margin-bottom:14px;">The last page fades back to the map.</div>' : `
           <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px;">
-            ${TRIPSY_FLYOVER_TRANSITIONS.map(t => `<button class="btn tfo-ss-chip${t.key === cfg.transition ? ' tfo-ss-on' : ''}" data-ss-tr="${t.key}">${esc(t.label)}</button>`).join('')}
-          </div>
+            ${TRIPSY_FLYOVER_TRANSITIONS.map(t => `<button class="btn tfo-ss-chip${t.key === page.transition ? ' tfo-ss-on' : ''}" data-ss-tr="${t.key}">${esc(t.label)}</button>`).join('')}
+          </div>`}
           <div class="tfo-ss-label">Time on screen</div>
           <div style="display:flex; gap:8px; align-items:center; margin-bottom:14px; font-size:13px;">
             <select class="field-input" data-ss-seconds style="width:auto; padding:4px 8px;">
-              ${secOpts.map(v => `<option value="${v}"${v === cfg.seconds ? ' selected' : ''}>${v} seconds</option>`).join('')}
+              ${secOpts.map(v => `<option value="${v}"${v === page.seconds ? ' selected' : ''}>${v} seconds</option>`).join('')}
             </select>
-            <span style="color:var(--muted);">per ${cfg.layout === 'single' ? 'photo' : 'screen'}</span>
+            <span style="color:var(--muted);">for page ${cur + 1}</span>
           </div>
-          ${cfg.layout !== 'single' && photos.length ? `
-            <div class="tfo-ss-label">Photos that get a screen of their own</div>
-            <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap “Own page” on a photo to give it the whole screen; the others share screens as chosen above.</div>
-            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
-              ${photos.map((p, i) => `
-                <div style="display:flex; flex-direction:column; gap:4px; align-items:center;">
-                  <div style="width:84px; height:64px; border-radius:6px; background:var(--panel-2) center/cover no-repeat;" data-diary-img="${esc(p.driveFileId)}"></div>
-                  <button class="btn tfo-ss-chip${p.solo ? ' tfo-ss-on' : ''}" data-ss-solo="${i}" style="font-size:11px; padding:3px 8px;">${p.solo ? '★ Own page' : 'Own page'}</button>
-                </div>`).join('')}
-            </div>` : ''}
-          <div style="font-size:12px; color:var(--muted); margin-bottom:14px;">
-            Plays as ${groups.length} screen${groups.length === 1 ? '' : 's'}: ${groups.map(g => `<span class="tfo-ss-screen">${g.map(p => index.get(p)).join(' + ')}</span>`).join(' ')}
-          </div>
-          <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;">
-            ${playPreview ? `<button class="btn" data-ss-preview>▶ Preview</button>` : ''}
-            <button class="btn" data-ss-cancel>Cancel</button>
-            <button class="btn" data-ss-save style="font-weight:700;">Save</button>
+          ${unplaced.length ? `<div style="font-size:12px; color:var(--muted); margin-bottom:12px;">${unplaced.length} photo${unplaced.length === 1 ? ' is' : 's are'} on no page yet — ${unplaced.length === 1 ? 'it plays' : 'they play'} after the last page, one per page.</div>` : ''}
+          <div style="display:flex; gap:8px; justify-content:space-between; flex-wrap:wrap;">
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn" data-ss-prev${cur === 0 ? ' disabled' : ''}>◀ Page ${Math.max(1, cur)}</button>
+              <button class="btn" data-ss-next>${cur < pages.length - 1 ? `Page ${cur + 2} ▶` : '＋ Next page ▶'}</button>
+              ${pages.length > 1 ? `<button class="btn" data-ss-delete>🗑 Delete page</button>` : ''}
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              ${playPreview ? `<button class="btn" data-ss-preview>▶ Preview</button>` : ''}
+              <button class="btn" data-ss-cancel>Cancel</button>
+              <button class="btn" data-ss-save style="font-weight:700;">Save</button>
+            </div>
           </div>
         </div>`;
       tripsyDiaryPaintPhotos(ov);
-      ov.querySelectorAll('[data-ss-layout]').forEach(b => b.onclick = () => { cfg = { ...cfg, layout: b.getAttribute('data-ss-layout') }; render(); });
-      ov.querySelectorAll('[data-ss-tr]').forEach(b => b.onclick = () => { cfg = { ...cfg, transition: b.getAttribute('data-ss-tr') }; render(); });
-      const sec = ov.querySelector('[data-ss-seconds]');
-      sec.onchange = () => { cfg = { ...cfg, seconds: Number(sec.value) }; render(); };
-      ov.querySelectorAll('[data-ss-solo]').forEach(b => b.onclick = () => {
-        const i = Number(b.getAttribute('data-ss-solo'));
-        photos = photos.map((p, k) => k === i ? { ...p, solo: !p.solo } : p);
+      ov.querySelectorAll('[data-ss-goto]').forEach(b => b.onclick = () => { cur = Number(b.getAttribute('data-ss-goto')); render(); });
+      ov.querySelectorAll('[data-ss-count]').forEach(b => b.onclick = () => {
+        const n = Number(b.getAttribute('data-ss-count'));
+        // Fewer than are chosen: the extras come off this page.
+        pages = pages.map((pg, k) => k === cur ? { ...pg, count: n, ids: pg.ids.slice(0, n) } : pg);
         render();
       });
+      ov.querySelectorAll('[data-ss-style]').forEach(b => b.onclick = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, style: b.getAttribute('data-ss-style') } : pg); render(); });
+      ov.querySelectorAll('[data-ss-photo]').forEach(b => b.onclick = () => {
+        const r = tripsyFlyoverTogglePagePhoto(pages, cur, b.getAttribute('data-ss-photo'));
+        if (r.full) { toast(`Page ${cur + 1} holds ${pages[cur].count} — choose a bigger number or take one off first.`); return; }
+        pages = r.pages;
+        render();
+      });
+      ov.querySelectorAll('[data-ss-tr]').forEach(b => b.onclick = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, transition: b.getAttribute('data-ss-tr') } : pg); render(); });
+      const sec = ov.querySelector('[data-ss-seconds]');
+      sec.onchange = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, seconds: Number(sec.value) } : pg); render(); };
+      const prev = ov.querySelector('[data-ss-prev]');
+      if (prev) prev.onclick = () => { if (cur > 0) { cur--; render(); } };
+      ov.querySelector('[data-ss-next]').onclick = () => {
+        if (cur < pages.length - 1) { cur++; render(); return; }
+        // A new page starts with the next photo on no page, if there is one.
+        const placed = onPage();
+        const pg = blank();
+        const nextPhoto = photos.find(p => !placed.has(p.driveFileId));
+        if (nextPhoto) pg.ids = [nextPhoto.driveFileId];
+        pages = [...pages, pg];
+        cur = pages.length - 1;
+        render();
+      };
+      const del = ov.querySelector('[data-ss-delete]');
+      if (del) del.onclick = () => { pages = pages.filter((_, k) => k !== cur); cur = Math.max(0, cur - 1); render(); };
       ov.querySelectorAll('[data-ss-cancel]').forEach(b => b.onclick = () => done(null));
-      ov.querySelector('[data-ss-save]').onclick = () => done({ slideshow: { ...cfg }, photos });
+      ov.querySelector('[data-ss-save]').onclick = () => done({ pages: cleaned(), photos });
       const pv = ov.querySelector('[data-ss-preview]');
       if (pv) pv.onclick = () => playPreview(draft());
     };
@@ -18335,29 +18501,60 @@ const TRIPSY_FLYOVER_MUSIC_GENRES = [
   { key: 'electronic', group: 'style', label: '🎧 Electronic', terms: 'electronic OR chillout OR downtempo' },
   { key: 'ambient', group: 'style', label: '🌙 Ambient', terms: 'ambient OR relaxing' },
   { key: 'upbeat', group: 'style', label: '☀️ Upbeat', terms: 'happy OR upbeat OR pop OR funk' },
-  { key: 'african', group: 'region', label: '🌍 African', terms: 'african OR africa OR afrobeat OR highlife OR soukous OR mbira OR kora' },
-  { key: 'middleeastern', group: 'region', label: '🕌 Middle Eastern', terms: 'arabic OR "middle eastern" OR oud OR persian OR turkish' },
-  { key: 'indian', group: 'region', label: '🪷 Indian', terms: 'indian OR raga OR sitar OR tabla OR bollywood' },
-  { key: 'eastasian', group: 'region', label: '🏯 East Asian', terms: 'asian OR chinese OR japanese OR korean OR guzheng OR koto OR erhu' },
-  { key: 'southeastasian', group: 'region', label: '🌴 Southeast Asian', terms: 'gamelan OR thai OR indonesian OR vietnamese OR balinese' },
-  { key: 'latin', group: 'region', label: '💃 Latin', terms: 'latin OR salsa OR bossa OR tango OR samba OR cumbia' },
-  { key: 'caribbean', group: 'region', label: '🏝️ Caribbean', terms: 'reggae OR calypso OR caribbean OR ska OR soca' },
-  { key: 'mediterranean', group: 'region', label: '🫒 Mediterranean', terms: 'flamenco OR greek OR italian OR mediterranean OR fado' },
-  { key: 'celtic', group: 'region', label: '☘️ Celtic', terms: 'celtic OR irish OR scottish' },
-  { key: 'pacific', group: 'region', label: '🌺 Hawaiian & Pacific', terms: 'hawaiian OR polynesian OR ukulele' },
+  { key: 'westafrican', group: 'region', label: '🥁 West African', terms: 'afrobeat OR highlife OR kora OR griot OR "west african" OR mali OR senegal OR ghana OR nigeria' },
+  { key: 'eastsouthafrican', group: 'region', label: '🌍 East & Southern African', terms: 'mbira OR soukous OR benga OR taarab OR "south african" OR zulu OR congo OR kenya OR ethiopia OR african' },
+  { key: 'northafrican', group: 'region', label: '🏜️ North African', terms: 'maghreb OR gnawa OR rai OR berber OR moroccan OR algerian OR tunisian OR egyptian' },
+  { key: 'arabic', group: 'region', label: '🕌 Arabic', terms: 'arabic OR oud OR "middle eastern" OR maqam OR qanun OR darbuka OR lebanese' },
+  { key: 'persianturkish', group: 'region', label: '🧿 Persian & Turkish', terms: 'persian OR iranian OR santur OR setar OR turkish OR saz OR ney OR anatolian OR kurdish' },
+  { key: 'indian', group: 'region', label: '🪷 Indian', terms: 'indian OR raga OR sitar OR tabla OR bollywood OR carnatic OR hindustani OR bhangra' },
+  { key: 'chinese', group: 'region', label: '🏮 Chinese', terms: 'chinese OR guzheng OR erhu OR pipa OR guqin OR "chinese traditional"' },
+  { key: 'japanese', group: 'region', label: '🏯 Japanese', terms: 'japanese OR koto OR shakuhachi OR shamisen OR taiko OR enka' },
+  { key: 'korean', group: 'region', label: '🎎 Korean', terms: 'korean OR gayageum OR gugak OR pansori OR "k-pop"' },
+  { key: 'southeastasian', group: 'region', label: '🌴 Southeast Asian', terms: 'gamelan OR thai OR indonesian OR vietnamese OR balinese OR javanese OR khmer OR filipino' },
+  { key: 'pacific', group: 'region', label: '🌺 Hawaiian & Pacific', terms: 'hawaiian OR polynesian OR ukulele OR "slack key" OR tahitian OR maori' },
+  { key: 'australian', group: 'region', label: '🦘 Australian', terms: 'didgeridoo OR aboriginal OR australian' },
+  { key: 'brazilian', group: 'region', label: '🇧🇷 Brazilian', terms: 'brazilian OR bossa OR samba OR choro OR forro OR mpb' },
+  { key: 'andean', group: 'region', label: '🏔️ Andean', terms: 'andean OR peruvian OR bolivian OR charango OR quena OR "pan flute"' },
+  { key: 'mexican', group: 'region', label: '🌮 Mexican', terms: 'mexican OR mariachi OR ranchera OR norteño OR son jarocho' },
+  { key: 'cuban', group: 'region', label: '🎺 Cuban & Salsa', terms: 'cuban OR salsa OR son OR mambo OR rumba OR "latin jazz"' },
+  { key: 'tango', group: 'region', label: '💃 Tango', terms: 'tango OR argentine OR bandoneon OR milonga' },
+  { key: 'caribbean', group: 'region', label: '🏝️ Caribbean', terms: 'reggae OR calypso OR caribbean OR ska OR soca OR steelpan OR "steel drum" OR zouk' },
+  { key: 'spanish', group: 'region', label: '🌹 Spanish & Flamenco', terms: 'flamenco OR spanish OR "spanish guitar" OR andalusian' },
+  { key: 'portuguese', group: 'region', label: '⛵ Portuguese & Fado', terms: 'fado OR portuguese OR "portuguese guitar"' },
+  { key: 'italian', group: 'region', label: '🍝 Italian', terms: 'italian OR tarantella OR neapolitan OR mandolin' },
+  { key: 'french', group: 'region', label: '🥐 French', terms: 'french OR musette OR chanson OR accordion OR "gypsy jazz" OR manouche' },
+  { key: 'greek', group: 'region', label: '🏛️ Greek', terms: 'greek OR bouzouki OR rebetiko OR sirtaki' },
+  { key: 'balkan', group: 'region', label: '🎻 Balkan & Eastern European', terms: 'balkan OR klezmer OR gypsy OR romani OR serbian OR bulgarian OR romanian OR hungarian OR polka' },
+  { key: 'russian', group: 'region', label: '🪆 Russian', terms: 'russian OR balalaika OR ukrainian OR slavic' },
+  { key: 'nordic', group: 'region', label: '❄️ Nordic', terms: 'nordic OR scandinavian OR swedish OR norwegian OR finnish OR icelandic OR hardanger' },
+  { key: 'celtic', group: 'region', label: '☘️ Celtic', terms: 'celtic OR irish OR scottish OR bagpipes OR breton OR welsh' },
+  { key: 'americana', group: 'region', label: '🤠 American Roots', terms: 'bluegrass OR americana OR country OR blues OR "new orleans" OR cajun OR zydeco OR gospel' },
 ];
 const TRIPSY_FLYOVER_MUSIC_GROUPS = [
   { key: 'style', label: 'Styles' },
   { key: 'region', label: 'Regions' },
 ];
 const TRIPSY_FLYOVER_MUSIC_MAX_BYTES = 25 * 1024 * 1024;
+// Spoken word is never offered ("Exclude lessons about learning a language," 2026-10-20 —
+// a regional search for "arabic" or "japanese" turned up language courses): the search
+// rules these words out of the subject and the title, and tripsyFlyoverMusicLooksSpoken
+// checks what comes back, since an item's tags are often incomplete.
+const TRIPSY_FLYOVER_MUSIC_SPOKEN_WORDS = ['lesson', 'lessons', 'language', 'learn', 'learning', 'course', 'tutorial',
+  'vocabulary', 'phrases', 'phrasebook', 'pronunciation', 'grammar', 'speak', 'speaking', 'spoken', 'speech', 'lecture',
+  'lectures', 'audiobook', 'podcast', 'sermon', 'interview', 'radio show', 'talk', 'reading', 'poetry', 'beginners'];
+// Descriptions are free prose ("of course", "a musical language"), so only phrases that
+// cannot describe music count there.
+const TRIPSY_FLYOVER_MUSIC_SPOKEN_PHRASES = ['language lesson', 'language lessons', 'language course', 'learn to speak',
+  'learning to speak', 'learn arabic', 'learn japanese', 'learn chinese', 'phrasebook', 'pronunciation', 'vocabulary',
+  'audiobook', 'audio book', 'podcast', 'lecture', 'sermon', 'spoken word'];
 function tripsyFlyoverMusicSearchUrl(genreKey) {
   const g = TRIPSY_FLYOVER_MUSIC_GENRES.find(x => x.key === genreKey) || TRIPSY_FLYOVER_MUSIC_GENRES[0];
+  const spoken = TRIPSY_FLYOVER_MUSIC_SPOKEN_WORDS.map(w => w.includes(' ') ? `"${w}"` : w).join(' OR ');
   const p = new URLSearchParams();
-  p.set('q', `mediatype:audio AND collection:(netlabels OR opensource_audio) AND subject:(${g.terms}) AND licenseurl:*creativecommons*`);
-  for (const f of ['identifier', 'title', 'creator', 'licenseurl']) p.append('fl[]', f);
+  p.set('q', `mediatype:audio AND collection:(netlabels OR opensource_audio) AND subject:(${g.terms}) AND licenseurl:*creativecommons* AND NOT subject:(${spoken}) AND NOT title:(${spoken})`);
+  for (const f of ['identifier', 'title', 'creator', 'licenseurl', 'subject']) p.append('fl[]', f);
   p.append('sort[]', 'downloads desc');
-  p.set('rows', '16');
+  p.set('rows', '30');
   p.set('output', 'json');
   return `https://archive.org/advancedsearch.php?${p.toString()}`;
 }
@@ -18390,14 +18587,27 @@ function tripsyFlyoverPickArchiveTrack(meta, doc) {
     page: `https://archive.org/details/${encodeURIComponent(id)}`,
   };
 }
+// True when a title / subject list reads as spoken word rather than music: any of `words`
+// (TRIPSY_FLYOVER_MUSIC_SPOKEN_WORDS by default) as a whole word. Pure (tested).
+function tripsyFlyoverMusicLooksSpoken(texts, words = TRIPSY_FLYOVER_MUSIC_SPOKEN_WORDS) {
+  const flat = [texts].flat(3).filter(v => v != null).map(v => String(v)).join(' ').toLowerCase();
+  if (!flat) return false;
+  return words.some(w => new RegExp(`(^|[^a-z])${w.replace(/ /g, '\\s+')}([^a-z]|$)`).test(flat));
+}
 async function tripsyFlyoverSearchMusic(genreKey) {
   const res = await fetch(tripsyFlyoverMusicSearchUrl(genreKey));
   if (!res.ok) throw new Error(`Music search failed (${res.status})`);
-  const docs = (((await res.json()) || {}).response || {}).docs || [];
-  const tracks = await Promise.all(docs.slice(0, 10).map(async doc => {
+  const docs = ((((await res.json()) || {}).response || {}).docs || [])
+    .filter(doc => !tripsyFlyoverMusicLooksSpoken([doc.title, doc.subject]));
+  const tracks = await Promise.all(docs.slice(0, 12).map(async doc => {
     try {
       const m = await fetch(`https://archive.org/metadata/${encodeURIComponent(doc.identifier)}`);
-      return m.ok ? tripsyFlyoverPickArchiveTrack(await m.json(), doc) : null;
+      if (!m.ok) return null;
+      const meta = await m.json();
+      const md = (meta && meta.metadata) || {};
+      if (tripsyFlyoverMusicLooksSpoken([md.title, md.subject]) || tripsyFlyoverMusicLooksSpoken(md.description, TRIPSY_FLYOVER_MUSIC_SPOKEN_PHRASES)) return null;
+      const t = tripsyFlyoverPickArchiveTrack(meta, doc);
+      return t && !tripsyFlyoverMusicLooksSpoken(t.title) ? t : null;
     } catch (e) { return null; }
   }));
   return tracks.filter(Boolean);
@@ -18410,6 +18620,15 @@ function tripsyFlyoverLicenseLabel(url) {
 function tripsyFlyoverMusicLabel(music) {
   if (!music) return '';
   return `${music.title || 'Untitled'}${music.artist ? ` — ${music.artist}` : ''}`;
+}
+// How long a Preview plays, and where in the song it starts: 30 s from a quarter of the way
+// in, never so late that the clip would run past the end; a short song plays from the top.
+// Pure (tested).
+const TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS = 30;
+function tripsyFlyoverMusicPreviewStart(duration) {
+  const d = Number(duration);
+  if (!isFinite(d) || d <= TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS + 10) return 0;
+  return Math.round(Math.min(d * 0.25, 45, d - TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS - 5));
 }
 // Object URLs for the owner's own music files, by Drive id, so playback can start the
 // moment Play is pressed (iOS only lets audio start inside the tap itself).
@@ -18440,7 +18659,46 @@ function tripsyFlyoverMusicPicker(current) {
     let genre = null;
     let tracks = [];
     let state = 'idle'; // idle | loading | done | error
-    const stopAudio = () => { try { audio.pause(); } catch (e) {} playingUrl = null; };
+    // Preview ("Add a preview button to the music so the user can hear it before
+    // selecting," 2026-10-20): a TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS clip taken from a little
+    // way into the song (an intro is rarely what it sounds like), with a countdown, ending
+    // by itself. One preview at a time; starting another stops the first.
+    let previewTimer = null;
+    const setStatus = (text, isError) => {
+      const st = ov.querySelector('[data-mu-status]');
+      if (st) { st.textContent = text || ''; st.style.color = isError ? '#E04B3A' : ''; }
+    };
+    const stopAudio = () => {
+      if (previewTimer) { clearInterval(previewTimer); previewTimer = null; }
+      try { audio.pause(); } catch (e) {}
+      playingUrl = null;
+    };
+    const startPreview = url => {
+      stopAudio();
+      if (!url) { setStatus('That song can’t be previewed yet — try again in a moment.', true); return; }
+      playingUrl = url;
+      audio.src = url;
+      audio.onloadedmetadata = () => {
+        const from = tripsyFlyoverMusicPreviewStart(audio.duration);
+        if (from > 0) { try { audio.currentTime = from; } catch (e) { /* not seekable: plays from the top */ } }
+      };
+      audio.onended = () => { stopAudio(); render(); setStatus('Preview finished.'); };
+      const p = audio.play();
+      if (p && p.catch) p.catch(() => { stopAudio(); render(); setStatus('That track won’t play here — try another.', true); });
+      // The clock counts time actually PLAYED, not the position: a server that can't seek
+      // plays from the top, and buffering doesn't eat into the clip.
+      let elapsed = 0, last = performance.now();
+      previewTimer = setInterval(() => {
+        const now = performance.now();
+        if (!audio.paused && audio.readyState >= 3) elapsed += (now - last) / 1000;
+        last = now;
+        const left = Math.ceil(TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS - elapsed);
+        if (left <= 0) { stopAudio(); render(); setStatus('Preview finished.'); return; }
+        setStatus(audio.paused ? 'Loading preview…' : `Previewing — ${left} s left`);
+      }, 250);
+      render();
+      setStatus('Loading preview…');
+    };
     const done = v => { stopAudio(); audio.src = ''; ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
     const render = () => {
       ov.innerHTML = `
@@ -18450,7 +18708,8 @@ function tripsyFlyoverMusicPicker(current) {
             <button class="tripsy-close-x" data-mu-close aria-label="Close">✕</button>
           </div>
           <div style="font-size:13px; color:var(--muted); margin-bottom:10px;">
-            ${current ? `Now: <strong style="color:var(--text);">${esc(tripsyFlyoverMusicLabel(current))}</strong>. ` : ''}Pick a genre to hear free Creative Commons music from the Internet Archive, or use a song of your own.
+            ${current ? `Now: <strong style="color:var(--text);">${esc(tripsyFlyoverMusicLabel(current))}</strong>
+              <button class="btn" data-mu-preview-current style="font-size:12px; padding:2px 8px; margin-left:4px;">${playingUrl && playingUrl === tripsyFlyoverMusicSrcNow(current) ? '■ Stop' : '▶ Preview'}</button>. ` : ''}Pick a genre to find free Creative Commons music from the Internet Archive. Press Preview to hear ${TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS} seconds of a song before you choose it, or use a song of your own.
           </div>
           ${TRIPSY_FLYOVER_MUSIC_GROUPS.map(gr => `
             <div class="tfo-ss-label" style="margin:0 0 4px;">${esc(gr.label)}</div>
@@ -18463,7 +18722,7 @@ function tripsyFlyoverMusicPicker(current) {
             ${state === 'done' && !tracks.length ? `<div style="color:var(--muted); font-size:13px;">Nothing found for that genre — try another.</div>` : ''}
             ${tracks.map((t, i) => `
               <div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid var(--line);">
-                <button class="btn" data-mu-play="${i}" style="width:38px; padding:4px 0;" aria-label="Listen">${playingUrl === t.url ? '❚❚' : '▶'}</button>
+                <button class="btn" data-mu-play="${i}" style="font-size:12px; padding:4px 8px; white-space:nowrap; min-width:88px;">${playingUrl === t.url ? '■ Stop' : '▶ Preview'}</button>
                 <div style="flex:1; min-width:0;">
                   <div style="font-size:13px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(t.title)}</div>
                   <div style="font-size:11px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc([t.artist, t.seconds ? `${Math.floor(t.seconds / 60)}:${String(Math.round(t.seconds % 60)).padStart(2, '0')}` : '', tripsyFlyoverLicenseLabel(t.license)].filter(Boolean).join(' · '))} · <a href="${esc(t.page)}" target="_blank" rel="noopener" style="color:inherit; text-decoration:underline;">source</a></div>
@@ -18499,16 +18758,15 @@ function tripsyFlyoverMusicPicker(current) {
       ov.querySelectorAll('[data-mu-play]').forEach(b => b.onclick = () => {
         const t = tracks[Number(b.getAttribute('data-mu-play'))];
         if (playingUrl === t.url) { stopAudio(); render(); return; }
-        audio.src = t.url;
-        playingUrl = t.url;
-        audio.play().catch(() => {
-          playingUrl = null;
-          render();
-          const st = ov.querySelector('[data-mu-status]');
-          if (st) st.textContent = 'That track won’t play here — try another.';
-        });
-        render();
+        startPreview(t.url);
       });
+      const pvCur = ov.querySelector('[data-mu-preview-current]');
+      if (pvCur) pvCur.onclick = async () => {
+        const now = tripsyFlyoverMusicSrcNow(current);
+        if (now && playingUrl === now) { stopAudio(); render(); return; }
+        // An own song is usually pre-downloaded; if not, this fetches it first.
+        startPreview(now || await tripsyFlyoverPrefetchMusic(current));
+      };
       ov.querySelectorAll('[data-mu-use]').forEach(b => b.onclick = () => {
         const t = tracks[Number(b.getAttribute('data-mu-use'))];
         done({ source: 'archive', url: t.url, title: t.title, artist: t.artist, license: t.license, page: t.page });
@@ -18593,6 +18851,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       <button class="tfo-btn" data-tfo-replay aria-label="Replay">↺</button>
       <button class="tfo-btn tfo-close" data-tfo-close aria-label="Close">✕</button>
     </div>
+    <div class="tfo-veil"></div>
     <div class="tfo-photo"></div>
     <div class="tfo-card"><div class="tfo-card-label"></div><div class="tfo-card-sub"></div></div>`;
   document.body.appendChild(ov);
@@ -18600,6 +18859,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   tripsyFlyoverAddTiles(L, map);
   const cardEl = ov.querySelector('.tfo-card');
   const photoEl = ov.querySelector('.tfo-photo');
+  const veilEl = ov.querySelector('.tfo-veil');
   const pauseBtn = ov.querySelector('[data-tfo-pause]');
 
   let run = { cancelled: false, paused: false };
@@ -18663,27 +18923,33 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   // Collage spots (left%, top%, rotation): scattered like prints on a table.
   const COLLAGE_SPOTS = [[4, 6, -6], [52, 4, 5], [28, 30, -2], [2, 48, 4], [54, 46, -5], [30, 58, 3]];
   const COLLAGE_SPOTS_PORTRAIT = [[4, 2, -5], [38, 14, 4], [6, 34, 3], [36, 50, -4], [8, 66, 5], [40, 78, -3]];
-  // One SCREEN of photos: built hidden, faded/slid/zoomed in, held for the stop's seconds
-  // (pause-aware), then taken out the same way.
-  const showGroup = async (r, ids, cfg) => {
+  // One PAGE of photos. Pages go DIRECTLY from one to the next ("transition directly from
+  // picture to picture. Do not go to the map between pictures," 2026-10-20): the next page
+  // is laid on top of the one showing and comes in the way the page before it asked; only
+  // then is the old one taken away. A dark backdrop (.tfo-veil) stays up for the whole
+  // slideshow, and each page is opaque, so the map shows only before the first page and
+  // after the last.
+  let shownEl = null;
+  const showPage = async (r, page, enterTr) => {
     const urls = [];
-    for (const id of ids) {
+    for (const id of page.ids) {
       try { urls.push(await tripsyPlacePhotoDisplayUrl(id)); } catch (e) { /* skip a photo that won't load */ }
     }
     if (r.cancelled) return false;
     if (!urls.length) return true;
-    const ms = Math.round(cfg.seconds * 1000);
+    const layout = tripsyFlyoverPageLayout(urls.length, page.style);
+    const ms = Math.round(page.seconds * 1000);
     const g = document.createElement('div');
     g.className = 'tfo-group';
-    g.dataset.layout = cfg.layout;
-    g.dataset.tr = cfg.transition;
+    g.dataset.layout = layout;
+    g.dataset.tr = enterTr;
     g.style.setProperty('--tfo-ms', `${ms + 600}ms`);
     const portrait = window.innerHeight > window.innerWidth;
     await Promise.all(urls.map((u, i) => new Promise(res => {
       const img = document.createElement('img');
       img.alt = '';
       img.onload = res; img.onerror = res;
-      if (cfg.layout === 'collage') {
+      if (layout === 'collage') {
         const [x, y, rot] = (portrait ? COLLAGE_SPOTS_PORTRAIT : COLLAGE_SPOTS)[i % 6];
         img.style.left = `${x}%`; img.style.top = `${y}%`;
         img.style.rotate = `${rot}deg`;
@@ -18693,14 +18959,27 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       g.appendChild(img);
     })));
     if (r.cancelled) return false;
+    veilEl.classList.add('tfo-show');
     photoEl.appendChild(g);
     // Two frames so the starting transform is laid out before the transition runs.
     await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
     g.classList.add('tfo-in');
-    const ok = await wait(r, ms);
+    const prev = shownEl;
+    shownEl = g;
+    const tMs = enterTr === 'none' ? 0 : 650;
+    if (!(await wait(r, tMs))) return false;
+    if (prev) prev.remove();
+    return wait(r, Math.max(0, ms - tMs));
+  };
+  // After a destination's last page: back to the map.
+  const endSlideshow = async r => {
+    veilEl.classList.remove('tfo-show');
+    const g = shownEl;
+    shownEl = null;
+    if (!g) return true;
     g.classList.remove('tfo-in');
     g.classList.add('tfo-out');
-    await wait(r, cfg.transition === 'none' ? 0 : 550);
+    const ok = await wait(r, 550);
     g.remove();
     return ok;
   };
@@ -18754,18 +19033,20 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     const n = stops.length;
     const sub = [tripsyFlyoverDatesLabel(s), preview ? '' : s.kind === 'origin' ? 'Departure' : s.kind === 'return' ? 'Home' : `Stop ${i} of ${n - (stops[0].kind === 'origin' ? 1 : 0) - (stops[n - 1].kind === 'return' ? 1 : 0)}`].filter(Boolean).join(' · ');
     showCard(s.label, sub);
-    const photos = s.photos || [];
-    if (!photos.length) { if (!(await wait(r, 1800))) return false; }
-    const cfg = tripsyFlyoverSlideshowConfig(s);
-    for (const group of tripsyFlyoverPhotoGroups(photos, cfg.layout)) {
-      if (!(await showGroup(r, group.map(p => p.driveFileId), { ...cfg, layout: tripsyFlyoverGroupLayout(group, cfg.layout) }))) return false;
+    const pages = tripsyFlyoverPages(s);
+    if (!pages.length) { if (!(await wait(r, 1800))) return false; }
+    const enter = tripsyFlyoverEnterTransitions(s, pages);
+    for (let k = 0; k < pages.length; k++) {
+      if (!(await showPage(r, pages[k], enter[k]))) return false;
     }
-    return true;
+    return endSlideshow(r);
   };
 
   const play = async r => {
     while (layers.length) { try { layers.pop().remove(); } catch (e) {} }
     photoEl.innerHTML = '';
+    shownEl = null;
+    veilEl.classList.remove('tfo-show');
     const all = L.latLngBounds(stops.map(s => [s.lat, s.lng]));
     if (preview) {
       map.setView([stops[0].lat, stops[0].lng], 6, { animate: false });
@@ -24367,6 +24648,8 @@ const tripsyPhotoObjectUrlCache = new Map();
 // touches driveData itself, unlike the old inline-data-URL approach this
 // replaced.
 function tripsyPlacePhotoDisplayUrl(driveFileId) {
+  // The fly-over's built-in LAX picture: embedded, not a Drive file.
+  if (driveFileId === TRIPSY_FLYOVER_LAX_PHOTO_ID) return Promise.resolve(`data:image/jpeg;base64,${PS_RESERVATION_PHOTO_B64}`);
   // Memoizes the PROMISE, not the resolved URL: caching only the result let two
   // overlapping renders of the same screen download the same photo twice (both
   // missed the cache before either had finished). A rejection evicts itself so

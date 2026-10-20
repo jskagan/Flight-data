@@ -3567,8 +3567,15 @@ WebView's support for recording is unproven.
     which the itinerary still uses. `tripsyFlyoverSeedItineraryPhotos` runs owner-only on
     every setup open and after each build. It stamps `autoPhotoSeeded` (carried across
     rebuilds), so a deleted photo is never re-added and a stay is offered exactly once; a stay
-    with nothing in the itinerary yet stays unseeded and is retried next open. Stays only:
-    the departure and home airports get none. Live check on the Singapore GP data
+    with nothing in the itinerary yet stays unseeded and is retried next open. The departure
+    and home airports get no itinerary photo, **except LAX** ("For trips that have lax as a
+    destination, select the default picture for lax for the fly-over," 2026-10-20): an
+    origin/return stop that `tripsyFlyoverStopIsLax` recognizes (LAX / "Los Angeles
+    International" in its query or label, or geocoded within 4 km of LAX) is seeded, once and
+    only when visited, with the Theme Building photo every P/S card already uses
+    (`PS_RESERVATION_PHOTO_B64`). It has no Drive file, so it is stored under the sentinel id
+    `TRIPSY_FLYOVER_LAX_PHOTO_ID` (`'builtin:lax'`), which `tripsyPlacePhotoDisplayUrl`
+    resolves to the embedded image. Every fly-over surface draws photos through that function. Live check on the Singapore GP data
     (2026-10-20): every visited stay found its hotel's photo.
 - **The player** is a full-screen `#tripsy-flyover-player` at z 2147483090, below
   `tripsyConfirmDialog`.
@@ -3599,42 +3606,61 @@ WebView's support for recording is unproven.
     clock. Replay restarts. ✕ or Esc cancels the run and removes the map.
   - **Photo preloading:** every photo starts downloading (memoized
     `tripsyPlacePhotoDisplayUrl`) before playback begins.
-  - **Each destination has its own slideshow settings** (`stop.slideshow`, read through
-    `tripsyFlyoverSlideshowConfig`, which falls back to one-at-a-time / fade / 3.2 s and
-    clamps seconds to 1–15; "Allow the user to select different ways to play the slideshow
-    at each location … multiple pictures on the screen at the same time and different ways
-    to transition … adjust the timing," 2026-10-20). The setup page's "Slideshow:" row
-    (owner, visited stops with photos) sets them, and **▶ Preview** plays just that
-    destination (`playTripsyFlyover(…, {previewStopId})`: no title card, legs or ending).
-    - **Layouts** (`TRIPSY_FLYOVER_LAYOUTS`): one at a time, two side by side (stacked in
-      portrait), a grid of four, or a collage of up to six scattered prints.
-      `tripsyFlyoverPhotoGroups` splits the photos into screens.
+  - **Each destination's photos play as PAGES, each configured on its own** ("allow users to
+    configure each picture or page of pictures separately … show page 1 of photos, ask how
+    many pictures to display on that page, allow users to select how many and which photos,
+    and ask about the transition to the next page," 2026-10-20). `stop.pages` is
+    `[{ids, count, style, transition, seconds}]` in play order: `ids` are photo
+    `driveFileId`s, `count` how many the page holds (1–6, `TRIPSY_FLYOVER_PAGE_MAX`), `style`
+    grid or collage for 3–4 (5–6 are always a collage, 1 is full-screen, 2 a pair —
+    `tripsyFlyoverPageLayout`), `transition` how THIS page gives way to the NEXT, `seconds`
+    its own time on screen (clamped 1–15). **`tripsyFlyoverPages(stop)` is the one reader**
+    (player, summary, dialog): a photo no longer on the stop drops off a page, a photo can be
+    on one page only, empty pages vanish, and photos on no page yet play after the pages,
+    grouped by the stop's older per-destination settings (`stop.slideshow` via
+    `tripsyFlyoverSlideshowConfig` — layout / transition / seconds, plus the old per-photo
+    `solo` "Own page" flag, through `tripsyFlyoverPhotoGroups`/`tripsyFlyoverGroupLayout`). So a
+    stop saved before pages existed plays exactly as it did. `tripsyFlyoverEnterTransitions`
+    gives each page the transition it ENTERS with: the first page uses the stop's own
+    (fade by default), every later page the one the page before it chose. **▶ Preview**
+    plays just that destination (`playTripsyFlyover(…, {previewStopId})`: no title card,
+    legs or ending). `tripsyFlyoverCarryOver` keeps `pages` and `slideshow` across Rebuild
+    (it used to drop `slideshow`).
     - **Transitions** (`TRIPSY_FLYOVER_TRANSITIONS`): fade, slide, zoom in, slow pan & zoom
-      (a Ken Burns keyframe sized to the screen's time), and cut.
-    - **Timing:** `seconds` is per SCREEN, not per photo; the label says "per photo" for the
-      one-at-a-time layout and "per screen" otherwise.
-    - **How a screen plays:** `showGroup` builds it hidden as `.tfo-group[data-layout]
-      [data-tr]`, waits two frames so the starting transform is laid out, adds `.tfo-in`,
-      holds pause-aware, then `.tfo-out`. Pause also sets `.tfo-paused`, which freezes the
-      pan-and-zoom animation.
-    - **The options live in a dialog that opens BY ITSELF after photos are added**
-      (`tripsyFlyoverSlideshowDialog`; "When the user selects photos for each location,
-      present him with options as to how he wants photos displayed - some may be one per page
-      and others several in a page, and how to transition," 2026-10-20). It also opens from
-      each card's **Slideshow options** button, and the card shows a one-line
-      `tripsyFlyoverSlideshowSummary`.
+      (a Ken Burns keyframe sized to the page's time), and cut.
+    - **Pages go DIRECTLY from one to the next — the map never shows between pictures**
+      ("transition directly from picture to picture. Do not go to the map between pictures,"
+      2026-10-20; each screen used to fade fully out, uncovering the map, before the next came
+      in). `showPage` lays the next page (`.tfo-group[data-layout][data-tr]`, OPAQUE: same
+      `#0b1020` as the backdrop) on top of the one showing, waits two frames, adds `.tfo-in`,
+      and removes the old page only once the new one has finished coming in; the hold counts
+      from `.tfo-in`, pause-aware. A full-screen `.tfo-veil` backdrop comes up with the first
+      page and stays for the whole slideshow, so a collage's gaps and the photo area's margins
+      never show the map either; `endSlideshow` fades the last page and the veil back to the
+      map together. Pause also sets `.tfo-paused`, which freezes the pan-and-zoom animation.
+      Verified in Chromium by sampling a two-page preview every 100 ms: an opaque page was on
+      screen at every sample until the final fade to the map.
+    - **The page-by-page dialog opens BY ITSELF after photos are added**
+      (`tripsyFlyoverSlideshowDialog`), and from each card's **Slideshow options** button;
+      the card shows a one-line `tripsyFlyoverSlideshowSummary` ("3 pages: 2 · 3 · 1 photos
+      per page").
       - **Triggers:** an own-photos upload batch, and closing the Suggested grid after
         picking some (`tripsyFlyoverSuggestedPhotos`' third arg `onClosed(added)`).
-      - **Contents:** layout picture cards (`TRIPSY_FLYOVER_LAYOUT_ICON`), transition chips,
-        seconds, a per-photo **Own page** toggle (`photo.solo`) and a live "Plays as N
-        screens: 1 · 2 · 3+4+5" plan.
-      - **Preview** plays the unsaved draft; Save writes `slideshow` + `photos` onto that
-        one stop, and Cancel changes nothing.
-      - **Grouping:** `tripsyFlyoverPhotoGroups` gives a `solo` photo its own screen and ends
-        the screen being filled before it, so order is kept.
-      - **Drawing a screen:** `tripsyFlyoverGroupLayout` draws a lone photo full-screen,
-        never as one cell of a grid, and two photos in a grid as a pair. The player passes it
-        per screen.
+      - **One page at a time:** "Page N of M" with a page strip to jump between pages; "How
+        many pictures on page N?" (1 … min(6, photos)); Grid / Collage for 3–4; every photo
+        of the stop as a tappable thumbnail (`tripsyFlyoverTogglePagePhoto`: on this page →
+        off; on another page → moved here, if this page has room; numbered in play order,
+        badged with its page otherwise); "Transition to page N+1" (the last page says it
+        fades back to the map instead); time on screen; ◀ previous / Next page ▶ (past the
+        last page it adds one, starting with the next photo on no page); Delete page.
+        Lowering a page's count takes the extra photos off it. A count above what's chosen is
+        allowed; the page plays what it has.
+      - **Opening:** existing pages are edited as saved (`tripsyFlyoverDialogPages`; a stop
+        with no saved pages starts from the old grouping). Photos on no page yet (just added)
+        get a new page at the end, which the dialog opens on; any still on no page at Save
+        play after the last page, one per page, and the dialog says so.
+      - **Preview** plays the unsaved draft; Save writes `pages` (empty ones dropped) +
+        `photos` onto that one stop; Cancel changes nothing.
 - **Music: one soundtrack per fly-over, chosen by genre** ("try to find different music that
   could be used of different genres and offer that to the user," same day).
   - **Data:** `record.music` is `{source:'archive', url, title, artist, license, page}` or
@@ -3642,17 +3668,38 @@ WebView's support for recording is unproven.
   - **Picker:** `tripsyFlyoverMusicPicker` offers genres in two labelled rows
     (`TRIPSY_FLYOVER_MUSIC_GENRES`, each tagged `group`, rows from
     `TRIPSY_FLYOVER_MUSIC_GROUPS`): **Styles** (cinematic, acoustic, jazz, classical,
-    electronic, ambient, upbeat) and **Regions** (African, Middle Eastern, Indian, East Asian,
-    Southeast Asian, Latin, Caribbean, Mediterranean, Celtic, Hawaiian & Pacific — "can you
-    try to find regional options as well," 2026-10-20; these replaced the old catch-all
-    "World"). A region is just its own set of archive subject words, so adding one is one
-    array entry. Each runs a keyless **Internet Archive** search
+    electronic, ambient, upbeat) and **Regions** — 28 of them ("can you try to find regional
+    options as well," then "try to find more regional options," 2026-10-20; they replaced the
+    old catch-all "World"): West / East & Southern / North African, Arabic, Persian & Turkish,
+    Indian, Chinese, Japanese, Korean, Southeast Asian, Hawaiian & Pacific, Australian,
+    Brazilian, Andean, Mexican, Cuban & Salsa, Tango, Caribbean, Spanish & Flamenco,
+    Portuguese & Fado, Italian, French, Greek, Balkan & Eastern European, Russian, Nordic,
+    Celtic, American Roots. A region is just its own set of archive subject words, so adding
+    one is one array entry.
+  - **Spoken word is never offered** ("Exclude lessons about learning a language," same day —
+    a regional search turned up language courses). The search query adds `AND NOT subject:(…)
+    AND NOT title:(…)` over `TRIPSY_FLYOVER_MUSIC_SPOKEN_WORDS` (lesson, language, learn,
+    course, pronunciation, audiobook, podcast, lecture, interview, poetry …), and because tags
+    are often incomplete, `tripsyFlyoverSearchMusic` re-checks every result with
+    `tripsyFlyoverMusicLooksSpoken` (whole words only, so "Talking Drums" survives) on the
+    item's title and subjects, the picked track's title, and the item DESCRIPTION — the last
+    against the phrase-only `TRIPSY_FLYOVER_MUSIC_SPOKEN_PHRASES` ("language course", "learn to
+    speak" …), since prose like "of course" or "a musical language" must not drop a song. It
+    asks for 30 results and checks up to 12 so the filtering still leaves a list. Each runs a keyless **Internet Archive** search
     (`tripsyFlyoverMusicSearchUrl`: audio in the netlabels / opensource_audio collections,
     the genre's subject terms, Creative Commons `licenseurl` only, most downloaded first).
     That is followed by the item metadata API, where `tripsyFlyoverPickArchiveTrack` picks
     one MP3, preferring 1–10 minutes over a jingle or a two-hour mix, with title, artist,
     license (`tripsyFlyoverLicenseLabel`, e.g. "CC BY-SA") and a source link.
-  - **Listening:** each track has a ▶ listen button and **Use**. **＋ Use my own song**
+  - **Preview before choosing** ("Add a preview button to the music so the user can hear it
+    before selecting," same day): every track has a labelled **▶ Preview** button (■ Stop while
+    playing) beside **Use**, and the song already chosen has one too. A preview plays
+    `TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS` (30) from a little way in
+    (`tripsyFlyoverMusicPreviewStart`: a quarter of the way, at most 45 s, never so late it runs
+    past the end; a short song plays from the top), counts down in the status line and stops by
+    itself; one at a time. The countdown counts time actually PLAYED, not the playback position
+    — found testing: a server that can't seek plays from the top, and a position-based count
+    then never reached zero and never stopped. **＋ Use my own song**
     uploads an audio file (capped at `TRIPSY_FLYOVER_MUSIC_MAX_BYTES`, 25 MB) to Drive.
     **No music** clears it.
   - **Playback starts BEFORE the player's first `await`**, inside the Play tap, because iOS
