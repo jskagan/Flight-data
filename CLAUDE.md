@@ -1181,7 +1181,15 @@ step 4; git history has it if ever needed.
   `overflow-x:auto`, which makes every card its own scrollport inside which a sticky child
   never moves — so the trip card restores `overflow:visible` (its timeline is never wider than
   the card; `.main`'s `overflow-x:hidden` is the backstop). Sticky is bounded by its card, so
-  each header gives way to the next card's.
+  each header gives way to the next card's. **The cost of that on a PHONE** ("It's not showing
+  the edit button in the my trips view," same day, iPhone): the old `overflow-x:auto` was what
+  let the owner scroll a trip card sideways to reach a timeline row's action icons (👔 ✏️ 📎
+  ↪️ 🗑️ past the 194px indent) and the header's six icon-label buttons; with it gone they were
+  clipped by `.main` with no way to reach them. So below 600px those rows WRAP instead:
+  `.tripsy-tl-body`/`.tripsy-tl-actions` (the icons drop under the title, `flex-basis:100%`),
+  `.tripsy-trip-head`/`.tripsy-trip-head-actions` (buttons under the trip name), and
+  `.tripsy-tl-row`/`.tripsy-tl-inner` tighten the indent. Wide screens get no wrap rule, so a
+  long title still shrinks beside its icons. `phonerowactions_test.js`.
   **The left nav rail is pinned too, on wide screens** ("Also freeze the left side navigation
   page, with all items always displayed when viewing on a wide device," same day): with the
   shell one viewport tall the rail simply never moves; it keeps `position:sticky; top:0;
