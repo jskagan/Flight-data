@@ -3487,6 +3487,128 @@ not.**
   file both render as nothing rather than a broken figure. Printing blurs the focused paragraph
   first — the snapshot is synchronous, so an unserialized edit would otherwise print stale.
 
+### Trip Fly-over (gear menu → 🗺️ Trip Fly-over; `showTripsyFlyover` / `playTripsyFlyover`)
+
+An animated map of a FINISHED trip ("after a trip is over, create a fly-over map that would
+show each destination we went to … photos would play in a slideshow format when the flyover
+map showed a plane or other transportation device reaching that destination," 2026-10-20).
+**Phase 1 (built): in-app playback. Phase 2 (not built): saving a video file to Drive**,
+either by recording in a desktop browser or by having the cloud routine render it. The iPad
+WebView's support for recording is unproven.
+
+- **It runs on ANY trip, finished or not, and the ⚙️ menu item follows its state**
+  (`tripsyFlyoverMenuItems`, pure; "Allow the feature to run on existing trips (non-finished)
+  … 'Start Fly-Over' … 'Finish Fly-Over' … After it is completed, there should be options to
+  view it or edit it," 2026-10-20):
+  - **No record:** "Start Fly-Over" (owner only).
+  - **Started:** "Finish Fly-Over" (owner only). Both of these open the setup page.
+  - **Completed:** "View Fly-Over" (plays straight away, any viewer) and "Edit Fly-Over" (the
+    setup page, owner only). A viewer sees nothing until the fly-over is completed.
+  - **Completing:** the setup page's **✓ Complete Fly-Over** stamps `completedAt`, and is
+    disabled until the trip is over (`tripsyFlyoverTripOver`: last event day before the
+    device's today), since only then can every destination have been visited. A rebuild from
+    Edit keeps `completedAt`. The first build and Complete both re-render My Trips, so the
+    menu label flips at once.
+  - **Photos only for VISITED destinations** (`tripsyFlyoverStopVisited`: the stop's first
+    day is today or earlier; an undated stop counts as visited). An unvisited stop shows
+    "🔒 Photos open once you get here (dates)" in place of its photo buttons.
+- **Destinations are where you SLEPT** (`tripsyFlyoverDeriveStops`, pure):
+  - **Stays:** one stop per lodging, with duplicate records of the same hotel collapsed.
+  - **Endpoints:** the first flight's departure airport (`origin`) and the last flight's
+    arrival (`return`).
+  - **No lodging:** each flight's arrival except the last, then the trip's own `location`.
+  - **Ordering is by CALENDAR DAY, not the clock.** A stay's start is its nominal check-in
+    hour, or a bare date (midnight), which can predate the flight that gets you there.
+  - **Legs:** a leg belongs to the first stop that begins on or after the leg's day, so
+    everything on a moving day goes to where you were moving TO. The leg is drawn as its most
+    significant mode (`TRIPSY_FLYOVER_MODE_RANK` plane > boat > train > car), so the car to
+    the airport doesn't turn a flight into a drive.
+- **Geocoded once, at build time** (`tripsyFlyoverBuild`, 4 lookups in parallel).
+  - **Lookup source:** Places `searchText` with `addressComponents` (it knows hotel names and
+    airport codes) first, falling back to the weather pipeline's free Open-Meteo city
+    geocoder.
+  - **Labels:** Places' locality REPLACES the address-parsed label. "LAX" becomes
+    "Los Angeles", and a ryokan address that parses only to its prefecture ("Oita") becomes
+    its town.
+  - **Merging:** consecutive stays in one city (same label, or under
+    `TRIPSY_FLYOVER_MERGE_KM` apart) merge AFTER geocoding (`tripsyFlyoverMergeNearby`).
+    The origin and return are never merged into a stay.
+  - **Unplaced stops ASK the owner** ("For locations such as burning man that do not have a
+    location, have the map ask user for the location name manually," 2026-10-20). A trip with
+    nothing placeable at all (no lodging, no usable flight arrival, no `location`) derives a
+    `needsPlace` placeholder stay (`id: 'location'`), and the build's `askPlace` option
+    (`tripsyFlyoverAskPlace`, one dialog at a time, in trip order) is asked about it and about
+    any stop the geocoder couldn't find. **Find** geocodes the typed text and uses the first
+    match under the typed name. No match keeps the dialog open asking for another name.
+    **Show nothing** marks the stop `removed` + `placeSkipped`. The typed place is remembered
+    on the stop (`manualPlace`), so a rebuild reuses it, and a skipped stop stays removed, so a
+    rebuild asks neither question again. A stop left unplaced (no `askPlace`, or one restored
+    after Show nothing) shows a ⚠️ with a **📍 Set location** button opening the same dialog,
+    and playback skips it.
+- **Saved in `driveData.tripsyFlyovers`.** There is one record per trip,
+  `{tripKey, builtAt, stops:[{id, kind, label, autoLabel, labelEdited, removed, lat, lng,
+  mode, names, start, end, photos:[{driveFileId}]}]}`, managed by `Store.getTripsyFlyover`
+  and `saveTripsyFlyover`. The prune rule drops a record when its trip is gone.
+  - **Rebuild destinations** re-derives the stops through `tripsyFlyoverCarryOver`, matching
+    by stop id and then by kind + city. Photos, a renamed label and a REMOVED stop all
+    survive; a rebuild never resurrects a stop the owner removed.
+  - **Photos:** the owner's own (`tripsyPickImageFile`, resized to 1600px) or Places
+    suggestions for the city and its hotels (`tripsyFlyoverSuggestedPhotos`). They are
+    uploaded as `flyover-photo-*` Drive files.
+  - **Each visited destination STARTS with the itinerary's photo for its first event** ("For
+    each location visited, start with one picture that is taken from the first itinerary
+    event for that location. (But allow user to delete or change later)," 2026-10-20).
+    `tripsyFlyoverItineraryPhotoFor` walks the hosting/activity events from the stay's start
+    (the hotel check-in) up to the next stop's start, in time order, and takes the first one
+    with a photo in `driveData.tripsyPlacePhotoCache`, skipping `skipped` entries. The match
+    is on the key's `name|address|` PREFIX, because the itinerary keys photos by the CARD's
+    title and hint ("<hotel> check-in"), which the raw event doesn't carry. It reuses that
+    Drive file outright, with no upload; removing it from the fly-over never deletes the file,
+    which the itinerary still uses. `tripsyFlyoverSeedItineraryPhotos` runs owner-only on
+    every setup open and after each build. It stamps `autoPhotoSeeded` (carried across
+    rebuilds), so a deleted photo is never re-added and a stay is offered exactly once; a stay
+    with nothing in the itinerary yet stays unseeded and is retried next open. Stays only:
+    the departure and home airports get none. Live check on the Singapore GP data
+    (2026-10-20): every visited stay found its hotel's photo.
+- **The player** is a full-screen `#tripsy-flyover-player` at z 2147483090, below
+  `tripsyConfirmDialog`.
+  - **Map:** Leaflet 1.9.4 loads on demand from cdnjs (`tripsyFlyoverLoadLeaflet`, a
+    memoized promise that is cleared on failure so a retry works). Tiles are CARTO's keyless
+    OpenStreetMap basemap, with attribution shown.
+  - **Sequence:** overview of the whole route → the origin → for each leg, frame the leg,
+    animate the vehicle → land with a dot, a city card and the photo slideshow
+    (`TRIPSY_FLYOVER_PHOTO_MS` per photo).
+  - **Route geometry:** flights follow a great circle (`tripsyFlyoverGreatCircle`). Longitudes
+    are UNWRAPPED both along the path and across stops (`tripsyFlyoverUnwrap`,
+    `tripsyFlyoverPlayableStops`), so LAX→SIN crosses the Pacific instead of looping back
+    across the whole map.
+  - **Vehicle direction:** ✈️ is rotated along the heading (+45°, since the glyph points
+    up-right); ground glyphs flip when heading right.
+  - **Controls:** pause/resume (space) freezes both the vehicle clock and the slideshow
+    clock. Replay restarts. ✕ or Esc cancels the run and removes the map.
+  - **Photo preloading:** every photo starts downloading (memoized
+    `tripsyPlacePhotoDisplayUrl`) before playback begins.
+  - **Each destination has its own slideshow settings** (`stop.slideshow`, read through
+    `tripsyFlyoverSlideshowConfig`, which falls back to one-at-a-time / fade / 3.2 s and
+    clamps seconds to 1–15; "Allow the user to select different ways to play the slideshow
+    at each location … multiple pictures on the screen at the same time and different ways
+    to transition … adjust the timing," 2026-10-20). The setup page's "Slideshow:" row
+    (owner, visited stops with photos) sets them, and **▶ Preview** plays just that
+    destination (`playTripsyFlyover(…, {previewStopId})`: no title card, legs or ending).
+    - **Layouts** (`TRIPSY_FLYOVER_LAYOUTS`): one at a time, two side by side (stacked in
+      portrait), a grid of four, or a collage of up to six scattered prints.
+      `tripsyFlyoverPhotoGroups` splits the photos into screens.
+    - **Transitions** (`TRIPSY_FLYOVER_TRANSITIONS`): fade, slide, zoom in, slow pan & zoom
+      (a Ken Burns keyframe sized to the screen's time), and cut.
+    - **Timing:** `seconds` is per SCREEN, not per photo; the label says "per photo" for the
+      one-at-a-time layout and "per screen" otherwise.
+    - **How a screen plays:** `showGroup` builds it hidden as `.tfo-group[data-layout]
+      [data-tr]`, waits two frames so the starting transform is laid out, adds `.tfo-in`,
+      holds pause-aware, then `.tfo-out`. Pause also sets `.tfo-paused`, which freezes the
+      pan-and-zoom animation.
+- **Testing:** verified in Chromium against a synthetic trip, with Leaflet served from npm
+  because the sandbox can't reach cdnjs or the tile host. `flyover_test.js`.
+
 ### Home's Upcoming Trips box
 
 An in-progress trip is listed FIRST ("the first trip listed should be any trip that is currently

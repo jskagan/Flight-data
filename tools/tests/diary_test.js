@@ -20,7 +20,7 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 assert(/data-tripsy-trip-diary data-key="\$\{esc\(trip\.key\)\}"`, '📖', 'Trip Diary'/.test(html),
   'the gear menu carries a Trip Diary item');
 assert(/querySelectorAll\("\[data-tripsy-trip-diary\]"\)/.test(html), 'and it is wired');
-const gear = html.slice(html.indexOf('data-tripsy-trip-menu="${esc(trip.key)}"'), html.indexOf('data-tripsy-trip-menu="${esc(trip.key)}"') + 900);
+const gear = html.slice(html.indexOf('data-tripsy-trip-menu="${esc(trip.key)}"'), html.indexOf('data-tripsy-trip-menu="${esc(trip.key)}"') + 1600);
 assert(gear.indexOf('Verify Travel Details') < gear.indexOf('Trip Diary')
     && gear.indexOf('Trip Diary') < gear.indexOf('Hide Trip'), 'placed between Verify and Hide');
 
