@@ -38,8 +38,8 @@ assert(/if \(_tripsyMyTripsScrolledToToday\) return;/.test(fn),
   'it fires once per visit, so a background re-render cannot yank you back');
 assert(/if \(!target\) return;/.test(fn) && /no trip is in progress/.test(fn),
   'a trip that has not started (or is over) leaves the page where it opened');
-assert(/window\.scrollY \+ el\.getBoundingClientRect\(\)\.top/.test(fn),
-  'it scrolls to an ABSOLUTE position, not by a relative delta');
+assert(/sc\.scrollTop \+ el\.getBoundingClientRect\(\)\.top - sc\.getBoundingClientRect\(\)\.top/.test(fn) && /const sc = tripsyPageScroller\(\);/.test(fn),
+  'it scrolls to an ABSOLUTE position inside the #main scroller (the window never scrolls, 2026-10-20), not by a relative delta');
 assert(/\[120, 350, 800\]\.forEach/.test(fn) && /requestAnimationFrame/.test(fn),
   'and re-runs, since cards grow as photos and weather arrive');
 assert(/const selector = tripsyMyTripsTodaySelector\(\);/.test(fn) && /const el = document\.querySelector\(selector\)/.test(fn),

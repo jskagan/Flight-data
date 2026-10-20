@@ -42,8 +42,21 @@ const rule = sel => { const m = css.match(new RegExp(sel.replace(/[.*+?^${}()|[\
   assert(isStuck(0, -400) === true, 'header at the window top while its card scrolled up -> stuck');
   assert(isStuck(240, 240) === false && isStuck(650, 650) === false, 'header at its card top (in place, anywhere in the window) -> not stuck');
   const watch = fnSource('tripsyWatchStickyTripHeads');
-  assert(/addEventListener\('scroll', schedule, \{ passive: true \}\)/.test(watch) && /requestAnimationFrame\(tripsyUpdateStickyTripHeads\)/.test(fnSource('tripsyWatchStickyTripHeads')),
-    're-judged on scroll, one frame per burst, wired once');
+  assert(/tripsyPageScroller\(\)\.addEventListener\('scroll', schedule, \{ passive: true \}\)/.test(watch) && /requestAnimationFrame\(tripsyUpdateStickyTripHeads\)/.test(fnSource('tripsyWatchStickyTripHeads')),
+    're-judged on the #main scroller\'s scroll, one frame per burst, wired once');
+  // THE REAL FIX for the iPad band ("The rows still show above the header on the iPad," third
+  // report): the window never scrolls -- the shell is one viewport tall and .main scrolls --
+  // so the native scroll view has nothing scrolled past to draw under the status bar, and
+  // what .main scrolls is clipped by its own box, which starts below the bar.
+  const app = rule('.app');
+  assert(/height:\s*100vh;\s*height:\s*100dvh/.test(app) && !/min-height:\s*100vh/.test(app), 'THE FIX: the app shell is exactly one viewport tall (dvh where supported)');
+  const main = rule('.main');
+  assert(/overflow-y:\s*auto/.test(main) && /min-height:\s*0/.test(main) && /overflow-x:\s*hidden/.test(main), 'and the content column is the scroller');
+  assert(/document\.getElementById\('main'\)/.test(fnSource('tripsyPageScroller')), 'tripsyPageScroller names it');
+  assert(/padding:\s*0 40px 32px/.test(main) && /\.main::before\s*\{\s*content: '';\s*display: block;\s*height: 32px;/.test(css), 'the top padding is an in-flow spacer (Chromium pins sticky at the CONTENT edge, so padding-top would leave a band above a pinned header)');
+  assert(!/window\.scrollY|window\.scrollTo\(|window\.addEventListener\('scroll'/.test(html), 'nothing left in the app scrolls or listens on the WINDOW');
+  const narrowApp = (css.slice(css.indexOf('@media (max-width: 1100px)')).match(/\.app\s*\{([^}]*)\}/) || [])[1] || '';
+  assert(!/min-height:\s*auto/.test(narrowApp) && /flex-direction:\s*column/.test(narrowApp), 'the <=1100px layout keeps the one-viewport shell (column) rather than un-sizing it');
   assert(/h\.closest\('\.tripsy-trip-card'\)/.test(fnSource('tripsyUpdateStickyTripHeads')), 'each header is judged against its own card');
   assert(/tripsyWatchStickyTripHeads\(\);/.test(fnSource('renderTripsyEventsListImpl')), 'armed on every My Trips render');
   const cardPad = (rule('.card').match(/padding:\s*([^;]+);/) || [])[1];

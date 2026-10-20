@@ -16,16 +16,19 @@ const fnSource = name => {
   throw new Error('unterminated ' + name);
 };
 // A fake page: two trips, each with a marked today day bar at a known offset; a sticky
-// header 70px tall; scrolls recorded. Timers run synchronously.
+// header 70px tall; the #main scroller (the page scrolls inside it, not the window) sits at
+// the window top; scrolls recorded. Timers run synchronously.
 function makePage() {
   const scrolls = [];
   const bar = (trip, top) => ({ getBoundingClientRect: () => ({ top }), closest: () => ({ querySelector: () => ({ getBoundingClientRect: () => ({ height: 70 }) }) }) });
   const bars = { a: bar('a', 500), b: bar('b', 1500) };
-  const document = { querySelector: sel => { const m = sel.match(/="([^"]+)"/); return m ? (bars[m[1]] || null) : bars.a; } };
-  const window = { scrollY: 0, scrollTo: ({ top }) => scrolls.push(top) };
+  const scroller = { scrollTop: 0, getBoundingClientRect: () => ({ top: 0 }), scrollTo: ({ top }) => scrolls.push(top) };
+  const document = { querySelector: sel => { const m = sel.match(/="([^"]+)"/); return m ? (bars[m[1]] || null) : bars.a; }, getElementById: id => id === 'main' ? scroller : null };
+  const window = {};
   const CSS = { escape: s => s };
   const api = new Function('document', 'window', 'CSS', 'requestAnimationFrame', 'setTimeout', [
     'let _tripsyMyTripsScrolledToToday = false; let _tripsyMyTripsTodayScrollTrip = null;',
+    fnSource('tripsyPageScroller'),
     fnSource('resetTripsyMyTripsTodayScroll'), fnSource('tripsyMyTripsTodaySelector'), fnSource('tripsyStickyTripHeaderHeight'), fnSource('tripsyScrollMyTripsToToday'),
     'return { reset: resetTripsyMyTripsTodayScroll, scroll: tripsyScrollMyTripsToToday, selector: tripsyMyTripsTodaySelector, done: () => _tripsyMyTripsScrolledToToday };'].join('\n'))(
     document, window, CSS, f => f(), f => f());

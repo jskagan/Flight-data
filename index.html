@@ -295,7 +295,18 @@
 
   a, button { font-family: inherit; }
 
-  .app { display: flex; min-height: 100vh; }
+  /* The app shell is exactly one viewport tall and the CONTENT COLUMN (.main) is what scrolls --
+     the window itself never does ("The rows still show above the header on the iPad,"
+     2026-10-20, third report: the Claude iPad app's web view is a native scroll view whose
+     content extends UNDER the translucent iOS status bar, so whatever the page had scrolled
+     past was drawn in that band above every pinned element -- a box-shadow cap and a
+     page-background strip both failed to hide it). With the window never scrolling, the band
+     only ever shows the document's static top edge (page background), and what scrolls is
+     clipped by .main's own box, which starts below the bar. Travel View's fixed, self-scrolling
+     root is the in-app precedent. 100dvh where supported (Safari's toolbars change the visual
+     height; a bare 100vh is the larger value and would hide the bottom strip); old WebViews
+     ignore the dvh line and keep 100vh. */
+  .app { display: flex; height: 100vh; height: 100dvh; }
 
   /* ---- Nav rail ---- */
   .rail {
@@ -345,7 +356,20 @@
   .rail-item .count.alert { background: rgba(226,85,75,0.2); color: var(--red); }
 
   /* ---- Main ---- */
-  .main { flex: 1; padding: 32px 40px; max-width: 1100px; }
+  /* The scroller (see .app above): min-height:0 lets a flex child shrink below its content so
+     overflow-y can take over; overflow-x stays hidden as the horizontal backstop body used to
+     be. A sticky element inside pins against THIS box's top edge, where nothing from above the
+     scrollport can ever be drawn. */
+  .main {
+    flex: 1; padding: 0 40px 32px; max-width: 1100px;
+    min-height: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+  }
+  /* The old 32px TOP padding is an in-flow spacer instead: Chromium pins a sticky child at the
+     scroll container's CONTENT edge, so padding-top would leave a 32px band above every pinned
+     trip header for the rows to show through, and the open-on-today jump would land 32px
+     short. A spacer scrolls away like any content, and the header pins at the scrollport's
+     very top in every engine. */
+  .main::before { content: ''; display: block; height: 32px; }
 
   /* Narrower / touch screens (tablets, phones, or a narrow Claude app
      pane): collapse the sidebar into a horizontal, scrollable top bar
@@ -358,14 +382,14 @@
      width (1366px) still clears this threshold, so the sidebar still
      shows there as intended. */
   @media (max-width: 1100px) {
-    .app { flex-direction: column; min-height: auto; }
+    .app { flex-direction: column; }
     .rail {
       width: 100%; flex-direction: row; flex-wrap: wrap; align-items: center;
       overflow-x: auto; -webkit-overflow-scrolling: touch;
       padding: 8px 0; border-right: none; border-bottom: 1px solid var(--line);
-      /* The top bar scrolls away with the page, as before -- the wide-screen pin above is
-         undone here. */
-      position: static; align-self: auto; min-height: 0; max-height: none;
+      /* The top bar is a plain column-flex row above the scrolling .main, so it stays put
+         (the window no longer scrolls anywhere -- see .app); the wide-screen pin is undone. */
+      position: static; align-self: auto; min-height: 0; max-height: none; flex-shrink: 0;
     }
     .rail-brand { display: none; }
     .rail-item {
@@ -385,7 +409,8 @@
     .rail-subitem { padding-left: 34px; }
     .rail-submenu-heading { padding-left: 34px; }
     .rail-subitem-nested { padding-left: 48px; }
-    .main { padding: 20px 16px; }
+    .main { padding: 0 16px 20px; }
+    .main::before { height: 20px; }
   }
   .page-title { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
   .page-sub { color: var(--muted); font-size: 13.5px; margin: 0 0 28px; }
@@ -404,8 +429,8 @@
   }
   /* My Trips: a trip card's HEADER (name, dates, the action buttons) stays pinned at the
      top of the window while its days scroll beneath it ("freeze the header and just allow
-     the scroll to apply to the days of the trip," 2026-10-20). The page itself is what
-     scrolls (the rail is in normal flow), so position:sticky against the window is enough
+     the scroll to apply to the days of the trip," 2026-10-20). The content column (.main)
+     is what scrolls (see .app), so position:sticky against that scrollport is enough
      -- EXCEPT that .card's overflow-x:auto makes every card its own scrollport, inside
      which a sticky child never moves with the page; a trip card therefore restores
      overflow:visible (its timeline is never wider than the card; body's overflow-x:hidden
@@ -35653,11 +35678,17 @@ function tripsyUpdateStickyTripHeads() {
     h.classList.toggle('tripsy-trip-head--stuck', tripsyStickyHeadIsStuck(h.getBoundingClientRect().top, card.getBoundingClientRect().top));
   });
 }
+// The element the app's pages scroll in: the content column (#main), not the window -- the
+// shell is one viewport tall so nothing can scroll under the iPad status bar (see the .app
+// CSS comment). Every programmatic page scroll and scroll listener goes through this.
+function tripsyPageScroller() {
+  return document.getElementById('main') || document.scrollingElement || document.documentElement;
+}
 function tripsyWatchStickyTripHeads() {
   if (!_tripsyStickyHeadsWired) {
     _tripsyStickyHeadsWired = true;
     const schedule = () => { if (!_tripsyStickyHeadsRaf) _tripsyStickyHeadsRaf = requestAnimationFrame(tripsyUpdateStickyTripHeads); };
-    window.addEventListener('scroll', schedule, { passive: true });
+    tripsyPageScroller().addEventListener('scroll', schedule, { passive: true });
     window.addEventListener('resize', schedule, { passive: true });
   }
   tripsyUpdateStickyTripHeads();
@@ -35674,11 +35705,15 @@ function tripsyScrollMyTripsToToday() {
   const scrollToIt = () => {
     const el = document.querySelector(selector);
     if (!el) return;
-    // The nav rail is a normal flow element (a column on wide screens, a scrolling top
-    // bar below 1100px), so it scrolls away with the page -- but the trip card's own
-    // header is STICKY (2026-10-20), so the day bar must land just below it, not under it.
-    const y = window.scrollY + el.getBoundingClientRect().top - 8 - tripsyStickyTripHeaderHeight(el);
-    window.scrollTo({ top: Math.max(0, y), behavior: 'auto' });
+    // The page scrolls inside #main (tripsyPageScroller), never the window, so the target is
+    // measured against the scroller's own box; the trip card's header is STICKY inside it
+    // (2026-10-20), so the day bar must land just below the pinned header, not under it.
+    const sc = tripsyPageScroller();
+    const y = sc.scrollTop + el.getBoundingClientRect().top - sc.getBoundingClientRect().top - 8 - tripsyStickyTripHeaderHeight(el);
+    const top = Math.max(0, y);
+    // Direct assignment on an older WebView without Element.scrollTo(options) (the Travel
+    // View strip lesson).
+    try { sc.scrollTo({ top, behavior: 'auto' }); } catch (e) { sc.scrollTop = top; }
   };
   requestAnimationFrame(() => requestAnimationFrame(scrollToIt));
   [120, 350, 800].forEach(ms => setTimeout(scrollToIt, ms));

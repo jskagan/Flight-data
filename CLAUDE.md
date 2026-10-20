@@ -1140,65 +1140,61 @@ step 4; git history has it if ever needed.
   — an earlier version required BOTH endpoints past specifically to keep that one boundary segment
   bright as a "now begins here" marker, which read as the wrong half of the line staying lit).
 - **A trip card's header is STICKY — the name, dates and action buttons stay pinned while
-  the days scroll** ("When I am viewing a trip from the my trips menu, can you freeze the
-  header and just allow the scroll to apply to the days of the trip," 2026-10-20). The page
-  itself scrolls (the rail is in normal flow), so `.tripsy-trip-head` (the
-  `data-tripsy-header-toggle` row) is `position:sticky; top:0` against the window, opaque
-  (`var(--panel)`), z 5 (above the day bars' z 2 and the connectors, far below every fixed
-  menu/modal), with side margins reaching the card's OUTER edge (`22px` padding + the 2px
-  border) and carrying the card's own `2px solid var(--muted)` outline on its top and sides.
-  **No negative TOP margin** ("Parts of the scrolled days are still appearing above the
-  header," same day): Safari pins a sticky box by its MARGIN edge, so the first cut's
-  `margin-top:-22px` left the header 22px below the window's top on the iPad with the day bars
-  showing in that band (Chromium pins the border edge, which is why the headless check passed).
-  The trip card (`.card.tripsy-trip-card`) instead has `padding-top:0; border-top:none` and the
-  header's own border is the card's top edge
-  ("As part of the frozen header, include the white top border and do not show any portion
-  of the scrolled dates above the header," same day). Its corners stay ROUNDED, pinned or
-  not ("Is it now possible to keep rounded corners on the scroll?", same day — a rounded corner
-  leaves a sliver outside the arc where the day bars scrolling beneath would show through),
-  and **while PINNED the header casts a hard PAGE-background `box-shadow` 60px straight UP**
-  (`.tripsy-trip-head--stuck { box-shadow: 0 -60px 0 0 var(--bg) }`): a box-shadow paints in
-  the header's own layer BELOW its background and border but above everything scrolling under
-  it, so it fills the corner slivers AND the band above the header on the iPad ("This is still
-  not working as shown on this image," same day, iPad screenshot: the Claude app's web view
-  scrolls the page UNDER the translucent iOS status bar while pinned elements — the rail too —
-  stop at the bar's bottom edge, ~28px down, so already-scrolled rows showed in that band; no
-  CSS value names that inset since the viewport meta has no `viewport-fit=cover`, hence a fixed
-  60px). In place the shadow is OFF (it would paint over the previous card's bottom).
-  **Two earlier cuts were wrong, for reasons worth keeping** ("The rows still show above the
-  header on the iPad and the rounded top borders are still missing," same day): (1) a
-  `z-index:-1 ::before` strip under `isolation:isolate` — by CSS painting order a negative-z
-  child paints AFTER its stacking context's own background and border, so the strip ERASED the
-  rounded top border on every page, in place or pinned; (2) "pinned" judged by an
-  `IntersectionObserver` as "top edge ≤ 0" — on the iPad the header pins ~28px down, so the
-  test never fired and the cap never applied. Pinned is now DISPLACEMENT: the pure
-  `tripsyStickyHeadIsStuck(headTop, cardTop)` (header rect top > its card's rect top) is true
-  wherever the header pins, and `tripsyUpdateStickyTripHeads` toggles the class per header
-  against `h.closest('.tripsy-trip-card')`, re-run by `tripsyWatchStickyTripHeads()` (armed at
-  the end of every My Trips render; passive scroll + resize listeners wired once,
-  rAF-throttled). Pixel-probed in Chromium with red day bars: border pixel intact and no red
-  at either corner in place and pinned, shadow present only while pinned. **The trap**:
-  `.card` has `overflow-x:auto`, which makes every card its own scrollport inside which a
-  sticky child never moves with the page — so the trip card (`.card.tripsy-trip-card`)
-  restores `overflow:visible` (its timeline is never wider than the card; body's
-  `overflow-x:hidden` is the backstop). Sticky is bounded by its card, so each header gives
-  way to the next card's. `tripsyScrollMyTripsToToday` subtracts
-  `tripsyStickyTripHeaderHeight(el)` so the open-on-today jump lands the day bar BELOW the
-  pinned header; `tripsyGoToTripDay` centers its target, which the header never covers.
+  the days scroll — and THE CONTENT COLUMN, NOT THE WINDOW, IS WHAT SCROLLS** ("When I am
+  viewing a trip from the my trips menu, can you freeze the header and just allow the scroll
+  to apply to the days of the trip," 2026-10-20). `.tripsy-trip-head` (the
+  `data-tripsy-header-toggle` row) is `position:sticky; top:0`, opaque (`var(--panel)`), z 5
+  (above the day bars' z 2 and the connectors, far below every fixed menu/modal), with side
+  margins reaching the card's OUTER edge (`22px` padding + the 2px border) and carrying the
+  card's own `2px solid var(--muted)` outline on its top and sides; the trip card
+  (`.card.tripsy-trip-card`) has `padding-top:0; border-top:none` so the header's border IS
+  the card's top edge, rounded in every state ("include the white top border … keep rounded
+  corners," same day). **The scroll model** (same day, the THIRD "rows still show above the
+  header on the iPad" report, with a screenshot): the Claude iPad app's web view is a native
+  scroll view whose content extends UNDER the translucent iOS status bar, so whatever the
+  PAGE had scrolled past was drawn in that ~48px band above every pinned element — a
+  negative-margin fix, a `z-index:-1 ::before` strip (which also ERASED the rounded border:
+  a negative-z child paints after its context's own background and border), and a
+  pinned-only page-background `box-shadow` cap all failed to hide it, because nothing a page
+  draws can reliably cover content the native layer shows there. So the window never scrolls:
+  `.app` is exactly one viewport tall (`height:100vh; height:100dvh` — dvh where supported,
+  since Safari's toolbars change the visual height) and **`.main` is the scroller**
+  (`min-height:0; overflow-y:auto; overflow-x:hidden`), the in-app precedent being Travel
+  View's fixed, self-scrolling root. The band then only ever shows the document's static top
+  (page background), and what `.main` scrolls is clipped by its own box, which starts below
+  the bar. `.main`'s old 32px TOP padding is a `.main::before` spacer instead (20px in the
+  `≤1100px` layout): Chromium pins a sticky child at the scroll container's CONTENT edge, so
+  padding-top would leave a 32px band for rows to show through and land the today jump 32px
+  short. **Every page scroll goes through `tripsyPageScroller()`** (`#main`; `window.scrollY`/
+  `window.scrollTo`/window `scroll` listeners are gone — `stickytriphead_test.js` asserts
+  none remain): `tripsyScrollMyTripsToToday` measures against the scroller's own rect, subtracts
+  `tripsyStickyTripHeaderHeight(el)` so the day bar lands BELOW the pinned header, and falls
+  back to a `scrollTop` assignment where `Element.scrollTo(options)` throws (the Travel View
+  strip lesson); `tripsyGoToTripDay`/`scrollIntoView` callers need nothing. The corner slivers
+  outside the rounded arcs are still filled while PINNED by `.tripsy-trip-head--stuck`'s hard
+  page-background `box-shadow: 0 -60px 0 0 var(--bg)` (painted under the header's own
+  background and border, above the rows; OFF in place, where it would cover the previous
+  card's bottom), toggled by `tripsyWatchStickyTripHeads()` (armed at the end of every My
+  Trips render; the scroller's passive `scroll` + window `resize`, rAF-throttled, wired once)
+  through the pure `tripsyStickyHeadIsStuck(headTop, cardTop)` — pinned = DISPLACED from its
+  own card's top, never "at the window's top edge". **The trap**: `.card` has
+  `overflow-x:auto`, which makes every card its own scrollport inside which a sticky child
+  never moves — so the trip card restores `overflow:visible` (its timeline is never wider than
+  the card; `.main`'s `overflow-x:hidden` is the backstop). Sticky is bounded by its card, so
+  each header gives way to the next card's.
   **The left nav rail is pinned too, on wide screens** ("Also freeze the left side navigation
-  page, with all items always displayed when viewing on a wide device," same day): `.rail` is
-  `position:sticky; top:0; align-self:flex-start` — a flex child is stretched to the whole
-  `.app` height by default and an element as tall as its container has nowhere to stick, so
-  it is pinned at its own height and sized to the viewport (`box-sizing:border-box;
-  min-height:100vh` keeps the panel background filling the window; `max-height:100vh;
-  overflow-y:auto` lets a rail taller than a short window scroll WITHIN itself rather than
-  lose its lower items). The `≤1100px` top-bar layout sets `position:static; min-height:0;
-  max-height:none` and scrolls away as before. `tripsyScrollMyTripsToToday`'s comment that
-  the rail scrolls away now holds only for that layout; its offset is the trip header's,
-  which is the one thing that can cover a day bar in either layout. Both pins were verified
-  in Chromium against a page built from the live stylesheet (1300×900, 1300×500, 900×700).
-  `stickytriphead_test.js`.
+  page, with all items always displayed when viewing on a wide device," same day): with the
+  shell one viewport tall the rail simply never moves; it keeps `position:sticky; top:0;
+  align-self:flex-start; box-sizing:border-box; min-height:100vh; max-height:100vh;
+  overflow-y:auto` so a rail taller than a short window scrolls WITHIN itself rather than lose
+  its lower items. The `≤1100px` top-bar layout sets `position:static; min-height:0;
+  max-height:none; flex-shrink:0` — a plain row above the scrolling `.main`, so the top bar
+  now stays put there too (it used to scroll away with the page; there is no page scroll left
+  for it to ride). Verified in Chromium against a page built from the live stylesheet at 1300
+  and 1000px: the document is never scrollable, `window.scrollTo` is a no-op, the header pins
+  at the scroller's top edge with its border and corners intact and no row pixel above it, and
+  the today jump lands the day bar 8px under the pinned header. `stickytriphead_test.js`,
+  `expandtoday_test.js`, `mytripstoday_test.js`.
 - **The My Trips render never waits on weather — chips paint from cache and heal in place**
   ("Sometimes when I open the app and select my trips there is a delay when I select a trip to
   open," 2026-09-28): expanding/collapsing a trip re-runs `renderTripsyEventsListImpl`, which
