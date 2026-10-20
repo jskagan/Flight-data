@@ -1156,25 +1156,29 @@ step 4; git history has it if ever needed.
   ("As part of the frozen header, include the white top border and do not show any portion
   of the scrolled dates above the header," same day). Its corners stay ROUNDED, pinned or
   not ("Is it now possible to keep rounded corners on the scroll?", same day — a rounded corner
-  leaves a sliver outside the arc where the day bars scrolling beneath would show through):
-  the header's `::before` is a 12px strip of PAGE background (`var(--bg)`) spanning its border
-  box at `z-index:-1` inside the header's own stacking context — beneath the header's paint,
-  above everything scrolling under it — so in place it is invisible and pinned it fills the
-  corner slivers (`isolation:isolate` guarantees the stacking context). Pixel-probed in Chromium
-  with red day bars: no red at either corner, in place or pinned. **While PINNED that strip
-  grows into a CAP reaching 60px (+ `env(safe-area-inset-top)`) ABOVE the header** ("This is
-  still not working as shown on this image," same day, iPad screenshot: the Claude app's web
-  view scrolls the page UNDER the translucent iOS status bar while pinned elements — the rail
-  too — stop at the bar's bottom edge, ~28px down, so already-scrolled rows showed in that
-  band above the header; no CSS value names that inset here since the viewport meta has no
-  `viewport-fit=cover`, hence the fixed 60px). Pinned, nothing legitimate is above the
-  header, so the cap hides only that band; in place it is OFF (it would paint over the
-  previous card's bottom), which is why `tripsyWatchStickyTripHeads(container)` (armed at the
-  end of every My Trips render) toggles `.tripsy-trip-head--stuck` from one
-  `IntersectionObserver` (`threshold:[1]`, `rootMargin:'-1px 0px 0px 0px'`) through the pure
-  `tripsyStickyHeadIsStuck(entry)` (ratio < 1 AND top edge ≤ 0, so a header entering from the
-  window's bottom is not pinned); no observer support → no cap, the corner strip still applies.
-  Corners stay rounded in both states. **The trap**:
+  leaves a sliver outside the arc where the day bars scrolling beneath would show through),
+  and **while PINNED the header casts a hard PAGE-background `box-shadow` 60px straight UP**
+  (`.tripsy-trip-head--stuck { box-shadow: 0 -60px 0 0 var(--bg) }`): a box-shadow paints in
+  the header's own layer BELOW its background and border but above everything scrolling under
+  it, so it fills the corner slivers AND the band above the header on the iPad ("This is still
+  not working as shown on this image," same day, iPad screenshot: the Claude app's web view
+  scrolls the page UNDER the translucent iOS status bar while pinned elements — the rail too —
+  stop at the bar's bottom edge, ~28px down, so already-scrolled rows showed in that band; no
+  CSS value names that inset since the viewport meta has no `viewport-fit=cover`, hence a fixed
+  60px). In place the shadow is OFF (it would paint over the previous card's bottom).
+  **Two earlier cuts were wrong, for reasons worth keeping** ("The rows still show above the
+  header on the iPad and the rounded top borders are still missing," same day): (1) a
+  `z-index:-1 ::before` strip under `isolation:isolate` — by CSS painting order a negative-z
+  child paints AFTER its stacking context's own background and border, so the strip ERASED the
+  rounded top border on every page, in place or pinned; (2) "pinned" judged by an
+  `IntersectionObserver` as "top edge ≤ 0" — on the iPad the header pins ~28px down, so the
+  test never fired and the cap never applied. Pinned is now DISPLACEMENT: the pure
+  `tripsyStickyHeadIsStuck(headTop, cardTop)` (header rect top > its card's rect top) is true
+  wherever the header pins, and `tripsyUpdateStickyTripHeads` toggles the class per header
+  against `h.closest('.tripsy-trip-card')`, re-run by `tripsyWatchStickyTripHeads()` (armed at
+  the end of every My Trips render; passive scroll + resize listeners wired once,
+  rAF-throttled). Pixel-probed in Chromium with red day bars: border pixel intact and no red
+  at either corner in place and pinned, shadow present only while pinned. **The trap**:
   `.card` has `overflow-x:auto`, which makes every card its own scrollport inside which a
   sticky child never moves with the page — so the trip card (`.card.tripsy-trip-card`)
   restores `overflow:visible` (its timeline is never wider than the card; body's

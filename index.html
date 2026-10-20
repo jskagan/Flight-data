@@ -425,33 +425,26 @@
      dates above the header," same day): its negative margins reach the card's OUTER edge
      (22px padding + 2px border) and its own border overlays the card's exactly, so pinned, the
      outline rides with the header and the strip from the window's top edge down is opaque.
-     Corners stay ROUNDED, pinned or not ("Is it now possible to keep rounded corners on the
-     scroll?", same day): a rounded corner leaves a sliver outside the arc where the day bars
-     scrolling beneath would show through, so the header's ::before paints a strip of PAGE
-     background behind its top edge, below the header's own paint (z-index:-1 inside the
-     header's stacking context) but above everything scrolling under it. In place that strip
-     sits on page background and is invisible; pinned, it is what fills the corner slivers.
-     WHILE PINNED the strip grows into a CAP reaching 60px (+ any safe-area inset) ABOVE the
-     header ("This is still not working as shown on this image," same day, with an iPad
-     screenshot: the Claude app's web view scrolls the page UNDER the translucent iOS status
-     bar while pinned elements stop at the bar's bottom edge, so already-scrolled rows showed
-     in that band above the header). Pinned, the only thing above the header is that obscured
-     band, so the cap hides nothing legitimate; in place the cap is off (it would paint over
-     the previous card's bottom edge). tripsyWatchStickyTripHeads toggles .tripsy-trip-head--stuck
-     from an IntersectionObserver; isolation:isolate guarantees the header is a stacking context
-     for the z:-1 strip even where sticky alone would not make one. */
+     Corners stay ROUNDED, pinned or not. WHILE PINNED the header casts a hard page-background
+     BOX-SHADOW 60px straight up (.tripsy-trip-head--stuck): a box-shadow is painted as part of
+     the header's own layer -- above everything scrolling beneath it (the day bars, z 2), but
+     UNDER the header's background and border, so the border and the rounded corners stay
+     visible -- and it covers both the slivers outside the corner arcs and the band above the
+     header where the iPad app shows already-scrolled rows (the Claude app's web view scrolls
+     the page under the translucent status bar while pinned elements stop at its bottom edge).
+     An earlier cut used a z-index:-1 ::before strip: WRONG, because a negative-z child paints
+     AFTER its stacking context's own background and border (CSS 2.1 App. E), so the strip
+     covered the header's top border and rounded corners on every page ("the rounded top
+     borders are still missing from the my trips page," same day). In place the shadow is OFF
+     (it would paint over the previous card's bottom); "pinned" is judged by DISPLACEMENT from
+     the card's own top (tripsyStickyHeadIsStuck), never by the window's top edge, which on
+     the iPad is not where a pinned element stops. */
   .tripsy-trip-head {
-    position: sticky; top: 0; z-index: 5; isolation: isolate; background: var(--panel);
+    position: sticky; top: 0; z-index: 5; background: var(--panel);
     margin: 0 -24px 0; padding: 20px 22px 10px;
     border: 2px solid var(--muted); border-bottom: none; border-radius: 10px 10px 0 0;
   }
-  .tripsy-trip-head::before {
-    content: ''; position: absolute; z-index: -1; left: -2px; right: -2px; top: -2px; height: 12px;
-    background: var(--bg);
-  }
-  .tripsy-trip-head.tripsy-trip-head--stuck::before {
-    top: calc(-62px - env(safe-area-inset-top, 0px)); height: calc(72px + env(safe-area-inset-top, 0px));
-  }
+  .tripsy-trip-head.tripsy-trip-head--stuck { box-shadow: 0 -60px 0 0 var(--bg); }
 
   /* ---- Upload dropzone ---- */
   .dropzone {
@@ -35639,24 +35632,35 @@ function tripsyStickyTripHeaderHeight(el) {
   const head = card && card.querySelector('.tripsy-trip-head');
   return head ? head.getBoundingClientRect().height : 0;
 }
-// Marks each trip card header .tripsy-trip-head--stuck while it is PINNED at the top of the
-// window (its page-background cap then reaches up over the band the iPad status bar scrolls
-// content under), and clears it when it scrolls back into place. One observer per page,
-// re-armed on every My Trips render; rootMargin -1px makes a header sitting exactly at top:0
-// report ratio < 1, and the top-edge test keeps a header merely entering from the bottom of
-// the window from counting as pinned. Pure decision in tripsyStickyHeadIsStuck for the test.
-function tripsyStickyHeadIsStuck(entry) {
-  return entry.intersectionRatio < 1 && entry.boundingClientRect.top <= 0;
+// Marks each trip card header .tripsy-trip-head--stuck while it is PINNED (its page-background
+// shadow then covers the band above it), and clears it when it scrolls back into place. A
+// header is pinned exactly when it has been DISPLACED from its natural position -- the top of
+// its own card, since the card has no top padding or border -- so the test is head.top >
+// card.top, judged from the two boxes alone. Deliberately NOT "head.top <= 0": the iPad app's
+// web view pins elements below the status bar, not at the window's top edge, so that test
+// never fired there and the cap never appeared. Re-checked on scroll (passive, one rAF per
+// burst) and resize, and after every My Trips render.
+function tripsyStickyHeadIsStuck(headTop, cardTop) {
+  return headTop > cardTop + 0.5;
 }
-let _tripsyStickyHeadObserver = null;
-function tripsyWatchStickyTripHeads(container) {
-  const heads = [...(container || document).querySelectorAll('.tripsy-trip-head')];
-  if (!('IntersectionObserver' in window)) return; // no cap, the corner strip still applies
-  if (_tripsyStickyHeadObserver) _tripsyStickyHeadObserver.disconnect();
-  _tripsyStickyHeadObserver = new IntersectionObserver(entries => {
-    for (const e of entries) e.target.classList.toggle('tripsy-trip-head--stuck', tripsyStickyHeadIsStuck(e));
-  }, { threshold: [1], rootMargin: '-1px 0px 0px 0px' });
-  heads.forEach(h => _tripsyStickyHeadObserver.observe(h));
+let _tripsyStickyHeadsWired = false;
+let _tripsyStickyHeadsRaf = 0;
+function tripsyUpdateStickyTripHeads() {
+  _tripsyStickyHeadsRaf = 0;
+  document.querySelectorAll('.tripsy-trip-head').forEach(h => {
+    const card = h.closest('.tripsy-trip-card');
+    if (!card) return;
+    h.classList.toggle('tripsy-trip-head--stuck', tripsyStickyHeadIsStuck(h.getBoundingClientRect().top, card.getBoundingClientRect().top));
+  });
+}
+function tripsyWatchStickyTripHeads() {
+  if (!_tripsyStickyHeadsWired) {
+    _tripsyStickyHeadsWired = true;
+    const schedule = () => { if (!_tripsyStickyHeadsRaf) _tripsyStickyHeadsRaf = requestAnimationFrame(tripsyUpdateStickyTripHeads); };
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule, { passive: true });
+  }
+  tripsyUpdateStickyTripHeads();
 }
 function tripsyScrollMyTripsToToday() {
   if (_tripsyMyTripsScrolledToToday) return;
@@ -36689,7 +36693,7 @@ async function renderTripsyEventsListImpl() {
       toggleTripsyCollapse(el.dataset.tripsyHeaderToggle);
     });
   });
-  tripsyWatchStickyTripHeads(container); // the pinned header's cap over the status-bar band
+  tripsyWatchStickyTripHeads(); // the pinned header's page-background shadow over the band above it
   container.querySelectorAll('[data-tripsy-year-toggle]').forEach(el => {
     el.addEventListener('click', () => {
       const y = el.dataset.tripsyYearToggle;
