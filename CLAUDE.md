@@ -3573,8 +3573,19 @@ WebView's support for recording is unproven.
 - **The player** is a full-screen `#tripsy-flyover-player` at z 2147483090, below
   `tripsyConfirmDialog`.
   - **Map:** Leaflet 1.9.4 loads on demand from cdnjs (`tripsyFlyoverLoadLeaflet`, a
-    memoized promise that is cleared on failure so a retry works). Tiles are CARTO's keyless
-    OpenStreetMap basemap, with attribution shown.
+    memoized promise that is cleared on failure so a retry works).
+  - **Tiles** come from `TRIPSY_FLYOVER_TILE_SOURCES`: OpenStreetMap's own tiles first, Esri
+    World Street Map second, both keyless, with attribution shown.
+    - **Never CARTO** ("I get a message saying api key required when I try to play the trip,"
+      2026-10-20). Its free basemap began drawing "API key required" onto every tile. That
+      arrives as a normal 200 image, so the browser cannot detect it, and it had to be
+      dropped outright.
+    - **Fallback:** `tripsyFlyoverAddTiles` switches to the next source after
+      `TRIPSY_FLYOVER_TILE_FAIL_LIMIT` tile errors with no tile yet loaded, which is how a
+      refused OpenStreetMap client answers. Once any tile has loaded it never swaps, and the
+      last source is kept rather than blanking the map.
+    - **Verified in Chromium** with OSM forced to 403: the player moved to Esri and the
+      attribution followed.
   - **Sequence:** overview of the whole route → the origin → for each leg, frame the leg,
     animate the vehicle → land with a dot, a city card and the photo slideshow
     (`TRIPSY_FLYOVER_PHOTO_MS` per photo).

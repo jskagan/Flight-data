@@ -17377,12 +17377,41 @@ function tripsyLodgingCityAt(trip, whenIso) {
 // They are derived from the trip, geocoded ONCE and saved in driveData.tripsyFlyovers
 // with the photos, so playback needs no lookups; "Rebuild destinations" re-derives them
 // and keeps each surviving stop's photos, name and removed state.
-// Leaflet is loaded on demand (the map is the only thing that needs it); tiles are CARTO's
-// OpenStreetMap basemap, which needs no key.
+// Leaflet is loaded on demand (the map is the only thing that needs it); tiles come from
+// TRIPSY_FLYOVER_TILE_SOURCES below, none of which needs a key.
 const TRIPSY_FLYOVER_LEAFLET_JS = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js';
 const TRIPSY_FLYOVER_LEAFLET_CSS = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css';
-const TRIPSY_FLYOVER_TILE_URL = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
-const TRIPSY_FLYOVER_TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>';
+// Map tiles, tried in order. NOT CARTO: its free basemap tiles started drawing "API key
+// required" onto every tile (2026-10-20, "I get a message saying api key required when I try
+// to play the trip") -- a normal 200 image, so nothing in the browser can detect it. Both
+// sources below need no key. If the first refuses (a run of tile errors before any tile
+// has loaded -- OpenStreetMap answers a refused client with errors, not an image), the
+// player switches to the next (`tripsyFlyoverAddTiles`).
+const TRIPSY_FLYOVER_TILE_SOURCES = [
+  { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors' },
+  { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', maxZoom: 19,
+    attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a>' },
+];
+const TRIPSY_FLYOVER_TILE_FAIL_LIMIT = 4;
+// Adds the i-th tile source to the map, falling back to the next one when this one fails
+// TRIPSY_FLYOVER_TILE_FAIL_LIMIT times before a single tile has loaded.
+function tripsyFlyoverAddTiles(L, map, i = 0) {
+  const src = TRIPSY_FLYOVER_TILE_SOURCES[i];
+  if (!src) return null;
+  const layer = L.tileLayer(src.url, { attribution: src.attribution, maxZoom: src.maxZoom });
+  let loaded = 0, failed = 0, switched = false;
+  layer.on('tileload', () => { loaded++; });
+  layer.on('tileerror', () => {
+    failed++;
+    if (switched || loaded || failed < TRIPSY_FLYOVER_TILE_FAIL_LIMIT || !TRIPSY_FLYOVER_TILE_SOURCES[i + 1]) return;
+    switched = true;
+    try { map.removeLayer(layer); } catch (e) { /* map already gone */ }
+    tripsyFlyoverAddTiles(L, map, i + 1);
+  });
+  layer.addTo(map);
+  return layer;
+}
 const TRIPSY_FLYOVER_MODE_GLYPH = { plane: '✈️', train: '🚆', boat: '⛴️', car: '🚗' };
 const TRIPSY_FLYOVER_MODE_LABEL = { plane: 'Flight', train: 'Train', boat: 'Ferry', car: 'Drive' };
 // When a leg mixes modes (a car to the airport, a flight, a car to the hotel) the leg is
@@ -18169,7 +18198,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     <div class="tfo-card"><div class="tfo-card-label"></div><div class="tfo-card-sub"></div></div>`;
   document.body.appendChild(ov);
   const map = L.map(ov.querySelector('.tfo-map'), { zoomControl: false, worldCopyJump: false, attributionControl: true, zoomSnap: 0.25 });
-  L.tileLayer(TRIPSY_FLYOVER_TILE_URL, { attribution: TRIPSY_FLYOVER_TILE_ATTRIBUTION, subdomains: 'abcd', maxZoom: 19 }).addTo(map);
+  tripsyFlyoverAddTiles(L, map);
   const cardEl = ov.querySelector('.tfo-card');
   const photoEl = ov.querySelector('.tfo-photo');
   const pauseBtn = ov.querySelector('[data-tfo-pause]');

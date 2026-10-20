@@ -316,3 +316,30 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     'the setup page offers layout, transition, seconds and a Preview per destination');
   assert(/updateStop\(id, \{ slideshow: \{ \.\.\.tripsyFlyoverSlideshowConfig\(stop\(\)\), \.\.\.fields \} \}\);/.test(setup), 'a change saves onto that one stop');
 }
+
+// ---- map tiles: keyless, with a fallback (2026-10-20: "I get a message saying api key
+// required when I try to play the trip" -- CARTO's free tiles now draw that onto every tile) ----
+{
+  assert(!/cartocdn/.test(html), 'CARTO tiles are gone entirely');
+  const srcBlock = (html.match(/const TRIPSY_FLYOVER_TILE_SOURCES = \[[\s\S]*?\n\];/) || [''])[0];
+  assert(/tile\.openstreetmap\.org/.test(srcBlock) && /arcgisonline\.com/.test(srcBlock) && !/key|token/i.test(srcBlock.replace(/rel="noopener"/g, '')),
+    'OpenStreetMap first, Esri second, neither carrying a key');
+  eval([srcBlock, constLine('TRIPSY_FLYOVER_TILE_FAIL_LIMIT'), extractFn('tripsyFlyoverAddTiles')].join('\n'));
+  const added = [];
+  const fakeL = { tileLayer: (url) => { const h = {}; const layer = { url, on: (ev, fn) => { h[ev] = fn; return layer; }, addTo: () => { added.push(layer); return layer; }, fire: ev => h[ev] && h[ev]() }; return layer; } };
+  const removed = [];
+  const fakeMap = { removeLayer: l => removed.push(l.url) };
+  const first = tripsyFlyoverAddTiles(fakeL, fakeMap);
+  for (let i = 0; i < 3; i++) first.fire('tileerror');
+  assert(added.length === 1, 'a few failed tiles alone don\'t switch sources');
+  first.fire('tileerror');
+  assert(added.length === 2 && /arcgisonline/.test(added[1].url) && removed[0] === first.url, 'a run of failures before any tile loads switches to the fallback source');
+  for (let i = 0; i < 10; i++) added[1].fire('tileerror');
+  assert(added.length === 2, 'the last source is kept rather than leaving the map blank');
+  added.length = 0;
+  const ok = tripsyFlyoverAddTiles(fakeL, fakeMap);
+  ok.fire('tileload');
+  for (let i = 0; i < 10; i++) ok.fire('tileerror');
+  assert(added.length === 1, 'once tiles have loaded, later stray errors never swap the map out');
+  assert(/tripsyFlyoverAddTiles\(L, map\);/.test(extractFn('playTripsyFlyover')), 'the player adds its tiles through the fallback helper');
+}
