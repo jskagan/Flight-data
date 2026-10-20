@@ -2728,6 +2728,46 @@ would overwrite the glyph with the word.
   glyph's "Something in the Clothes menu is out of date"). Everything else — function names,
   `data-tripsy-attire-*` attributes, the guide/summary page titles and this file — keeps
   "attire".
+- **While a trip is UNDERWAY, the Clothes menu hides Clothing Summary and Packing List**
+  ("When I am on a trip, do not show the packing list or clothing summary items on the
+  clothes menu," 2026-10-20 — the bag is packed, so both are planning pages with nothing
+  left to plan). `tripsyTripInProgress(trip, todayKey)` (pure; next to `tripsyTripHasStarted`,
+  same device-local today): first event day ≤ today ≤ last event day
+  (`tripsyItineraryStartDayKey`/`EndDayKey`, both ends inclusive; no dated events → never),
+  judged once per card render as `attireTripUnderway` and ANDed into just those two rows'
+  gates. Everything else — Daily Dress Guide, Packing Status, outfits, Garment Location,
+  Laundry, Refresh — stays, and both rows return once the trip's last event day is past.
+  The dress-only menu (one item) is untouched. `ontripmenu_test.js`.
+- **👔 → Buy Clothes (on-trip only): a garment bought mid-trip joins the Wardrobe, the
+  packing list, a cube and the outfits ahead** ("When I am on a trip, add a menu item called
+  'Buy Clothes' which allows me to add new clothes purchased on the trip. Allow me to take
+  pictures, add descriptions and categories, add them to packing cubes, and add them to
+  future outfits via a dialog which can recalculate future outfits for the trip," 2026-10-20).
+  Owner-only, guide required, `attireTripUnderway` (the same gate that hides Packing List),
+  after the outfits item. `tripsyBuyClothesFlow(tripKey, tripName)` runs four existing
+  mechanisms in order: **(1)** `showWardrobeGarmentForm(null, onSaved, opts)` — the Wardrobe
+  form (camera/library photo, name, type, Dress Categories, color, quantity), which now
+  passes the saved record to `onSaved(garment)` and takes `opts` `{title, person, hint,
+  onCancel}` (`onCancel` fires on Cancel or a tap outside, via `ov._onCancel`, so the flow
+  ends instead of waiting forever; cleared on save); **(2)** a packing-list entry on
+  `tripsyBuyClothesPackingLine(needByTier, g)` (pure: the first of its tags with an active
+  line it fills, else first tag/General with Add Garment's TYPE-derived fallback name),
+  written through `tripsyWardrobeCarryCubes` like every other `setTripWardrobe` writer;
+  **(3)** `showTripsyCubePicker` for its copies (skipped for `tripsyGarmentSkipsCube` types,
+  which are simply packed; a cancelled picker leaves it selected but UNPACKED so Packing
+  Status still lists it); **(4)** `tripsyBuyClothesOutfitDialog` over
+  `tripsyBuyClothesOutfitTargets(g, outfits, todayKey, garmentById)` (pure: this person's
+  saved blocks dated today or later, at a dress code the garment is tagged for — untagged
+  fits any — not already wearing it, never a `wornFromFlightDayKey` mirror; `replaceId` =
+  the garment filling the newcomer's `tripsyOutfitGarmentRoles` role, null = simply
+  added). "Add to checked outfits" mutates the live blocks (`tripsyBuyClothesApplyToBlocks`,
+  returning previous ids for rollback), re-syncs flight transfers, one
+  `saveTripsyTripOutfits`; "Recalculate future outfits" runs
+  `tripsyRecomposeFutureOutfitsInBackground(tripKey, person, todayKey)` — the Generate
+  Outfits background shape with `composeTripsyOutfits`' new `{redress}` predicate
+  (`b.dayKey >= todayKey`): matching blocks are never KEPT, so they are re-dressed like
+  uncovered ones while earlier days stay as wear context. No composed outfits yet → the
+  flow ends after packing (Generate Outfits will include it). `buyclothes_test.js`.
 - **👔 → Laundry, and a "Laundry back · N out" row per wash still out** ("In the attire menu,
   add a menu item called 'Laundry'. Have this bring up the same page as the laundry button from
   the daily dress guide. When laundry is out, also show the laundry back option from this

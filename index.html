@@ -9179,11 +9179,16 @@ function getOrCreateWardrobeFormOverlay() {
       </div>
     </div>`;
   document.body.appendChild(ov);
-  ov.addEventListener('click', e => { if (e.target === ov) ov.style.display = 'none'; });
+  ov.addEventListener('click', e => { if (e.target === ov) { ov.style.display = 'none'; if (ov._onCancel) ov._onCancel(); } });
   return ov;
 }
 
-function showWardrobeGarmentForm(existing, onSaved) {
+// `onSaved(garment)` receives the saved record (callers that ignore the argument are
+// unaffected). `opts` (2026-10-20, for Buy Clothes): `title` replaces the heading,
+// `person` presets Whose, `hint` seeds the status line, and `onCancel` fires when the
+// form is dismissed unsaved (Cancel, or a tap outside) so a flow built on the form can
+// end instead of waiting forever.
+function showWardrobeGarmentForm(existing, onSaved, opts = {}) {
   // A FRESH form on every open ("Whenever a user selects add garment, make sure all
   // the fields to describe that garment are cleared from the last time," 2026-10-05):
   // the node used to be reused, so anything still in flight from the previous open --
@@ -9197,11 +9202,12 @@ function showWardrobeGarmentForm(existing, onSaved) {
   const g = existing || {};
   let pendingBlob = null;                 // a newly captured photo not yet uploaded
   let photoFileId = g.driveFileId || '';  // the current stored photo id (kept if unchanged)
-  $('#tw-form-title').textContent = existing ? 'Edit garment' : 'Add garment';
+  $('#tw-form-title').textContent = opts.title || (existing ? 'Edit garment' : 'Add garment');
   $('#tw-form-name').value = g.name || '';
   // Existing garment keeps its own person; a new one defaults to the library the
-  // owner is currently viewing on the Wardrobe page.
-  $('#tw-form-person').value = existing ? (g.person || 'him') : (tripsyWardrobePerson || 'him');
+  // owner is currently viewing on the Wardrobe page (or the caller's preset).
+  $('#tw-form-person').value = existing ? (g.person || 'him') : (opts.person || tripsyWardrobePerson || 'him');
+  ov._onCancel = typeof opts.onCancel === 'function' ? opts.onCancel : null;
   $('#tw-form-color').value = g.color || '';
   $('#tw-form-qty').value = String(Math.min(20, Math.max(1, g.quantity || 1)));
   // A new garment starts with NO type chosen, rather than silently pre-picking the
@@ -9213,7 +9219,7 @@ function showWardrobeGarmentForm(existing, onSaved) {
   photoBox.textContent = photoFileId ? '' : '👕';
   photoBox.style.backgroundImage = '';
   if (photoFileId) tripsyPlacePhotoDisplayUrl(photoFileId).then(u => { photoBox.style.backgroundImage = `url("${u}")`; photoBox.textContent = ''; }).catch(() => {});
-  $('#tw-form-status').textContent = '';
+  $('#tw-form-status').textContent = opts.hint || '';
   const showPreview = blob => { const u = URL.createObjectURL(blob); photoBox.style.backgroundImage = `url("${u}")`; photoBox.textContent = ''; };
 
   // ONE hidden input with no `capture` ("I think we can move straight from the
@@ -9231,7 +9237,7 @@ function showWardrobeGarmentForm(existing, onSaved) {
     try { const blob = await tripsyReadImageFromClipboard(); if (blob) { pendingBlob = blob; showPreview(blob); } else $('#tw-form-status').textContent = 'No image found on the clipboard.'; }
     catch (e) { $('#tw-form-status').textContent = 'Could not read the clipboard.'; }
   };
-  $('#tw-form-cancel').onclick = () => { ov.style.display = 'none'; };
+  $('#tw-form-cancel').onclick = () => { ov.style.display = 'none'; if (ov._onCancel) ov._onCancel(); };
   $('#tw-form-save').onclick = async () => {
     const name = $('#tw-form-name').value.trim();
     if (!name) { $('#tw-form-status').textContent = 'Please enter a name.'; return; }
@@ -9265,8 +9271,9 @@ function showWardrobeGarmentForm(existing, onSaved) {
       // write (a multi-MB flight-log-data.json PATCH) finish in the background.
       const savePromise = Store.saveWardrobeGarment(garment);
       ov.style.display = 'none';
+      ov._onCancel = null; // saved, not dismissed
       saveBtn.disabled = false;
-      if (onSaved) onSaved();
+      if (onSaved) onSaved(garment);
       // The form closes instantly, so say so -- an error toast below replaces it
       // if the background Drive write fails.
       toast(`Saved “${name}”.`);
@@ -20417,6 +20424,18 @@ function tripsyTodayDayKey() {
 function tripsyTripHasStarted(trip) {
   const start = tripsyItineraryStartDayKey(trip);
   return !!start && start <= tripsyTodayDayKey();
+}
+
+// Is the owner ON this trip right now -- started, and its last event day not yet
+// past? ("When I am on a trip, do not show the packing list or clothing summary
+// items on the clothes menu," 2026-10-20: the bag is packed, so those two pages
+// are planning tools with nothing left to plan.) Both ends inclusive; a trip with
+// no dated events is never in progress. Device-local today, like tripsyTripHasStarted.
+function tripsyTripInProgress(trip, todayKey = tripsyTodayDayKey()) {
+  const start = tripsyItineraryStartDayKey(trip);
+  if (!start) return false;
+  const end = tripsyItineraryEndDayKey(trip) || start;
+  return start <= todayKey && todayKey <= end;
 }
 
 // Cluster heuristic for the doc-parse review page: how tightly a doc's
@@ -33059,7 +33078,12 @@ async function generateTripsyAttireGuide(tripKey, { onStage, dressOnly } = {}) {
 // Session-scoped and deliberately never persisted: it is a speed cache for repeated
 // regenerations, not data.
 const tripsyOutfitPhotoCache = new Map();
-async function composeTripsyOutfits(tripKey, person = 'him') {
+// `redress(block)` (2026-10-20, Buy Clothes' "Recalculate future outfits"): a predicate
+// naming current blocks to re-dress EVEN IF a saved outfit still covers them -- they are
+// treated exactly like uncovered blocks (sent to Claude, with every other kept outfit as
+// fixed wear context), so a garment bought mid-trip can be worked into the days ahead
+// without re-dressing the days already worn.
+async function composeTripsyOutfits(tripKey, person = 'him', { redress = null } = {}) {
   const composeStart = performance.now();
   const guide = await Store.getTripsyAttireGuide(tripKey);
   if (!guide) throw new Error('Generate an attire guide for this trip first.');
@@ -33109,6 +33133,7 @@ async function composeTripsyOutfits(tripKey, person = 'him') {
   if (existing && (existing.blocks || []).length) {
     const unused = [...(existing.blocks || [])];
     blocks.forEach((b, i) => {
+      if (redress && redress(b)) return; // asked to be re-dressed: never kept
       const j = unused.findIndex(sb => sb.dayKey === b.dayKey && sb.category === b.category && outfitStillPacked(sb));
       if (j >= 0) { keptByIndex.set(i, unused[j]); unused.splice(j, 1); }
     });
@@ -33439,12 +33464,194 @@ function tripsyRefreshOutfitGeneratingBadges() {
     el.style.display = tripsyOutfitComposingKeys.has(el.getAttribute('data-tripsy-outfits-generating')) ? 'inline-flex' : 'none';
   });
 }
-async function runTripsyOutfitComposition(tripKey, person = 'him', { quiet = false } = {}) {
+// ===== BUY CLOTHES (2026-10-20) =====
+// "When I am on a trip, add a menu item called 'Buy Clothes' which allows me to add new
+// clothes purchased on the trip. Allow me to take pictures, add descriptions and
+// categories, add them to packing cubes, and add them to future outfits via a dialog
+// which can recalculate future outfits for the trip." Four steps, each an existing
+// mechanism: the wardrobe garment form (photo, name, type, dress categories, color,
+// quantity -- the garment joins the Wardrobe like any other), a packing-list entry on the
+// line the garment fits (so Packing Status, Garment Location, laundry and the outfit
+// composer all see it), the cube picker for where it went, and an outfits dialog over the
+// person's REMAINING blocks: tick the outfits it joins (replacing the garment in its role,
+// or added when it fills none), or hand the rest of the trip to the composer with every
+// block from today on re-dressed around the new piece.
+//
+// Which tier + line the bought garment is packed under: the first of its dress-category
+// tags that has an active need line it fills on this trip; failing that, its first tag
+// (General when untagged) with the stable TYPE-derived line name Add Garment also falls
+// back to. Pure, so it is testable.
+function tripsyBuyClothesPackingLine(needByTier, g) {
+  const tags = (g && g.tiers) || [];
+  for (const tier of tags) {
+    const lines = needByTier[tier] || [];
+    const ln = lines.find(l => tripsyWardrobeGarmentFillsLine(g, l, lines));
+    if (ln) return { tier, line: ln.name };
+  }
+  const gType = tripsyGarmentTypeKey((g && g.name) || '');
+  const fallbackName = TRIPSY_GARMENT_TYPE_LABEL[gType] || TRIPSY_ATTIRE_PACKING_GROUP_LABEL[tripsyAttirePackingGroupOf(g)] || 'Other';
+  return { tier: tags[0] || 'general', line: fallbackName };
+}
+// The outfits a bought garment could join: this person's saved blocks dated today or
+// later (today's remaining outfits included -- a shirt bought at noon can be dinner's),
+// at a dress code the garment is tagged for (an untagged garment fits any), not already
+// wearing it, and not a block that merely mirrors a flight block. `replaceId` is the
+// garment currently filling the newcomer's role (top / bottoms / shoes) there, or null
+// when it fills none (a jacket, a sweater) and would simply be added.
+function tripsyBuyClothesOutfitTargets(g, outfits, todayKey, garmentById) {
+  const roles = tripsyOutfitGarmentRoles(g);
+  const tags = (g && g.tiers) || [];
+  const out = [];
+  for (const b of ((outfits && outfits.blocks) || [])) {
+    if (!b.dayKey || b.dayKey < todayKey || b.wornFromFlightDayKey) continue;
+    if (tags.length && !tags.includes(b.category)) continue;
+    const ids = b.garmentIds || [];
+    if (ids.includes(g.id)) continue;
+    const replaceId = roles.length
+      ? (ids.find(id => { const x = garmentById.get(id); return !!x && tripsyOutfitGarmentRoles(x).some(r => roles.includes(r)); }) || null)
+      : null;
+    out.push({ block: b, replaceId, role: roles[0] || '' });
+  }
+  return out;
+}
+// Put the bought garment into each target block in place (live records), returning the
+// previous ids per block so a failed save can restore them.
+function tripsyBuyClothesApplyToBlocks(g, targets) {
+  const prev = new Map();
+  for (const t of targets) {
+    const b = t.block;
+    prev.set(b, (b.garmentIds || []).slice());
+    if (!b.garmentIds) b.garmentIds = [];
+    const i = t.replaceId ? b.garmentIds.indexOf(t.replaceId) : -1;
+    if (i >= 0) b.garmentIds[i] = g.id;
+    else if (!b.garmentIds.includes(g.id)) b.garmentIds.push(g.id);
+  }
+  return prev;
+}
+// Re-dress every block from `fromDayKey` on, in the background, around the current packing
+// list (which now holds the bought garment). The same one-run-per-trip guard, ⏳ badge and
+// re-render as Generate Outfits; days before fromDayKey keep their outfits as wear context.
+function tripsyRecomposeFutureOutfitsInBackground(tripKey, person, fromDayKey) {
+  if (tripsyOutfitComposingKeys.has(tripKey)) { toast('Outfits are already being generated for this trip…'); return; }
+  tripsyOutfitComposingKeys.add(tripKey);
+  tripsyRefreshOutfitGeneratingBadges();
+  toast('Recalculating the rest of the trip’s outfits in the background — you can keep using the app.');
+  (async () => {
+    try {
+      await runTripsyOutfitComposition(tripKey, person, { quiet: true, redress: b => b.dayKey >= fromDayKey });
+    } finally {
+      tripsyOutfitComposingKeys.delete(tripKey);
+      if (currentView === 'tripsytrips') renderTripsyEventsList();
+      tripsyRefreshOutfitGeneratingBadges();
+    }
+  })();
+}
+// The dialog: one row per target outfit with a checkbox, plus Recalculate / Not now.
+// Resolves {action:'apply', picked:[targets]} | {action:'recalc'} | null.
+function tripsyBuyClothesOutfitDialog(g, targets, garmentById) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tw-buy-outfits-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tw-buy-outfits-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483098';
+    const rows = targets.map((t, i) => {
+      const rep = t.replaceId ? garmentById.get(t.replaceId) : null;
+      const what = t.replaceId ? `replaces ${esc(rep ? rep.name : 'a garment')}` : 'added to the outfit';
+      return `<label style="display:flex; gap:10px; align-items:flex-start; padding:8px 0; border-bottom:1px solid var(--line); cursor:pointer;">
+        <input type="checkbox" data-buy-target="${i}" style="margin-top:3px;">
+        <span style="flex:1; min-width:0;">
+          <span style="font-weight:600;">${esc(tripsyDayHeaderLabel(t.block.dayKey))}</span>
+          <span style="margin-left:6px; font-size:12px; color:var(--muted);">${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[t.block.category] || t.block.category || '')}</span>
+          <div style="font-size:13px; color:var(--text); word-break:break-word;">${esc(t.block.label || '(no events named)')}</div>
+          <div style="font-size:12px; color:var(--muted);">${what}</div>
+        </span>
+      </label>`;
+    }).join('');
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:520px;">
+        <h2 style="margin:0 0 4px; font-size:17px;">Add “${esc(g.name || 'garment')}” to outfits?</h2>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:10px;">
+          ${targets.length ? 'Tick the outfits it joins, or let the app recalculate every outfit from today on around it.' : 'No remaining outfit is at a dress code this garment is tagged for — you can still recalculate the rest of the trip around it.'}
+        </div>
+        <div style="max-height:50vh; overflow:auto;">${rows}</div>
+        <div style="display:flex; flex-wrap:wrap; gap:10px; justify-content:flex-end; margin-top:16px;">
+          <button class="btn" data-buy-cancel>Not now</button>
+          <button class="btn" data-buy-recalc>Recalculate future outfits</button>
+          ${targets.length ? '<button class="btn primary" data-buy-apply>Add to checked outfits</button>' : ''}
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const close = val => { ov.style.display = 'none'; ov.onclick = null; resolve(val); };
+    ov.onclick = e => {
+      if (e.target.closest('[data-buy-apply]')) {
+        const picked = [...ov.querySelectorAll('[data-buy-target]:checked')].map(el => targets[parseInt(el.dataset.buyTarget, 10)]).filter(Boolean);
+        if (!picked.length) { toast('Tick at least one outfit, or choose Recalculate.'); return; }
+        close({ action: 'apply', picked });
+        return;
+      }
+      if (e.target.closest('[data-buy-recalc]')) { close({ action: 'recalc' }); return; }
+      if (e.target.closest('[data-buy-cancel]') || e.target === ov) close(null);
+    };
+  });
+}
+// The whole flow, from the 👔 Clothes menu's on-trip "Buy Clothes" row.
+async function tripsyBuyClothesFlow(tripKey, tripName) {
+  const guide = await Store.getTripsyAttireGuide(tripKey);
+  if (!guide) { toast('Build the Daily Dress Guide first.', 'error'); return; }
+  // 1. The garment itself -- photo, name, type, dress categories, color, quantity.
+  const g = await new Promise(resolve => showWardrobeGarmentForm(null, saved => resolve(saved), {
+    title: '🛍️ Buy Clothes', person: tripsyDressGuidePerson, onCancel: () => resolve(null),
+    hint: `Bought on ${tripName || 'this trip'} — it joins your Wardrobe, this trip's packing list and, if you like, the outfits ahead.`,
+  }));
+  if (!g) return;
+  const person = g.person || 'him';
+  const qty = Math.max(1, Number(g.quantity) || 1);
+  // 2. Packing list entry on the line it fits, then 3. which cube(s) it went into. A
+  //    hanging/loose type skips the picker and is simply packed; a cancelled picker leaves
+  //    it selected but unpacked, so Packing Status still lists it to put away.
+  const needByTier = tripsyWardrobeNeedByTier(guide, person);
+  const { tier, line } = tripsyBuyClothesPackingLine(needByTier, g);
+  let cubes = [], packed = qty;
+  if (!tripsyGarmentSkipsCube(g.name, tripsyGarmentTypeKey(g.name || ''))) {
+    const pickedCubes = await showTripsyCubePicker(g.name, Array.from({ length: qty }, () => ''));
+    cubes = pickedCubes ? pickedCubes.filter(Boolean) : [];
+    packed = pickedCubes ? cubes.length : 0;
+  }
+  const entries = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey))
+    .filter(e => !(e.id === g.id && e.category === tier && e.line === line));
+  entries.push(tripsyWardrobeCarryCubes({ id: g.id, category: tier, line, qty, packed }, cubes));
+  const okSel = await Store.setTripWardrobe(tripKey, entries.map(e => tripsyWardrobeCarryCubes({ id: e.id, category: e.category, line: e.line, qty: e.qty, packed: Math.min(e.qty, e.packed) }, e.cubes)));
+  if (!okSel) { toast(`“${g.name}” is in your Wardrobe but could not be added to this trip's packing list — add it from the Packing List.`, 'error'); return; }
+  toast(`“${g.name}” added to this trip under ${tripsyWardrobeTierLabel(tier)} · ${line}${packed ? '' : ' (not yet packed)'}.`, 'success');
+  if (currentView === 'tripsytrips') renderTripsyEventsList();
+  // 4. The outfits ahead.
+  const outfits = await Store.getTripsyTripOutfits(tripKey, person);
+  if (!outfits || !(outfits.blocks || []).length) return; // nothing composed yet -- Generate Outfits will include it
+  const garmentById = new Map((await Store.listWardrobe()).map(x => [x.id, x]));
+  const todayKey = tripsyTodayDayKey();
+  const targets = tripsyBuyClothesOutfitTargets(g, outfits, todayKey, garmentById);
+  const choice = await tripsyBuyClothesOutfitDialog(g, targets, garmentById);
+  if (!choice) return;
+  if (choice.action === 'recalc') { tripsyRecomposeFutureOutfitsInBackground(tripKey, person, todayKey); return; }
+  const prev = tripsyBuyClothesApplyToBlocks(g, choice.picked);
+  for (const t of choice.picked) tripsyOutfitSyncFlightTransfers(guide, outfits, t.block);
+  let ok = false;
+  try { ok = await Store.saveTripsyTripOutfits(outfits); } catch (e) { ok = false; }
+  if (!ok) {
+    for (const [b, ids] of prev) b.garmentIds = ids;
+    for (const t of choice.picked) tripsyOutfitSyncFlightTransfers(guide, outfits, t.block);
+    toast('Could not save the outfit changes — they were undone.', 'error');
+    return;
+  }
+  toast(`“${g.name}” added to ${choice.picked.length} outfit${choice.picked.length === 1 ? '' : 's'}.`, 'success');
+  if (currentView === 'tripsytrips') renderTripsyEventsList();
+}
+
+async function runTripsyOutfitComposition(tripKey, person = 'him', { quiet = false, redress = null } = {}) {
   // Triggered from the outfit list's per-person Compose/Recompose; toast covers the
   // wait, and My Trips is re-rendered afterward so the card's outfits item flips.
   if (!quiet) toast(`Composing ${person === 'her' ? 'Hers' : 'His'} outfits — this can take a minute…`);
   try {
-    await composeTripsyOutfits(tripKey, person);
+    await composeTripsyOutfits(tripKey, person, { redress });
     await tripsyOutfitComposeSucceeded(tripKey);
   } catch (e) {
     console.error('Outfit composition failed:', e);
@@ -36059,16 +36266,26 @@ async function renderTripsyEventsListImpl() {
     // 2026-10-05) offers exactly one thing: the Daily Dress Guide, where the suggested
     // dress codes are reviewed and changed.
     const attireDressOnly = tripsyAttireGuideIsDressOnly(attireGuideObj);
+    // While the trip is UNDERWAY the Clothing Summary and Packing List rows are hidden
+    // ("When I am on a trip, do not show the packing list or clothing summary items on
+    // the clothes menu," 2026-10-20) -- the bag is packed, so both are planning pages
+    // with nothing left to plan; Packing Status, the guide, outfits, location and laundry
+    // are the on-trip pages and stay. They return once the trip is over.
+    const attireTripUnderway = tripsyTripInProgress(trip);
     const attireMenuItems = attireDressOnly
       ? menuListButtonHtml(`data-tripsy-attire-nav="dressguide" data-key="${esc(trip.key)}"`, '📅', 'Daily Dress Guide')
       : [
       attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="dressguide" data-key="${esc(trip.key)}"`, '📅', 'Daily Dress Guide', attireStaleWarnHtml) : '',
-      attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="summary" data-key="${esc(trip.key)}"`, '👗', 'Clothing Summary', attireStaleWarnHtml) : '',
-      isOwner && attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="pack" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🧳', 'Packing List') : '',
+      attireHasGuide && !attireTripUnderway ? menuListButtonHtml(`data-tripsy-attire-nav="summary" data-key="${esc(trip.key)}"`, '👗', 'Clothing Summary', attireStaleWarnHtml) : '',
+      isOwner && attireHasGuide && !attireTripUnderway ? menuListButtonHtml(`data-tripsy-attire-nav="pack" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🧳', 'Packing List') : '',
       attireStatusReady ? menuListButtonHtml(`data-tripsy-attire-nav="packlist" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '📋', 'Packing Status') : '',
       attireHasOutfits
         ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-key="${esc(trip.key)}"`, '✨', 'View Outfits', attireOutfitsGenHtml + `<span data-tripsy-outfits-warning="${esc(trip.key)}" class="tripsy-menu-flash" title="Your packing is complete, but these outfits were composed from an older plan" style="display:none; margin-left:auto; color:var(--amber); font-size:13px; line-height:1;">⚠️</span>`)
         : (attireOutfitsReady ? menuListButtonHtml(`data-tripsy-attire-nav="outfits" data-mode="generate" data-key="${esc(trip.key)}"`, '✨', 'Generate Outfits', attireOutfitsGenHtml) : ''),
+      // Buy Clothes ("When I am on a trip, add a menu item called 'Buy Clothes' which allows
+      // me to add new clothes purchased on the trip," 2026-10-20): on-trip only, owner-only
+      // (it writes the wardrobe, the packing list and the outfits). See tripsyBuyClothesFlow.
+      isOwner && attireHasGuide && attireTripUnderway ? menuListButtonHtml(`data-tripsy-attire-nav="buy" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🛍️', 'Buy Clothes') : '',
       // Garment Location ("a list of each packing cube used on that trip plus an option
       // for Laundry," 2026-10-17): read-only, any viewer, once a guide exists -- cube
       // contents come from the packing selection and the laundry judgement from the
@@ -36528,6 +36745,7 @@ async function renderTripsyEventsListImpl() {
         case 'pack': tripsyWardrobePackForTrip(key, name); break;
         case 'packlist': tripsyWardrobePackingList(key, name); break;
         case 'location': showTripsyGarmentLocation(key, name); break;
+        case 'buy': tripsyBuyClothesFlow(key, name); break;
         // Laundry / Laundry back (2026-10-19): the Daily Dress Guide's own screens, for the
         // trip's today (data-day; empty = the trip hasn't started, nothing worn yet) and
         // the person the guide is showing. A change re-renders My Trips so the "N out"

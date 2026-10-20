@@ -17,12 +17,12 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
 const start = html.indexOf('const attireMenuItems = attireDressOnly');
 const menu = html.slice(start, html.indexOf('].join', start));
 assert(menu.length > 200, 'sanity: found the Attire menu builder');
-assert(/isOwner && attireHasGuide \? menuListButtonHtml\(`data-tripsy-attire-nav="pack"/.test(menu),
-  'THE ASK: Plan Packing List requires a saved guide, not just owner');
+assert(/isOwner && attireHasGuide && !attireTripUnderway \? menuListButtonHtml\(`data-tripsy-attire-nav="pack"/.test(menu),
+  'THE ASK: Plan Packing List requires a saved guide, not just owner (and, since 2026-10-20, a trip not underway)');
 assert(/attireStatusReady \? menuListButtonHtml\(`data-tripsy-attire-nav="packlist"/.test(menu)
   && /const attireStatusReady = attirePlanDone \|\| \(isOwner && attireHasGuide && attireAnyPacked\);/.test(html),
   'Packing Status requires a saved guide AND a complete Packing List (or packing already begun) -- 2026-10-05');
-assert(/attireHasGuide \? menuListButtonHtml\(`data-tripsy-attire-nav="summary"/.test(menu)
+assert(/attireHasGuide && !attireTripUnderway \? menuListButtonHtml\(`data-tripsy-attire-nav="summary"/.test(menu)
   && /attireHasGuide \? menuListButtonHtml\(`data-tripsy-attire-nav="dressguide"/.test(menu),
   'Clothing Summary / Daily Dress Guide keep their existing guide gates');
 assert(/isOwner \? menuListButtonHtml\(`data-tripsy-attire-nav="refresh"[\s\S]*?attireHasGuide \? 'Refresh' : 'Generate'/.test(menu),
