@@ -3617,6 +3617,56 @@ WebView's support for recording is unproven.
       [data-tr]`, waits two frames so the starting transform is laid out, adds `.tfo-in`,
       holds pause-aware, then `.tfo-out`. Pause also sets `.tfo-paused`, which freezes the
       pan-and-zoom animation.
+    - **The options live in a dialog that opens BY ITSELF after photos are added**
+      (`tripsyFlyoverSlideshowDialog`; "When the user selects photos for each location,
+      present him with options as to how he wants photos displayed - some may be one per page
+      and others several in a page, and how to transition," 2026-10-20). It also opens from
+      each card's **Slideshow options** button, and the card shows a one-line
+      `tripsyFlyoverSlideshowSummary`.
+      - **Triggers:** an own-photos upload batch, and closing the Suggested grid after
+        picking some (`tripsyFlyoverSuggestedPhotos`' third arg `onClosed(added)`).
+      - **Contents:** layout picture cards (`TRIPSY_FLYOVER_LAYOUT_ICON`), transition chips,
+        seconds, a per-photo **Own page** toggle (`photo.solo`) and a live "Plays as N
+        screens: 1 · 2 · 3+4+5" plan.
+      - **Preview** plays the unsaved draft; Save writes `slideshow` + `photos` onto that
+        one stop, and Cancel changes nothing.
+      - **Grouping:** `tripsyFlyoverPhotoGroups` gives a `solo` photo its own screen and ends
+        the screen being filled before it, so order is kept.
+      - **Drawing a screen:** `tripsyFlyoverGroupLayout` draws a lone photo full-screen,
+        never as one cell of a grid, and two photos in a grid as a pair. The player passes it
+        per screen.
+- **Music: one soundtrack per fly-over, chosen by genre** ("try to find different music that
+  could be used of different genres and offer that to the user," same day).
+  - **Data:** `record.music` is `{source:'archive', url, title, artist, license, page}` or
+    `{source:'drive', driveFileId, title}`. A rebuild keeps it.
+  - **Picker:** `tripsyFlyoverMusicPicker` offers genres in two labelled rows
+    (`TRIPSY_FLYOVER_MUSIC_GENRES`, each tagged `group`, rows from
+    `TRIPSY_FLYOVER_MUSIC_GROUPS`): **Styles** (cinematic, acoustic, jazz, classical,
+    electronic, ambient, upbeat) and **Regions** (African, Middle Eastern, Indian, East Asian,
+    Southeast Asian, Latin, Caribbean, Mediterranean, Celtic, Hawaiian & Pacific — "can you
+    try to find regional options as well," 2026-10-20; these replaced the old catch-all
+    "World"). A region is just its own set of archive subject words, so adding one is one
+    array entry. Each runs a keyless **Internet Archive** search
+    (`tripsyFlyoverMusicSearchUrl`: audio in the netlabels / opensource_audio collections,
+    the genre's subject terms, Creative Commons `licenseurl` only, most downloaded first).
+    That is followed by the item metadata API, where `tripsyFlyoverPickArchiveTrack` picks
+    one MP3, preferring 1–10 minutes over a jingle or a two-hour mix, with title, artist,
+    license (`tripsyFlyoverLicenseLabel`, e.g. "CC BY-SA") and a source link.
+  - **Listening:** each track has a ▶ listen button and **Use**. **＋ Use my own song**
+    uploads an audio file (capped at `TRIPSY_FLYOVER_MUSIC_MAX_BYTES`, 25 MB) to Drive.
+    **No music** clears it.
+  - **Playback starts BEFORE the player's first `await`**, inside the Play tap, because iOS
+    only lets audio begin there. An archive URL is ready at once.
+    - **Own songs** are pre-downloaded into `tripsyFlyoverMusicUrlCache` when the setup page
+      opens, so they are usually ready too.
+    - **If music still can't start**, it shows 🔇 on the top bar's music button, and a tap
+      plays it. That button also mutes.
+    - **Pause, close and the ending:** pause pauses the music, Replay restarts it, close
+      stops it, and it fades out under "The end".
+  - **Verified in Chromium with the archive.org answers STUBBED.** The sandbox can't reach
+    archive.org, so whether its search and metadata endpoints answer the app's origin
+    (CORS) is the one unverified piece; a failure shows "Couldn't reach the music library",
+    and an own song always works.
 - **Testing:** verified in Chromium against a synthetic trip, with Leaflet served from npm
   because the sandbox can't reach cdnjs or the tile host. `flyover_test.js`.
 

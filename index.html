@@ -1323,6 +1323,14 @@
   #tripsy-flyover-player .tfo-title { flex: 1; min-width: 0; color: #fff; font-weight: 700; font-size: 16px; text-shadow: 0 1px 3px rgba(0,0,0,0.6); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #tripsy-flyover-player .tfo-btn { pointer-events: auto; width: 38px; height: 38px; border-radius: 50%; border: none; background: rgba(0,0,0,0.6); color: #fff; font-size: 15px; cursor: pointer; }
   #tripsy-flyover-player .tfo-close { color: #ff8a7a; font-weight: 800; }
+  /* Slideshow options dialog (tripsyFlyoverSlideshowDialog) and music picker. */
+  .tfo-ss-label { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .tfo-ss-choice { display: inline-flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 10px; font-size: 12px; min-width: 110px; }
+  .tfo-ss-chip { font-size: 12px; padding: 5px 10px; }
+  .tfo-ss-on { outline: 2px solid #3AA76D; outline-offset: 1px; font-weight: 700; }
+  .tfo-ss-screen { display: inline-block; padding: 1px 6px; margin: 2px 2px 0 0; border: 1px solid var(--line); border-radius: 5px; font-family: var(--mono); }
+  .tfo-layout-icon { position: relative; display: block; width: 56px; height: 40px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
+  .tfo-layout-icon i { position: absolute; background: #7c9cd6; border-radius: 2px; box-sizing: border-box; border: 1px solid var(--panel); }
   #tripsy-flyover-player .tfo-card { position: absolute; left: 16px; bottom: calc(28px + env(safe-area-inset-bottom, 0px)); z-index: 1000; max-width: calc(100% - 32px);
     background: rgba(10,14,28,0.82); color: #fff; border-radius: 12px; padding: 12px 16px; opacity: 0; transform: translateY(8px); transition: opacity 0.4s, transform 0.4s; pointer-events: none; }
   #tripsy-flyover-player .tfo-card.tfo-show { opacity: 1; transform: none; }
@@ -17563,13 +17571,29 @@ function tripsyFlyoverSlideshowConfig(stop) {
   seconds = Math.min(TRIPSY_FLYOVER_SECONDS_MAX, Math.max(TRIPSY_FLYOVER_SECONDS_MIN, seconds));
   return { layout, transition, seconds };
 }
-// The photos split into the screens the layout shows them on, in order.
+// The photos split into the screens the layout shows them on, in order. A photo marked
+// `solo` ("Own page") always gets a screen to itself and ends the screen being filled
+// before it, so the photos around it keep their order.
 function tripsyFlyoverPhotoGroups(photos, layout) {
   const per = (TRIPSY_FLYOVER_LAYOUTS.find(l => l.key === layout) || TRIPSY_FLYOVER_LAYOUTS[0]).perScreen;
   const out = [];
-  const list = photos || [];
-  for (let i = 0; i < list.length; i += per) out.push(list.slice(i, i + per));
+  let cur = [];
+  const flush = () => { if (cur.length) { out.push(cur); cur = []; } };
+  for (const p of (photos || [])) {
+    if (per > 1 && p && p.solo) { flush(); out.push([p]); continue; }
+    cur.push(p);
+    if (cur.length >= per) flush();
+  }
+  flush();
   return out;
+}
+// How ONE screen is drawn: a lone photo (an "Own page", or a leftover at the end) fills the
+// screen rather than sitting in one cell of a grid, and two photos in a grid become a pair.
+function tripsyFlyoverGroupLayout(group, layout) {
+  const n = (group || []).length;
+  if (n <= 1) return 'single';
+  if (layout === 'grid' && n === 2) return 'pair';
+  return layout;
 }
 
 function tripsyFlyoverDistanceKm(a, b) {
@@ -17735,6 +17759,7 @@ async function tripsyFlyoverBuild(trip, prevRecord, opts = {}) {
   const rec = { tripKey: trip.key, stops: tripsyFlyoverCarryOver(merged, prevRecord && prevRecord.stops), builtAt: new Date().toISOString() };
   // Rebuilding a completed fly-over (Edit -> Rebuild) leaves it completed.
   if (prevRecord && prevRecord.completedAt) rec.completedAt = prevRecord.completedAt;
+  if (prevRecord && prevRecord.music) rec.music = prevRecord.music;
   return rec;
 }
 
@@ -17909,6 +17934,23 @@ async function showTripsyFlyover(tripKey) {
     if (seeded.changed) { record = seeded.record; save(); }
   }
 
+  // The options box opens by itself right after photos are added, and from each
+  // destination's "Slideshow options" button. Nothing changes until Save.
+  const openSlideshowOptions = async (id, intro) => {
+    const st = record.stops.find(x => x.id === id);
+    if (!st) return;
+    const r = await tripsyFlyoverSlideshowDialog(st, {
+      intro,
+      playPreview: draft => {
+        if (draft.lat == null) { toast('Set this destination\'s location first.', 'error'); return; }
+        playTripsyFlyover(trip, { ...record, stops: record.stops.map(x => x.id === id ? draft : x) }, { previewStopId: id });
+      },
+    });
+    if (!r || closed) return;
+    updateStop(id, { slideshow: r.slideshow, photos: r.photos });
+    save(); render();
+  };
+  if (record && record.music) tripsyFlyoverPrefetchMusic(record.music);
   const render = () => {
     if (!record || !(record.stops || []).length) {
       body.innerHTML = `<div style="padding:18px 0; color:var(--muted);">No destinations found for this trip — it needs lodging or flights with places.</div>`;
@@ -17926,6 +17968,10 @@ async function showTripsyFlyover(tripKey) {
         ${playable} destination${playable === 1 ? '' : 's'} on the map.${isOwner ? ' Add photos to each one — they play as a slideshow when the trip arrives there.' : ''}
         ${isOwner ? `<button class="btn" data-flyover-rebuild style="font-size:12px; margin-left:6px;">↻ Rebuild destinations</button>` : ''}
         ${completeHtml}
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; font-size:13px;">
+        <span>🎵 ${record.music ? `<strong>${esc(tripsyFlyoverMusicLabel(record.music))}</strong>${record.music.license ? ` <span style="color:var(--muted); font-size:11px;">${esc(tripsyFlyoverLicenseLabel(record.music.license))}</span>` : ''}` : '<span style="color:var(--muted);">No music</span>'}</span>
+        ${isOwner ? `<button class="btn" data-flyover-music style="font-size:12px;">${record.music ? 'Change music' : 'Choose music'}</button>` : ''}
       </div>
       ${record.stops.map((s, i) => {
         const photos = s.photos || [];
@@ -17959,19 +18005,12 @@ async function showTripsyFlyover(tripKey) {
               <button class="btn" data-flyover-add-own style="font-size:12px;">＋ My photos</button>
               <button class="btn" data-flyover-add-suggested style="font-size:12px;">🔍 Suggested photos</button>` : ''}`}
           </div>
-          ${isOwner && photos.length && tripsyFlyoverStopVisited(s, todayKey) ? (() => {
-            const cfg = tripsyFlyoverSlideshowConfig(s);
-            const sel = (attr, opts, cur) => `<select class="field-input" ${attr} style="font-size:12px; padding:4px 6px; width:auto;">${opts.map(o => `<option value="${esc(String(o.key))}"${String(o.key) === String(cur) ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
-            const secOpts = [...new Set([...TRIPSY_FLYOVER_SECONDS_OPTIONS, cfg.seconds])].sort((a, b) => a - b).map(v => ({ key: v, label: `${v} s` }));
-            return `<div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; font-size:12px; color:var(--muted);">
-              <span>Slideshow:</span>
-              ${sel('data-flyover-layout title="How many photos share the screen"', TRIPSY_FLYOVER_LAYOUTS, cfg.layout)}
-              ${sel('data-flyover-transition title="How each screen of photos comes in and goes out"', TRIPSY_FLYOVER_TRANSITIONS, cfg.transition)}
-              ${sel('data-flyover-seconds title="How long each screen of photos shows"', secOpts, cfg.seconds)}
-              <span>per ${cfg.layout === 'single' ? 'photo' : 'screen'}</span>
+          ${isOwner && photos.length && tripsyFlyoverStopVisited(s, todayKey) ? `
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; font-size:12px; color:var(--muted);">
+              <span>🎞 ${esc(tripsyFlyoverSlideshowSummary(s))}</span>
+              <button class="btn" data-flyover-slideshow style="font-size:12px;">Slideshow options</button>
               <button class="btn" data-flyover-preview style="font-size:12px;">▶ Preview</button>
-            </div>`;
-          })() : ''}`}
+            </div>` : ''}`}
         </div>`;
       }).join('')}`;
     tripsyDiaryPaintPhotos(body);
@@ -17985,6 +18024,13 @@ async function showTripsyFlyover(tripKey) {
       renderTripsyEventsList();
       if (!closed) render();
     };
+    const musicBtn = body.querySelector('[data-flyover-music]');
+    if (musicBtn) musicBtn.onclick = async () => {
+      const m = await tripsyFlyoverMusicPicker(record.music || null);
+      if (m === undefined || closed) return;
+      record = { ...record, music: m };
+      save(); render();
+    };
     const rebuildBtn = body.querySelector('[data-flyover-rebuild]');
     if (rebuildBtn) rebuildBtn.onclick = async () => { rebuildBtn.disabled = true; await build(); if (!closed) render(); };
     body.querySelectorAll('[data-flyover-stop]').forEach(card => {
@@ -17997,16 +18043,8 @@ async function showTripsyFlyover(tripKey) {
         updateStop(id, { label: v, labelEdited: true });
         save();
       };
-      const setSlideshow = fields => {
-        updateStop(id, { slideshow: { ...tripsyFlyoverSlideshowConfig(stop()), ...fields } });
-        save(); render();
-      };
-      const layoutSel = card.querySelector('[data-flyover-layout]');
-      if (layoutSel) layoutSel.onchange = () => setSlideshow({ layout: layoutSel.value });
-      const trSel = card.querySelector('[data-flyover-transition]');
-      if (trSel) trSel.onchange = () => setSlideshow({ transition: trSel.value });
-      const secSel = card.querySelector('[data-flyover-seconds]');
-      if (secSel) secSel.onchange = () => setSlideshow({ seconds: Number(secSel.value) });
+      const ssBtn = card.querySelector('[data-flyover-slideshow]');
+      if (ssBtn) ssBtn.onclick = () => openSlideshowOptions(id, '');
       const previewBtn = card.querySelector('[data-flyover-preview]');
       if (previewBtn) previewBtn.onclick = () => {
         if (stop().lat == null) { toast('Set this destination\'s location first.', 'error'); return; }
@@ -18046,13 +18084,18 @@ async function showTripsyFlyover(tripKey) {
           } catch (e) { console.error('fly-over photo upload failed:', e); }
         }
         setStatus(done === files.length ? '' : `${files.length - done} photo${files.length - done === 1 ? '' : 's'} couldn’t be uploaded.`);
-        if (done) { save(); if (!closed) render(); }
+        if (done) {
+          save();
+          if (!closed) { render(); openSlideshowOptions(id, `${done} photo${done === 1 ? '' : 's'} added. Choose how this place’s photos play.`); }
+        }
       });
       const sug = card.querySelector('[data-flyover-add-suggested]');
       if (sug) sug.onclick = () => tripsyFlyoverSuggestedPhotos(stop(), async picked => {
         updateStop(id, { photos: [...(stop().photos || []), picked] });
         await save();
         if (!closed) render();
+      }, added => {
+        if (added && !closed) openSlideshowOptions(id, `${added} photo${added === 1 ? '' : 's'} added. Choose how this place’s photos play.`);
       });
     });
   };
@@ -18114,7 +18157,8 @@ function tripsyFlyoverAskPlace(trip, stop) {
 
 // Places photos of the destination (its city, then its hotels) to pick from; each tap
 // uploads that one photo and adds it to the stop.
-async function tripsyFlyoverSuggestedPhotos(stop, onPicked) {
+async function tripsyFlyoverSuggestedPhotos(stop, onPicked, onClosed) {
+  let added = 0;
   let ov = document.getElementById('tripsy-flyover-suggest-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-suggest-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
   ov.style.zIndex = '2147483060';
@@ -18127,7 +18171,7 @@ async function tripsyFlyoverSuggestedPhotos(stop, onPicked) {
       <div data-suggest-grid style="color:var(--muted); font-size:13px;">Searching…</div>
     </div>`;
   ov.style.display = 'flex';
-  const close = () => { ov.style.display = 'none'; ov.innerHTML = ''; };
+  const close = () => { ov.style.display = 'none'; ov.innerHTML = ''; if (onClosed) onClosed(added); };
   ov.querySelector('[data-suggest-close]').onclick = close;
   ov.onclick = e => { if (e.target === ov) close(); };
   const queries = [stop.label, ...(stop.names || []).slice(0, 2)].filter(Boolean);
@@ -18158,6 +18202,7 @@ async function tripsyFlyoverSuggestedPhotos(stop, onPicked) {
         const driveFileId = await uploadBlobToDrive(t.blob, `flyover-photo-${Date.now()}`, mime);
         tripsyPutCachedPhotoBlob(driveFileId, t.blob);
         await onPicked({ driveFileId, addedAt: new Date().toISOString(), source: 'places' });
+        added++;
         btn.innerHTML = `<span style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.45); color:#fff; font-size:22px;">✓</span>`;
       } catch (e) {
         console.error('fly-over suggested photo failed:', e);
@@ -18165,6 +18210,332 @@ async function tripsyFlyoverSuggestedPhotos(stop, onPicked) {
         toast('Couldn’t add that photo — try again.', 'error');
       }
     };
+  });
+}
+
+// ---- Slideshow options dialog ------------------------------------------------------
+// Opened right after photos are added to a destination, and from its "🎞 Slideshow
+// options" button ("When the user selects photos for each location, present him with
+// options as to how he wants photos displayed - some may be one per page and others
+// several in a page, and how to transition between photos," 2026-10-20). Layout, transition
+// and timing are per destination; "Own page" is per photo -- that photo takes the whole
+// screen while the rest share screens in the destination's layout.
+const TRIPSY_FLYOVER_LAYOUT_ICON = {
+  single: [[0, 0, 100, 100]],
+  pair: [[0, 0, 47, 100], [53, 0, 47, 100]],
+  grid: [[0, 0, 47, 46], [53, 0, 47, 46], [0, 54, 47, 46], [53, 54, 47, 46]],
+  collage: [[2, 6, 46, 42], [46, 2, 50, 44], [20, 38, 54, 44], [0, 56, 40, 40]],
+};
+function tripsyFlyoverLayoutIconHtml(key) {
+  return `<span class="tfo-layout-icon" aria-hidden="true">${(TRIPSY_FLYOVER_LAYOUT_ICON[key] || []).map(([x, y, w, h]) =>
+    `<i style="left:${x}%; top:${y}%; width:${w}%; height:${h}%;"></i>`).join('')}</span>`;
+}
+// One line describing how a destination's photos will play, for its card on the setup page.
+function tripsyFlyoverSlideshowSummary(stop) {
+  const cfg = tripsyFlyoverSlideshowConfig(stop);
+  const screens = tripsyFlyoverPhotoGroups((stop && stop.photos) || [], cfg.layout).length;
+  const layout = (TRIPSY_FLYOVER_LAYOUTS.find(l => l.key === cfg.layout) || {}).label || '';
+  const tr = (TRIPSY_FLYOVER_TRANSITIONS.find(t => t.key === cfg.transition) || {}).label || '';
+  return `${layout} · ${tr} · ${cfg.seconds} s per ${cfg.layout === 'single' ? 'photo' : 'screen'} · ${screens} screen${screens === 1 ? '' : 's'}`;
+}
+// Resolves {slideshow, photos} on Save, null on Cancel. `playPreview(stopDraft)` plays the
+// draft without saving it.
+function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } = {}) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-flyover-slideshow-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-slideshow-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    // Above the setup page and the suggested-photos grid, below the player (2147483090), so
+    // Preview plays on top of the dialog and drops back to it.
+    ov.style.zIndex = '2147483065';
+    let cfg = tripsyFlyoverSlideshowConfig(stop);
+    let photos = ((stop && stop.photos) || []).map(p => ({ ...p }));
+    const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
+    const draft = () => ({ ...stop, slideshow: { ...cfg }, photos });
+    const render = () => {
+      const groups = tripsyFlyoverPhotoGroups(photos, cfg.layout);
+      const index = new Map(photos.map((p, i) => [p, i + 1]));
+      const secOpts = [...new Set([...TRIPSY_FLYOVER_SECONDS_OPTIONS, cfg.seconds])].sort((a, b) => a - b);
+      ov.innerHTML = `
+        <div class="tw-modal-paper tw-wide" style="max-width:640px;">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+            <h2 style="margin:0; font-size:17px; flex:1;">🎞 How should ${esc(stop.label || 'these photos')} play?</h2>
+            <button class="tripsy-close-x" data-ss-cancel aria-label="Close">✕</button>
+          </div>
+          ${intro ? `<div style="font-size:13px; color:var(--muted); margin-bottom:10px;">${esc(intro)}</div>` : ''}
+          <div class="tfo-ss-label">Photos on screen at once</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+            ${TRIPSY_FLYOVER_LAYOUTS.map(l => `<button class="btn tfo-ss-choice${l.key === cfg.layout ? ' tfo-ss-on' : ''}" data-ss-layout="${l.key}">${tripsyFlyoverLayoutIconHtml(l.key)}<span>${esc(l.label)}</span></button>`).join('')}
+          </div>
+          <div class="tfo-ss-label">Transition between screens</div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px;">
+            ${TRIPSY_FLYOVER_TRANSITIONS.map(t => `<button class="btn tfo-ss-chip${t.key === cfg.transition ? ' tfo-ss-on' : ''}" data-ss-tr="${t.key}">${esc(t.label)}</button>`).join('')}
+          </div>
+          <div class="tfo-ss-label">Time on screen</div>
+          <div style="display:flex; gap:8px; align-items:center; margin-bottom:14px; font-size:13px;">
+            <select class="field-input" data-ss-seconds style="width:auto; padding:4px 8px;">
+              ${secOpts.map(v => `<option value="${v}"${v === cfg.seconds ? ' selected' : ''}>${v} seconds</option>`).join('')}
+            </select>
+            <span style="color:var(--muted);">per ${cfg.layout === 'single' ? 'photo' : 'screen'}</span>
+          </div>
+          ${cfg.layout !== 'single' && photos.length ? `
+            <div class="tfo-ss-label">Photos that get a screen of their own</div>
+            <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap “Own page” on a photo to give it the whole screen; the others share screens as chosen above.</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
+              ${photos.map((p, i) => `
+                <div style="display:flex; flex-direction:column; gap:4px; align-items:center;">
+                  <div style="width:84px; height:64px; border-radius:6px; background:var(--panel-2) center/cover no-repeat;" data-diary-img="${esc(p.driveFileId)}"></div>
+                  <button class="btn tfo-ss-chip${p.solo ? ' tfo-ss-on' : ''}" data-ss-solo="${i}" style="font-size:11px; padding:3px 8px;">${p.solo ? '★ Own page' : 'Own page'}</button>
+                </div>`).join('')}
+            </div>` : ''}
+          <div style="font-size:12px; color:var(--muted); margin-bottom:14px;">
+            Plays as ${groups.length} screen${groups.length === 1 ? '' : 's'}: ${groups.map(g => `<span class="tfo-ss-screen">${g.map(p => index.get(p)).join(' + ')}</span>`).join(' ')}
+          </div>
+          <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;">
+            ${playPreview ? `<button class="btn" data-ss-preview>▶ Preview</button>` : ''}
+            <button class="btn" data-ss-cancel>Cancel</button>
+            <button class="btn" data-ss-save style="font-weight:700;">Save</button>
+          </div>
+        </div>`;
+      tripsyDiaryPaintPhotos(ov);
+      ov.querySelectorAll('[data-ss-layout]').forEach(b => b.onclick = () => { cfg = { ...cfg, layout: b.getAttribute('data-ss-layout') }; render(); });
+      ov.querySelectorAll('[data-ss-tr]').forEach(b => b.onclick = () => { cfg = { ...cfg, transition: b.getAttribute('data-ss-tr') }; render(); });
+      const sec = ov.querySelector('[data-ss-seconds]');
+      sec.onchange = () => { cfg = { ...cfg, seconds: Number(sec.value) }; render(); };
+      ov.querySelectorAll('[data-ss-solo]').forEach(b => b.onclick = () => {
+        const i = Number(b.getAttribute('data-ss-solo'));
+        photos = photos.map((p, k) => k === i ? { ...p, solo: !p.solo } : p);
+        render();
+      });
+      ov.querySelectorAll('[data-ss-cancel]').forEach(b => b.onclick = () => done(null));
+      ov.querySelector('[data-ss-save]').onclick = () => done({ slideshow: { ...cfg }, photos });
+      const pv = ov.querySelector('[data-ss-preview]');
+      if (pv) pv.onclick = () => playPreview(draft());
+    };
+    render();
+    ov.style.display = 'flex';
+    ov.onclick = e => { if (e.target === ov) done(null); };
+  });
+}
+
+// ---- Music ------------------------------------------------------------------------
+// One soundtrack per fly-over ("try to find different music that could be used of
+// different genres and offer that to the user," 2026-10-20). Found music comes from the
+// Internet Archive's Creative Commons netlabel and open-source audio collections, searched
+// by genre with no key; the owner can also use a music file of their own (uploaded to
+// Drive). Saved as record.music: {source:'archive', url, title, artist, license, page} or
+// {source:'drive', driveFileId, title}.
+// group 'style' = a kind of music; 'region' = music of a part of the world ("can you try
+// to find regional options as well - African, Asian, middle eastern, etc," 2026-10-20).
+// Terms are Internet Archive subject words; the picker shows the two groups as two rows.
+const TRIPSY_FLYOVER_MUSIC_GENRES = [
+  { key: 'cinematic', group: 'style', label: '🎬 Cinematic', terms: 'cinematic OR soundtrack OR orchestral OR epic' },
+  { key: 'acoustic', group: 'style', label: '🎸 Acoustic', terms: 'acoustic OR folk OR guitar' },
+  { key: 'jazz', group: 'style', label: '🎷 Jazz', terms: 'jazz OR swing OR lounge' },
+  { key: 'classical', group: 'style', label: '🎻 Classical', terms: 'classical OR piano OR strings' },
+  { key: 'electronic', group: 'style', label: '🎧 Electronic', terms: 'electronic OR chillout OR downtempo' },
+  { key: 'ambient', group: 'style', label: '🌙 Ambient', terms: 'ambient OR relaxing' },
+  { key: 'upbeat', group: 'style', label: '☀️ Upbeat', terms: 'happy OR upbeat OR pop OR funk' },
+  { key: 'african', group: 'region', label: '🌍 African', terms: 'african OR africa OR afrobeat OR highlife OR soukous OR mbira OR kora' },
+  { key: 'middleeastern', group: 'region', label: '🕌 Middle Eastern', terms: 'arabic OR "middle eastern" OR oud OR persian OR turkish' },
+  { key: 'indian', group: 'region', label: '🪷 Indian', terms: 'indian OR raga OR sitar OR tabla OR bollywood' },
+  { key: 'eastasian', group: 'region', label: '🏯 East Asian', terms: 'asian OR chinese OR japanese OR korean OR guzheng OR koto OR erhu' },
+  { key: 'southeastasian', group: 'region', label: '🌴 Southeast Asian', terms: 'gamelan OR thai OR indonesian OR vietnamese OR balinese' },
+  { key: 'latin', group: 'region', label: '💃 Latin', terms: 'latin OR salsa OR bossa OR tango OR samba OR cumbia' },
+  { key: 'caribbean', group: 'region', label: '🏝️ Caribbean', terms: 'reggae OR calypso OR caribbean OR ska OR soca' },
+  { key: 'mediterranean', group: 'region', label: '🫒 Mediterranean', terms: 'flamenco OR greek OR italian OR mediterranean OR fado' },
+  { key: 'celtic', group: 'region', label: '☘️ Celtic', terms: 'celtic OR irish OR scottish' },
+  { key: 'pacific', group: 'region', label: '🌺 Hawaiian & Pacific', terms: 'hawaiian OR polynesian OR ukulele' },
+];
+const TRIPSY_FLYOVER_MUSIC_GROUPS = [
+  { key: 'style', label: 'Styles' },
+  { key: 'region', label: 'Regions' },
+];
+const TRIPSY_FLYOVER_MUSIC_MAX_BYTES = 25 * 1024 * 1024;
+function tripsyFlyoverMusicSearchUrl(genreKey) {
+  const g = TRIPSY_FLYOVER_MUSIC_GENRES.find(x => x.key === genreKey) || TRIPSY_FLYOVER_MUSIC_GENRES[0];
+  const p = new URLSearchParams();
+  p.set('q', `mediatype:audio AND collection:(netlabels OR opensource_audio) AND subject:(${g.terms}) AND licenseurl:*creativecommons*`);
+  for (const f of ['identifier', 'title', 'creator', 'licenseurl']) p.append('fl[]', f);
+  p.append('sort[]', 'downloads desc');
+  p.set('rows', '16');
+  p.set('output', 'json');
+  return `https://archive.org/advancedsearch.php?${p.toString()}`;
+}
+// "123.4" or "2:03" (or "1:02:03") -> seconds; null when unreadable.
+function tripsyFlyoverParseLength(v) {
+  if (v == null || v === '') return null;
+  const s = String(v);
+  if (s.includes(':')) return s.split(':').reduce((a, n) => a * 60 + (Number(n) || 0), 0);
+  const n = Number(s);
+  return isFinite(n) ? n : null;
+}
+// One playable track from an archive.org item's metadata: an MP3, preferring one between
+// one and ten minutes (a background song, not a jingle or a two-hour mix). Pure (tested).
+function tripsyFlyoverPickArchiveTrack(meta, doc) {
+  const id = (meta && meta.metadata && meta.metadata.identifier) || (doc && doc.identifier);
+  const files = ((meta && meta.files) || []).filter(f => f && f.name && (/mp3/i.test(f.format || '') || /\.mp3$/i.test(f.name)));
+  if (!id || !files.length) return null;
+  const scored = files.map(f => ({ f, len: tripsyFlyoverParseLength(f.length) }));
+  const good = scored.filter(x => x.len != null && x.len >= 60 && x.len <= 600);
+  const pick = (good[0] || scored[0]).f;
+  const one = v => Array.isArray(v) ? v[0] : v;
+  const md = (meta && meta.metadata) || {};
+  return {
+    source: 'archive',
+    url: `https://archive.org/download/${encodeURIComponent(id)}/${pick.name.split('/').map(encodeURIComponent).join('/')}`,
+    title: String(pick.title || one(md.title) || (doc && one(doc.title)) || pick.name.replace(/\.mp3$/i, '')),
+    artist: String(pick.artist || pick.creator || one(md.creator) || (doc && one(doc.creator)) || ''),
+    seconds: tripsyFlyoverParseLength(pick.length),
+    license: String(one(md.licenseurl) || (doc && one(doc.licenseurl)) || ''),
+    page: `https://archive.org/details/${encodeURIComponent(id)}`,
+  };
+}
+async function tripsyFlyoverSearchMusic(genreKey) {
+  const res = await fetch(tripsyFlyoverMusicSearchUrl(genreKey));
+  if (!res.ok) throw new Error(`Music search failed (${res.status})`);
+  const docs = (((await res.json()) || {}).response || {}).docs || [];
+  const tracks = await Promise.all(docs.slice(0, 10).map(async doc => {
+    try {
+      const m = await fetch(`https://archive.org/metadata/${encodeURIComponent(doc.identifier)}`);
+      return m.ok ? tripsyFlyoverPickArchiveTrack(await m.json(), doc) : null;
+    } catch (e) { return null; }
+  }));
+  return tracks.filter(Boolean);
+}
+function tripsyFlyoverLicenseLabel(url) {
+  const m = String(url || '').match(/licenses\/([a-z-]+)/i);
+  if (m) return `CC ${m[1].toUpperCase()}`;
+  return /publicdomain/i.test(String(url || '')) ? 'Public domain' : (url ? 'Creative Commons' : '');
+}
+function tripsyFlyoverMusicLabel(music) {
+  if (!music) return '';
+  return `${music.title || 'Untitled'}${music.artist ? ` — ${music.artist}` : ''}`;
+}
+// Object URLs for the owner's own music files, by Drive id, so playback can start the
+// moment Play is pressed (iOS only lets audio start inside the tap itself).
+const tripsyFlyoverMusicUrlCache = new Map();
+function tripsyFlyoverMusicSrcNow(music) {
+  if (!music) return null;
+  if (music.source === 'archive') return music.url || null;
+  if (music.source === 'drive') return tripsyFlyoverMusicUrlCache.get(music.driveFileId) || null;
+  return null;
+}
+async function tripsyFlyoverPrefetchMusic(music) {
+  if (!music || music.source !== 'drive' || !music.driveFileId) return tripsyFlyoverMusicSrcNow(music);
+  if (tripsyFlyoverMusicUrlCache.has(music.driveFileId)) return tripsyFlyoverMusicUrlCache.get(music.driveFileId);
+  try {
+    const url = URL.createObjectURL(await downloadDriveFileBlob(music.driveFileId));
+    tripsyFlyoverMusicUrlCache.set(music.driveFileId, url);
+    return url;
+  } catch (e) { console.error('fly-over music download failed:', e); return null; }
+}
+// Resolves the chosen music, null for "No music", or undefined when closed unchanged.
+function tripsyFlyoverMusicPicker(current) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-flyover-music-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-music-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483065';
+    const audio = new Audio();
+    let playingUrl = null;
+    let genre = null;
+    let tracks = [];
+    let state = 'idle'; // idle | loading | done | error
+    const stopAudio = () => { try { audio.pause(); } catch (e) {} playingUrl = null; };
+    const done = v => { stopAudio(); audio.src = ''; ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
+    const render = () => {
+      ov.innerHTML = `
+        <div class="tw-modal-paper tw-wide" style="max-width:640px;">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+            <h2 style="margin:0; font-size:17px; flex:1;">🎵 Music for the fly-over</h2>
+            <button class="tripsy-close-x" data-mu-close aria-label="Close">✕</button>
+          </div>
+          <div style="font-size:13px; color:var(--muted); margin-bottom:10px;">
+            ${current ? `Now: <strong style="color:var(--text);">${esc(tripsyFlyoverMusicLabel(current))}</strong>. ` : ''}Pick a genre to hear free Creative Commons music from the Internet Archive, or use a song of your own.
+          </div>
+          ${TRIPSY_FLYOVER_MUSIC_GROUPS.map(gr => `
+            <div class="tfo-ss-label" style="margin:0 0 4px;">${esc(gr.label)}</div>
+            <div data-mu-group="${gr.key}" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px;">
+              ${TRIPSY_FLYOVER_MUSIC_GENRES.filter(g => g.group === gr.key).map(g => `<button class="btn tfo-ss-chip${g.key === genre ? ' tfo-ss-on' : ''}" data-mu-genre="${g.key}">${esc(g.label)}</button>`).join('')}
+            </div>`).join('')}
+          <div data-mu-results style="margin-bottom:12px;">
+            ${state === 'loading' ? `<div style="color:var(--muted); font-size:13px;">Finding music…</div>` : ''}
+            ${state === 'error' ? `<div style="color:#E04B3A; font-size:13px;">Couldn’t reach the music library — check the connection, or use your own song.</div>` : ''}
+            ${state === 'done' && !tracks.length ? `<div style="color:var(--muted); font-size:13px;">Nothing found for that genre — try another.</div>` : ''}
+            ${tracks.map((t, i) => `
+              <div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid var(--line);">
+                <button class="btn" data-mu-play="${i}" style="width:38px; padding:4px 0;" aria-label="Listen">${playingUrl === t.url ? '❚❚' : '▶'}</button>
+                <div style="flex:1; min-width:0;">
+                  <div style="font-size:13px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(t.title)}</div>
+                  <div style="font-size:11px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc([t.artist, t.seconds ? `${Math.floor(t.seconds / 60)}:${String(Math.round(t.seconds % 60)).padStart(2, '0')}` : '', tripsyFlyoverLicenseLabel(t.license)].filter(Boolean).join(' · '))} · <a href="${esc(t.page)}" target="_blank" rel="noopener" style="color:inherit; text-decoration:underline;">source</a></div>
+                </div>
+                <button class="btn" data-mu-use="${i}" style="font-size:12px; font-weight:700;">Use</button>
+              </div>`).join('')}
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; align-items:center;">
+            <span data-mu-status style="font-size:12px; color:var(--muted); flex:1;"></span>
+            <input type="file" accept="audio/*" data-mu-file style="display:none;">
+            <button class="btn" data-mu-own>＋ Use my own song</button>
+            ${current ? `<button class="btn" data-mu-none>No music</button>` : ''}
+          </div>
+        </div>`;
+      ov.querySelector('[data-mu-close]').onclick = () => done(undefined);
+      ov.querySelectorAll('[data-mu-genre]').forEach(b => b.onclick = async () => {
+        genre = b.getAttribute('data-mu-genre');
+        state = 'loading'; tracks = []; stopAudio(); render();
+        const asked = genre;
+        // A newer genre tap, or closing the picker, makes this answer stale.
+        const stale = () => genre !== asked || ov.style.display === 'none';
+        try {
+          const found = await tripsyFlyoverSearchMusic(asked);
+          if (stale()) return;
+          tracks = found; state = 'done';
+        } catch (e) {
+          console.error('fly-over music search failed:', e);
+          if (stale()) return;
+          state = 'error';
+        }
+        render();
+      });
+      ov.querySelectorAll('[data-mu-play]').forEach(b => b.onclick = () => {
+        const t = tracks[Number(b.getAttribute('data-mu-play'))];
+        if (playingUrl === t.url) { stopAudio(); render(); return; }
+        audio.src = t.url;
+        playingUrl = t.url;
+        audio.play().catch(() => {
+          playingUrl = null;
+          render();
+          const st = ov.querySelector('[data-mu-status]');
+          if (st) st.textContent = 'That track won’t play here — try another.';
+        });
+        render();
+      });
+      ov.querySelectorAll('[data-mu-use]').forEach(b => b.onclick = () => {
+        const t = tracks[Number(b.getAttribute('data-mu-use'))];
+        done({ source: 'archive', url: t.url, title: t.title, artist: t.artist, license: t.license, page: t.page });
+      });
+      const none = ov.querySelector('[data-mu-none]');
+      if (none) none.onclick = () => done(null);
+      const file = ov.querySelector('[data-mu-file]');
+      ov.querySelector('[data-mu-own]').onclick = () => { file.value = ''; file.click(); };
+      file.onchange = async () => {
+        const f = file.files && file.files[0];
+        if (!f) return;
+        const st = ov.querySelector('[data-mu-status]');
+        if (f.size > TRIPSY_FLYOVER_MUSIC_MAX_BYTES) { st.textContent = 'That file is over 25 MB — pick a shorter song.'; return; }
+        st.textContent = 'Uploading…';
+        try {
+          const driveFileId = await uploadBlobToDrive(f, `flyover-music-${Date.now()}`, f.type || 'audio/mpeg');
+          tripsyFlyoverMusicUrlCache.set(driveFileId, URL.createObjectURL(f));
+          done({ source: 'drive', driveFileId, title: f.name.replace(/\.[^.]+$/, '') });
+        } catch (e) {
+          console.error('fly-over music upload failed:', e);
+          st.textContent = 'Couldn’t upload that song — try again.';
+        }
+      };
+    };
+    render();
+    ov.style.display = 'flex';
+    ov.onclick = e => { if (e.target === ov) done(undefined); };
   });
 }
 
@@ -18176,9 +18547,36 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   const preview = !!opts.previewStopId;
   if (preview) stops = stops.filter(s => s.id === opts.previewStopId);
   if (!stops.length) return;
+  // Music starts HERE, before the first await: iOS only lets audio begin inside the tap
+  // that started playback. Music that still can't start (a song of the owner's not yet
+  // downloaded, or a browser that refuses) gets a tap-to-play button in the top bar.
+  let musicBtnEl = null;
+  let musicMuted = false;
+  let musicEnded = false;
+  const music = (record && record.music) || null;
+  const audio = music ? new Audio() : null;
+  const updateMusicBtn = () => {
+    if (!musicBtnEl || !audio) return;
+    musicBtnEl.textContent = (audio.paused || musicMuted) ? '🔇' : '🔊';
+    musicBtnEl.title = (audio.paused || musicMuted) ? 'Play music' : 'Mute music';
+  };
+  const startMusic = () => {
+    if (!audio || !audio.src || musicMuted || musicEnded) return;
+    audio.volume = 0.7;
+    const p = audio.play();
+    if (p && p.catch) p.catch(() => updateMusicBtn());
+    if (p && p.then) p.then(updateMusicBtn);
+  };
+  if (audio) {
+    audio.loop = true;
+    const src = tripsyFlyoverMusicSrcNow(music);
+    if (src) { audio.src = src; startMusic(); }
+    else tripsyFlyoverPrefetchMusic(music).then(u => { if (u && !musicEnded) { audio.src = u; startMusic(); } });
+  }
+  const stopMusic = () => { musicEnded = true; if (audio) { try { audio.pause(); } catch (e) {} audio.removeAttribute('src'); } };
   let L;
   try { L = await tripsyFlyoverLoadLeaflet(); }
-  catch (e) { toast('Couldn’t load the map — check the connection and try again.', 'error'); return; }
+  catch (e) { stopMusic(); toast('Couldn’t load the map — check the connection and try again.', 'error'); return; }
   // Start every photo downloading now (memoized), so each is ready when its stop arrives.
   for (const s of stops) for (const p of (s.photos || [])) tripsyPlacePhotoDisplayUrl(p.driveFileId).catch(() => {});
 
@@ -18190,6 +18588,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     <div class="tfo-map"></div>
     <div class="tfo-top">
       <div class="tfo-title">${esc(trip.name || '')}</div>
+      ${music ? `<button class="tfo-btn" data-tfo-music aria-label="Music">🔊</button>` : ''}
       <button class="tfo-btn" data-tfo-pause aria-label="Pause">❚❚</button>
       <button class="tfo-btn" data-tfo-replay aria-label="Replay">↺</button>
       <button class="tfo-btn tfo-close" data-tfo-close aria-label="Close">✕</button>
@@ -18204,15 +18603,27 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   const pauseBtn = ov.querySelector('[data-tfo-pause]');
 
   let run = { cancelled: false, paused: false };
+  musicBtnEl = ov.querySelector('[data-tfo-music]');
+  if (musicBtnEl) musicBtnEl.onclick = () => {
+    if (audio.paused || musicMuted) { musicMuted = false; if (!run.paused) startMusic(); else updateMusicBtn(); }
+    else { musicMuted = true; audio.pause(); updateMusicBtn(); }
+  };
+  updateMusicBtn();
   const close = () => {
     run.cancelled = true;
+    stopMusic();
     document.removeEventListener('keydown', onKey);
     try { map.remove(); } catch (e) { /* already gone */ }
     ov.remove();
   };
   const onKey = e => { if (e.key === 'Escape') close(); else if (e.key === ' ') { e.preventDefault(); togglePause(); } };
   document.addEventListener('keydown', onKey);
-  const togglePause = () => { run.paused = !run.paused; pauseBtn.textContent = run.paused ? '▶' : '❚❚'; ov.classList.toggle('tfo-paused', run.paused); };
+  const togglePause = () => {
+    run.paused = !run.paused;
+    pauseBtn.textContent = run.paused ? '▶' : '❚❚';
+    ov.classList.toggle('tfo-paused', run.paused);
+    if (audio) { if (run.paused) audio.pause(); else startMusic(); updateMusicBtn(); }
+  };
   pauseBtn.onclick = togglePause;
   ov.querySelector('[data-tfo-close]').onclick = close;
   ov.querySelector('[data-tfo-replay]').onclick = () => {
@@ -18220,6 +18631,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     run = { cancelled: false, paused: false };
     pauseBtn.textContent = '❚❚';
     ov.classList.remove('tfo-paused');
+    if (audio) { try { audio.currentTime = 0; } catch (e) {} startMusic(); }
     play(run);
   };
 
@@ -18346,7 +18758,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     if (!photos.length) { if (!(await wait(r, 1800))) return false; }
     const cfg = tripsyFlyoverSlideshowConfig(s);
     for (const group of tripsyFlyoverPhotoGroups(photos, cfg.layout)) {
-      if (!(await showGroup(r, group.map(p => p.driveFileId), cfg))) return false;
+      if (!(await showGroup(r, group.map(p => p.driveFileId), { ...cfg, layout: tripsyFlyoverGroupLayout(group, cfg.layout) }))) return false;
     }
     return true;
   };
@@ -18376,6 +18788,13 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     }
     if (!(await untilMoveEnd(r, () => map.flyToBounds(all, { padding: [70, 70], duration: 1.6 }), 2800))) return;
     showCard(trip.name || 'Trip', 'The end');
+    // Let the music fade out under the closing card.
+    if (audio && !audio.paused) {
+      const v0 = audio.volume;
+      for (let i = 1; i <= 25 && !r.cancelled; i++) { await wait(r, 100); audio.volume = Math.max(0, v0 * (1 - i / 25)); }
+      if (!r.cancelled) audio.pause();
+      updateMusicBtn();
+    }
   };
   play(run);
 }

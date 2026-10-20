@@ -312,9 +312,9 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   for (const k of ['slide', 'zoom', 'none']) assert(html.includes(`.tfo-group[data-tr="${k}"]`), `the ${k} transition has its CSS`);
   for (const k of ['pair', 'grid', 'collage']) assert(html.includes(`.tfo-group[data-layout="${k}"]`), `the ${k} layout has its CSS`);
   const setup = extractFn('showTripsyFlyover');
-  assert(/data-flyover-layout/.test(setup) && /data-flyover-transition/.test(setup) && /data-flyover-seconds/.test(setup) && /data-flyover-preview/.test(setup),
-    'the setup page offers layout, transition, seconds and a Preview per destination');
-  assert(/updateStop\(id, \{ slideshow: \{ \.\.\.tripsyFlyoverSlideshowConfig\(stop\(\)\), \.\.\.fields \} \}\);/.test(setup), 'a change saves onto that one stop');
+  assert(/data-flyover-slideshow/.test(setup) && /data-flyover-preview/.test(setup) && /tripsyFlyoverSlideshowSummary\(s\)/.test(setup),
+    'each destination shows how its photos play, with Slideshow options and Preview buttons');
+  assert(/updateStop\(id, \{ slideshow: r\.slideshow, photos: r\.photos \}\);/.test(setup), 'Save in the options box writes onto that one stop');
 }
 
 // ---- map tiles: keyless, with a fallback (2026-10-20: "I get a message saying api key
@@ -342,4 +342,87 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   for (let i = 0; i < 10; i++) ok.fire('tileerror');
   assert(added.length === 1, 'once tiles have loaded, later stray errors never swap the map out');
   assert(/tripsyFlyoverAddTiles\(L, map\);/.test(extractFn('playTripsyFlyover')), 'the player adds its tiles through the fallback helper');
+}
+
+// ---- options when photos are added: "some may be one per page and others several in a
+// page, and how to transition" (2026-10-20) ----
+eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MIN'), constLine('TRIPSY_FLYOVER_SECONDS_MAX'),
+  (html.match(/const TRIPSY_FLYOVER_LAYOUTS = \[[\s\S]*?\];/) || [''])[0],
+  (html.match(/const TRIPSY_FLYOVER_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0],
+  extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverPhotoGroups'),
+  extractFn('tripsyFlyoverGroupLayout'), extractFn('tripsyFlyoverSlideshowSummary')].join('\n'));
+{
+  const P = (n, solo) => ({ driveFileId: 'p' + n, solo: !!solo });
+  const ph = [P(1), P(2, true), P(3), P(4), P(5), P(6, true), P(7)];
+  const ids = l => tripsyFlyoverPhotoGroups(ph, l).map(g => g.map(p => p.driveFileId.slice(1)).join('')).join('|');
+  assert(ids('grid') === '1|2|345|6|7', 'THE ASK: an "Own page" photo gets a screen to itself; the others share screens in order -> ' + ids('grid'));
+  assert(ids('pair') === '1|2|34|5|6|7', 'pairs break around an own-page photo too -> ' + ids('pair'));
+  assert(ids('single') === '1|2|3|4|5|6|7', 'one at a time is unaffected');
+  assert(tripsyFlyoverGroupLayout([P(1)], 'grid') === 'single' && tripsyFlyoverGroupLayout([P(1), P(2)], 'grid') === 'pair'
+    && tripsyFlyoverGroupLayout([P(1), P(2), P(3)], 'grid') === 'grid' && tripsyFlyoverGroupLayout([P(1), P(2)], 'collage') === 'collage',
+    'a lone photo fills the screen (never one cell of a grid), and two in a grid show as a pair');
+  assert(/Grid of four · Fade · 3\.2 s per screen · 5 screens/.test(tripsyFlyoverSlideshowSummary({ slideshow: { layout: 'grid' }, photos: ph })),
+    'the setup card says how the photos will play -> ' + tripsyFlyoverSlideshowSummary({ slideshow: { layout: 'grid' }, photos: ph }));
+  const player = extractFn('playTripsyFlyover');
+  assert(/layout: tripsyFlyoverGroupLayout\(group, cfg\.layout\)/.test(player), 'the player draws each screen with its own layout');
+  const dlg = extractFn('tripsyFlyoverSlideshowDialog');
+  assert(/data-ss-layout/.test(dlg) && /data-ss-tr/.test(dlg) && /data-ss-seconds/.test(dlg) && /data-ss-solo/.test(dlg) && /data-ss-preview/.test(dlg),
+    'the options box offers layout pictures, transitions, timing, per-photo Own page and a Preview');
+  assert(/done\(\{ slideshow: \{ \.\.\.cfg \}, photos \}\)/.test(dlg) && /data-ss-cancel[\s\S]*done\(null\)/.test(dlg), 'Save returns the choices, Cancel changes nothing');
+  const setup = extractFn('showTripsyFlyover');
+  assert(/if \(!closed\) \{ render\(\); openSlideshowOptions\(id, `\$\{done\} photo/.test(setup), 'THE ASK: adding your own photos opens the options box straight away');
+  assert(/added => \{\s*if \(added && !closed\) openSlideshowOptions\(id,/.test(setup), 'and so does closing the suggested photos after picking some');
+  assert(/close = \(\) => \{[^}]*if \(onClosed\) onClosed\(added\);/.test(extractFn('tripsyFlyoverSuggestedPhotos')), 'the suggestions grid reports how many it added');
+}
+
+// ---- music by genre ----
+eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[0].replace(/^const /, 'var '),
+  extractFn('tripsyFlyoverMusicSearchUrl'), extractFn('tripsyFlyoverParseLength'), extractFn('tripsyFlyoverPickArchiveTrack'),
+  extractFn('tripsyFlyoverLicenseLabel'), extractFn('tripsyFlyoverMusicLabel')].join('\n'));
+{
+  assert(TRIPSY_FLYOVER_MUSIC_GENRES.length >= 6 && new Set(TRIPSY_FLYOVER_MUSIC_GENRES.map(g => g.key)).size === TRIPSY_FLYOVER_MUSIC_GENRES.length,
+    'THE ASK: music is offered across several genres');
+  const regions = TRIPSY_FLYOVER_MUSIC_GENRES.filter(g => g.group === 'region').map(g => g.key);
+  assert(['african', 'middleeastern', 'eastasian', 'indian', 'latin'].every(k => regions.includes(k)),
+    'THE ASK: regional music too — African, Middle Eastern, Asian and more -> ' + regions.join(','));
+  assert(TRIPSY_FLYOVER_MUSIC_GENRES.every(g => g.group === 'style' || g.group === 'region'), 'every genre is a style or a region');
+  for (const k of regions) {
+    const q = new URL(tripsyFlyoverMusicSearchUrl(k)).searchParams.get('q');
+    const g = TRIPSY_FLYOVER_MUSIC_GENRES.find(x => x.key === k);
+    assert(q.includes(`subject:(${g.terms})`), 'each region searches its own subject words: ' + k);
+  }
+  const muPicker = extractFn('tripsyFlyoverMusicPicker');
+  assert(/TRIPSY_FLYOVER_MUSIC_GROUPS\.map/.test(muPicker) && /g\.group === gr\.key/.test(muPicker) && /data-mu-group/.test(muPicker),
+    'the picker shows Styles and Regions as two rows');
+  assert(/key: 'style'[^}]*Styles[\s\S]*key: 'region'[^}]*Regions/.test(html), 'the two rows are labelled Styles and Regions');
+  const u = new URL(tripsyFlyoverMusicSearchUrl('jazz'));
+  assert(u.host === 'archive.org' && /subject:\(jazz/.test(u.searchParams.get('q')) && /licenseurl:\*creativecommons\*/.test(u.searchParams.get('q'))
+    && u.searchParams.getAll('fl[]').includes('identifier') && u.searchParams.get('output') === 'json',
+    'the search asks the Internet Archive for Creative Commons audio in that genre, as JSON');
+  assert(tripsyFlyoverParseLength('2:03') === 123 && tripsyFlyoverParseLength('95.5') === 95.5 && tripsyFlyoverParseLength('') === null, 'track lengths read both shapes');
+  const meta = { metadata: { identifier: 'some-album', title: 'Album', creator: 'Band', licenseurl: 'https://creativecommons.org/licenses/by/4.0/' },
+    files: [
+      { name: 'cover.jpg', format: 'JPEG' },
+      { name: '01 intro.mp3', format: 'VBR MP3', length: '0:20', title: 'Intro' },
+      { name: '02 main theme.mp3', format: 'VBR MP3', length: '3:45', title: 'Main Theme' },
+      { name: 'mix.mp3', format: 'VBR MP3', length: '7200' },
+    ] };
+  const t = tripsyFlyoverPickArchiveTrack(meta, { identifier: 'some-album' });
+  assert(t && t.title === 'Main Theme' && t.seconds === 225, 'a song of one to ten minutes is picked over a jingle or a two-hour mix -> ' + (t && t.title));
+  assert(t.url === 'https://archive.org/download/some-album/02%20main%20theme.mp3' && t.artist === 'Band' && t.page === 'https://archive.org/details/some-album',
+    'with a streamable URL, the artist, and a link to its source page');
+  assert(tripsyFlyoverLicenseLabel(t.license) === 'CC BY' && tripsyFlyoverMusicLabel(t) === 'Main Theme — Band', 'its license and label read cleanly');
+  assert(tripsyFlyoverPickArchiveTrack({ metadata: { identifier: 'x' }, files: [{ name: 'a.flac', format: 'Flac' }] }, null) === null, 'an item with no MP3 is skipped');
+  const picker = extractFn('tripsyFlyoverMusicPicker');
+  assert(/data-mu-genre/.test(picker) && /data-mu-play/.test(picker) && /data-mu-use/.test(picker) && /data-mu-own/.test(picker),
+    'the picker offers genres, a listen button and Use per track, and your own song');
+  assert(/f\.size > TRIPSY_FLYOVER_MUSIC_MAX_BYTES/.test(picker), 'an oversized song file is refused before upload');
+  const player = extractFn('playTripsyFlyover');
+  const firstAwait = player.indexOf('await ');
+  assert(player.indexOf('const audio = music ? new Audio() : null;') > 0 && player.indexOf('const audio = music ? new Audio() : null;') < firstAwait
+    && player.indexOf('startMusic();') < firstAwait, 'music starts before the first await, inside the Play tap (iOS only allows that)');
+  assert(/data-tfo-music/.test(player) && /musicMuted = true; audio\.pause\(\)/.test(player), 'a music button mutes, and plays when the browser blocked autoplay');
+  assert(/if \(run\.paused\) audio\.pause\(\); else startMusic\(\);/.test(player) && /run\.cancelled = true;\s*stopMusic\(\);/.test(player), 'pause pauses the music; closing stops it');
+  assert(/if \(prevRecord && prevRecord\.music\) rec\.music = prevRecord\.music;/.test(extractFn('tripsyFlyoverBuild')), 'a rebuild keeps the chosen music');
+  assert(/data-flyover-music/.test(extractFn('showTripsyFlyover')), 'the setup page shows the music with Choose/Change');
 }
