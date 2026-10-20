@@ -23,9 +23,23 @@ const rule = sel => { const m = css.match(new RegExp(sel.replace(/[.*+?^${}()|[\
   assert(/background:\s*var\(--panel\)/.test(head), 'it is opaque, so the days scroll UNDER it rather than through it');
   const z = parseInt((head.match(/z-index:\s*(\d+)/) || [])[1] || '0', 10);
   assert(z > 2 && z < 100, `its z-index clears the day bars (z 2) and connectors but stays below every fixed menu/modal (got ${z})`);
-  assert(/margin:\s*-20px -22px 0/.test(head) && /padding:\s*20px 22px/.test(head), 'its negative margins re-cover the card padding (20px 22px) so nothing peeks above it');
+  assert(/margin:\s*-22px -24px 0/.test(head) && /padding:\s*20px 22px/.test(head), 'its negative margins reach the card\'s OUTER edge (20px 22px padding + 2px border) so nothing peeks above it');
+  assert(/border:\s*2px solid var\(--muted\);\s*border-bottom:\s*none;\s*border-radius:\s*10px 10px 0 0/.test(head),
+    'THE ASK: the header carries the card\'s 2px top/side border, rounded like the card while in place');
+  assert(/border-radius:\s*0/.test(rule('.tripsy-trip-head.tripsy-trip-head--stuck')), 'and SQUARE corners only while PINNED (a rounded corner lets the days show through the sliver outside the arc)');
+  // The pinned decision: ratio < 1 under the -1px rootMargin AND the top edge at/above 0 --
+  // a header merely entering from the bottom of the window is not pinned.
+  const isStuck = new Function(fnSource('tripsyStickyHeadIsStuck') + '; return tripsyStickyHeadIsStuck;')();
+  assert(isStuck({ intersectionRatio: 0.98, boundingClientRect: { top: 0 } }) === true, 'pinned at top:0 -> stuck');
+  assert(isStuck({ intersectionRatio: 1, boundingClientRect: { top: 240 } }) === false, 'fully visible in place -> not stuck');
+  assert(isStuck({ intersectionRatio: 0.5, boundingClientRect: { top: 650 } }) === false, 'half off the BOTTOM of the window -> not stuck');
+  const watch = fnSource('tripsyWatchStickyTripHeads');
+  assert(/rootMargin: '-1px 0px 0px 0px'/.test(watch) && /threshold: \[1\]/.test(watch) && /classList\.add\('tripsy-trip-head--stuck'\)/.test(watch),
+    'the observer uses the -1px trick, and a browser without IntersectionObserver falls back to always-square (the safe side)');
+  assert(/tripsyWatchStickyTripHeads\(container\);/.test(fnSource('renderTripsyEventsListImpl')), 'armed on every My Trips render');
   const cardPad = (rule('.card').match(/padding:\s*([^;]+);/) || [])[1];
-  assert(cardPad === '20px 22px', `sanity: .card padding is still 20px 22px (got ${cardPad}) -- the header margins mirror it`);
+  const cardBorder = (rule('.card').match(/border:\s*([^;]+);/) || [])[1];
+  assert(cardPad === '20px 22px' && cardBorder === '2px solid var(--muted)', `sanity: .card is still padding 20px 22px / border 2px (got ${cardPad} / ${cardBorder}) -- the header margins and border mirror them`);
   assert(/overflow-x:\s*auto/.test(rule('.card')) && /overflow:\s*visible/.test(rule('.card.tripsy-trip-card')),
     'THE TRAP: .card is a scrollport (overflow-x:auto), inside which sticky never moves with the page -- the trip card restores overflow:visible');
   assert(/<div class="card tripsy-trip-card" style="margin-bottom:14px;">\s*<div class="tripsy-trip-head" data-tripsy-header-toggle=/.test(html),

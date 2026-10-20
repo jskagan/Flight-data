@@ -1145,7 +1145,18 @@ step 4; git history has it if ever needed.
   itself scrolls (the rail is in normal flow), so `.tripsy-trip-head` (the
   `data-tripsy-header-toggle` row) is `position:sticky; top:0` against the window, opaque
   (`var(--panel)`), z 5 (above the day bars' z 2 and the connectors, far below every fixed
-  menu/modal), with negative margins re-covering the card's `20px 22px` padding. **The trap**:
+  menu/modal), with negative margins reaching the card's OUTER edge (`20px 22px` padding + the
+  2px border) and carrying the card's own `2px solid var(--muted)` outline on its top and sides
+  ("As part of the frozen header, include the white top border and do not show any portion
+  of the scrolled dates above the header," same day). Its corners are ROUNDED like the card
+  in place and SQUARE only while pinned ("Is it possible to keep rounded corners at the top?",
+  same day — a rounded corner leaves a sliver outside the arc where the day bars scrolling
+  beneath show through, which only happens once pinned): `tripsyWatchStickyTripHeads(container)`,
+  armed at the end of every My Trips render, toggles `.tripsy-trip-head--stuck` from one
+  `IntersectionObserver` (`threshold:[1]`, `rootMargin:'-1px 0px 0px 0px'` — a header exactly at
+  `top:0` reports ratio < 1) through the pure `tripsyStickyHeadIsStuck(entry)` (ratio < 1 AND
+  top edge ≤ 0, so a header entering from the window's bottom is not "pinned"); no
+  `IntersectionObserver` → always square, the safe side. **The trap**:
   `.card` has `overflow-x:auto`, which makes every card its own scrollport inside which a
   sticky child never moves with the page — so the trip card (`.card.tripsy-trip-card`)
   restores `overflow:visible` (its timeline is never wider than the card; body's

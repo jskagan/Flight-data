@@ -414,10 +414,23 @@
      connectors while staying far below every fixed menu/modal layer. Sticky is bounded by
      the card, so each card's header gives way to the next card's. */
   .card.tripsy-trip-card { overflow: visible; }
+  /* The header carries the card's own 2px outline on its top and sides ("As part of the
+     frozen header, include the white top border and do not show any portion of the scrolled
+     dates above the header," same day): its negative margins reach the card's OUTER edge
+     (22px padding + 2px border) and its own border overlays the card's exactly, so pinned, the
+     outline rides with the header and the strip from the window's top edge down is opaque.
+     Corners: ROUNDED like the card while the header sits in place, SQUARE only while pinned
+     ("Is it possible to keep rounded corners at the top?", same day) -- a rounded corner
+     leaves a sliver outside the arc where the day bars scrolling beneath show through, and
+     that only happens once something is scrolling beneath. tripsyWatchStickyTripHeads toggles
+     .tripsy-trip-head--stuck from an IntersectionObserver (no observer support: square, the
+     safe side). */
   .tripsy-trip-head {
     position: sticky; top: 0; z-index: 5; background: var(--panel);
-    margin: -20px -22px 0; padding: 20px 22px 10px; border-radius: 10px 10px 0 0;
+    margin: -22px -24px 0; padding: 20px 22px 10px;
+    border: 2px solid var(--muted); border-bottom: none; border-radius: 10px 10px 0 0;
   }
+  .tripsy-trip-head.tripsy-trip-head--stuck { border-radius: 0; }
 
   /* ---- Upload dropzone ---- */
   .dropzone {
@@ -35605,6 +35618,25 @@ function tripsyStickyTripHeaderHeight(el) {
   const head = card && card.querySelector('.tripsy-trip-head');
   return head ? head.getBoundingClientRect().height : 0;
 }
+// Marks each trip card header .tripsy-trip-head--stuck while it is PINNED at the top of the
+// window (its corners go square so no day bar shows through the sliver outside a rounded
+// corner), and clears it when it scrolls back into place. One observer per page, re-armed on
+// every My Trips render; rootMargin -1px makes a header sitting exactly at top:0 report
+// ratio < 1, and the top-edge test keeps a header merely entering from the bottom of the
+// window from counting as pinned. Pure decision in tripsyStickyHeadIsStuck for the test.
+function tripsyStickyHeadIsStuck(entry) {
+  return entry.intersectionRatio < 1 && entry.boundingClientRect.top <= 0;
+}
+let _tripsyStickyHeadObserver = null;
+function tripsyWatchStickyTripHeads(container) {
+  const heads = [...(container || document).querySelectorAll('.tripsy-trip-head')];
+  if (!('IntersectionObserver' in window)) { heads.forEach(h => h.classList.add('tripsy-trip-head--stuck')); return; }
+  if (_tripsyStickyHeadObserver) _tripsyStickyHeadObserver.disconnect();
+  _tripsyStickyHeadObserver = new IntersectionObserver(entries => {
+    for (const e of entries) e.target.classList.toggle('tripsy-trip-head--stuck', tripsyStickyHeadIsStuck(e));
+  }, { threshold: [1], rootMargin: '-1px 0px 0px 0px' });
+  heads.forEach(h => _tripsyStickyHeadObserver.observe(h));
+}
 function tripsyScrollMyTripsToToday() {
   if (_tripsyMyTripsScrolledToToday) return;
   const selector = tripsyMyTripsTodaySelector();
@@ -36636,6 +36668,7 @@ async function renderTripsyEventsListImpl() {
       toggleTripsyCollapse(el.dataset.tripsyHeaderToggle);
     });
   });
+  tripsyWatchStickyTripHeads(container); // square the pinned header's corners, round them again in place
   container.querySelectorAll('[data-tripsy-year-toggle]').forEach(el => {
     el.addEventListener('click', () => {
       const y = el.dataset.tripsyYearToggle;
