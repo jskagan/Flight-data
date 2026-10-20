@@ -3530,6 +3530,21 @@ WebView's support for recording is unproven.
   - **Labels:** Places' locality REPLACES the address-parsed label. "LAX" becomes
     "Los Angeles", and a ryokan address that parses only to its prefecture ("Oita") becomes
     its town.
+  - **Names are always ENGLISH** ("Use the names of all destinations in the flyover in
+    English," 2026-10-20). `tripsyFlyoverGeocode` asks Places for `languageCode: 'en'`
+    (without it Fukuoka came back as 福岡市), and the Open-Meteo fallback's own name (already
+    `language=en`) is used instead of being discarded. Even in English, Places keeps a
+    Latin-script city's LOCAL spelling in address components (München, Wien, Roma, Köln —
+    verified against the live API), so `tripsyFlyoverEnglishCityName` looks the city itself
+    up (`includedType: 'locality'`, English) and takes its display name (Munich, Vienna, Rome,
+    Cologne, Seville) when that city is within 60 km of the stop; otherwise, or on any
+    failure, the address's name stands. Memoized per session. A build stamps every stop
+    `labelLang: 'en'`; **a fly-over saved before this is re-named once** by
+    `tripsyFlyoverEnglishLabels` — owner-only, behind the setup page on open (only the names
+    are merged back, so anything changed meanwhile is kept), and after View has STARTED
+    playback (so music still starts inside the tap). A name the owner typed (`labelEdited`)
+    or a place they set by hand (`manualPlace`) is never replaced; a failed lookup stays
+    unstamped and is retried next time.
   - **Merging:** consecutive stays in one city (same label, or under
     `TRIPSY_FLYOVER_MERGE_KM` apart) merge AFTER geocoding (`tripsyFlyoverMergeNearby`).
     The origin and return are never merged into a stay.
@@ -3581,8 +3596,15 @@ WebView's support for recording is unproven.
   `tripsyConfirmDialog`.
   - **Map:** Leaflet 1.9.4 loads on demand from cdnjs (`tripsyFlyoverLoadLeaflet`, a
     memoized promise that is cleared on failure so a retry works).
-  - **Tiles** come from `TRIPSY_FLYOVER_TILE_SOURCES`: OpenStreetMap's own tiles first, Esri
-    World Street Map second, both keyless, with attribution shown.
+  - **Tiles** come from `TRIPSY_FLYOVER_TILE_SOURCES`: **Esri World Street Map first,
+    OpenStreetMap's own tiles second**, both keyless, with attribution shown.
+    - **Esri is first for its ENGLISH labels** ("Can you show the names of all locations on
+      the fly-over map in English?", 2026-10-20). OpenStreetMap's tiles label every place in
+      its local language and script, a pre-rendered tile's labels can't be changed by the
+      app, and no keyless OpenStreetMap server renders English (the English OSM services need
+      a key). OpenStreetMap stays as the fallback: local labels beat a blank map. The sandbox
+      can't reach either tile host, so the English labels are the providers' documented
+      behaviour, not something seen here.
     - **Never CARTO** ("I get a message saying api key required when I try to play the trip,"
       2026-10-20). Its free basemap began drawing "API key required" onto every tile. That
       arrives as a normal 200 image, so the browser cannot detect it, and it had to be
@@ -3591,8 +3613,8 @@ WebView's support for recording is unproven.
       `TRIPSY_FLYOVER_TILE_FAIL_LIMIT` tile errors with no tile yet loaded, which is how a
       refused OpenStreetMap client answers. Once any tile has loaded it never swaps, and the
       last source is kept rather than blanking the map.
-    - **Verified in Chromium** with OSM forced to 403: the player moved to Esri and the
-      attribution followed.
+    - **Verified in Chromium** (when OSM was first) with the first source forced to 403: the
+      player moved to the second and the attribution followed.
   - **Sequence:** overview of the whole route → the origin → for each leg, frame the leg,
     animate the vehicle → land with a dot, a city card and the photo slideshow
     (`TRIPSY_FLYOVER_PHOTO_MS` per photo).

@@ -184,7 +184,7 @@ assert(/completedAt: new Date\(\)\.toISOString\(\)/.test(setupSrc) && /renderTri
 assert(/if \(prevRecord && prevRecord\.completedAt\) rec\.completedAt = prevRecord\.completedAt;/.test(extractFn('tripsyFlyoverBuild')), 'a rebuild from Edit keeps the fly-over completed');
 assert(/tripsyFlyoverMenuItems\(isOwner, Store\.getTripsyFlyover\(trip\.key\)\)\.map\(it => menuListButtonHtml\(`data-tripsy-flyover data-mode="\$\{it\.mode\}"/.test(html), 'the ⚙️ Trip menu carries the state-dependent items');
 assert(/btn\.dataset\.mode === 'view'[\s\S]{0,300}playTripsyFlyover\(trip, record\)/.test(html), 'View plays the fly-over straight away');
-assert(/container\.querySelectorAll\("\[data-tripsy-flyover\]"\)[\s\S]{0,700}showTripsyFlyover\(btn\.dataset\.key\)/.test(html), 'Start/Finish/Edit open the setup page');
+assert(/container\.querySelectorAll\("\[data-tripsy-flyover\]"\)[\s\S]{0,1400}showTripsyFlyover\(btn\.dataset\.key\)/.test(html), 'Start/Finish/Edit open the setup page');
 assert(/driveData\.tripsyFlyovers = driveData\.tripsyFlyovers\.filter\(r => keys\.has\(r\.tripKey\)\)/.test(extractFn('pruneDriveDataInMemory')),
   'prune rule: a fly-over goes when its trip does');
 const player = extractFn('playTripsyFlyover');
@@ -347,7 +347,9 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(!/cartocdn/.test(html), 'CARTO tiles are gone entirely');
   const srcBlock = (html.match(/const TRIPSY_FLYOVER_TILE_SOURCES = \[[\s\S]*?\n\];/) || [''])[0];
   assert(/tile\.openstreetmap\.org/.test(srcBlock) && /arcgisonline\.com/.test(srcBlock) && !/key|token/i.test(srcBlock.replace(/rel="noopener"/g, '')),
-    'OpenStreetMap first, Esri second, neither carrying a key');
+    'Esri and OpenStreetMap, neither carrying a key');
+  assert(srcBlock.indexOf('arcgisonline.com') < srcBlock.indexOf('tile.openstreetmap.org'),
+    'THE ASK: Esri (English labels) is the map; OpenStreetMap (local-language labels) only the fallback');
   eval([srcBlock, constLine('TRIPSY_FLYOVER_TILE_FAIL_LIMIT'), extractFn('tripsyFlyoverAddTiles')].join('\n'));
   const added = [];
   const fakeL = { tileLayer: (url) => { const h = {}; const layer = { url, on: (ev, fn) => { h[ev] = fn; return layer; }, addTo: () => { added.push(layer); return layer; }, fire: ev => h[ev] && h[ev]() }; return layer; } };
@@ -357,7 +359,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   for (let i = 0; i < 3; i++) first.fire('tileerror');
   assert(added.length === 1, 'a few failed tiles alone don\'t switch sources');
   first.fire('tileerror');
-  assert(added.length === 2 && /arcgisonline/.test(added[1].url) && removed[0] === first.url, 'a run of failures before any tile loads switches to the fallback source');
+  assert(added.length === 2 && /openstreetmap/.test(added[1].url) && /arcgisonline/.test(removed[0]) && removed[0] === first.url, 'a run of failures before any tile loads switches to the fallback source');
   for (let i = 0; i < 10; i++) added[1].fire('tileerror');
   assert(added.length === 2, 'the last source is kept rather than leaving the map blank');
   added.length = 0;
@@ -517,4 +519,58 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   assert(/if \(run\.paused\) audio\.pause\(\); else startMusic\(\);/.test(player) && /run\.cancelled = true;\s*stopMusic\(\);/.test(player), 'pause pauses the music; closing stops it');
   assert(/if \(prevRecord && prevRecord\.music\) rec\.music = prevRecord\.music;/.test(extractFn('tripsyFlyoverBuild')), 'a rebuild keeps the chosen music');
   assert(/data-flyover-music/.test(extractFn('showTripsyFlyover')), 'the setup page shows the music with Choose/Change');
+}
+
+// ---- destination names in English ("Use the names of all destinations in the flyover in
+// English," 2026-10-20) ----
+{
+  const geo = extractFn('tripsyFlyoverGeocode');
+  assert(/textQuery: query, maxResultCount: 1, languageCode: 'en'/.test(geo), 'THE ASK: Places is asked for English names');
+  assert(/return \{ lat: g\.lat, lng: g\.lon, city: g\.name \|\| '' \}/.test(geo), 'the fallback geocoder\'s English name is used, not thrown away');
+  assert(/const city = local \? await tripsyFlyoverEnglishCityName\(local, pick\('country'\), lat, lng, apiKey\) : '';/.test(geo),
+    'an address\'s local city spelling is swapped for the English one');
+  (async () => {
+    const reqs = [];
+    const f = new Function('reqs', `
+      const tripsyFlyoverEnglishCityCache = new Map();
+      ${extractFn('tripsyFlyoverDistanceKm')}
+      async function fetch(u, o) { const b = JSON.parse(o.body); reqs.push(b);
+        const at = { 'München, Germany': ['Munich', 48.14, 11.58], 'Paris, United States': ['Paris', 33.66, -95.56] }[b.textQuery];
+        return { ok: true, json: async () => ({ places: at ? [{ displayName: { text: at[0] }, location: { latitude: at[1], longitude: at[2] } }] : [] }) }; }
+      ${extractFn('tripsyFlyoverEnglishCityName')}
+      return tripsyFlyoverEnglishCityName;`)(reqs);
+    assert(await f('München', 'Germany', 48.14, 11.57, 'k') === 'Munich', 'THE ASK: München becomes Munich');
+    assert(reqs[0].languageCode === 'en' && reqs[0].includedType === 'locality', 'by looking the city itself up in English');
+    assert(await f('Paris', 'United States', 48.85, 2.35, 'k') === 'Paris' && await f('Zzz', '', 0, 0, 'k') === 'Zzz',
+      'a far-away namesake, or no answer, keeps the address\'s own name');
+    await f('München', 'Germany', 48.14, 11.57, 'k');
+    assert(reqs.length === 3, 'each city is looked up once per session');
+  })().catch(e => { console.log('FAIL english city', e); process.exitCode = 1; });
+  assert(/for \(const s of stops\) s\.labelLang = 'en';/.test(extractFn('tripsyFlyoverBuild')), 'a build stamps its names as English');
+  const en = extractFn('tripsyFlyoverEnglishLabels');
+  (async () => {
+    const calls = [];
+    const f = new Function('calls', `
+      async function tripsyFlyoverGeocode(q) { calls.push(q); if (q === 'fail') return null; return { lat: 1, lng: 2, city: { '福岡市 hotel': 'Fukuoka', 'MUC airport': 'Munich' }[q] || '' }; }
+      ${en}
+      return tripsyFlyoverEnglishLabels;`)(calls);
+    const rec = { stops: [
+      { id: 'a', kind: 'stay', label: '福岡市', query: '福岡市 hotel' },
+      { id: 'b', kind: 'origin', label: 'München', query: 'MUC airport' },
+      { id: 'c', kind: 'stay', label: 'My Camp', labelEdited: true, query: 'x' },
+      { id: 'd', kind: 'stay', label: 'Black Rock City', manualPlace: 'Black Rock City', query: 'y' },
+      { id: 'e', kind: 'stay', label: 'Paris', labelLang: 'en', query: 'Paris' },
+      { id: 'f', kind: 'stay', label: 'Somewhere', query: 'fail' },
+    ] };
+    const r = await f(rec);
+    const L = id => r.record.stops.find(s => s.id === id);
+    assert(r.changed && L('a').label === 'Fukuoka' && L('a').labelLang === 'en' && L('b').label === 'Munich',
+      'THE ASK: a saved fly-over\'s destinations are re-named in English');
+    assert(L('c').label === 'My Camp' && L('d').label === 'Black Rock City' && L('c').labelLang === 'en',
+      'a name the owner typed or chose is kept');
+    assert(!calls.includes('Paris') && !calls.includes('x') && !calls.includes('y'), 'stops already in English, or named by the owner, are not looked up');
+    assert(L('f').label === 'Somewhere' && !L('f').labelLang, 'a failed lookup is retried next time');
+  })().catch(e => { console.log('FAIL english labels', e); process.exitCode = 1; });
+  assert(/tripsyFlyoverEnglishLabels\(record\)\.then/.test(extractFn('showTripsyFlyover')), 'the setup page re-names an older fly-over behind the page');
+  assert(/playTripsyFlyover\(trip, record\);\s*\/\/ Older fly-overs pick up English names/.test(html), 'and View does it after starting playback, so music still starts in the tap');
 }

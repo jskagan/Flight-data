@@ -17395,14 +17395,18 @@ const TRIPSY_FLYOVER_LEAFLET_CSS = 'https://cdnjs.cloudflare.com/ajax/libs/leafl
 // Map tiles, tried in order. NOT CARTO: its free basemap tiles started drawing "API key
 // required" onto every tile (2026-10-20, "I get a message saying api key required when I try
 // to play the trip") -- a normal 200 image, so nothing in the browser can detect it. Both
-// sources below need no key. If the first refuses (a run of tile errors before any tile
-// has loaded -- OpenStreetMap answers a refused client with errors, not an image), the
-// player switches to the next (`tripsyFlyoverAddTiles`).
+// sources below need no key. ESRI COMES FIRST because its labels are in English ("Can you
+// show the names of all locations on the fly-over map in English?", 2026-10-20):
+// OpenStreetMap's own tiles label every place in its LOCAL language and script (東京,
+// Москва, القاهرة), and a pre-rendered tile's labels can't be changed by the app; there is no
+// keyless OpenStreetMap server with English labels. OpenStreetMap stays as the fallback --
+// local-language labels beat a blank map. If a source refuses (a run of tile errors before
+// any tile has loaded), the player switches to the next (`tripsyFlyoverAddTiles`).
 const TRIPSY_FLYOVER_TILE_SOURCES = [
+  { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', maxZoom: 19,
+    attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a> &mdash; Esri, HERE, Garmin, USGS, &copy; OpenStreetMap contributors' },
   { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors' },
-  { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', maxZoom: 19,
-    attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a>' },
 ];
 const TRIPSY_FLYOVER_TILE_FAIL_LIMIT = 4;
 // Adds the i-th tile source to the map, falling back to the next one when this one fails
@@ -17775,7 +17779,10 @@ function tripsyFlyoverSeedItineraryPhotos(record, trip, todayKey, photoCache) {
 
 // Coordinates (+ a clean city name) for a stop: Places when there is a key (it knows hotel
 // names and airport codes), Open-Meteo's free city geocoder -- the weather pipeline's,
-// cached in driveData -- otherwise.
+// cached in driveData -- otherwise. The name is always ENGLISH ("Use the names of all
+// destinations in the flyover in English," 2026-10-20): Places is asked for `languageCode:
+// 'en'` (without it the locality came back in the local language and script), and the
+// fallback's own name is the English one Open-Meteo already returns (`language=en`).
 async function tripsyFlyoverGeocode(query, cityHint) {
   try {
     const apiKey = await Store.getPlacesApiKey();
@@ -17783,24 +17790,53 @@ async function tripsyFlyoverGeocode(query, cityHint) {
       const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.location,places.addressComponents' },
-        body: JSON.stringify({ textQuery: query, maxResultCount: 1 }),
+        body: JSON.stringify({ textQuery: query, maxResultCount: 1, languageCode: 'en' }),
       });
       if (res.ok) {
         const p = ((await res.json()).places || [])[0];
         if (p && p.location && typeof p.location.latitude === 'number') {
           const comps = p.addressComponents || [];
           const pick = t => (comps.find(c => (c.types || []).includes(t)) || {}).longText || '';
-          const city = pick('locality') || pick('postal_town') || pick('administrative_area_level_2') || pick('administrative_area_level_1') || pick('country');
-          return { lat: p.location.latitude, lng: p.location.longitude, city };
+          const local = pick('locality') || pick('postal_town') || pick('administrative_area_level_2') || pick('administrative_area_level_1') || pick('country');
+          const lat = p.location.latitude, lng = p.location.longitude;
+          const city = local ? await tripsyFlyoverEnglishCityName(local, pick('country'), lat, lng, apiKey) : '';
+          return { lat, lng, city };
         }
       }
     }
   } catch (e) { console.error('tripsyFlyoverGeocode (Places) failed:', e); }
   if (cityHint) {
     const g = await tripsyWeatherGeocode(cityHint, '');
-    if (g) return { lat: g.lat, lng: g.lon, city: '' };
+    if (g) return { lat: g.lat, lng: g.lon, city: g.name || '' };
   }
   return null;
+}
+
+// The English name of a city. Even asked for English, an address keeps a Latin-script
+// city's local spelling ("München", "Wien", "Roma", "Köln" -- verified against the live
+// Places API, 2026-10-20), so the city ITSELF is looked up: a locality search's display name
+// is the English one (Munich, Vienna, Rome, Cologne, Seville). Taken only when that city lies
+// within 60 km of the stop, so a same-named city elsewhere can't be picked; otherwise, or on
+// any failure, the address's own name stands. Memoized per session.
+const tripsyFlyoverEnglishCityCache = new Map();
+async function tripsyFlyoverEnglishCityName(local, country, lat, lng, apiKey) {
+  const k = `${local}|${country}`.toLowerCase();
+  if (tripsyFlyoverEnglishCityCache.has(k)) return tripsyFlyoverEnglishCityCache.get(k);
+  let name = local;
+  try {
+    const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.displayName,places.location' },
+      body: JSON.stringify({ textQuery: [local, country].filter(Boolean).join(', '), maxResultCount: 1, languageCode: 'en', includedType: 'locality' }),
+    });
+    if (res.ok) {
+      const c = ((await res.json()).places || [])[0];
+      const text = c && c.displayName && c.displayName.text;
+      if (text && c.location && tripsyFlyoverDistanceKm({ lat, lng }, { lat: c.location.latitude, lng: c.location.longitude }) <= 60) name = text;
+    }
+  } catch (e) { /* keep the address's own name */ }
+  tripsyFlyoverEnglishCityCache.set(k, name);
+  return name;
 }
 
 // Derive + geocode + merge + carry over. A stop that can't be placed is kept (lat null)
@@ -17833,6 +17869,8 @@ async function tripsyFlyoverBuild(trip, prevRecord, opts = {}) {
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
+  // Every name from here on is the English one (see tripsyFlyoverEnglishLabels).
+  for (const s of stops) s.labelLang = 'en';
   // One question at a time, in trip order.
   for (const s of stops) {
     if (s.lat != null) continue;
@@ -17849,6 +17887,27 @@ async function tripsyFlyoverBuild(trip, prevRecord, opts = {}) {
   if (prevRecord && prevRecord.completedAt) rec.completedAt = prevRecord.completedAt;
   if (prevRecord && prevRecord.music) rec.music = prevRecord.music;
   return rec;
+}
+
+// A fly-over saved before names were asked for in English gets its destinations re-named
+// once: every stop not yet stamped `labelLang: 'en'` is looked up again and takes the English
+// city name -- except one the owner renamed (`labelEdited`) or placed by hand (`manualPlace`):
+// those names are the owner's own. A stop whose lookup fails stays unstamped and is tried
+// again next time. Resolves {record, changed}; the caller saves.
+async function tripsyFlyoverEnglishLabels(record) {
+  if (!record || !Array.isArray(record.stops)) return { record, changed: false };
+  let changed = false;
+  const stops = await Promise.all(record.stops.map(async st => {
+    if (st.labelLang === 'en') return st;
+    if (st.labelEdited || st.manualPlace) { changed = true; return { ...st, labelLang: 'en' }; }
+    if (!st.query && !st.label) return st;
+    let g = null;
+    try { g = await tripsyFlyoverGeocode(st.query || st.label, st.kind === 'stay' ? st.label : ''); } catch (e) { g = null; }
+    if (!g) return st;
+    changed = true;
+    return g.city ? { ...st, label: g.city, autoLabel: g.city, labelLang: 'en' } : { ...st, labelLang: 'en' };
+  }));
+  return { record: changed ? { ...record, stops } : record, changed };
 }
 
 // Points along the great circle from a to b ({lat,lng}), n of them, with longitudes
@@ -18020,6 +18079,19 @@ async function showTripsyFlyover(tripKey) {
   if (record && isOwner) {
     const seeded = tripsyFlyoverSeedItineraryPhotos(record, trip, tripsyTodayDayKey(), driveData.tripsyPlacePhotoCache);
     if (seeded.changed) { record = seeded.record; save(); }
+    // A fly-over built before English names: re-name its destinations, behind the page.
+    if (record.stops.some(st => st.labelLang !== 'en')) {
+      tripsyFlyoverEnglishLabels(record).then(r => {
+        if (!r.changed || closed) return;
+        const byId = new Map(r.record.stops.map(st => [st.id, st]));
+        // Only the names move; anything changed on the page meanwhile is kept.
+        record = { ...record, stops: record.stops.map(st => {
+          const n = byId.get(st.id);
+          return n && !st.labelEdited ? { ...st, label: n.label, autoLabel: n.autoLabel, labelLang: n.labelLang } : st;
+        }) };
+        save(); render();
+      }).catch(e => console.error('fly-over English names failed:', e));
+    }
   }
 
   // The options box opens by itself right after photos are added, and from each
@@ -38984,7 +39056,14 @@ async function renderTripsyEventsListImpl() {
       if (btn.dataset.mode === 'view') {
         const trip = (tripsyDecryptedTrips || []).find(t => t.key === btn.dataset.key);
         const record = Store.getTripsyFlyover(btn.dataset.key);
-        if (trip && record && tripsyFlyoverPlayableStops(record).length) playTripsyFlyover(trip, record);
+        if (trip && record && tripsyFlyoverPlayableStops(record).length) {
+          playTripsyFlyover(trip, record);
+          // Older fly-overs pick up English names for the next showing (owner only: it writes).
+          if (isOwner && record.stops.some(st => st.labelLang !== 'en')) {
+            tripsyFlyoverEnglishLabels(record).then(r => { if (r.changed) Store.saveTripsyFlyover(r.record); })
+              .catch(e => console.error('fly-over English names failed:', e));
+          }
+        }
         else toast('This fly-over has no destinations on the map yet.', 'error');
         return;
       }
