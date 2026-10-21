@@ -3561,6 +3561,25 @@ WebView's support for recording is unproven.
   `.tfo-via-label` name tag and a 0.9 s pause — no flyTo, no card, no slideshow. The setup
   card shows "via …" beside the leg. Verified in Chromium (LAX → NRT → SIN: Narita labelled, no
   zoom).
+- **Airport destinations and layovers are named for the CITY of the airport the itinerary
+  lists** ("Where there are flight destinations use the city names from the airports listed in
+  the itinerary," 2026-10-21 — geocoding an airport lands on the town it sits in: NRT → Narita,
+  ICN → Incheon). Flight records spell airports three ways — a bare code ("NRT"), "City, ST
+  (CODE)" / "City (CODE)", or "CODE City, ST - address" — and `tripsyFlyoverAirportCity(desc)`
+  (pure) takes a known code's city from `TRIPSY_AIRPORT_CITIES` (~300 codes, English names, so
+  "Zürich (ZRH)" reads Zurich), else the city the record itself writes, else '' (an unknown bare
+  code keeps the geocoded name). Derived airport stops (origin, return, a no-lodging `arrive-*`
+  stay) and layovers carry the description as `airport`; `tripsyFlyoverApplyAirportCities`
+  (pure, idempotent; never over `labelEdited`/`manualPlace`) runs at the end of a build, in
+  `tripsyFlyoverAddLayovers`, at the top of the player, and on setup open / View (owner saves),
+  so a saved fly-over is renamed without a rebuild (an old record's description is recovered
+  from its `"CODE airport"` query). **A leg's mode now trusts the record's CATEGORY before its
+  wording** (`tripsyFlyoverModeOf`): a car "from Chiang Rai Airport (arriving Flight TG136)"
+  read as a flight and planted a bogus "Chiang Rai Airport (for Flight FD3210)" layover; since
+  layovers found under those rules are wrong, `layoversV` (`TRIPSY_FLYOVER_LAYOVERS_V` = 2,
+  `tripsyFlyoverLayoversCurrent`) makes an older record re-derive its layovers once, dropping
+  any a stop no longer has. Live check, Singapore GP: Tented Camp via Bangkok, Nam Hai via
+  Bangkok, Fukuoka via Singapore.
 - **Geocoded once, at build time** (`tripsyFlyoverBuild`, 4 lookups in parallel).
   - **Lookup source:** Places `searchText` with `addressComponents` (it knows hotel names and
     airport codes) first, falling back to the weather pipeline's free Open-Meteo city

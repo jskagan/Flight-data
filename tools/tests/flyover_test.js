@@ -184,7 +184,7 @@ assert(/completedAt: new Date\(\)\.toISOString\(\)/.test(setupSrc) && /renderTri
 assert(/if \(prevRecord && prevRecord\.completedAt\) rec\.completedAt = prevRecord\.completedAt;/.test(extractFn('tripsyFlyoverBuild')), 'a rebuild from Edit keeps the fly-over completed');
 assert(/tripsyFlyoverMenuItems\(isOwner, Store\.getTripsyFlyover\(trip\.key\)\)\.map\(it => menuListButtonHtml\(`data-tripsy-flyover data-mode="\$\{it\.mode\}"/.test(html), 'the ⚙️ Trip menu carries the state-dependent items');
 assert(/btn\.dataset\.mode === 'view'[\s\S]{0,700}playTripsyFlyover\(trip, record, layovers \? \{ layovers \} : \{\}\)/.test(html), 'View plays the fly-over straight away');
-assert(/container\.querySelectorAll\("\[data-tripsy-flyover\]"\)[\s\S]{0,1400}showTripsyFlyover\(btn\.dataset\.key\)/.test(html), 'Start/Finish/Edit open the setup page');
+assert(/container\.querySelectorAll\("\[data-tripsy-flyover\]"\)[\s\S]{0,1800}showTripsyFlyover\(btn\.dataset\.key\)/.test(html), 'Start/Finish/Edit open the setup page');
 assert(/driveData\.tripsyFlyovers = driveData\.tripsyFlyovers\.filter\(r => keys\.has\(r\.tripKey\)\)/.test(extractFn('pruneDriveDataInMemory')),
   'prune rule: a fly-over goes when its trip does');
 const player = extractFn('playTripsyFlyover');
@@ -206,6 +206,8 @@ assert(bs[1].mode === 'plane', 'and is still reached by plane');
 (async () => {
   eval(extractFn('tripsyFlyoverBuild'));
   global.tripsyFlyoverGeocodeVias = async st => st;
+  global.tripsyFlyoverApplyAirportCities = r => ({ record: r, changed: false });
+  global.TRIPSY_FLYOVER_LAYOVERS_V = 2;
   const geo = { 'BUR airport': { lat: 34.2, lng: -118.36, city: 'Burbank' } };
   global.tripsyFlyoverGeocode = async q => geo[q] || null;
   let asked = [];
@@ -963,3 +965,48 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(stops[0].via.map(v => v.label).join() === 'Narita,BKK' && stops[0].via[0].lat === 35.7, 'layovers take their English city name; a non-Latin answer keeps the flight\'s own wording');
   assert(!('via' in stops[1]), 'a layover that can\'t be found is dropped');
 })();
+
+// ---- Airport destinations take their airport's city ("Where there are flight destinations use
+// the city names from the airports listed in the itinerary," 2026-10-21) ----
+{
+  const f = new Function('tripsyFlyoverNameIsNonLatin', [constLine('TRIPSY_AIRPORT_CITIES') || (html.match(/const TRIPSY_AIRPORT_CITIES = \{[\s\S]*?\n\};/) || [''])[0],
+    extractFn('tripsyFlyoverAirportCity'), extractFn('tripsyFlyoverAirportDesc'), extractFn('tripsyFlyoverIsAirportStop'),
+    extractFn('tripsyFlyoverApplyAirportCities'),
+    'return { city: tripsyFlyoverAirportCity, apply: tripsyFlyoverApplyAirportCities };'].join('\n'))(n => /[^\u0000-ɏ]/.test(n));
+  const C = f.city;
+  assert(C('NRT') === 'Tokyo' && C('DMK') === 'Bangkok' && C('ICN') === 'Seoul' && C('LAX') === 'Los Angeles', 'a bare airport code reads as the city it serves');
+  assert(C('Zürich (ZRH)') === 'Zurich' && C('Newark, NJ/New York, NY, US (EWR)') === 'Newark', 'a "City (CODE)" airport reads as its city, in English');
+  assert(C('Montrose, CO (MTJ)') === 'Montrose' && C('Springfield (QQQ)') === 'Springfield', 'an unknown code with a city in the record uses the record\'s city');
+  assert(C('SMO Santa Monica, CA - 3100 Donald Douglas Loop N, Santa Monica, CA 90405') === 'Santa Monica', 'a "CODE City - address" airport reads as its city');
+  assert(C('QQQ') === '' && C('') === '', 'an unknown bare code leaves the geocoded name alone');
+  const rec = { stops: [
+    { id: 'origin', kind: 'origin', label: 'Los Angeles', query: 'LAX airport' },
+    { id: 'hosting-1', kind: 'stay', label: 'Singapore', via: [{ label: 'Narita', query: 'NRT airport' }] },
+    { id: 'return', kind: 'return', label: 'Incheon', query: 'ICN airport' },
+    { id: 'arrive-2', kind: 'stay', label: 'Wherever', query: 'Zürich (ZRH)', labelEdited: true },
+  ] };
+  const r = f.apply(rec);
+  assert(r.changed && r.record.stops[2].label === 'Seoul' && r.record.stops[2].labelLang === 'en', 'an older fly-over\'s airport stop is renamed from its stored lookup');
+  assert(r.record.stops[1].via[0].label === 'Tokyo' && r.record.stops[1].label === 'Singapore', 'a layover takes its airport\'s city; a hotel stay is untouched');
+  assert(r.record.stops[3].label === 'Wherever', 'a name the owner typed is kept');
+  assert(f.apply(r.record).changed === false, 'applying twice changes nothing');
+  assert(/airport: dep, names/.test(extractFn('tripsyFlyoverDeriveStops')) && /query: tripsyFlyoverAirportQuery\(d\), airport: d/.test(extractFn('tripsyFlyoverDeriveStops')), 'derived airport stops and layovers remember the airport as written');
+  assert(/return tripsyFlyoverApplyAirportCities\(rec\)\.record;/.test(extractFn('tripsyFlyoverBuild')), 'a build names airports by city');
+  assert(/record = tripsyFlyoverApplyAirportCities\(record\)\.record;/.test(extractFn('playTripsyFlyover')), 'playback names them too, saved or not');
+  assert(/const named = tripsyFlyoverApplyAirportCities\(record\);/.test(extractFn('showTripsyFlyover')), 'the setup page renames an older fly-over\'s airports');
+}
+{
+  assert(tripsyFlyoverModeOf({ category: 'car' }, 'Car from Chiang Rai Airport (arriving Flight TG136) → Camp') === 'car'
+    && tripsyFlyoverModeOf({ category: 'roadtrip' }, 'Roadtrip to the airport for Flight X') === 'car',
+    'a car whose wording names a flight is still a car (its category decides)');
+  assert(tripsyFlyoverModeOf({ category: 'airplane' }, '') === 'plane' && tripsyFlyoverModeOf({}, 'Flight from LAX to SIN') === 'plane',
+    'flights are still flights, by category or by title');
+}
+{
+  const add = extractFn('tripsyFlyoverAddLayovers');
+  assert(/tripsyFlyoverLayoversCurrent\(record\)/.test(add) && /const TRIPSY_FLYOVER_LAYOVERS_V = 2;/.test(html)
+    && /layoversV: TRIPSY_FLYOVER_LAYOVERS_V/.test(extractFn('tripsyFlyoverBuild')),
+    'a fly-over whose layovers were found by the earlier rules is looked at again, once');
+  assert(/const \{ via: _gone, \.\.\.rest \} = s;/.test(add), 'and a stop that no longer has layovers loses its bogus ones');
+  assert(!/record\.layoversAt \?|!record\.layoversAt\)/.test(html), 'no caller still keys on the old stamp');
+}
