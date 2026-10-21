@@ -17549,10 +17549,92 @@ const TRIPSY_FLYOVER_TILE_SOURCES = [
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors' },
 ];
 const TRIPSY_FLYOVER_TILE_FAIL_LIMIT = 4;
+// GOOGLE MAP TILES come first when they can ("Add Google Map Tiles with the Places key,"
+// 2026-10-21 — the keyless sources have no @2x tiles, so the map looked pixelated on the
+// iPad). The Map Tiles API needs a SESSION (createSession, valid ~2 weeks) and a key; it
+// reuses the owner's Places key from driveData (never in this public file), so it works only
+// once "Map Tiles API" is enabled for that key in Google Cloud Console. `highDpi` +
+// `scaleFactor2x` returns 512px tiles covering the same area as a 256px tile, which Leaflet
+// draws at 256 CSS px — true retina sharpness at the zoom shown (unlike detectRetina, which
+// fetched a level deeper). English labels via `language`. Fails soft in every direction: no
+// key, the API not enabled (403), offline, or slow (the player waits at most 2.5 s) all give
+// null, and the keyless sources play exactly as before; tile errors fall back the same way.
+const TRIPSY_FLYOVER_GOOGLE_TILES_API = 'https://tile.googleapis.com';
+function tripsyFlyoverGoogleTileUrl(session, key) {
+  return `${TRIPSY_FLYOVER_GOOGLE_TILES_API}/v1/2dtiles/{z}/{x}/{y}?session=${encodeURIComponent(session)}&key=${encodeURIComponent(key)}`;
+}
+// Memoized per page; a session within an hour of its expiry is replaced, a failure is not
+// remembered (the next play tries again).
+async function tripsyFlyoverGoogleTileSource() {
+  const memo = tripsyFlyoverGoogleTileSource;
+  const now = Date.now() / 1000;
+  if (memo._src && memo._expiry - now > 3600) return memo._src;
+  let key = null;
+  try { key = await Store.getPlacesApiKey(); } catch (e) { key = null; }
+  if (!key) return null;
+  try {
+    const res = await fetch(`${TRIPSY_FLYOVER_GOOGLE_TILES_API}/v1/createSession?key=${encodeURIComponent(key)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mapType: 'roadmap', language: 'en-US', region: 'US', scale: 'scaleFactor2x', highDpi: true }),
+    });
+    if (!res.ok) { console.warn('Map Tiles session refused:', res.status); return null; }
+    const data = await res.json();
+    if (!data || !data.session) return null;
+    memo._expiry = Number(data.expiry) || (now + 86400);
+    memo._src = {
+      url: tripsyFlyoverGoogleTileUrl(data.session, key), maxZoom: 21, google: true,
+      session: data.session, key,
+      attribution: `Map data &copy;${new Date().getFullYear()} Google`,
+    };
+    return memo._src;
+  } catch (e) {
+    console.warn('Map Tiles session failed:', e);
+    return null;
+  }
+}
+// Google requires showing the copyright for the area in view; the viewport endpoint names
+// it. Refreshed on moveend (throttled to one request in flight), and failures keep the
+// generic "Map data ©Google" line.
+// `isActive` says whether the Google layer is still the one shown: once the player has
+// fallen back to a keyless source, the Google line is removed and never re-added.
+function tripsyFlyoverWireGoogleAttribution(map, src, isActive = () => true) {
+  if (!src || !src.google || !map.attributionControl) return;
+  let shown = src.attribution, busy = false;
+  const update = async () => {
+    if (!isActive()) {
+      if (shown && shown !== src.attribution) map.attributionControl.removeAttribution(shown);
+      shown = null;
+      map.off('moveend', update);
+      return;
+    }
+    if (busy) return;
+    busy = true;
+    try {
+      const b = map.getBounds();
+      const q = new URLSearchParams({ session: src.session, key: src.key, zoom: String(Math.round(map.getZoom())),
+        north: String(Math.min(90, b.getNorth())), south: String(Math.max(-90, b.getSouth())),
+        east: String(b.getEast()), west: String(b.getWest()) });
+      const res = await fetch(`${TRIPSY_FLYOVER_GOOGLE_TILES_API}/tile/v1/viewport?${q}`);
+      if (res.ok) {
+        const data = await res.json();
+        const text = data && data.copyright ? esc(String(data.copyright)) : src.attribution;
+        if (text !== shown && isActive()) {
+          map.attributionControl.removeAttribution(shown);
+          map.attributionControl.addAttribution(text);
+          shown = text;
+        }
+      }
+    } catch (e) { /* keep the generic line */ }
+    busy = false;
+  };
+  map.on('moveend', update);
+  update();
+}
 // Adds the i-th tile source to the map, falling back to the next one when this one fails
-// TRIPSY_FLYOVER_TILE_FAIL_LIMIT times before a single tile has loaded.
-function tripsyFlyoverAddTiles(L, map, i = 0) {
-  const src = TRIPSY_FLYOVER_TILE_SOURCES[i];
+// TRIPSY_FLYOVER_TILE_FAIL_LIMIT times before a single tile has loaded. `sources` defaults to
+// the keyless list; the player passes [Google, ...keyless] when a Google session exists.
+function tripsyFlyoverAddTiles(L, map, i = 0, sources = TRIPSY_FLYOVER_TILE_SOURCES) {
+  const src = sources[i];
   if (!src) return null;
   // NOT detectRetina: it fetched tiles a zoom level deeper than the map shows, and Esri has
   // gaps at those deeper levels, so parts of the map went blank (2026-10-21). Sharpness comes
@@ -17563,10 +17645,10 @@ function tripsyFlyoverAddTiles(L, map, i = 0) {
   layer.on('tileload', () => { loaded++; });
   layer.on('tileerror', () => {
     failed++;
-    if (switched || loaded || failed < TRIPSY_FLYOVER_TILE_FAIL_LIMIT || !TRIPSY_FLYOVER_TILE_SOURCES[i + 1]) return;
+    if (switched || loaded || failed < TRIPSY_FLYOVER_TILE_FAIL_LIMIT || !sources[i + 1]) return;
     switched = true;
     try { map.removeLayer(layer); } catch (e) { /* map already gone */ }
-    tripsyFlyoverAddTiles(L, map, i + 1);
+    tripsyFlyoverAddTiles(L, map, i + 1, sources);
   });
   layer.addTo(map);
   return layer;
@@ -19957,8 +20039,15 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   }
   const stopMusic = () => { musicEnded = true; if (audio) { try { audio.pause(); } catch (e) {} audio.removeAttribute('src'); } };
   let L;
+  // The Google tile session is asked for alongside Leaflet (after the music has started),
+  // and waited for at most 2.5 s: slow or refused means the keyless tiles, as before.
+  const googleTilesP = Promise.race([
+    tripsyFlyoverGoogleTileSource().catch(() => null),
+    new Promise(res => setTimeout(() => res(null), 2500)),
+  ]);
   try { L = await tripsyFlyoverLoadLeaflet(); }
   catch (e) { stopMusic(); toast('Couldn’t load the map — check the connection and try again.', 'error'); return; }
+  const googleTiles = await googleTilesP;
   // A fly-over built before layovers existed: they are being looked up as this opens
   // (opts.layovers, from tripsyFlyoverAddLayovers). Waited for briefly, never for long.
   if (opts.layovers) {
@@ -19992,8 +20081,17 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     <div class="tfo-photo"></div>
     <div class="tfo-card"><div class="tfo-card-label"></div><div class="tfo-card-sub"></div></div>`;
   document.body.appendChild(ov);
-  const map = L.map(ov.querySelector('.tfo-map'), { zoomControl: false, worldCopyJump: false, attributionControl: true, zoomSnap: 1 });
-  const tilesRef = { layer: tripsyFlyoverAddTiles(L, map) };
+  // zoomAnimation OFF: every move here is a flyTo/flyToBounds (their own frame animation) or
+  // a deliberate instant jump. Leaflet's separate CSS zoom animation is what map.stop() (it
+  // re-zooms to a whole level) and a plain setView start, and it ends ~250 ms later by
+  // moving the map back to ITS target — undoing the instant jump to the arrival view, so the
+  // burst and the photos could start over a map that then sprang back out ("the entire
+  // screen does go to orange, but then the app immediately shows the zoomed out map with the
+  // orange dot and zooms in on the dot a second time," 2026-10-21).
+  const map = L.map(ov.querySelector('.tfo-map'), { zoomControl: false, worldCopyJump: false, attributionControl: true, zoomSnap: 1, zoomAnimation: false });
+  const tileSources = googleTiles ? [googleTiles, ...TRIPSY_FLYOVER_TILE_SOURCES] : TRIPSY_FLYOVER_TILE_SOURCES;
+  const tilesRef = { layer: tripsyFlyoverAddTiles(L, map, 0, tileSources) };
+  tripsyFlyoverWireGoogleAttribution(map, googleTiles, () => !!(tilesRef.layer && googleTiles && tilesRef.layer._url === googleTiles.url));
   map.on('layeradd', e => { if (e.layer instanceof L.TileLayer) tilesRef.layer = e.layer; });
   const cardEl = ov.querySelector('.tfo-card');
   const photoEl = ov.querySelector('.tfo-photo');
@@ -20356,6 +20454,18 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     layer.on('load', fin);
     setTimeout(fin, maxMs);
   });
+  // True once some photo of the stop's pages has loaded (they were all asked for at the
+  // start, so this is normally instant); waits at most 8 s.
+  const firstPageLoads = (r, s) => {
+    const ids = tripsyFlyoverPages(s).flatMap(p => p.ids || []);
+    if (!ids.length) return Promise.resolve(false);
+    return new Promise(resolve => {
+      let left = ids.length, done = false;
+      const fin = v => { if (!done) { done = true; resolve(v); } };
+      for (const id of ids) tripsyPlacePhotoDisplayUrl(id).then(() => fin(true), () => { if (--left === 0) fin(false); });
+      setTimeout(() => fin(false), 8000);
+    });
+  };
   const arrive = async (r, s, i, withPhotos = true) => {
     layers.push(dot(s));
     showDestLabel(s);
@@ -20370,6 +20480,10 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     showCard(s.label, stopSub(s, i));
     if (!(await untilTilesLoaded(r, 1500))) return false;
     if (!withPhotos || !tripsyFlyoverPages(s).length) return wait(r, 1800);
+    // The orange only goes up once a page CAN follow it: if none of this stop's pictures load
+    // (a failed download), the screen would go orange and then straight back to the map.
+    if (!(await firstPageLoads(r, s))) { console.warn('fly-over: no photo of', s.label, 'loaded'); return wait(r, 1800); }
+    if (r.cancelled) return false;
     if (!(await burstFromDot(r, s))) return false;
     // The backdrop goes up at once under the orange, so no map shows round the first page.
     veilEl.style.transition = 'none';
@@ -20412,9 +20526,32 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       showCard(first.label, stopSub(first, stayNo(first)));
       if (!(await slideshow(r, first))) return;
     }
+    // The FIRST leg is flown on the whole-route map, never zoomed: the origin's dot and both
+    // names are on it from the start ("for the first leg do not zoom. Start with the unzoomed
+    // map with labels for origin and destination and then animate the flyover," 2026-10-21).
+    // A trip with one destination keeps the old landing on it.
+    if (stops.length > 1) {
+      layers.push(dot(first));
+      viaLabels.push(L.marker([first.lat, first.lng], { icon: L.divIcon({ className: 'tfo-via-label tfo-dest-label', html: `<span>${esc(first.label || '')}</span>`, iconSize: [0, 0] }), interactive: false, zIndexOffset: 900 }).addTo(map));
+      showDestLabel(stops[1]);
+      // Names are drawn to the RIGHT of their dots, so one at the map's right edge would be
+      // cut off: slide the map left just enough (same zoom), as far as the left edge allows.
+      const w = ov.clientWidth, ovLeft = ov.getBoundingClientRect().left;
+      let over = 0, room = Infinity;
+      for (const m of [viaLabels[viaLabels.length - 1], destLabel]) {
+        const sp = m && m.getElement() && m.getElement().querySelector('span');
+        if (!sp) continue;
+        const rc = sp.getBoundingClientRect();
+        over = Math.max(over, rc.right - ovLeft - (w - 12));
+        room = Math.min(room, rc.left - ovLeft - 12);
+      }
+      for (const s of [first, stops[1]]) room = Math.min(room, map.latLngToContainerPoint([s.lat, s.lng]).x - 12);
+      const shift = Math.min(over, room);
+      if (shift > 0) map.panBy([shift, 0], { animate: false });
+    }
     showCard(trip.name || 'Trip', formatTripDateRange(tripsyItineraryStartDayKey(trip), tripsyItineraryEndDayKey(trip)));
     if (!(await wait(r, 2200))) return;
-    if (!(await arrive(r, first, stayNo(first), !openWithPhotos))) return;
+    if (stops.length === 1 && !(await arrive(r, first, stayNo(first), !openWithPhotos))) return;
     for (let k = 1; k < stops.length; k++) {
       const a = stops[k - 1], b = stops[k];
       showCard(`${TRIPSY_FLYOVER_MODE_GLYPH[b.mode] || ''} ${a.label} → ${b.label}`, TRIPSY_FLYOVER_MODE_LABEL[b.mode] || '');
@@ -20422,14 +20559,14 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       // leg -- no zoom, no photos, just the city's name on the map.
       const via = b.mode === 'plane' ? (b.via || []) : [];
       const legBounds = L.latLngBounds([[a.lat, a.lng], ...via.map(v => [v.lat, v.lng]), [b.lat, b.lng]]);
-      clearDestLabel();
-      clearViaLabels();
-      // The destination's name is on the map before the leg is even framed.
-      showDestLabel(b);
-      if (!(await untilMoveEnd(r, () => map.flyToBounds(legBounds, { padding: [80, 80], maxZoom: 9, duration: 1.3 }), 2400))) return;
-      // As on arrival: never start the vehicle while the map is still zooming (a vehicle
-      // placed during a zoom animation jumps about).
-      {
+      if (k > 1) {
+        clearDestLabel();
+        clearViaLabels();
+        // The destination's name is on the map before the leg is even framed.
+        showDestLabel(b);
+        if (!(await untilMoveEnd(r, () => map.flyToBounds(legBounds, { padding: [80, 80], maxZoom: 9, duration: 1.3 }), 2400))) return;
+        // As on arrival: never start the vehicle while the map is still zooming (a vehicle
+        // placed during a zoom animation jumps about).
         const want = Math.min(9, map.getBoundsZoom(legBounds, false, L.point(160, 160)));
         if (Math.abs(map.getZoom() - want) > 0.01) { try { map.stop(); } catch (e) {} map.fitBounds(legBounds, { padding: [80, 80], maxZoom: 9, animate: false }); }
       }

@@ -3729,7 +3729,40 @@ WebView's support for recording is unproven.
     rotation toward it (20%/frame, wrap-aware), and flips a ground glyph only on a clear
     (>3 px) sideways move. Sampled in Chromium: 173 frames of a leg with zero direction
     reversals.
-  - **Tiles** come from `TRIPSY_FLYOVER_TILE_SOURCES`: **Esri World Street Map first,
+    **Still reported on the iPad after that** ("The entire screen does go to orange, but then
+    the app immediately shows the zoomed out map with the orange dot and zooms in on the dot
+    a second time," same day — not reproducible in Chromium, even with the live stop layout).
+    Two defenses: **(1)** the player map is `zoomAnimation: false`. Every move is a
+    flyTo/flyToBounds (their own frame animation) or a deliberate instant jump, and Leaflet's
+    separate CSS zoom animation — started by `map.stop()` (which re-zooms to a whole level) or
+    a plain setView — ends ~250 ms later by moving the map back to ITS target, undoing the
+    forced arrival view. **(2)** `firstPageLoads` gates the burst: the orange only goes up once
+    one of the stop's photos has loaded (≤ 8 s), so a failed download can never turn the screen
+    orange and then straight back to the map; a stop with none loading just lands with its card.
+    **The first leg is never zoomed** ("for the first leg do not zoom. Start with the unzoomed
+    map with labels for origin and destination and then animate the flyover," same day): the
+    opening whole-route map carries the origin's dot and both names during the title card, the
+    origin is no longer zoomed into, and leg 1 is flown on that view (later legs are framed as
+    before; a one-destination trip still lands on it). Names sit to the right of their dots, so
+    one at the map's edge is slid into view with `panBy` at the same zoom (asymmetric fitBounds
+    padding cost a whole zoom level under `zoomSnap: 1`).
+  - **Google Map Tiles come FIRST when available** ("Add Google Map Tiles with the Places
+    key," 2026-10-21 — the keyless sources have no @2x tiles, so the map looked pixelated on
+    the iPad). `tripsyFlyoverGoogleTileSource` creates a Map Tiles API session (`roadmap`,
+    `en-US`, `scaleFactor2x` + `highDpi`: 512px tiles covering a 256px tile's area, drawn at
+    256 CSS px — real retina sharpness at the zoom shown, unlike `detectRetina`) with the
+    owner's Places key from `driveData` (never in the public file), memoized per page until
+    an hour before expiry. The player asks for it after the music starts, alongside Leaflet,
+    waits at most 2.5 s, and plays `[Google, ...TRIPSY_FLYOVER_TILE_SOURCES]` through the
+    same `tripsyFlyoverAddTiles` fallback (its `sources` arg). No key, the API not enabled
+    for the key (403), offline or slow → the keyless tiles exactly as before.
+    `tripsyFlyoverWireGoogleAttribution` shows Google's required copyright for the area in
+    view (`/tile/v1/viewport` on `moveend`) and drops it after a fallback. **Needs "Map Tiles
+    API" enabled for the Places key in Google Cloud Console** (and the key's API
+    restrictions, if any, must allow it); free tier 100k tile requests/month. Verified in
+    Chromium with Google stubbed (session granted → Google tiles + copyright; 403 → Esri);
+    the live API is unreachable from the sandbox.
+  - **Keyless tiles** come from `TRIPSY_FLYOVER_TILE_SOURCES`: **Esri World Street Map first,
     OpenStreetMap's own tiles second**, both keyless, with attribution shown.
     - **Esri is first for its ENGLISH labels** ("Can you show the names of all locations on
       the fly-over map in English?", 2026-10-20). OpenStreetMap's tiles label every place in

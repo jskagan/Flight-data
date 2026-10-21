@@ -370,7 +370,35 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   ok.fire('tileload');
   for (let i = 0; i < 10; i++) ok.fire('tileerror');
   assert(added.length === 1, 'once tiles have loaded, later stray errors never swap the map out');
-  assert(/tripsyFlyoverAddTiles\(L, map\)/.test(extractFn('playTripsyFlyover')), 'the player adds its tiles through the fallback helper');
+  assert(/tripsyFlyoverAddTiles\(L, map, 0, tileSources\)/.test(extractFn('playTripsyFlyover')), 'the player adds its tiles through the fallback helper');
+  // An explicit source list (Google first) falls back through the SAME list.
+  added.length = 0;
+  const g = tripsyFlyoverAddTiles(fakeL, fakeMap, 0, [{ url: 'G' }, { url: 'https://server.arcgisonline.com/x' }]);
+  for (let i = 0; i < 4; i++) g.fire('tileerror');
+  assert(added.length === 2 && added[0].url === 'G' && /arcgisonline/.test(added[1].url),
+    'refused Google tiles fall back to Esri');
+}
+
+// ---- Google Map Tiles with the Places key ("Add Google Map Tiles with the Places key,"
+// 2026-10-21: the keyless tiles have no @2x, so the map looked pixelated) ----
+{
+  const fn = extractFn('tripsyFlyoverGoogleTileSource');
+  assert(/Store\.getPlacesApiKey\(\)/.test(fn) && /if \(!key\) return null/.test(fn), 'uses the owner\'s Places key from Drive, none means keyless tiles');
+  assert(/createSession/.test(fn) && /highDpi: true/.test(fn) && /scaleFactor2x/.test(fn) && /language: 'en-US'/.test(fn),
+    'a high-DPI, English roadmap session');
+  assert(/if \(!res\.ok\)[^\n]*return null/.test(fn) && /catch \(e\)[\s\S]*return null/.test(fn), 'a refused or failed session falls back quietly');
+  assert(!/AIza[0-9A-Za-z_-]{30}/.test(html), 'no Google key is written into the public file');
+  eval([constLine('TRIPSY_FLYOVER_GOOGLE_TILES_API'), extractFn('tripsyFlyoverGoogleTileUrl')].join('\n'));
+  assert(tripsyFlyoverGoogleTileUrl('s 1', 'k&2') === 'https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=s%201&key=k%262',
+    'tile URL carries the session and key, encoded');
+  const play = extractFn('playTripsyFlyover');
+  assert(/googleTiles \? \[googleTiles, \.\.\.TRIPSY_FLYOVER_TILE_SOURCES\]/.test(play), 'Google first, keyless sources as the fallback');
+  assert(/setTimeout\(\(\) => res\(null\), 2500\)/.test(play), 'a slow session never holds up the map for long');
+  assert(play.indexOf('startMusic(true)') < play.indexOf('tripsyFlyoverGoogleTileSource()'),
+    'the music still starts inside the tap, before the tile lookup');
+  const attr = extractFn('tripsyFlyoverWireGoogleAttribution');
+  assert(/tile\/v1\/viewport/.test(attr) && /moveend/.test(attr) && /if \(!isActive\(\)\)/.test(attr),
+    'Google\'s copyright for the area in view is shown, and dropped after a fallback');
 }
 
 // ---- options when photos are added: "some may be one per page and others several in a
@@ -1029,8 +1057,21 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(iClose > iEndMap && /arrive\(r, b, stayNo\(b\), !\(closeWithPhotos && b === last\)\)/.test(play)
     && play.indexOf("'The end'") > iClose,
     'the last destination\'s pictures play after the closing map, before "The end"');
-  assert(!/detectRetina: true/.test(extractFn('tripsyFlyoverAddTiles')) && /zoomSnap: 1 \}/.test(play),
+  assert(!/detectRetina: true/.test(extractFn('tripsyFlyoverAddTiles')) && /zoomSnap: 1, zoomAnimation: false \}/.test(play),
     'tiles are fetched at the zoom shown (no retina offset, which left gaps) and only whole zoom levels are used');
+  // "The entire screen does go to orange, but then the app immediately shows the zoomed out
+  // map with the orange dot and zooms in on the dot a second time" (2026-10-21).
+  assert(/zoomAnimation: false/.test(play), 'no separate CSS zoom animation that could spring the map back after an instant jump');
+  const arriveSrc = play.slice(play.indexOf('const arrive = async'), play.indexOf('const play = async'));
+  assert(arriveSrc.indexOf('firstPageLoads(r, s)') > -1 && arriveSrc.indexOf('firstPageLoads(r, s)') < arriveSrc.indexOf('burstFromDot(r, s)'),
+    'the orange only goes up once a photo of that stop has loaded');
+  // "for the first leg do not zoom. Start with the unzoomed map with labels for origin and destination"
+  const playSrc = play.slice(play.indexOf('const play = async'));
+  assert(/if \(stops\.length > 1\) \{\s*layers\.push\(dot\(first\)\);[\s\S]*?tfo-dest-label[\s\S]*?showDestLabel\(stops\[1\]\)/.test(playSrc),
+    'the opening map carries the origin dot and both names');
+  assert(/if \(stops\.length === 1 && !\(await arrive\(r, first/.test(playSrc), 'no zoom onto the origin when there is a leg to fly');
+  assert(/if \(k > 1\) \{[\s\S]*?flyToBounds\(legBounds/.test(playSrc), 'the first leg is flown on the whole-route map, later legs are framed');
+  assert(/map\.panBy\(\[shift, 0\], \{ animate: false \}\)/.test(playSrc), 'a name at the right edge is slid into view without changing zoom');
   assert(/showDestLabel\(s\);[\s\S]*?untilTilesLoaded\(r, 1500\)/.test(play),
     'arriving names the destination beside its dot and lets the tiles land before photos cover the map');
   const iLeg = play.indexOf('const legBounds'), iClear = play.indexOf('clearDestLabel();', iLeg);
