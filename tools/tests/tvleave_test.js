@@ -18,35 +18,28 @@ const fnSource = name => {
   throw new Error('unterminated ' + name);
 };
 
-// tripsyRemoveTravelViewLayer against a fake #main
-{
-  const removed = [];
-  const mk = () => { const r = { style: {}, remove() { removed.push(this); } }; return r; };
+// tripsyRemoveTravelViewLayer: stop scrolling, wait two frames, THEN remove
+(async () => {
+  const log = [];
+  const mk = () => ({ scrollTop: 300, style: {}, remove() { log.push('remove:' + this.style.overflow); } });
   const roots = [mk()];
   const document = { getElementById: id => id === 'main' ? { querySelectorAll: sel => sel === '.tv-root' ? roots : [] } : null };
-  const f = new Function('document', fnSource('tripsyRemoveTravelViewLayer') + '; return tripsyRemoveTravelViewLayer;')(document);
-  assert(f() === true && removed.length === 1 && roots[0].style.display === 'none', 'the Travel View layer is hidden and removed, and reported');
-  const empty = new Function('document', fnSource('tripsyRemoveTravelViewLayer') + '; return tripsyRemoveTravelViewLayer;')({ getElementById: () => ({ querySelectorAll: () => [] }) });
-  assert(empty() === false, 'no Travel View layer: nothing to do');
-}
-// tripsyForceMainRepaint bumps #main onto its own layer and back, twice
-{
-  const m = { style: { transform: '' }, get offsetHeight() { return 1; } };
-  const sets = [];
-  const style = new Proxy(m.style, { set(o, k, v) { if (k === 'transform') sets.push(v); o[k] = v; return true; } });
-  m.style = style;
-  const timers = [];
-  const f = new Function('document', 'requestAnimationFrame', 'setTimeout', fnSource('tripsyForceMainRepaint') + '; return tripsyForceMainRepaint;')(
-    { getElementById: () => m }, cb => cb(), (cb, ms) => timers.push([cb, ms]));
-  f();
-  assert(sets.join('|') === 'translateZ(0)|' && timers.length === 1 && timers[0][1] === 400, 'the main area is put on its own layer for two frames, then back');
-  timers[0][0]();
-  assert(sets.join('|') === 'translateZ(0)||translateZ(0)|' && m.style.transform === '', 'and once more a moment later, ending with no transform');
-}
-// wired into navigate
-{
+  const raf = cb => { log.push('frame'); setImmediate(cb); };
+  const mkFn = doc => new Function('document', 'requestAnimationFrame', 'setTimeout',
+    fnSource('tripsyNextFrames') + '\n' + fnSource('tripsyRemoveTravelViewLayer') + '; return tripsyRemoveTravelViewLayer;')(doc, raf, setTimeout);
+  const res = await mkFn(document)();
+  const r = roots[0];
+  assert(res === true && r.scrollTop === 0 && r.style.overflow === 'hidden' && r.style.webkitOverflowScrolling === 'auto' && r.style.overscrollBehavior === 'auto',
+    'the Travel View layer stops being a scroller first (top, overflow hidden, no touch scrolling)');
+  assert(log.join(',') === 'frame,frame,remove:hidden', 'and is removed only after two frames have passed');
+  assert(await mkFn({ getElementById: () => ({ querySelectorAll: () => [] }) })() === false, 'no Travel View layer: nothing to do');
+  // a page firing no frames still finishes
+  const stuck = new Function('requestAnimationFrame', 'setTimeout', fnSource('tripsyNextFrames') + '; return tripsyNextFrames;')(() => {}, setTimeout);
+  const t0 = Date.now(); await stuck(2);
+  assert(Date.now() - t0 < 1000, 'waiting for frames gives up after a moment when none fire');
+  // wired into navigate, before any view renders; the old repaint nudge is gone
   const nav = fnSource('navigate');
-  assert(/const leavingTravelView = view !== 'travelview' && tripsyRemoveTravelViewLayer\(\);/.test(nav), 'navigating away from Travel View removes its layer before the next page draws');
-  assert(/if \(leavingTravelView\) tripsyForceMainRepaint\(\);/.test(nav)
-    && nav.indexOf('tripsyForceMainRepaint()') > nav.indexOf('await renderHome()'), 'and repaints the main area after it has drawn');
-}
+  assert(/if \(view !== 'travelview'\) await tripsyRemoveTravelViewLayer\(\);/.test(nav)
+    && nav.indexOf('tripsyRemoveTravelViewLayer') < nav.indexOf('await renderHome()'), 'navigating away from Travel View removes its layer before the next page draws');
+  assert(!/tripsyForceMainRepaint|translateZ\(0\)/.test(nav) && !/function tripsyForceMainRepaint/.test(html), 'the #main repaint nudge is removed');
+})();

@@ -4034,18 +4034,21 @@ rather than a bare `renderHome()`, since the preview's own `navigate('travelview
 would have brought Travel View back. A stored Travel-View preference still lands there by design — the
 ✕ in Travel View, or "Use Travel Tracker" at the gate, clears it.
 
-**Leaving Travel View removes its layer FIRST and repaints `#main`** ("The screen is not
-rendering correctly," 2026-10-21, iPad, right after opening the app — Home drawn with dark
-patches over its left and lower parts that no scroll or rotation cleared). The splash's
-stand-in Travel View is `.tv-root`, a FIXED, self-scrolling, full-screen layer inside the
-scrolling `#main`; when sign-in landed and `navigate('home')` replaced `#main`, iPad WebKit
-left stale tiles of that removed composited layer (its `var(--bg)` background) over Home.
-Chromium renders the same Home correctly at that size, so it is a WebKit paint failure, not
-layout. `navigate` now runs `tripsyRemoveTravelViewLayer()` (hide, then remove, every
-`#main .tv-root`) BEFORE rendering any other view, and after the render
-`tripsyForceMainRepaint()` puts `#main` on its own layer (`translateZ(0)`) for two frames
-and back, again 400 ms later. Cannot be reproduced off-device (no WebKit in the sandbox);
-verified in Chromium that the layer is gone and the transform cleared. `tvleave_test.js`.
+**Leaving Travel View STOPS its layer scrolling, waits two frames, THEN removes it** ("The
+screen is not rendering correctly," 2026-10-21, iPad, right after opening the app — Home drawn
+under dark patches that no scroll or rotation cleared; the first fix's follow-up screenshot
+showed nearly the whole screen dark). The splash's stand-in Travel View is `.tv-root`, a
+FIXED, self-scrolling (`overflow-y:auto`, `-webkit-overflow-scrolling:touch`) full-screen
+layer inside the scrolling `#main`. On iOS every overflow scroller is backed by a NATIVE
+scroll view, and removing the node while it still scrolls can orphan that native view on
+screen — which is why rotation (a full relayout and repaint) never cleared it, and why the
+first fix (hide + remove, then a `translateZ(0)` repaint nudge on `#main`) didn't help and
+was removed. `navigate` now awaits `tripsyRemoveTravelViewLayer()` before rendering any other
+view: every `#main .tv-root` is scrolled to the top and set `overflow:hidden`,
+`-webkit-overflow-scrolling:auto`, `overscroll-behavior:auto`; `tripsyNextFrames(2)` lets
+WebKit commit that (tearing the native view down through the normal path; it gives up after
+120 ms if a backgrounded page fires no frames); only then is the node removed. Cannot be
+reproduced off-device (no iOS WebKit in the sandbox). `tvleave_test.js`.
 
 **A PHONE always lands on Travel View** ("Anytime the app is opened on a phone, default to the
 travel view," 2026-10-18). `tripsyIsPhoneDevice()` judges it by the DEVICE, not the window

@@ -6899,11 +6899,11 @@ async function navigate(view, param) {
   // automatically whenever we navigate to any other view.
   document.documentElement.classList.toggle('travel-view-open', view === 'travelview');
   // Leaving Travel View: take its full-screen layer away BEFORE the next page draws, and
-  // make the iPad redraw the main area afterwards ("The screen is not rendering correctly,"
+  // stop it scrolling before removing it ("The screen is not rendering correctly,"
   // 2026-10-21 -- on opening the app, the splash's stand-in Travel View gave way to Home,
-  // and iPad WebKit left stale patches of the removed self-scrolling .tv-root (its dark
-  // background) over parts of Home that no scroll or rotation cleared).
-  const leavingTravelView = view !== 'travelview' && tripsyRemoveTravelViewLayer();
+  // and iPad WebKit left the removed self-scrolling .tv-root's native scroll view (its dark
+  // background) over Home, which no scroll or rotation cleared).
+  if (view !== 'travelview') await tripsyRemoveTravelViewLayer();
   // Entering Reports from somewhere else (not just switching between its
   // own Totals/Kagan/Lopata or Hours/Legs/Flight Log sub-views) forces a
   // fresh recompute -- important now that data is shared across multiple
@@ -6972,7 +6972,6 @@ async function navigate(view, param) {
       });
     }
   }
-  if (leavingTravelView) tripsyForceMainRepaint();
   try {
     await refreshNavCounts();
   } catch (e) {
@@ -6980,27 +6979,36 @@ async function navigate(view, param) {
     showStorageHealthBanner(e.message || String(e));
   }
 }
-// Removes Travel View's full-screen, self-scrolling layer from #main, hidden first so WebKit
-// drops its composited layer before the node goes. True when there was one.
-function tripsyRemoveTravelViewLayer() {
+// Takes Travel View's full-screen, self-scrolling layer out of #main in TWO steps. On iPad
+// each overflow-scrolling element is backed by a native scroll view, and removing the node
+// while it still scrolls can orphan that native view on screen -- a dark sheet over Home that
+// no repaint, scroll or rotation clears (2026-10-21, twice). So it first STOPS being a
+// scroller (scrolled to the top, overflow hidden, no touch scrolling), lets WebKit commit
+// that for two frames -- tearing the native view down through the normal path -- and only
+// then removes the node. True when there was one.
+async function tripsyRemoveTravelViewLayer() {
   const main = document.getElementById('main');
   const roots = main ? [...main.querySelectorAll('.tv-root')] : [];
-  for (const r of roots) { r.style.display = 'none'; r.remove(); }
-  return roots.length > 0;
+  if (!roots.length) return false;
+  for (const r of roots) {
+    try { r.scrollTop = 0; } catch (e) {}
+    r.style.overflow = 'hidden';
+    r.style.webkitOverflowScrolling = 'auto';
+    r.style.overscrollBehavior = 'auto';
+  }
+  await tripsyNextFrames(2);
+  for (const r of roots) r.remove();
+  return true;
 }
-// Makes iPad WebKit repaint the whole main area: a stale composited patch is cleared by
-// putting #main on its own layer for two frames and back -- and once more a moment later,
-// since WebKit can finish painting the new page after the first pass.
-function tripsyForceMainRepaint() {
-  const m = document.getElementById('main');
-  if (!m) return;
-  const bump = () => {
-    m.style.transform = 'translateZ(0)';
-    void m.offsetHeight;
-    requestAnimationFrame(() => requestAnimationFrame(() => { m.style.transform = ''; }));
-  };
-  bump();
-  setTimeout(bump, 400);
+// Resolves after n animation frames -- or 120ms, since a backgrounded page fires none.
+function tripsyNextFrames(n) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    const step = k => { if (k <= 0) return finish(); requestAnimationFrame(() => step(k - 1)); };
+    step(n);
+    setTimeout(finish, 120);
+  });
 }
 
 // ---- Upload ----
