@@ -20445,28 +20445,34 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       setTimeout(() => fin(false), 8000);
     });
   };
-  // Dots and route lines are drawn ONCE per settled view and CSS-scaled while the map zooms:
-  // zooming in eight levels blows a 7-px dot up to fill the screen, then it snaps back to
-  // size when the zoom ends -- on the iPad that read as "the screen goes orange, then the
-  // zoomed out map with the orange dot, then it zooms in on the dot a second time" (the real
-  // burst growing). So they are hidden for a zoom IN and shown again once the map has
-  // settled and redrawn them. Names (markers) are not scaled and stay up.
-  const overlayPane = map.getPane('overlayPane');
-  const hideOverlays = () => { if (overlayPane) overlayPane.style.visibility = 'hidden'; };
-  const showOverlays = () => new Promise(res => requestAnimationFrame(() => { if (overlayPane) overlayPane.style.visibility = ''; res(); }));
+  // Dots and route lines (SVG paths) are drawn ONCE per settled view and CSS-SCALED while the
+  // map zooms: zooming in eight levels blew a 7-px dot up to fill the screen, and it snapped
+  // back to size when the zoom ended (the iPad's "the screen goes orange, then the zoomed out
+  // map with the orange dot, then it zooms in on the dot a second time," 2026-10-21). Hiding
+  // them for the zoom made the dot arrive AFTER the map ("I want the map and orange dot to
+  // zoom together," same day), so instead every path is re-projected and redrawn on each
+  // frame of a zoom: the dot rides the map at its own size, and the route stays a thin line.
+  const redrawPathsAtZoom = () => {
+    const renderers = new Set();
+    for (const l of layers) if (l && l._renderer && l._map) renderers.add(l._renderer);
+    for (const rd of renderers) { try { rd._update(); } catch (e) {} }
+    for (const l of layers) {
+      if (!l || !l._renderer || !l._map) continue;
+      try { l._project(); l._update(); } catch (e) {}
+    }
+  };
+  map.on('zoom', redrawPathsAtZoom);
   const arrive = async (r, s, i, withPhotos = true) => {
     ensureDot(s);
     showDestLabel(s);
     growDestLabel();
     const zoom = s.kind === 'stay' ? 10 : 9;
     const center = arrivalCenter(s, zoom);
-    hideOverlays();
-    if (!(await untilMoveEnd(r, () => map.flyTo(center, zoom, { duration: 1.4 }), 2600))) { await showOverlays(); return false; }
+    if (!(await untilMoveEnd(r, () => map.flyTo(center, zoom, { duration: 1.4 }), 2600))) return false;
     // A slow device can still be mid-flight here (a stray early moveend, or the time cap):
     // finish the zoom outright, so the burst and the photos never start over a map that is
     // still zoomed out.
     if (Math.abs(map.getZoom() - zoom) > 0.01) { try { map.stop(); } catch (e) {} map.setView(center, zoom, { animate: false }); }
-    await showOverlays();
     showCard(s.label, stopSub(s, i));
     if (!(await untilTilesLoaded(r, 1500))) return false;
     if (!withPhotos || !tripsyFlyoverPages(s).length) return wait(r, 1800);

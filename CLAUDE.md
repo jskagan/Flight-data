@@ -3755,9 +3755,13 @@ WebView's support for recording is unproven.
     a zoom, so the eight-level arrival zoom blew the 7-px dot up ~256× (the pane measured
     1,416 → 362,387 px wide in Chromium), and it snapped back to size when the zoom ended —
     the "orange, then the zoomed-out map, then zooming in again" was that, not the burst.
-    `arrive` now hides the overlay pane (`hideOverlays`) for the zoom in and shows it again
-    (`showOverlays`, one frame after the map settles and redraws) before the burst; names are
-    markers, which are repositioned rather than scaled, so they stay up. The two earlier
+    The first fix hid the overlay pane for the zoom in, which made the dot arrive AFTER the map
+    ("I want the map and orange dot to zoom together," same day), so the player now listens to
+    the map's `zoom` event (`redrawPathsAtZoom`) and on every frame re-projects and redraws
+    every path in `layers` (`renderer._update()`, then each path's `_project()`/`_update()` —
+    Leaflet 1.9.4 internals, pinned): the dot rides the map at its own 7 px beside its name and
+    the route stays a thin line. Verified in Chromium by sampling the arrival every 80 ms: the
+    Singapore dot stays 14 px wide and 12 px left of its label throughout. The two earlier
     defenses stay.
     **A destination's dot goes up with its name** ("the destination orange dot should appear on
     the map when the map first appears," same day): the opening map shows the origin's AND the

@@ -1058,12 +1058,12 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   // zooms in, so the dot filled the screen and then snapped back before the real burst.
   {
     const arr = play.slice(play.indexOf('const arrive = async'), play.indexOf('const play = async'));
-    assert(arr.indexOf('hideOverlays()') > -1 && arr.indexOf('hideOverlays()') < arr.indexOf('map.flyTo(center, zoom'),
-      'dots and route lines are hidden before the arrival zoom in');
-    assert(arr.indexOf('await showOverlays()', arr.indexOf('map.setView(center, zoom')) > -1
-      && arr.indexOf('await showOverlays()', arr.indexOf('map.setView(center, zoom')) < arr.indexOf('burstFromDot(r, s)'),
-      'and shown again once the map has settled, before the burst');
-    assert(/if \(overlayPane\) overlayPane\.style\.visibility = 'hidden'/.test(play), 'only the overlay pane is hidden; names stay up');
+    // "I want the map and orange dot to zoom together": paths are redrawn on every zoom frame
+    // instead of being hidden (hiding made the dot appear after the map).
+    assert(!/hideOverlays|showOverlays|overlayPane\.style\.visibility/.test(play), 'dots and routes are never hidden for a zoom');
+    assert(/map\.on\('zoom', redrawPathsAtZoom\)/.test(play)
+      && /const redrawPathsAtZoom = \(\) => \{[\s\S]*?rd\._update\(\);[\s\S]*?l\._project\(\); l\._update\(\);/.test(play),
+      'every zoom frame re-projects and redraws the dots and route lines, so they ride the map at their own size');
     // "the destination orange dot should appear on the map when the map first appears"
     assert(/ensureDot\(first\);\s*ensureDot\(stops\[1\]\);/.test(play), 'the opening map shows the first destination\'s dot as well as the origin\'s');
     assert(/showDestLabel\(b\);\s*ensureDot\(b\);/.test(play), 'each later destination\'s dot goes up with its name as its leg begins');
@@ -1134,7 +1134,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'the destination name is placed before the leg to it is framed, and the last leg\'s names are cleared');
   assert(/viaLabels\.push\(L\.marker/.test(play) && !/layers\.push\(L\.marker\(\[v\.lat/.test(play),
     'layover labels are tracked so they are removed when the leg ends, not left on the map');
-  assert(/growDestLabel\(\);[\s\S]*?const center = arrivalCenter\(s, zoom\);\s*hideOverlays\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom/.test(play),
+  assert(/growDestLabel\(\);[\s\S]*?const center = arrivalCenter\(s, zoom\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom/.test(play),
     'the zoom-in frames the dot and its growing label together');
   assert(/if \(!\(await burstFromDot\(r, s\)\)\) return false;[\s\S]*?return slideshow\(r, s\);/.test(play)
     && (play.match(/if \(prev\) prev\.remove\(\);\s*clearBurst\(\);/g) || []).length === 2,
