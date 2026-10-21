@@ -6898,6 +6898,12 @@ async function navigate(view, param) {
   // can't chain into it (an iOS Safari freeze at the list's top/bottom). Cleared
   // automatically whenever we navigate to any other view.
   document.documentElement.classList.toggle('travel-view-open', view === 'travelview');
+  // Leaving Travel View: take its full-screen layer away BEFORE the next page draws, and
+  // make the iPad redraw the main area afterwards ("The screen is not rendering correctly,"
+  // 2026-10-21 -- on opening the app, the splash's stand-in Travel View gave way to Home,
+  // and iPad WebKit left stale patches of the removed self-scrolling .tv-root (its dark
+  // background) over parts of Home that no scroll or rotation cleared).
+  const leavingTravelView = view !== 'travelview' && tripsyRemoveTravelViewLayer();
   // Entering Reports from somewhere else (not just switching between its
   // own Totals/Kagan/Lopata or Hours/Legs/Flight Log sub-views) forces a
   // fresh recompute -- important now that data is shared across multiple
@@ -6966,12 +6972,35 @@ async function navigate(view, param) {
       });
     }
   }
+  if (leavingTravelView) tripsyForceMainRepaint();
   try {
     await refreshNavCounts();
   } catch (e) {
     console.error('refreshNavCounts failed:', e);
     showStorageHealthBanner(e.message || String(e));
   }
+}
+// Removes Travel View's full-screen, self-scrolling layer from #main, hidden first so WebKit
+// drops its composited layer before the node goes. True when there was one.
+function tripsyRemoveTravelViewLayer() {
+  const main = document.getElementById('main');
+  const roots = main ? [...main.querySelectorAll('.tv-root')] : [];
+  for (const r of roots) { r.style.display = 'none'; r.remove(); }
+  return roots.length > 0;
+}
+// Makes iPad WebKit repaint the whole main area: a stale composited patch is cleared by
+// putting #main on its own layer for two frames and back -- and once more a moment later,
+// since WebKit can finish painting the new page after the first pass.
+function tripsyForceMainRepaint() {
+  const m = document.getElementById('main');
+  if (!m) return;
+  const bump = () => {
+    m.style.transform = 'translateZ(0)';
+    void m.offsetHeight;
+    requestAnimationFrame(() => requestAnimationFrame(() => { m.style.transform = ''; }));
+  };
+  bump();
+  setTimeout(bump, 400);
 }
 
 // ---- Upload ----

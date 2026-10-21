@@ -4034,6 +4034,19 @@ rather than a bare `renderHome()`, since the preview's own `navigate('travelview
 would have brought Travel View back. A stored Travel-View preference still lands there by design — the
 ✕ in Travel View, or "Use Travel Tracker" at the gate, clears it.
 
+**Leaving Travel View removes its layer FIRST and repaints `#main`** ("The screen is not
+rendering correctly," 2026-10-21, iPad, right after opening the app — Home drawn with dark
+patches over its left and lower parts that no scroll or rotation cleared). The splash's
+stand-in Travel View is `.tv-root`, a FIXED, self-scrolling, full-screen layer inside the
+scrolling `#main`; when sign-in landed and `navigate('home')` replaced `#main`, iPad WebKit
+left stale tiles of that removed composited layer (its `var(--bg)` background) over Home.
+Chromium renders the same Home correctly at that size, so it is a WebKit paint failure, not
+layout. `navigate` now runs `tripsyRemoveTravelViewLayer()` (hide, then remove, every
+`#main .tv-root`) BEFORE rendering any other view, and after the render
+`tripsyForceMainRepaint()` puts `#main` on its own layer (`translateZ(0)`) for two frames
+and back, again 400 ms later. Cannot be reproduced off-device (no WebKit in the sandbox);
+verified in Chromium that the layer is gone and the transform cleared. `tvleave_test.js`.
+
 **A PHONE always lands on Travel View** ("Anytime the app is opened on a phone, default to the
 travel view," 2026-10-18). `tripsyIsPhoneDevice()` judges it by the DEVICE, not the window
 ("The app defaulted to travel view on my iPad," same day — the first cut read the viewport, and an
