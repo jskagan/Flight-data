@@ -17744,6 +17744,12 @@ function tripsyFlyoverPages(stop) {
 }
 // The transition each page ENTERS with: the first comes in from the map the destination's
 // own way (fade by default); every later one the way the page before it asked for.
+// A stop's photos in PLAY order, each with the page (1-based) it plays on: page 1's
+// photos first, then page 2's … ("Always show pages in the flyover edit view in the order of
+// the pages," 2026-10-21). Pure.
+function tripsyFlyoverPhotosInPageOrder(stop) {
+  return tripsyFlyoverPages(stop).flatMap((pg, k) => pg.photos.map(photo => ({ photo, page: k + 1 })));
+}
 function tripsyFlyoverEnterTransitions(stop, pages) {
   const first = tripsyFlyoverSlideshowConfig(stop).transition;
   return (pages || []).map((_, i) => i === 0 ? first : pages[i - 1].transition);
@@ -17885,9 +17891,20 @@ async function tripsyFlyoverGeocode(query, cityHint) {
         if (p && p.location && typeof p.location.latitude === 'number') {
           const comps = p.addressComponents || [];
           const pick = t => (comps.find(c => (c.types || []).includes(t)) || {}).longText || '';
-          const local = pick('locality') || pick('postal_town') || pick('administrative_area_level_2') || pick('administrative_area_level_1') || pick('country');
           const lat = p.location.latitude, lng = p.location.longitude;
-          const city = local ? await tripsyFlyoverEnglishCityName(local, pick('country'), lat, lng, apiKey) : '';
+          const country = pick('country');
+          const levels = tripsyFlyoverNameLevels({
+            locality: pick('locality') || pick('postal_town'),
+            admin2: pick('administrative_area_level_2'),
+            admin1: pick('administrative_area_level_1'),
+          });
+          // The first level that yields an English (Latin-script) name; '' when none does, and
+          // the caller keeps the name it already had.
+          let city = '';
+          for (const lv of levels) {
+            const n = await tripsyFlyoverEnglishCityName(lv.name, country, lat, lng, apiKey, lv);
+            if (n && !tripsyFlyoverNameIsNonLatin(n)) { city = tripsyFlyoverTidyPlaceName(n); break; }
+          }
           return { lat, lng, city };
         }
       }
@@ -17906,25 +17923,58 @@ async function tripsyFlyoverGeocode(query, cityHint) {
 // is the English one (Munich, Vienna, Rome, Cologne, Seville). Taken only when that city lies
 // within 60 km of the stop, so a same-named city elsewhere can't be picked; otherwise, or on
 // any failure, the address's own name stands. Memoized per session.
+// `lv` = {type, km}: which kind of place to look up (a locality by default) and how far from
+// the stop its centre may be.
 const tripsyFlyoverEnglishCityCache = new Map();
-async function tripsyFlyoverEnglishCityName(local, country, lat, lng, apiKey) {
-  const k = `${local}|${country}`.toLowerCase();
+async function tripsyFlyoverEnglishCityName(local, country, lat, lng, apiKey, lv = {}) {
+  const type = lv.type || 'locality';
+  const km = lv.km || 60;
+  const k = `${type}|${local}|${country}`.toLowerCase();
   if (tripsyFlyoverEnglishCityCache.has(k)) return tripsyFlyoverEnglishCityCache.get(k);
   let name = local;
   try {
     const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'places.displayName,places.location' },
-      body: JSON.stringify({ textQuery: [local, country].filter(Boolean).join(', '), maxResultCount: 1, languageCode: 'en', includedType: 'locality' }),
+      body: JSON.stringify({ textQuery: [local, country].filter(Boolean).join(', '), maxResultCount: 1, languageCode: 'en', includedType: type }),
     });
     if (res.ok) {
       const c = ((await res.json()).places || [])[0];
       const text = c && c.displayName && c.displayName.text;
-      if (text && c.location && tripsyFlyoverDistanceKm({ lat, lng }, { lat: c.location.latitude, lng: c.location.longitude }) <= 60) name = text;
+      if (text && c.location && tripsyFlyoverDistanceKm({ lat, lng }, { lat: c.location.latitude, lng: c.location.longitude }) <= km) name = text;
     }
   } catch (e) { /* keep the address's own name */ }
   tripsyFlyoverEnglishCityCache.set(k, name);
   return name;
+}
+// True when a name is in a non-Latin script (Thai, Japanese, Arabic …): never shown as a
+// destination name ("I am still seeing this," 2026-10-21 -- a Four Seasons Tented Camp stop
+// read "ตำบล เวียง": even asked for English, Places gave the Thai sub-district, and its
+// English lookup matched a DIFFERENT Wiang 36 km away). Latin with accents is fine. Pure.
+function tripsyFlyoverNameIsNonLatin(name) {
+  return /[^\u0000-\u024F\u1E00-\u1EFF\u2000-\u206F\u2018-\u201F]/.test(String(name || ''));
+}
+// Whether a saved stop still needs its English name looked up: never stamped, or stamped
+// but still showing a non-Latin name (and not one the owner chose). Pure.
+function tripsyFlyoverStopNeedsEnglishName(st) {
+  if (!st) return false;
+  if (st.labelLang !== 'en') return true;
+  return !st.labelEdited && !st.manualPlace && tripsyFlyoverNameIsNonLatin(st.label);
+}
+// "Chiang Saen District" -> "Chiang Saen", "Amphoe Chiang Saen" -> "Chiang Saen". Pure.
+function tripsyFlyoverTidyPlaceName(name) {
+  return String(name || '').replace(/^(amphoe|tambon|muang|mueang)\s+/i, '').replace(/\s+(district|subdistrict|municipality|city)$/i, '').trim() || String(name || '');
+}
+// Which address levels to try for a stop's English name, in order. Normally the town
+// (locality) first. When the town came back in a non-Latin script it is usually a tiny
+// sub-district whose English lookup can land on a namesake elsewhere, so the district
+// (administrative_area_level_2) goes first, then the town, then the province. Pure.
+function tripsyFlyoverNameLevels({ locality, admin2, admin1 }) {
+  const L = locality && { name: locality, type: 'locality', km: 60 };
+  const A2 = admin2 && { name: admin2, type: 'administrative_area_level_2', km: 120 };
+  const A1 = admin1 && { name: admin1, type: 'administrative_area_level_1', km: 250 };
+  const order = locality && tripsyFlyoverNameIsNonLatin(locality) ? [A2, L, A1] : [L, A2, A1];
+  return order.filter(Boolean);
 }
 
 // Derive + geocode + merge + carry over. A stop that can't be placed is kept (lat null)
@@ -17954,6 +18004,9 @@ async function tripsyFlyoverBuild(trip, prevRecord, opts = {}) {
         // city ("LAX" -> "Los Angeles") and a prefecture-only address into the town.
         if (g.city) s.label = g.city;
       } else { s.lat = null; s.lng = null; }
+      // A name that is STILL not English is never kept: the label stays empty (Location) only
+      // if nothing English was ever known -- otherwise the address-parsed name stands.
+      if (tripsyFlyoverNameIsNonLatin(s.label)) s.label = '';
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
@@ -17986,14 +18039,17 @@ async function tripsyFlyoverEnglishLabels(record) {
   if (!record || !Array.isArray(record.stops)) return { record, changed: false };
   let changed = false;
   const stops = await Promise.all(record.stops.map(async st => {
-    if (st.labelLang === 'en') return st;
-    if (st.labelEdited || st.manualPlace) { changed = true; return { ...st, labelLang: 'en' }; }
+    const foreign = tripsyFlyoverNameIsNonLatin(st.label);
+    if (st.labelLang === 'en' && !foreign) return st;
+    if (st.labelEdited || st.manualPlace) { if (st.labelLang === 'en') return st; changed = true; return { ...st, labelLang: 'en' }; }
     if (!st.query && !st.label) return st;
     let g = null;
     try { g = await tripsyFlyoverGeocode(st.query || st.label, st.kind === 'stay' ? st.label : ''); } catch (e) { g = null; }
     if (!g) return st;
+    // No English name found: a foreign label stays unstamped, to be tried again next time.
+    if (!g.city) { if (foreign) return st; changed = true; return { ...st, labelLang: 'en' }; }
     changed = true;
-    return g.city ? { ...st, label: g.city, autoLabel: g.city, labelLang: 'en' } : { ...st, labelLang: 'en' };
+    return { ...st, label: g.city, autoLabel: g.city, labelLang: 'en' };
   }));
   return { record: changed ? { ...record, stops } : record, changed };
 }
@@ -18168,7 +18224,7 @@ async function showTripsyFlyover(tripKey) {
     const seeded = tripsyFlyoverSeedItineraryPhotos(record, trip, tripsyTodayDayKey(), driveData.tripsyPlacePhotoCache);
     if (seeded.changed) { record = seeded.record; save(); }
     // A fly-over built before English names: re-name its destinations, behind the page.
-    if (record.stops.some(st => st.labelLang !== 'en')) {
+    if (record.stops.some(tripsyFlyoverStopNeedsEnglishName)) {
       tripsyFlyoverEnglishLabels(record).then(r => {
         if (!r.changed || closed) return;
         const byId = new Map(r.record.stops.map(st => [st.id, st]));
@@ -18195,7 +18251,8 @@ async function showTripsyFlyover(tripKey) {
       },
     });
     if (!r || closed) return;
-    updateStop(id, { pages: r.pages, photos: r.photos });
+    // The stop's photos are kept in the order they play, so every list of them agrees.
+    updateStop(id, { pages: r.pages, photos: tripsyFlyoverPhotosInPageOrder({ ...st, pages: r.pages, photos: r.photos }).map(x => x.photo) });
     save(); render();
   };
   if (record && record.music) tripsyFlyoverPrefetchMusic(record.music);
@@ -18223,6 +18280,9 @@ async function showTripsyFlyover(tripKey) {
       </div>
       ${record.stops.map((s, i) => {
         const photos = s.photos || [];
+        // Shown in PLAY order -- page 1's photos first -- with each one's page number, so a
+        // re-ordered slideshow reads back in the order chosen.
+        const ordered = tripsyFlyoverPhotosInPageOrder(s);
         const legHtml = s.mode ? `<span title="${esc(TRIPSY_FLYOVER_MODE_LABEL[s.mode] || '')}" style="font-size:18px;">${TRIPSY_FLYOVER_MODE_GLYPH[s.mode] || ''}</span>` : `<span style="font-size:18px;">📍</span>`;
         const noPlace = s.lat == null;
         return `
@@ -18242,10 +18302,11 @@ async function showTripsyFlyover(tripKey) {
           ${noPlace && !s.removed ? `<div style="font-size:12px; color:#E0A33A; margin-top:4px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">⚠️ Not on the map yet — it will be skipped.${isOwner ? ` <button class="btn" data-flyover-set-place style="font-size:12px;">📍 Set location</button>` : ''}</div>` : ''}
           ${s.removed ? '' : `
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center;">
-            ${photos.map((p, pi) => `
-              <div style="position:relative;">
-                ${tripsyFlyoverThumbHtml(p)}
-                ${isOwner ? `<button data-flyover-photo-remove="${pi}" title="Remove ${tripsyFlyoverIsVideo(p) ? 'video' : 'photo'}" style="position:absolute; top:2px; right:2px; width:22px; height:22px; border-radius:50%; border:none; background:rgba(0,0,0,0.65); color:#fff; font-size:12px; cursor:pointer; padding:0;">✕</button>` : ''}
+            ${ordered.map(({ photo: p, page }) => `
+              <div class="btn" style="padding:3px; position:relative; cursor:default;">
+                ${tripsyFlyoverThumbHtml(p, 84, 64, 'border-radius:5px;')}
+                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:rgba(0,0,0,0.65); color:#fff;">Page ${page}</span>
+                ${isOwner ? `<button data-flyover-photo-remove="${esc(p.driveFileId)}" title="Remove ${tripsyFlyoverIsVideo(p) ? 'video' : 'photo'}" style="position:absolute; top:5px; right:5px; width:22px; height:22px; border-radius:50%; border:none; background:rgba(0,0,0,0.65); color:#fff; font-size:12px; cursor:pointer; padding:0;">✕</button>` : ''}
               </div>`).join('')}
             ${!tripsyFlyoverStopVisited(s, todayKey)
               ? `<span style="font-size:12px; color:var(--muted);">🔒 Photos open once you get here (${esc(tripsyFlyoverDatesLabel(s))}).</span>`
@@ -18314,8 +18375,8 @@ async function showTripsyFlyover(tripKey) {
       card.querySelectorAll('[data-flyover-photo-remove]').forEach(b => {
         b.onclick = e => {
           e.stopPropagation();
-          const pi = Number(b.getAttribute('data-flyover-photo-remove'));
-          updateStop(id, { photos: (stop().photos || []).filter((_, k) => k !== pi) });
+          const fid = b.getAttribute('data-flyover-photo-remove');
+          updateStop(id, { photos: (stop().photos || []).filter(ph => ph.driveFileId !== fid) });
           save(); render();
         };
       });
@@ -18630,7 +18691,8 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
     // Above the setup page and the suggested-photos grid, below the player (2147483090), so
     // Preview plays on top of the dialog and drops back to it.
     ov.style.zIndex = '2147483065';
-    const photos = ((stop && stop.photos) || []).map(p => ({ ...p }));
+    // In play order (page 1's photos first), so the grid reads like the slideshow.
+    const photos = tripsyFlyoverPhotosInPageOrder(stop).map(x => ({ ...x.photo }));
     const videoIds = new Set(photos.filter(tripsyFlyoverIsVideo).map(p => p.driveFileId));
     const isVideo = id => videoIds.has(id);
     const cfg = tripsyFlyoverSlideshowConfig(stop);
@@ -39450,7 +39512,7 @@ async function renderTripsyEventsListImpl() {
         if (trip && record && tripsyFlyoverPlayableStops(record).length) {
           playTripsyFlyover(trip, record);
           // Older fly-overs pick up English names for the next showing (owner only: it writes).
-          if (isOwner && record.stops.some(st => st.labelLang !== 'en')) {
+          if (isOwner && record.stops.some(tripsyFlyoverStopNeedsEnglishName)) {
             tripsyFlyoverEnglishLabels(record).then(r => { if (r.changed) Store.saveTripsyFlyover(r.record); })
               .catch(e => console.error('fly-over English names failed:', e));
           }

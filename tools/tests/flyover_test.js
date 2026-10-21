@@ -338,7 +338,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   const setup = extractFn('showTripsyFlyover');
   assert(/data-flyover-slideshow/.test(setup) && /data-flyover-preview/.test(setup) && /tripsyFlyoverSlideshowSummary\(s\)/.test(setup),
     'each destination shows how its photos play, with Slideshow options and Preview buttons');
-  assert(/updateStop\(id, \{ pages: r\.pages, photos: r\.photos \}\);/.test(setup), 'Save in the options box writes the pages onto that one stop');
+  assert(/updateStop\(id, \{ pages: r\.pages, photos: tripsyFlyoverPhotosInPageOrder/.test(setup), 'Save in the options box writes the pages onto that one stop');
 }
 
 // ---- map tiles: keyless, with a fallback (2026-10-20: "I get a message saying api key
@@ -527,8 +527,8 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   const geo = extractFn('tripsyFlyoverGeocode');
   assert(/textQuery: query, maxResultCount: 1, languageCode: 'en'/.test(geo), 'THE ASK: Places is asked for English names');
   assert(/return \{ lat: g\.lat, lng: g\.lon, city: g\.name \|\| '' \}/.test(geo), 'the fallback geocoder\'s English name is used, not thrown away');
-  assert(/const city = local \? await tripsyFlyoverEnglishCityName\(local, pick\('country'\), lat, lng, apiKey\) : '';/.test(geo),
-    'an address\'s local city spelling is swapped for the English one');
+  assert(/await tripsyFlyoverEnglishCityName\(lv\.name, country, lat, lng, apiKey, lv\)/.test(geo) && /!tripsyFlyoverNameIsNonLatin\(n\)/.test(geo),
+    'an address\'s local city spelling is swapped for the English one, and a non-English answer is never taken');
   (async () => {
     const reqs = [];
     const f = new Function('reqs', `
@@ -551,6 +551,7 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   (async () => {
     const calls = [];
     const f = new Function('calls', `
+      ${extractFn('tripsyFlyoverNameIsNonLatin')}
       async function tripsyFlyoverGeocode(q) { calls.push(q); if (q === 'fail') return null; return { lat: 1, lng: 2, city: { '福岡市 hotel': 'Fukuoka', 'MUC airport': 'Munich' }[q] || '' }; }
       ${en}
       return tripsyFlyoverEnglishLabels;`)(calls);
@@ -679,4 +680,58 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/file\.size > TRIPSY_FLYOVER_VIDEO_MAX_BYTES/.test(extractFn('tripsyFlyoverUploadVideo')), 'an oversized video is refused with a message');
   assert(/data-ss-video-note/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the page dialog explains a video page instead of asking a count');
   assert(/tripsyFlyoverMusicUrlCache\.set\(music\.url/.test(extractFn('tripsyFlyoverPrefetchMusic')), 'a found song is copied locally when it can be, so iOS can fade it');
+}
+
+// ---- a name that is STILL not English is never shown ("I am still seeing this," 2026-10-21:
+// a Thai Four Seasons stop read "ตำบล เวียง" -- Places returned the Thai sub-district even when
+// asked for English) ----
+eval([extractFn('tripsyFlyoverNameIsNonLatin'), extractFn('tripsyFlyoverTidyPlaceName'), extractFn('tripsyFlyoverNameLevels'),
+  extractFn('tripsyFlyoverStopNeedsEnglishName')].join('\n'));
+{
+  assert(tripsyFlyoverNameIsNonLatin('ตำบล เวียง') && tripsyFlyoverNameIsNonLatin('福岡市') && tripsyFlyoverNameIsNonLatin('Москва'),
+    'Thai, Japanese and Cyrillic names are not English');
+  assert(!tripsyFlyoverNameIsNonLatin('München') && !tripsyFlyoverNameIsNonLatin('Hội An') && !tripsyFlyoverNameIsNonLatin('St. John’s'),
+    'Latin names with accents or curly quotes are fine');
+  assert(tripsyFlyoverTidyPlaceName('Chiang Saen District') === 'Chiang Saen' && tripsyFlyoverTidyPlaceName('Amphoe Chiang Saen') === 'Chiang Saen'
+    && tripsyFlyoverTidyPlaceName('Mexico City') === 'Mexico', 'district wording is trimmed');
+  const lv = tripsyFlyoverNameLevels({ locality: 'ตำบล เวียง', admin2: 'อำเภอ เชียงแสน', admin1: 'เชียงราย' });
+  assert(lv.map(l => l.type).join(',') === 'administrative_area_level_2,locality,administrative_area_level_1',
+    'a non-Latin town (a Thai sub-district) tries the district first, then the town, then the province');
+  assert(tripsyFlyoverNameLevels({ locality: 'München', admin2: 'Oberbayern' })[0].type === 'locality', 'a Latin town is still tried first');
+  assert(tripsyFlyoverStopNeedsEnglishName({ labelLang: 'en', label: 'ตำบล เวียง' }) && !tripsyFlyoverStopNeedsEnglishName({ labelLang: 'en', label: 'Singapore' })
+    && !tripsyFlyoverStopNeedsEnglishName({ labelLang: 'en', label: 'ตำบล เวียง', labelEdited: true }),
+    'THE ASK: a stop already stamped English but still showing Thai is looked up again; an owner-typed name is not');
+  assert(/record\.stops\.some\(tripsyFlyoverStopNeedsEnglishName\)/.test(extractFn('showTripsyFlyover')), 'the setup page re-checks such stops on open');
+  assert(/if \(tripsyFlyoverNameIsNonLatin\(s\.label\)\) s\.label = '';/.test(extractFn('tripsyFlyoverBuild')), 'a build never keeps a non-English name');
+  (async () => {
+    const f = new Function(`
+      ${extractFn('tripsyFlyoverNameIsNonLatin')}
+      async function tripsyFlyoverGeocode(q) { return { lat: 1, lng: 2, city: q === 'camp' ? 'Chiang Saen' : '' }; }
+      ${extractFn('tripsyFlyoverEnglishLabels')}
+      return tripsyFlyoverEnglishLabels;`)();
+    const r = await f({ stops: [{ id: 'a', kind: 'stay', label: 'ตำบล เวียง', labelLang: 'en', query: 'camp' },
+      { id: 'b', kind: 'stay', label: 'ตำบล', labelLang: 'en', query: 'nothing' }] });
+    assert(r.record.stops[0].label === 'Chiang Saen', 'THE ASK: the Thai stop becomes Chiang Saen');
+    assert(r.record.stops[1].label === 'ตำบล' && r.record.stops[1].labelLang === 'en', 'no English found: left as is, and tried again next open (it still reads non-Latin)');
+  })().catch(e => { console.log('FAIL thai label', e); process.exitCode = 1; });
+}
+
+// ---- photos listed in PAGE order ("Always show pages in the flyover edit view in the order of
+// the pages … show them in the new order I selected," 2026-10-21) ----
+eval([extractFn('tripsyFlyoverPhotosInPageOrder')].join('\n'));
+{
+  const ph = id => ({ driveFileId: id });
+  const st = { photos: [ph('a'), ph('b'), ph('c'), ph('d')], pages: [{ ids: ['c'], count: 1 }, { ids: ['a', 'd'], count: 2 }] };
+  const o = tripsyFlyoverPhotosInPageOrder(st);
+  assert(o.map(x => x.photo.driveFileId + x.page).join(',') === 'c1,a2,d2,b3',
+    'THE ASK: photos come back in the order their pages play, each with its page; one on no page plays last');
+  const setup = extractFn('showTripsyFlyover');
+  assert(/const ordered = tripsyFlyoverPhotosInPageOrder\(s\);/.test(setup) && /ordered\.map\(\(\{ photo: p, page \}\)/.test(setup) && />Page \$\{page\}<\/span>/.test(setup)
+    && /<div class="btn" style="padding:3px; position:relative; cursor:default;">\s*\$\{tripsyFlyoverThumbHtml\(p, 84, 64, 'border-radius:5px;'\)\}/.test(setup),
+    'the setup page lists each destination\'s photos in play order, drawn like the page dialog\'s grid (framed, "Page N" badge)');
+  assert(/data-flyover-photo-remove="\$\{esc\(p\.driveFileId\)\}"/.test(setup) && /ph\.driveFileId !== fid/.test(setup),
+    'removing a photo goes by its id, not its position (the order on screen is no longer the stored order)');
+  assert(/photos: tripsyFlyoverPhotosInPageOrder\(\{ \.\.\.st, pages: r\.pages, photos: r\.photos \}\)\.map\(x => x\.photo\)/.test(setup),
+    'Save stores the photos in the new page order');
+  assert(/const photos = tripsyFlyoverPhotosInPageOrder\(stop\)\.map/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the page dialog\'s grid opens in play order too');
 }

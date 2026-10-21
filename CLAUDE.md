@@ -3545,6 +3545,18 @@ WebView's support for recording is unproven.
     playback (so music still starts inside the tap). A name the owner typed (`labelEdited`)
     or a place they set by hand (`manualPlace`) is never replaced; a failed lookup stays
     unstamped and is retried next time.
+    **A non-English name is never shown** ("I am still seeing this," 2026-10-21 — the
+    Golden Triangle Four Seasons stop read "ตำบล เวียง": asked for English, Places still
+    returned the Thai sub-district, and that name's English lookup matched a DIFFERENT Wiang
+    36 km away). `tripsyFlyoverNameIsNonLatin` (anything beyond Latin + accents) gates every
+    name: `tripsyFlyoverNameLevels` tries the town, district, then province in English
+    (DISTRICT first when the town came back non-Latin — a sub-district's namesakes are near;
+    km bounds 60/120/250), takes the first Latin answer, trimmed by
+    `tripsyFlyoverTidyPlaceName` ("Chiang Saen District" → "Chiang Saen"); a build blanks a
+    label still non-Latin; and `tripsyFlyoverStopNeedsEnglishName` re-checks stops already
+    stamped `labelLang:'en'` that still read non-Latin (never an owner-typed name), so the
+    saved Singapore GP fly-over heals on its next open. Live check: the camp → "Chiang Saen";
+    Mandarin Oriental → Singapore, Bayerischer Hof → Munich, Ritz-Carlton → Fukuoka.
   - **Merging:** consecutive stays in one city (same label, or under
     `TRIPSY_FLYOVER_MERGE_KM` apart) merge AFTER geocoding (`tripsyFlyoverMergeNearby`).
     The origin and return are never merged into a stay.
@@ -3689,6 +3701,14 @@ WebView's support for recording is unproven.
         fold, reachable only by scrolling inside the box (measured: 120 px below a 700 px
         screen). The box's height also uses `dvh`, so Safari's toolbars can't push the footer
         off the screen.
+      - **Photos are listed in PLAY order everywhere** ("Always show pages in the flyover edit
+        view in the order of the pages … show them in the new order I selected," 2026-10-21):
+        `tripsyFlyoverPhotosInPageOrder(stop)` (pure; page 1's photos first, each with its
+        page number) drives the setup card's thumbnails (drawn exactly like the page dialog's grid — framed
+        84×64 tile, "Page N" badge top-left, per "show the photos in the same way they display
+        on the slideshow options page," same day; ✕ removes by
+        `driveFileId`, since screen order is no longer storage order) and the dialog's grid at
+        open, and Save rewrites `stop.photos` in that order so every list agrees.
       - **Save also sits at the TOP, beside the ✕** ("The save button for changes to the
         flyover should be next to the close window button on the top of the window. There
         should also be cancel and save buttons at the bottom," same day): `data-ss-save-top`
