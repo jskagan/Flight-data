@@ -3767,17 +3767,22 @@ const Store = {
   getTripsyFlyover(tripKey) {
     return (driveData.tripsyFlyovers || []).find(r => r.tripKey === tripKey) || null;
   },
+  // In memory only, synchronously, so every reader (View on the menu, the player) sees a
+  // change the moment it is made, however long the Drive write queued behind it takes.
+  stageTripsyFlyover(record) {
+    if (!record || !record.tripKey) return false;
+    driveData.tripsyFlyovers = (driveData.tripsyFlyovers || []).filter(r => r.tripKey !== record.tripKey);
+    driveData.tripsyFlyovers.push({ ...record, updatedAt: new Date().toISOString() });
+    return true;
+  },
+  // Writes whatever is staged (the whole file carries the newest record).
+  async persistTripsyFlyovers() {
+    try { await persistDriveData(); return true; }
+    catch (e) { console.error('Store.persistTripsyFlyovers failed:', e); return false; }
+  },
   async saveTripsyFlyover(record) {
-    try {
-      if (!record || !record.tripKey) return false;
-      driveData.tripsyFlyovers = (driveData.tripsyFlyovers || []).filter(r => r.tripKey !== record.tripKey);
-      driveData.tripsyFlyovers.push({ ...record, updatedAt: new Date().toISOString() });
-      await persistDriveData();
-      return true;
-    } catch (e) {
-      console.error('Store.saveTripsyFlyover failed:', e);
-      return false;
-    }
+    if (!this.stageTripsyFlyover(record)) return false;
+    return this.persistTripsyFlyovers();
   },
   async getTripsyPartialItinerary(tripKey) {
     return (driveData.tripsyPartialItineraries || []).find(p => p.tripKey === tripKey) || null;
@@ -17523,7 +17528,10 @@ const TRIPSY_FLYOVER_TILE_FAIL_LIMIT = 4;
 function tripsyFlyoverAddTiles(L, map, i = 0) {
   const src = TRIPSY_FLYOVER_TILE_SOURCES[i];
   if (!src) return null;
-  const layer = L.tileLayer(src.url, { attribution: src.attribution, maxZoom: src.maxZoom });
+  // detectRetina: on a high-density screen (every iPad and iPhone) each 256px tile is
+  // fetched one zoom level deeper and drawn at half size, so the map is sharp rather than
+  // a 1x tile stretched to 2x ("The maps are very pixelated when you zoom in," 2026-10-21).
+  const layer = L.tileLayer(src.url, { attribution: src.attribution, maxZoom: src.maxZoom, detectRetina: true });
   let loaded = 0, failed = 0, switched = false;
   layer.on('tileload', () => { loaded++; });
   layer.on('tileerror', () => {
@@ -18558,10 +18566,12 @@ async function showTripsyFlyover(tripKey) {
 
   let record = Store.getTripsyFlyover(tripKey);
   let saveChain = Promise.resolve();
+  // The change is staged in memory AT ONCE (so View, Play, and every other reader see it
+  // immediately); only the Drive write waits its turn in the chain.
   const save = () => {
-    const snapshot = record;
+    Store.stageTripsyFlyover(record);
     saveChain = saveChain.then(async () => {
-      const ok = await Store.saveTripsyFlyover(snapshot);
+      const ok = await Store.persistTripsyFlyovers();
       if (!ok) toast('Couldn’t save the fly-over to Drive — try again.', 'error');
       return ok;
     }, () => false);
@@ -20193,19 +20203,27 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     requestAnimationFrame(frame);
   });
 
-  const arrive = async (r, s, i) => {
-    layers.push(dot(s));
-    if (!(await untilMoveEnd(r, () => map.flyTo([s.lat, s.lng], s.kind === 'stay' ? 10 : 9, { duration: 1.4 }), 2600))) return false;
+  const stopSub = (s, i) => {
     const n = stops.length;
-    const sub = [tripsyFlyoverDatesLabel(s), preview ? '' : s.kind === 'origin' ? 'Departure' : s.kind === 'return' ? 'Home' : `Stop ${i} of ${n - (stops[0].kind === 'origin' ? 1 : 0) - (stops[n - 1].kind === 'return' ? 1 : 0)}`].filter(Boolean).join(' · ');
-    showCard(s.label, sub);
+    return [tripsyFlyoverDatesLabel(s), preview ? '' : s.kind === 'origin' ? 'Departure' : s.kind === 'return' ? 'Home' : `Stop ${i} of ${n - (stops[0].kind === 'origin' ? 1 : 0) - (stops[n - 1].kind === 'return' ? 1 : 0)}`].filter(Boolean).join(' · ');
+  };
+  // A destination's photo pages, then back to the map.
+  const slideshow = async (r, s) => {
     const pages = tripsyFlyoverPages(s);
-    if (!pages.length) { if (!(await wait(r, 1800))) return false; }
     const enter = tripsyFlyoverEnterTransitions(s, pages);
     for (let k = 0; k < pages.length; k++) {
       if (!(await showPage(r, pages[k], enter[k]))) return false;
     }
     return endSlideshow(r);
+  };
+  // withPhotos false: the stop's pictures play elsewhere (the first destination's open the
+  // show, the last's close it), so the map just lands and names the place.
+  const arrive = async (r, s, i, withPhotos = true) => {
+    layers.push(dot(s));
+    if (!(await untilMoveEnd(r, () => map.flyTo([s.lat, s.lng], s.kind === 'stay' ? 10 : 9, { duration: 1.4 }), 2600))) return false;
+    showCard(s.label, stopSub(s, i));
+    if (!withPhotos || !tripsyFlyoverPages(s).length) return wait(r, 1800);
+    return slideshow(r, s);
   };
 
   const play = async r => {
@@ -20221,10 +20239,26 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       return;
     }
     map.fitBounds(all, { padding: [70, 70], animate: false });
+    const stayNo = s => stops.filter(x => x.kind === 'stay').indexOf(s) + 1;
+    // The FIRST destination's pictures play BEFORE the map is ever seen, and the LAST
+    // destination's AFTER the closing map ("for the very first destination show the picture
+    // before the map. On the last destinations, show the picture after the map,"
+    // 2026-10-21). The veil goes up instantly, so the map never flashes first.
+    const first = stops[0];
+    const last = stops.length > 1 ? stops[stops.length - 1] : null;
+    const openWithPhotos = tripsyFlyoverPages(first).length > 0;
+    const closeWithPhotos = !!last && tripsyFlyoverPages(last).length > 0;
+    if (openWithPhotos) {
+      veilEl.style.transition = 'none';
+      veilEl.classList.add('tfo-show');
+      void veilEl.offsetWidth;
+      veilEl.style.transition = '';
+      showCard(first.label, stopSub(first, stayNo(first)));
+      if (!(await slideshow(r, first))) return;
+    }
     showCard(trip.name || 'Trip', formatTripDateRange(tripsyItineraryStartDayKey(trip), tripsyItineraryEndDayKey(trip)));
     if (!(await wait(r, 2200))) return;
-    const stayNo = s => stops.filter(x => x.kind === 'stay').indexOf(s) + 1;
-    if (!(await arrive(r, stops[0], stayNo(stops[0])))) return;
+    if (!(await arrive(r, first, stayNo(first), !openWithPhotos))) return;
     for (let k = 1; k < stops.length; k++) {
       const a = stops[k - 1], b = stops[k];
       showCard(`${TRIPSY_FLYOVER_MODE_GLYPH[b.mode] || ''} ${a.label} → ${b.label}`, TRIPSY_FLYOVER_MODE_LABEL[b.mode] || '');
@@ -20242,9 +20276,15 @@ async function playTripsyFlyover(trip, record, opts = {}) {
         from = v;
       }
       if (!(await animateLeg(r, from, b, via.length ? 'plane' : ''))) return;
-      if (!(await arrive(r, b, stayNo(b)))) return;
+      if (!(await arrive(r, b, stayNo(b), !(closeWithPhotos && b === last)))) return;
     }
     if (!(await untilMoveEnd(r, () => map.flyToBounds(all, { padding: [70, 70], duration: 1.6 }), 2800))) return;
+    if (closeWithPhotos) {
+      showCard(trip.name || 'Trip', '');
+      if (!(await wait(r, 1600))) return;
+      showCard(last.label, stopSub(last, stayNo(last)));
+      if (!(await slideshow(r, last))) return;
+    }
     showCard(trip.name || 'Trip', 'The end');
     // Let the music fade out under the closing card.
     if (audio && !audio.paused) {

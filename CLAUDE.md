@@ -3633,6 +3633,13 @@ WebView's support for recording is unproven.
   `{tripKey, builtAt, stops:[{id, kind, label, autoLabel, labelEdited, removed, lat, lng,
   mode, names, start, end, photos:[{driveFileId}]}]}`, managed by `Store.getTripsyFlyover`
   and `saveTripsyFlyover`. The prune rule drops a record when its trip is gone.
+  - **Every change is effective the moment it's made** ("When a user saves a change from a
+    slideshow options page, make that change effective immediately," 2026-10-21): the setup
+    page's `save()` STAGES the record in `driveData` synchronously
+    (`Store.stageTripsyFlyover`) and only the Drive write (`Store.persistTripsyFlyovers`)
+    waits in the save chain. It used to queue the whole `saveTripsyFlyover` call, so the
+    in-memory record lagged behind earlier writes and View from the ⚙️ menu could play the
+    old slideshow.
   - **Rebuild destinations** re-derives the stops through `tripsyFlyoverCarryOver`, matching
     by stop id and then by kind + city. Photos, a renamed label and a REMOVED stop all
     survive; a rebuild never resurrects a stop the owner removed.
@@ -3665,6 +3672,10 @@ WebView's support for recording is unproven.
   `tripsyConfirmDialog`.
   - **Map:** Leaflet 1.9.4 loads on demand from cdnjs (`tripsyFlyoverLoadLeaflet`, a
     memoized promise that is cleared on failure so a retry works).
+  - **Tiles load at screen resolution** (`detectRetina: true` in `tripsyFlyoverAddTiles`;
+    "The maps are very pixelated when you zoom in," 2026-10-21): neither keyless source has
+    @2x tiles, so on a high-density screen each tile is fetched one zoom level deeper and
+    drawn at half size — sharp, with labels drawn smaller.
   - **Tiles** come from `TRIPSY_FLYOVER_TILE_SOURCES`: **Esri World Street Map first,
     OpenStreetMap's own tiles second**, both keyless, with attribution shown.
     - **Esri is first for its ENGLISH labels** ("Can you show the names of all locations on
@@ -3687,6 +3698,13 @@ WebView's support for recording is unproven.
   - **Sequence:** overview of the whole route → the origin → for each leg, frame the leg,
     animate the vehicle → land with a dot, a city card and the photo slideshow
     (`TRIPSY_FLYOVER_PHOTO_MS` per photo).
+    **The first destination's pictures open the show and the last's close it** ("for the
+    very first destination show the picture before the map. On the last destinations, show
+    the picture after the map," 2026-10-21): with photos on the first stop, the veil goes up
+    INSTANTLY (transition off for one frame, so the map never flashes) and its slideshow
+    plays before the overview; the map later lands there with just its card. The last stop
+    lands with just its card too, then the closing whole-route map, then its slideshow, then
+    "The end". `arrive(r, s, i, withPhotos)` / `slideshow(r, s)`; preview is unchanged.
   - **Route geometry:** flights follow a great circle (`tripsyFlyoverGreatCircle`). Longitudes
     are UNWRAPPED both along the path and across stops (`tripsyFlyoverUnwrap`,
     `tripsyFlyoverPlayableStops`), so LAX→SIN crosses the Pacific instead of looping back

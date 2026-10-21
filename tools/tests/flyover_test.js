@@ -1010,3 +1010,24 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(/const \{ via: _gone, \.\.\.rest \} = s;/.test(add), 'and a stop that no longer has layovers loses its bogus ones');
   assert(!/record\.layoversAt \?|!record\.layoversAt\)/.test(html), 'no caller still keys on the old stamp');
 }
+{
+  // Slideshow options take effect at once; bookend photos; sharp tiles (2026-10-21).
+  const setup = extractFn('showTripsyFlyover');
+  assert(/const save = \(\) => \{\s*Store\.stageTripsyFlyover\(record\);/.test(setup)
+    && /Store\.persistTripsyFlyovers\(\)/.test(setup),
+    'a fly-over change is staged in memory before its Drive write queues, so View plays it immediately');
+  const dd = { tripsyFlyovers: [{ tripKey: 'a', v: 1 }, { tripKey: 'b', v: 1 }] };
+  const store = new Function('driveData', 'return ({' + html.match(/  stageTripsyFlyover\(record\) \{[\s\S]*?\n  \},/)[0] + '})')(dd);
+  store.stageTripsyFlyover({ tripKey: 'a', v: 2 });
+  assert(dd.tripsyFlyovers.length === 2 && dd.tripsyFlyovers.find(r => r.tripKey === 'a').v === 2, 'staging replaces the trip\'s record synchronously');
+  const play = extractFn('playTripsyFlyover');
+  const iOpen = play.indexOf('if (openWithPhotos) {'), iOverview = play.indexOf("formatTripDateRange(tripsyItineraryStartDayKey(trip)");
+  assert(iOpen > 0 && iOpen < iOverview && /if \(openWithPhotos\) \{[\s\S]*?slideshow\(r, first\)/.test(play)
+    && /arrive\(r, first, stayNo\(first\), !openWithPhotos\)/.test(play),
+    'the first destination\'s pictures play before the map, and are not repeated when the map lands there');
+  const iClose = play.indexOf('if (closeWithPhotos) {'), iEndMap = play.lastIndexOf('map.flyToBounds(all');
+  assert(iClose > iEndMap && /arrive\(r, b, stayNo\(b\), !\(closeWithPhotos && b === last\)\)/.test(play)
+    && play.indexOf("'The end'") > iClose,
+    'the last destination\'s pictures play after the closing map, before "The end"');
+  assert(/detectRetina: true/.test(extractFn('tripsyFlyoverAddTiles')), 'map tiles load at screen resolution (retina)');
+}
