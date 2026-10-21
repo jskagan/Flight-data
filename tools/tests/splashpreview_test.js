@@ -18,7 +18,7 @@ const fnSource = name => {
 };
 
 // ---- scaffold: a fake document with a splash, gate, app-root and a rail ----
-function makeWorld({ cache = { trips: [{ key: 't1', start: '2026-10-20' }], updatedAt: 'u', cachedAt: 'c' }, signedIn = false, splashShown = true } = {}) {
+function makeWorld({ cache = { trips: [{ key: 't1', start: '2026-10-20' }], updatedAt: 'u', cachedAt: 'c' }, signedIn = false, splashShown = true, landsOnTravelView = true } = {}) {
   const el = (id, display) => ({ id, style: { display }, dataset: {} });
   const splash = el('splash-screen', splashShown ? 'flex' : 'none');
   const gate = el('signin-gate', splashShown ? 'none' : 'flex');
@@ -39,6 +39,7 @@ function makeWorld({ cache = { trips: [{ key: 't1', start: '2026-10-20' }], upda
     document, console,
     setTimeout: (fn, ms) => { ctx.lastTimer = { fn, ms }; return 1; }, clearTimeout: () => {},
     loadTripsyOfflineTrips: async () => cache,
+    loadTravelViewPref: () => landsOnTravelView,
     navigate: async v => { navigated.push(v); ctx.currentView = v; },
     currentView: '',
     OFFLINE_ALLOWED_VIEWS: new Set(['travelview', 'tripinsurance']),
@@ -105,6 +106,13 @@ const build = opts => {
     const w = build({ signedIn: true });
     await w.api.maybe();
     assert(w.api.preview() === false, 'no preview once sign-in has finished');
+  }
+  // ---- does not fire: a device that lands on Home (the iPad's dark-sheet swap, 2026-10-21) ----
+  {
+    const w = build({ landsOnTravelView: false });
+    await w.api.maybe();
+    assert(w.api.preview() === false && w.navigated.length === 0 && w.splash.style.display === 'flex',
+      'a device that lands on Home keeps the splash until Home is ready -- no stand-in to swap away');
   }
   // ---- does not fire: nothing cached ----
   {

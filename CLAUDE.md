@@ -4020,6 +4020,12 @@ offline mode in place via `tripsyPreviewBecomeOffline` (flags flipped, Travel Vi
 the strip re-words to Offline — no gate over the schedule); a failure that REACHED the server
 (expired sign-in, sharing) still shows the gate, since the reader has to act. The 12s watchdog
 paints nothing while a preview shows — the preview IS the fallback it existed to offer.
+**Only a device that LANDS on Travel View gets the stand-in** (2026-10-21, chosen by the owner
+after two failed fixes): on a device that lands on Home (the owner's iPad), the preview had to be
+swapped for Home when sign-in finished, and on iPad that swap left a dark sheet over Home that no
+scroll, rotation or repaint cleared, and which Chromium never shows. `tripsyMaybeShowSplashPreview`
+now returns early unless `loadTravelViewPref()` (phones always qualify), so such a device keeps the
+splash until Home is ready; the swap code paths stay for the TV-landing devices, which never swap.
 `splashpreview_test.js` (runs the extracted lifecycle inside `with (ctx)` against a fake
 document); `offlinehang_test.js`'s catch-path pin was loosened for the new early-out.
 **A preview render still loading when sign-in lands must not paint over Home** ("When I opened the
