@@ -856,7 +856,7 @@ eval(extractFn('tripsyFlyoverStopsNeedingMode'));
   assert(/\.\.\.\(p\.modeManual \? \{ mode: p\.mode, modeManual: true, modeGuessed: false \} : \{\}\)/.test(extractFn('tripsyFlyoverCarryOver')),
     'a transport the owner chose survives a rebuild');
   const ask = extractFn('tripsyFlyoverAskMode');
-  assert(/\['plane', 'train', 'car', 'boat'\]/.test(ask) && /data-mode-later/.test(ask) && /How did you get there\?/.test(ask),
+  assert(/TRIPSY_FLYOVER_MODES\.map/.test(ask) && /data-mode-later/.test(ask) && /How did you get there\?/.test(ask),
     'the dialog offers flight / train / drive / ferry, or Not now');
   const setup = extractFn('showTripsyFlyover');
   assert(/render\(\);\s*askMissingModes\(\);/.test(setup) && /tripsyFlyoverDeriveStops\(trip\)\.filter\(x => x\.modeGuessed\)/.test(setup),
@@ -890,4 +890,16 @@ eval(extractFn('tripsyFlyoverVideoAudio'));
     && /const duck = underMusic \? Promise\.resolve\(\) : duckMusic\(\);/.test(player),
     'a video set to the music plays silently and the music never fades out for it');
   assert(/tripsyFlyoverVideoAudio\(p\) === 'music' \? '🎵' : '🔊'/.test(extractFn('tripsyFlyoverThumbHtml')), 'its thumbnail shows which sound it uses');
+}
+
+// ---- hiking between locations ("Add an option to hike between locations for the flyover," 2026-10-21) ----
+eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join('\n').replace(/^const /gm, 'var '));
+{
+  assert(TRIPSY_FLYOVER_MODES.includes('hike') && /hike: '🚶'/.test(html) && /hike: 'Hike'/.test(html), 'THE ASK: Hike is one of the transports, shown as 🚶 Hike');
+  assert(/<select class="field-input" data-flyover-mode-select[^`]*\$\{TRIPSY_FLYOVER_MODES\.map/.test(extractFn('showTripsyFlyover')),
+    'the leg drop-down offers it');
+  assert(/TRIPSY_FLYOVER_MODES\.map/.test(extractFn('tripsyFlyoverAskMode')), 'and so does the "How did you get there?" question');
+  assert(tripsyFlyoverModeOf({ category: 'other' }, 'Hike to the summit') === 'hike' && tripsyFlyoverModeOf({ category: 'car' }, 'Car from A to B') === 'car'
+    && tripsyFlyoverModeOf({ category: 'other' }, 'Walkabout tour') === 'car', 'a transport leg the trip names as a hike or walk draws as one (whole words only)');
+  assert(/mode === 'hike' \? '2 7'/.test(extractFn('playTripsyFlyover')), 'a hike is drawn as a dotted trail');
 }

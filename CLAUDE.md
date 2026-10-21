@@ -3535,7 +3535,14 @@ WebView's support for recording is unproven.
   until next open); an answer stamps `{mode, modeManual: true}`, and `tripsyFlyoverCarryOver`
   keeps it across Rebuild. Each card's leg is a DROP-DOWN (`data-flyover-mode-select`,
   owner-only; "Allow the user to change the mode of transportation with a drop down menu,"
-  same day) to change the transport any time, with a ❓ beside it while still a guess. Verified in Chromium: a Paris→Rome stay with no leg
+  same day) to change the transport any time, with a ❓ beside it while still a guess.
+  **Hike is a transport too** ("Add an option to hike between locations for the flyover,"
+  same day): `hike` (🚶 Hike — the walker, chosen over 🧑‍🦯, which is the white-cane symbol, since no
+  hiker-with-a-stick emoji exists) is in `TRIPSY_FLYOVER_MODES`, the one list both the drop-down and
+  the question dialog draw from; it plays as a dotted trail (`dashArray '2 7'`) with the 🚶
+  walking along it (ground glyphs face left and flip heading right); a trip leg named as a
+  hike/trek/walk/"on foot" derives as one (`tripsyFlyoverModeOf`, whole words); rank 0.5,
+  below a drive, so a mixed leg still draws as its vehicle. Verified in Chromium: a Paris→Rome stay with no leg
   asked, Train saved, Rebuild kept it without asking again.
 - **Geocoded once, at build time** (`tripsyFlyoverBuild`, 4 lookups in parallel).
   - **Lookup source:** Places `searchText` with `addressComponents` (it knows hotel names and

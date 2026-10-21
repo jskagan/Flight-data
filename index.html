@@ -17497,11 +17497,17 @@ function tripsyFlyoverAddTiles(L, map, i = 0) {
   layer.addTo(map);
   return layer;
 }
-const TRIPSY_FLYOVER_MODE_GLYPH = { plane: '✈️', train: '🚆', boat: '⛴️', car: '🚗' };
-const TRIPSY_FLYOVER_MODE_LABEL = { plane: 'Flight', train: 'Train', boat: 'Ferry', car: 'Drive' };
+// `hike` ("Add an option to hike between locations for the flyover," 2026-10-21): a walking
+// leg, drawn as a dotted trail with a walker (🚶 — there is no hiker-with-a-stick emoji; the
+// one person-with-a-stick emoji is the white cane). Like the ground glyphs it faces left,
+// so it flips when heading right.
+const TRIPSY_FLYOVER_MODE_GLYPH = { plane: '✈️', train: '🚆', boat: '⛴️', car: '🚗', hike: '🚶' };
+const TRIPSY_FLYOVER_MODE_LABEL = { plane: 'Flight', train: 'Train', boat: 'Ferry', car: 'Drive', hike: 'Hike' };
+// The transports the owner can pick for a leg, in menu order.
+const TRIPSY_FLYOVER_MODES = ['plane', 'train', 'car', 'boat', 'hike'];
 // When a leg mixes modes (a car to the airport, a flight, a car to the hotel) the leg is
 // drawn as the most significant one.
-const TRIPSY_FLYOVER_MODE_RANK = { plane: 4, boat: 3, train: 2, car: 1 };
+const TRIPSY_FLYOVER_MODE_RANK = { plane: 4, boat: 3, train: 2, car: 1, hike: 0.5 };
 const TRIPSY_FLYOVER_PHOTO_MS = 3200;
 // Per-destination slideshow settings ("Allow the user to select different ways to play the
 // slideshow at each location … multiple pictures on the screen at the same time and
@@ -17535,6 +17541,7 @@ function tripsyFlyoverModeOf(raw, summary) {
   if (/airplane|plane|flight/.test(text)) return 'plane';
   if (/boat|ferry|cruise|ship|sail/.test(text)) return 'boat';
   if (/train|rail/.test(text)) return 'train';
+  if (/\b(hike|hiking|trek|trekking|walk|walking|on foot)\b/.test(text)) return 'hike';
   return 'car';
 }
 // A bare IATA code ("LAX") geocodes far better with the word "airport" after it.
@@ -18464,7 +18471,7 @@ async function showTripsyFlyover(tripKey) {
         const legHtml = !s.mode ? `<span style="font-size:18px;">📍</span>`
           // A drop-down to change how the trip got here ("Allow the user to change the mode of
           // transportation with a drop down menu," 2026-10-21); ❓ while it is still a guess.
-          : isOwner ? `<span style="display:inline-flex; align-items:center; gap:3px;">${needsMode ? '<span title="Nothing on the trip says how you got here — choose it" style="font-size:13px;">❓</span>' : ''}<select class="field-input" data-flyover-mode-select title="How you got here" aria-label="How you got here" style="width:auto; padding:3px 6px; font-size:13px;">${['plane', 'train', 'car', 'boat'].map(m => `<option value="${m}"${m === s.mode ? ' selected' : ''}>${TRIPSY_FLYOVER_MODE_GLYPH[m]} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}</select></span>`
+          : isOwner ? `<span style="display:inline-flex; align-items:center; gap:3px;">${needsMode ? '<span title="Nothing on the trip says how you got here — choose it" style="font-size:13px;">❓</span>' : ''}<select class="field-input" data-flyover-mode-select title="How you got here" aria-label="How you got here" style="width:auto; padding:3px 6px; font-size:13px;">${TRIPSY_FLYOVER_MODES.map(m => `<option value="${m}"${m === s.mode ? ' selected' : ''}>${TRIPSY_FLYOVER_MODE_GLYPH[m]} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}</select></span>`
           : `<span title="${esc(TRIPSY_FLYOVER_MODE_LABEL[s.mode] || '')}" style="font-size:18px;">${TRIPSY_FLYOVER_MODE_GLYPH[s.mode] || ''}</span>`;
         const noPlace = s.lat == null;
         return `
@@ -18644,7 +18651,7 @@ function tripsyFlyoverAskMode(fromStop, toStop, { current = '', step = '' } = {}
         <h2 style="margin:0 0 8px; font-size:17px;">How did you get there?${step ? ` <span style="font-size:12px; color:var(--muted); font-weight:400;">${esc(step)}</span>` : ''}</h2>
         <div style="font-size:13px; color:var(--muted); margin-bottom:14px;">Nothing on the trip says how you travelled from <strong>${esc((fromStop && fromStop.label) || 'the last stop')}</strong> to <strong>${esc((toStop && toStop.label) || 'this stop')}</strong>${dates ? ` (${esc(dates)})` : ''}. The fly-over will show that leg this way.</div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
-          ${['plane', 'train', 'car', 'boat'].map(m => `<button class="btn" data-mode-pick="${m}" style="padding:12px 8px; font-size:15px; ${m === current ? 'outline:2px solid #3AA76D; outline-offset:1px;' : ''}">${TRIPSY_FLYOVER_MODE_GLYPH[m]} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</button>`).join('')}
+          ${TRIPSY_FLYOVER_MODES.map(m => `<button class="btn" data-mode-pick="${m}" style="padding:12px 8px; font-size:15px; ${m === current ? 'outline:2px solid #3AA76D; outline-offset:1px;' : ''}">${TRIPSY_FLYOVER_MODE_GLYPH[m]} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</button>`).join('')}
         </div>
         <div style="display:flex; justify-content:flex-end;"><button class="btn" data-mode-later style="font-size:12px;">Not now</button></div>
       </div>`;
@@ -19913,7 +19920,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   const animateLeg = (r, a, b) => new Promise(resolve => {
     const mode = b.mode || 'car';
     const path = mode === 'plane' ? tripsyFlyoverGreatCircle(a, b, 72) : tripsyFlyoverStraight(a, b, 40);
-    const trail = L.polyline([path[0]], { color: '#E04B3A', weight: 3, opacity: 0.9, dashArray: mode === 'plane' ? '7 9' : null }).addTo(map);
+    const trail = L.polyline([path[0]], { color: '#E04B3A', weight: 3, opacity: 0.9, dashArray: mode === 'plane' ? '7 9' : mode === 'hike' ? '2 7' : null }).addTo(map);
     layers.push(trail);
     const marker = L.marker(path[0], { icon: vehicleIcon(mode), interactive: false, zIndexOffset: 1000 }).addTo(map);
     const total = tripsyFlyoverLegMs(mode, tripsyFlyoverDistanceKm(a, b));
