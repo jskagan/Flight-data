@@ -17632,8 +17632,30 @@ function tripsyFlyoverDeriveStops(trip) {
     const m = tripsyFlyoverModeOf(l.raw, l.ev.summary);
     if (!modes[i] || TRIPSY_FLYOVER_MODE_RANK[m] > TRIPSY_FLYOVER_MODE_RANK[modes[i]]) modes[i] = m;
   }
-  for (let i = 1; i < stops.length; i++) stops[i].mode = modes[i] || 'car';
+  // No transport on the trip between two stops: drawn as a drive for now, but flagged
+  // `modeGuessed` so the setup page ASKS what it was (tripsyFlyoverStopsNeedingMode).
+  for (let i = 1; i < stops.length; i++) {
+    stops[i].mode = modes[i] || 'car';
+    if (!modes[i]) stops[i].modeGuessed = true;
+  }
   return stops;
+}
+// The stops whose leg IN has no transport on the trip and that the owner hasn't answered
+// for yet ("Where there is no form of transportation specified between two points, bring up
+// a dialog box asking the user what type of transportation is involved," 2026-10-21), in
+// trip order, each with the stop it comes FROM. `guessedIds` (ids a fresh derivation flags)
+// covers a record saved before stops carried the flag. The first stop shown has no leg in;
+// removed and unplaced stops are not on the map, so they are skipped both ways. Pure.
+function tripsyFlyoverStopsNeedingMode(record, guessedIds) {
+  const g = guessedIds instanceof Set ? guessedIds : new Set(guessedIds || []);
+  const shown = ((record && record.stops) || []).filter(s => !s.removed && s.lat != null);
+  const out = [];
+  for (let k = 1; k < shown.length; k++) {
+    const st = shown[k];
+    if (st.modeManual) continue;
+    if (st.modeGuessed || g.has(st.id)) out.push({ stop: st, from: shown[k - 1] });
+  }
+  return out;
 }
 
 // A stop's slideshow settings, normalized: unknown or missing values fall back to the
@@ -17896,6 +17918,8 @@ function tripsyFlyoverCarryOver(stops, prevStops) {
     used.add(p);
     return { ...s, autoLabel: s.label, label: p.labelEdited ? p.label : s.label, labelEdited: !!p.labelEdited,
       removed: !!(p.removed || s.removed), autoPhotoSeeded: !!p.autoPhotoSeeded, photos: [...(p.photos || [])],
+      // A transport the owner chose for this leg survives a rebuild.
+      ...(p.modeManual ? { mode: p.mode, modeManual: true, modeGuessed: false } : {}),
       ...(p.slideshow ? { slideshow: { ...p.slideshow } } : {}),
       ...(Array.isArray(p.pages) ? { pages: p.pages.map(pg => ({ ...pg, ids: [...(pg.ids || [])] })) } : {}) };
   });
@@ -18375,6 +18399,7 @@ async function showTripsyFlyover(tripKey) {
     if (!st) return;
     const r = await tripsyFlyoverSlideshowDialog(st, {
       intro,
+      hasMusic: !!record.music,
       playPreview: draft => {
         if (draft.lat == null) { toast('Set this destination\'s location first.', 'error'); return; }
         playTripsyFlyover(trip, { ...record, stops: record.stops.map(x => x.id === id ? draft : x) }, { previewStopId: id });
@@ -18386,12 +18411,34 @@ async function showTripsyFlyover(tripKey) {
     save(); render();
   };
   if (record && record.music) tripsyFlyoverPrefetchMusic(record.music);
+  // Legs a fresh derivation finds no transport for -- covers a fly-over saved before stops
+  // carried the flag.
+  let guessedModeIds = new Set();
+  try { guessedModeIds = new Set(tripsyFlyoverDeriveStops(trip).filter(x => x.modeGuessed).map(x => x.id)); } catch (e) {}
+  // One question at a time, in trip order; "Not now" leaves the rest for next time.
+  let askingModes = false;
+  const askMissingModes = async () => {
+    if (!isOwner || askingModes || !record) return;
+    askingModes = true;
+    try {
+      const queue = tripsyFlyoverStopsNeedingMode(record, guessedModeIds);
+      for (let i = 0; i < queue.length; i++) {
+        if (closed) return;
+        const { stop: st, from } = queue[i];
+        const m = await tripsyFlyoverAskMode(from, st, { step: queue.length > 1 ? `${i + 1} of ${queue.length}` : '' });
+        if (!m || closed) break;
+        updateStop(st.id, { mode: m, modeManual: true, modeGuessed: false });
+        save(); render();
+      }
+    } finally { askingModes = false; }
+  };
   const render = () => {
     if (!record || !(record.stops || []).length) {
       body.innerHTML = `<div style="padding:18px 0; color:var(--muted);">No destinations found for this trip — it needs lodging or flights with places.</div>`;
       return;
     }
     const playable = tripsyFlyoverPlayableStops(record).length;
+    const needModeIds = new Set(tripsyFlyoverStopsNeedingMode(record, guessedModeIds).map(x => x.stop.id));
     const todayKey = tripsyTodayDayKey();
     const tripOver = tripsyFlyoverTripOver(trip, todayKey);
     const completeHtml = !isOwner ? '' : record.completedAt
@@ -18413,7 +18460,10 @@ async function showTripsyFlyover(tripKey) {
         // Shown in PLAY order -- page 1's photos first -- with each one's page number, so a
         // re-ordered slideshow reads back in the order chosen.
         const ordered = tripsyFlyoverPhotosInPageOrder(s);
-        const legHtml = s.mode ? `<span title="${esc(TRIPSY_FLYOVER_MODE_LABEL[s.mode] || '')}" style="font-size:18px;">${TRIPSY_FLYOVER_MODE_GLYPH[s.mode] || ''}</span>` : `<span style="font-size:18px;">📍</span>`;
+        const needsMode = needModeIds.has(s.id);
+        const legHtml = !s.mode ? `<span style="font-size:18px;">📍</span>`
+          : isOwner ? `<button class="btn" data-flyover-mode title="${esc(needsMode ? 'How did you get here? Tap to choose' : `${TRIPSY_FLYOVER_MODE_LABEL[s.mode] || ''} — tap to change`)}" style="font-size:18px; padding:2px 6px; position:relative;">${TRIPSY_FLYOVER_MODE_GLYPH[s.mode] || ''}${needsMode ? '<span style="position:absolute; top:-6px; right:-6px; font-size:12px;">❓</span>' : ''}</button>`
+          : `<span title="${esc(TRIPSY_FLYOVER_MODE_LABEL[s.mode] || '')}" style="font-size:18px;">${TRIPSY_FLYOVER_MODE_GLYPH[s.mode] || ''}</span>`;
         const noPlace = s.lat == null;
         return `
         <div data-flyover-stop="${esc(s.id)}" style="border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:10px; ${s.removed ? 'opacity:0.5;' : ''}">
@@ -18472,7 +18522,7 @@ async function showTripsyFlyover(tripKey) {
       save(); render();
     };
     const rebuildBtn = body.querySelector('[data-flyover-rebuild]');
-    if (rebuildBtn) rebuildBtn.onclick = async () => { rebuildBtn.disabled = true; await build(); if (!closed) render(); };
+    if (rebuildBtn) rebuildBtn.onclick = async () => { rebuildBtn.disabled = true; await build(); if (!closed) { render(); askMissingModes(); } };
     body.querySelectorAll('[data-flyover-stop]').forEach(card => {
       const id = card.getAttribute('data-flyover-stop');
       const stop = () => record.stops.find(s => s.id === id);
@@ -18482,6 +18532,15 @@ async function showTripsyFlyover(tripKey) {
         if (!v || v === stop().label) { label.value = stop().label; return; }
         updateStop(id, { label: v, labelEdited: true });
         save();
+      };
+      const modeBtn = card.querySelector('[data-flyover-mode]');
+      if (modeBtn) modeBtn.onclick = async () => {
+        const shown = record.stops.filter(x => !x.removed && x.lat != null);
+        const k = shown.findIndex(x => x.id === id);
+        const m = await tripsyFlyoverAskMode(k > 0 ? shown[k - 1] : null, stop(), { current: stop().mode });
+        if (!m || closed) return;
+        updateStop(id, { mode: m, modeManual: true, modeGuessed: false });
+        save(); render();
       };
       const ssBtn = card.querySelector('[data-flyover-slideshow]');
       if (ssBtn) ssBtn.onclick = () => openSlideshowOptions(id, '');
@@ -18523,7 +18582,17 @@ async function showTripsyFlyover(tripKey) {
           try {
             let rec;
             if (isVid) {
+              // Too big: the upload refuses it with its message before anything is asked.
+              if (file.size > TRIPSY_FLYOVER_VIDEO_MAX_BYTES) await tripsyFlyoverUploadVideo(file);
+              // Ask before uploading: its own sound, or the fly-over's music?
+              const localUrl = URL.createObjectURL(file);
+              setStatus(`Choose the sound for ${what}…`);
+              const audio = await tripsyFlyoverVideoAudioDialog(localUrl, { name: file.name || '', hasMusic: !!record.music });
+              URL.revokeObjectURL(localUrl);
+              if (closed) return;
+              setStatus(`Uploading ${what}…`);
               rec = await tripsyFlyoverUploadVideo(file, f => { if (!closed) setStatus(`Uploading ${what}… ${Math.round(f * 100)}%`); });
+              rec.audio = audio === 'music' ? 'music' : 'video';
             } else {
               const small = await tripsyResizeImageBlob(file, 1600, 0.85);
               const driveFileId = await uploadBlobToDrive(small, `flyover-photo-${Date.now()}-${done}`, 'image/jpeg');
@@ -18555,10 +18624,36 @@ async function showTripsyFlyover(tripKey) {
     });
   };
   render();
+  askMissingModes();
   ov.querySelector('[data-flyover-play]').onclick = () => {
     if (!record || !tripsyFlyoverPlayableStops(record).length) { toast('There are no destinations on the map to play yet.', 'error'); return; }
     playTripsyFlyover(trip, record);
   };
+}
+
+// Asks how the trip got from one stop to the next when nothing on the trip says. Resolves
+// 'plane' | 'train' | 'boat' | 'car', or null for "Not now" (asked again next time).
+function tripsyFlyoverAskMode(fromStop, toStop, { current = '', step = '' } = {}) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-flyover-mode-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-mode-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483070';
+    const dates = tripsyFlyoverDatesLabel(toStop);
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:440px;">
+        <h2 style="margin:0 0 8px; font-size:17px;">How did you get there?${step ? ` <span style="font-size:12px; color:var(--muted); font-weight:400;">${esc(step)}</span>` : ''}</h2>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:14px;">Nothing on the trip says how you travelled from <strong>${esc((fromStop && fromStop.label) || 'the last stop')}</strong> to <strong>${esc((toStop && toStop.label) || 'this stop')}</strong>${dates ? ` (${esc(dates)})` : ''}. The fly-over will show that leg this way.</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
+          ${['plane', 'train', 'car', 'boat'].map(m => `<button class="btn" data-mode-pick="${m}" style="padding:12px 8px; font-size:15px; ${m === current ? 'outline:2px solid #3AA76D; outline-offset:1px;' : ''}">${TRIPSY_FLYOVER_MODE_GLYPH[m]} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</button>`).join('')}
+        </div>
+        <div style="display:flex; justify-content:flex-end;"><button class="btn" data-mode-later style="font-size:12px;">Not now</button></div>
+      </div>`;
+    ov.style.display = 'flex';
+    const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
+    ov.querySelectorAll('[data-mode-pick]').forEach(b => b.onclick = () => done(b.getAttribute('data-mode-pick')));
+    ov.querySelector('[data-mode-later]').onclick = () => done(null);
+    ov.onclick = e => { if (e.target === ov) done(null); };
+  });
 }
 
 // Asks the owner where a stop was, when nothing on the trip says (a camping trip whose
@@ -18617,7 +18712,7 @@ function tripsyFlyoverThumbHtml(p, w = 84, h = 64, extra = '') {
   const paintId = vid ? (p.posterId || '') : p.driveFileId;
   const len = vid ? tripsyFlyoverDurationLabel(p.duration) : '';
   return `<div style="position:relative; width:${w}px; height:${h}px; border-radius:6px; overflow:hidden; background:${vid ? '#111' : 'var(--panel-2)'} center/cover no-repeat; ${extra}"${paintId ? ` data-diary-img="${esc(paintId)}"` : ''}>${vid
-    ? `<span style="position:absolute; left:4px; bottom:3px; font-size:11px; font-weight:700; color:#fff; background:rgba(0,0,0,0.65); padding:1px 5px; border-radius:4px;">🎬${len ? ` ${len}` : ''}</span>`
+    ? `<span style="position:absolute; left:4px; bottom:3px; font-size:11px; font-weight:700; color:#fff; background:rgba(0,0,0,0.65); padding:1px 5px; border-radius:4px;" title="${tripsyFlyoverVideoAudio(p) === 'music' ? 'Plays under the fly-over music' : 'Plays with its own sound'}">🎬${len ? ` ${len}` : ''} ${tripsyFlyoverVideoAudio(p) === 'music' ? '🎵' : '🔊'}</span>`
     : ''}</div>`;
 }
 // Photos AND videos in ONE step: a single hidden input with NO `capture`, clicked
@@ -18646,6 +18741,51 @@ function tripsyFlyoverPickMedia(onPick) {
     if (files.length) onPick(files);
   };
   input.click();
+}
+// Whether a video plays with ITS OWN sound or under the fly-over's music ("When the user
+// selects a video, ask the user if he wants to use audio from the video or the flyover
+// music. Also, add an option for the user to hear the music from the video," 2026-10-21).
+// Shows the video itself with a "Hear the video" button (and its own controls) so the sound
+// can be judged before choosing. Resolves 'video' | 'music', or null when dismissed.
+// A video record without `audio` plays its own sound, as before.
+function tripsyFlyoverVideoAudio(rec) { return rec && rec.audio === 'music' ? 'music' : 'video'; }
+function tripsyFlyoverVideoAudioDialog(srcUrl, { name = '', current = '', hasMusic = true } = {}) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-flyover-vaudio-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-vaudio-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    // Above the setup page and the page dialog, below the player and confirm dialogs.
+    ov.style.zIndex = '2147483075';
+    ov.innerHTML = `
+      <div class="tw-modal-paper" style="max-width:480px;">
+        <h2 style="margin:0 0 6px; font-size:17px;">🎬 Sound for this video</h2>
+        <div style="font-size:13px; color:var(--muted); margin-bottom:10px;">${name ? `<strong>${esc(name)}</strong> — ` : ''}play it to hear its sound, then choose what plays while it's on screen.${hasMusic ? '' : ' (This fly-over has no music chosen yet.)'}</div>
+        <video data-va-video playsinline controls preload="metadata" style="width:100%; max-height:42vh; border-radius:8px; background:#000; display:block; margin-bottom:8px;"></video>
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:14px;">
+          <button class="btn" data-va-hear>▶ Hear the video</button>
+          <span data-va-status style="font-size:12px; color:var(--muted);"></span>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+          <button class="btn" data-va-pick="video" style="padding:12px 8px; ${current === 'video' ? 'outline:2px solid #3AA76D; outline-offset:1px;' : ''}">🔊 Use the video's sound<div style="font-size:11px; color:var(--muted); font-weight:400; margin-top:3px;">The music fades out while it plays</div></button>
+          <button class="btn" data-va-pick="music" style="padding:12px 8px; ${current === 'music' ? 'outline:2px solid #3AA76D; outline-offset:1px;' : ''}">🎵 Keep the fly-over music<div style="font-size:11px; color:var(--muted); font-weight:400; margin-top:3px;">The video plays silently</div></button>
+        </div>
+      </div>`;
+    ov.style.display = 'flex';
+    const v = ov.querySelector('[data-va-video]');
+    const hear = ov.querySelector('[data-va-hear]');
+    const status = ov.querySelector('[data-va-status]');
+    v.src = srcUrl;
+    const sync = () => { hear.textContent = v.paused ? '▶ Hear the video' : '■ Stop'; };
+    v.onplay = sync; v.onpause = sync; v.onended = sync;
+    hear.onclick = () => {
+      if (!v.paused) { v.pause(); return; }
+      v.muted = false;
+      const p = v.play();
+      if (p && p.catch) p.catch(() => { status.textContent = 'Couldn’t play it here — use the player controls.'; });
+    };
+    const done = val => { try { v.pause(); } catch (e) {} v.removeAttribute('src'); ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(val); };
+    ov.querySelectorAll('[data-va-pick]').forEach(b => b.onclick = () => done(b.getAttribute('data-va-pick')));
+    ov.onclick = e => { if (e.target === ov) done(null); };
+  });
 }
 // A video's length, size and a poster frame (a JPEG, up to 640 px) for its thumbnail.
 // Fails soft: a video whose frame can't be drawn just has no poster.
@@ -18814,7 +18954,7 @@ function tripsyFlyoverTogglePagePhoto(pages, cur, id, isVideo = () => false) {
 // and ask about the transition to the next page," 2026-10-20). Resolves {pages, photos} on
 // Save, null on Cancel; nothing changes until Save. Photos left on no page play after the
 // pages, one per page. `playPreview(stopDraft)` plays the draft without saving it.
-function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } = {}) {
+function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, hasMusic = true } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-slideshow-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-slideshow-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -18869,7 +19009,16 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
           </div>
           ${pages.length > 1 ? '<div style="font-size:11px; color:var(--muted); margin-bottom:12px;">Drag a page to change the order the pages play in.</div>' : ''}
           ${videoPage ? `
-          <div data-ss-video-note style="font-size:13px; margin-bottom:14px; padding:8px 10px; border:1px solid var(--line); border-radius:8px;">🎬 Page ${cur + 1} is a video${vrec && vrec.duration ? ` (${esc(tripsyFlyoverDurationLabel(vrec.duration))})` : ''}. It plays on its own page, to its end, with its own sound — the music fades out while it plays and back in after.</div>` : `
+          <div data-ss-video-note style="font-size:13px; margin-bottom:14px; padding:8px 10px; border:1px solid var(--line); border-radius:8px;">🎬 Page ${cur + 1} is a video${vrec && vrec.duration ? ` (${esc(tripsyFlyoverDurationLabel(vrec.duration))})` : ''}. It plays on its own page, to its end, ${tripsyFlyoverVideoAudio(vrec) === 'music'
+            ? 'silently, under the fly-over music.'
+            : 'with its own sound — the music fades out while it plays and back in after.'}
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;">
+              <span style="font-size:12px; color:var(--muted);">Sound:</span>
+              <button class="btn tfo-ss-chip${tripsyFlyoverVideoAudio(vrec) === 'video' ? ' tfo-ss-on' : ''}" data-ss-vaudio="video">🔊 Video's sound</button>
+              <button class="btn tfo-ss-chip${tripsyFlyoverVideoAudio(vrec) === 'music' ? ' tfo-ss-on' : ''}" data-ss-vaudio="music">🎵 Fly-over music</button>
+              <button class="btn tfo-ss-chip" data-ss-vhear>▶ Hear the video</button>
+            </div>
+          </div>` : `
           <div class="tfo-ss-label">How many pictures on page ${cur + 1}?</div>
           <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:${page.count >= 3 ? 8 : 14}px;">
             ${Array.from({ length: maxCount }, (_, k) => k + 1).map(n => `<button class="btn tfo-ss-chip${n === page.count ? ' tfo-ss-on' : ''}" data-ss-count="${n}">${n}</button>`).join('')}
@@ -19033,6 +19182,19 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
         pages = r.pages;
         render();
       });
+      const setVideoAudio = val => {
+        const i = photos.findIndex(p => p.driveFileId === page.ids[0]);
+        if (i >= 0 && (val === 'video' || val === 'music')) photos[i] = { ...photos[i], audio: val };
+      };
+      ov.querySelectorAll('[data-ss-vaudio]').forEach(b => b.onclick = () => { setVideoAudio(b.getAttribute('data-ss-vaudio')); render(); });
+      const vhear = ov.querySelector('[data-ss-vhear]');
+      if (vhear) vhear.onclick = async () => {
+        let url;
+        try { url = await tripsyPlacePhotoDisplayUrl(page.ids[0]); } catch (e) { toast('Couldn’t load the video — try again.', 'error'); return; }
+        const val = await tripsyFlyoverVideoAudioDialog(url, { current: tripsyFlyoverVideoAudio(vrec), hasMusic });
+        if (val) setVideoAudio(val);
+        render();
+      };
       ov.querySelectorAll('[data-ss-tr]').forEach(b => b.onclick = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, transition: b.getAttribute('data-ss-tr') } : pg); render(); });
       const sec = ov.querySelector('[data-ss-seconds]');
       if (sec) sec.onchange = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, seconds: Number(sec.value) } : pg); render(); };
@@ -19639,9 +19801,11 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     let url;
     try { url = await tripsyPlacePhotoDisplayUrl(page.ids[0]); } catch (e) { return !r.cancelled; }
     if (r.cancelled) return false;
+    // 'music': the video plays silently and the music carries on under it.
+    const underMusic = tripsyFlyoverVideoAudio(rec) === 'music';
     const v = document.createElement('video');
     v.playsInline = true; v.setAttribute('playsinline', ''); v.preload = 'auto';
-    v.muted = false;
+    v.muted = underMusic;
     const ready = await new Promise(res => {
       const tm = setTimeout(() => res(v.readyState >= 2), 20000);
       v.onloadeddata = () => { clearTimeout(tm); res(true); };
@@ -19657,7 +19821,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     g.appendChild(v);
     veilEl.classList.add('tfo-show');
     photoEl.appendChild(g);
-    const duck = duckMusic();
+    const duck = underMusic ? Promise.resolve() : duckMusic();
     await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
     g.classList.add('tfo-in');
     const prev = shownEl;
@@ -19668,7 +19832,8 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     await duck;
     if (r.cancelled) return false;
     curVideo = v;
-    try { await v.play(); }
+    if (underMusic) v.play().catch(() => {});
+    else try { await v.play(); }
     catch (e) {
       // No sound without a tap (iOS can refuse an unmuted start): play muted, offer sound.
       v.muted = true;

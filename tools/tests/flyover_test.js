@@ -663,7 +663,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
 
   const player = extractFn('playTripsyFlyover');
   assert(/const duckMusic = async \(\) => \{[\s\S]*fader\.to\(0, 700\)[\s\S]*else audio\.pause\(\)/.test(player), 'THE ASK: the music fades out (or stops) before a video');
-  assert(/const duck = duckMusic\(\);[\s\S]*await duck;[\s\S]*await v\.play\(\)/.test(player), 'the video starts with its sound once the music is down');
+  assert(/const duck = underMusic \? Promise\.resolve\(\) : duckMusic\(\);[\s\S]*await duck;[\s\S]*else try \{ await v\.play\(\); \}/.test(player), 'the video starts with its sound once the music is down');
   assert(/v\.muted = false;/.test(player) && /Tap for sound/.test(player), 'the video plays unmuted, with a tap-for-sound fallback');
   assert(/if \(!ok\) return false;\s*unduckMusic\(\);/.test(player) && /fader\.to\(1, 1500\)/.test(player), 'the music fades back in after the video');
   assert(/startMusic\(true\)/.test(player) && /fader\.to\(0, 2500\)/.test(player), 'music fades in at the start and out at the end');
@@ -835,4 +835,56 @@ eval([extractFn('tripsyFlyoverDropSide'), extractFn('tripsyFlyoverInsertPhotoPag
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
   assert(/\(drag\.to > drag\.from \? 'after' : 'before'\)/.test(dlg) && /c\.classList\.toggle\('tfo-ss-drop', hit && drag\.side === 'swap'\)/.test(dlg),
     'the page strip (which always moves) shows the same line on the side the page will land; only a swap outlines the target');
+}
+
+// ---- ask the transport when the trip names none ("Where there is no form of transportation
+// specified between two points, bring up a dialog box asking the user what type of
+// transportation is involved," 2026-10-21) ----
+eval(extractFn('tripsyFlyoverStopsNeedingMode'));
+{
+  const st = (id, extra = {}) => ({ id, label: id.toUpperCase(), lat: 1, lng: 1, mode: 'car', ...extra });
+  const rec = { stops: [st('o', { mode: '' }), st('a', { modeGuessed: true }), st('x', { removed: true, modeGuessed: true }),
+    st('b'), st('c', { modeGuessed: true, modeManual: true }), st('d')] };
+  let q = tripsyFlyoverStopsNeedingMode(rec, new Set(['d']));
+  assert(q.map(x => `${x.from.id}>${x.stop.id}`).join(',') === 'o>a,c>d',
+    'THE ASK: legs with no transport on the trip are asked about, in order, each with the stop it comes from; answered or removed ones are not');
+  q = tripsyFlyoverStopsNeedingMode({ stops: [st('a', { modeGuessed: true }), st('b', { modeGuessed: true })] }, []);
+  assert(q.length === 1 && q[0].stop.id === 'b', 'the first stop on the map has no leg in, so it is never asked');
+  assert(tripsyFlyoverStopsNeedingMode({ stops: [st('a'), st('b', { modeGuessed: true, lat: null })] }, []).length === 0, 'an unplaced stop is not asked');
+  const derive = extractFn('tripsyFlyoverDeriveStops');
+  assert(/if \(!modes\[i\]\) stops\[i\]\.modeGuessed = true;/.test(derive), 'a leg the trip says nothing about is drawn as a drive but flagged as a guess');
+  assert(/\.\.\.\(p\.modeManual \? \{ mode: p\.mode, modeManual: true, modeGuessed: false \} : \{\}\)/.test(extractFn('tripsyFlyoverCarryOver')),
+    'a transport the owner chose survives a rebuild');
+  const ask = extractFn('tripsyFlyoverAskMode');
+  assert(/\['plane', 'train', 'car', 'boat'\]/.test(ask) && /data-mode-later/.test(ask) && /How did you get there\?/.test(ask),
+    'the dialog offers flight / train / drive / ferry, or Not now');
+  const setup = extractFn('showTripsyFlyover');
+  assert(/render\(\);\s*askMissingModes\(\);/.test(setup) && /tripsyFlyoverDeriveStops\(trip\)\.filter\(x => x\.modeGuessed\)/.test(setup),
+    'opening the setup page asks right away, including for fly-overs saved before the flag');
+  assert(/updateStop\(st\.id, \{ mode: m, modeManual: true, modeGuessed: false \}\);/.test(setup) && /if \(!m \|\| closed\) break;/.test(setup),
+    'each answer is saved on its stop; Not now stops asking until next time');
+  assert(/data-flyover-mode/.test(setup) && /❓/.test(setup), 'each leg\'s transport glyph is a button to change it, marked ❓ while it is still a guess');
+}
+
+// ---- a video's sound: its own, or the fly-over music ("When the user selects a video, ask the
+// user if he wants to use audio from the video or the flyover music. Also, add an option for the
+// user to hear the music from the video," 2026-10-21) ----
+eval(extractFn('tripsyFlyoverVideoAudio'));
+{
+  assert(tripsyFlyoverVideoAudio({ kind: 'video', audio: 'music' }) === 'music' && tripsyFlyoverVideoAudio({ kind: 'video' }) === 'video'
+    && tripsyFlyoverVideoAudio(null) === 'video', 'a video plays its own sound unless set to the music (older videos keep their sound)');
+  const dlg = extractFn('tripsyFlyoverVideoAudioDialog');
+  assert(/data-va-pick="video"/.test(dlg) && /data-va-pick="music"/.test(dlg) && /<video data-va-video playsinline controls/.test(dlg) && /▶ Hear the video/.test(dlg)
+    && /v\.muted = false;/.test(dlg), 'THE ASK: the dialog plays the video so its sound can be heard, then asks: its own sound or the fly-over music');
+  const setup = extractFn('showTripsyFlyover');
+  assert(/tripsyFlyoverVideoAudioDialog\(localUrl,[\s\S]*tripsyFlyoverUploadVideo\(file, f =>[\s\S]*rec\.audio = audio === 'music' \? 'music' : 'video';/.test(setup),
+    'each video picked is asked about (from the picked file, before uploading) and the answer saved on it');
+  const ss = extractFn('tripsyFlyoverSlideshowDialog');
+  assert(/data-ss-vaudio="video"/.test(ss) && /data-ss-vaudio="music"/.test(ss) && /data-ss-vhear/.test(ss) && /photos\[i\] = \{ \.\.\.photos\[i\], audio: val \}/.test(ss),
+    'a video page can switch its sound, or play the video to hear it, in Slideshow options (saved with Save)');
+  const player = extractFn('playTripsyFlyover');
+  assert(/const underMusic = tripsyFlyoverVideoAudio\(rec\) === 'music';/.test(player) && /v\.muted = underMusic;/.test(player)
+    && /const duck = underMusic \? Promise\.resolve\(\) : duckMusic\(\);/.test(player),
+    'a video set to the music plays silently and the music never fades out for it');
+  assert(/tripsyFlyoverVideoAudio\(p\) === 'music' \? '🎵' : '🔊'/.test(extractFn('tripsyFlyoverThumbHtml')), 'its thumbnail shows which sound it uses');
 }

@@ -3523,6 +3523,19 @@ WebView's support for recording is unproven.
     everything on a moving day goes to where you were moving TO. The leg is drawn as its most
     significant mode (`TRIPSY_FLYOVER_MODE_RANK` plane > boat > train > car), so the car to
     the airport doesn't turn a flight into a drive.
+- **A leg with no transport on the trip is ASKED about** ("Where there is no form of
+  transportation specified between two points, bring up a dialog box asking the user what type
+  of transportation is involved," 2026-10-21). The derivation still draws such a leg as a drive
+  but flags the stop `modeGuessed`; `tripsyFlyoverStopsNeedingMode(record, guessedIds)` (pure)
+  lists, in trip order, each shown stop (not removed, placed, not the first) still guessed and
+  not `modeManual`, with the stop it comes FROM — `guessedIds` is a fresh derivation's flags,
+  so a fly-over saved before the flag is asked too. The setup page (owner) asks on open and
+  after Rebuild, one `tripsyFlyoverAskMode` dialog at a time ("How did you get there? … from
+  Paris to Rome": ✈️ Flight / 🚆 Train / 🚗 Drive / ⛴️ Ferry, or Not now — which stops asking
+  until next open); an answer stamps `{mode, modeManual: true}`, and `tripsyFlyoverCarryOver`
+  keeps it across Rebuild. Each card's leg glyph is a button to change the transport any
+  time, badged ❓ while still a guess. Verified in Chromium: a Paris→Rome stay with no leg
+  asked, Train saved, Rebuild kept it without asking again.
 - **Geocoded once, at build time** (`tripsyFlyoverBuild`, 4 lookups in parallel).
   - **Lookup source:** Places `searchText` with `addressComponents` (it knows hotel names and
     airport codes) first, falling back to the weather pipeline's free Open-Meteo city
@@ -3838,6 +3851,19 @@ WebView's support for recording is unproven.
     refuses an unmuted start it plays muted with a **🔊 Tap for sound** button. Pause/Replay
     reach it (`curVideo`); at its end the music fades back in (`unduckMusic`) as the next page
     crossfades in.
+  - **Each video chooses its SOUND: its own, or the fly-over music** ("When the user selects
+    a video, ask the user if he wants to use audio from the video or the flyover music. Also,
+    add an option for the user to hear the music from the video," 2026-10-21). Every video
+    picked opens `tripsyFlyoverVideoAudioDialog` BEFORE its upload (on a local object URL of the
+    picked file): the video itself with controls and a **▶ Hear the video** button (unmuted),
+    then 🔊 *Use the video's sound* / 🎵 *Keep the fly-over music*; the answer rides the record
+    as `audio: 'video'|'music'` (dismissed → video). `tripsyFlyoverVideoAudio(rec)` is the one
+    reader and treats a record without `audio` as `'video'`, so older videos keep their sound.
+    The page dialog's video note shows the current sound with the same two chips plus ▶ Hear the
+    video (the dialog again, from the stored video), saved with Save; thumbnails badge 🔊/🎵.
+    In the player a `'music'` video plays MUTED with no duck/unduck and no tap-for-sound.
+    Verified in Chromium: the preview played unmuted; a music video ran muted while the music
+    held at 0.7 throughout.
   - **Fades: `tripsyFlyoverMusicFader`**. Music fades in at the start/Replay, out before and
     back in after each video, and out under "The end". Desktop ramps the element's volume.
     iOS keeps an element's volume fixed at 1, so there the song is routed through a Web
