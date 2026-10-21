@@ -1413,6 +1413,9 @@
   /* A destination's own name: to the right of its dot, growing as the map zooms in. */
   .tfo-dest-label span { transform: translate(12px, -50%) scale(0.75); transform-origin: left center; transition: transform 1.4s ease-out; font-size: 15px; }
   .tfo-dest-label.tfo-grow span { transform: translate(12px, -50%) scale(1.35); }
+  /* The arrival burst: the destination dot swelling to fill the screen before its photos. */
+  #tripsy-flyover-player .tfo-burst { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: #E04B3A; z-index: 998; pointer-events: none; animation: tfo-burst 0.9s ease-in forwards; }
+  @keyframes tfo-burst { from { transform: scale(1); } to { transform: scale(var(--tfo-burst-scale, 200)); } }
   .tfo-vehicle span { display: block; font-size: 32px; line-height: 40px; text-align: center; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5)); }
   /* ---- Wardrobe (Phase 1: garment library + per-trip selection) ---- */
   .tw-group { margin-bottom: 22px; }
@@ -20133,6 +20136,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     const tMs = enterTr === 'none' ? 0 : 650;
     if (!(await wait(r, tMs))) return false;
     if (prev) prev.remove();
+    clearBurst();
     await duck;
     if (r.cancelled) return false;
     curVideo = v;
@@ -20196,10 +20200,12 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     const tMs = enterTr === 'none' ? 0 : 650;
     if (!(await wait(r, tMs))) return false;
     if (prev) prev.remove();
+    clearBurst();
     return wait(r, Math.max(0, ms - tMs));
   };
   // After a destination's last page: back to the map.
   const endSlideshow = async r => {
+    clearBurst();
     veilEl.classList.remove('tfo-show');
     const g = shownEl;
     shownEl = null;
@@ -20271,13 +20277,59 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   // show, the last's close it), so the map just lands and names the place.
   // The destination's name beside its dot, like a layover's, growing as the map zooms in;
   // taken away the moment the map pulls back out for the next leg.
-  let destLabel = null;
-  const clearDestLabel = () => { if (destLabel) { try { destLabel.remove(); } catch (e) {} destLabel = null; } };
+  // The label goes up as the leg TO that city begins ("Place the city labels on the map before
+  // the map zooms out for the leg traveling to that city," 2026-10-21), grows on the zoom in,
+  // and is gone when the next leg starts. Layover labels go with their leg too.
+  let destLabel = null, destLabelStop = null;
+  let viaLabels = [];
+  const clearDestLabel = () => { if (destLabel) { try { destLabel.remove(); } catch (e) {} } destLabel = null; destLabelStop = null; };
+  const clearViaLabels = () => { for (const m of viaLabels) { try { m.remove(); } catch (e) {} } viaLabels = []; };
   const showDestLabel = s => {
+    if (destLabelStop === s && destLabel) return;
     clearDestLabel();
     destLabel = L.marker([s.lat, s.lng], { icon: L.divIcon({ className: 'tfo-via-label tfo-dest-label', html: `<span>${esc(s.label || '')}</span>`, iconSize: [0, 0] }), interactive: false, zIndexOffset: 900 }).addTo(map);
-    const el = destLabel.getElement();
-    requestAnimationFrame(() => requestAnimationFrame(() => { if (el) el.classList.add('tfo-grow'); }));
+    destLabelStop = s;
+  };
+  const growDestLabel = () => {
+    const el = destLabel && destLabel.getElement();
+    if (el) requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('tfo-grow')));
+  };
+  // Where to centre the zoom so the dot AND its grown label are both in view: half the
+  // label's final width to the right of the dot, never so far the dot leaves the screen.
+  const arrivalCenter = (s, zoom) => {
+    const span = destLabel && destLabel.getElement() && destLabel.getElement().querySelector('span');
+    const grownW = span ? span.getBoundingClientRect().width / 0.75 * 1.35 : 0;
+    const shift = Math.min((12 + grownW) / 2, Math.max(0, ov.clientWidth / 2 - 40));
+    const pt = map.project([s.lat, s.lng], zoom).add([shift, 0]);
+    return map.unproject(pt, zoom);
+  };
+  // The arrival "burst": the destination's dot swells until the whole screen is its colour,
+  // and the first photo page comes in straight over it ("allow the dot to entirely fill the
+  // screen. When the entire screen is orange, transition to the first page for that
+  // destination without going back to the map," same day). Removed once that page is in.
+  let burstEl = null;
+  // Fades out under the page that has come in, rather than snapping orange to dark.
+  const clearBurst = () => {
+    if (!burstEl) return;
+    const el = burstEl;
+    burstEl = null;
+    el.style.transition = 'opacity 0.45s ease';
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 500);
+  };
+  const burstFromDot = (r, s) => {
+    clearBurst();
+    const pt = map.latLngToContainerPoint([s.lat, s.lng]);
+    const w = ov.clientWidth, h = ov.clientHeight;
+    const far = Math.max(Math.hypot(pt.x, pt.y), Math.hypot(w - pt.x, pt.y), Math.hypot(pt.x, h - pt.y), Math.hypot(w - pt.x, h - pt.y));
+    const el = document.createElement('div');
+    el.className = 'tfo-burst';
+    el.style.left = `${pt.x}px`;
+    el.style.top = `${pt.y}px`;
+    el.style.setProperty('--tfo-burst-scale', String(Math.ceil((far * 2) / 14) + 2));
+    ov.appendChild(el);
+    burstEl = el;
+    return wait(r, 950);
   };
   // Waits (briefly, at most maxMs) for the tiles at the new view to finish loading.
   const untilTilesLoaded = (r, maxMs) => new Promise(resolve => {
@@ -20291,16 +20343,26 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   const arrive = async (r, s, i, withPhotos = true) => {
     layers.push(dot(s));
     showDestLabel(s);
-    if (!(await untilMoveEnd(r, () => map.flyTo([s.lat, s.lng], s.kind === 'stay' ? 10 : 9, { duration: 1.4 }), 2600))) return false;
+    growDestLabel();
+    const zoom = s.kind === 'stay' ? 10 : 9;
+    if (!(await untilMoveEnd(r, () => map.flyTo(arrivalCenter(s, zoom), zoom, { duration: 1.4 }), 2600))) return false;
     showCard(s.label, stopSub(s, i));
     if (!(await untilTilesLoaded(r, 1500))) return false;
     if (!withPhotos || !tripsyFlyoverPages(s).length) return wait(r, 1800);
+    if (!(await burstFromDot(r, s))) return false;
+    // The backdrop goes up at once under the orange, so no map shows round the first page.
+    veilEl.style.transition = 'none';
+    veilEl.classList.add('tfo-show');
+    void veilEl.offsetWidth;
+    veilEl.style.transition = '';
     return slideshow(r, s);
   };
 
   const play = async r => {
     while (layers.length) { try { layers.pop().remove(); } catch (e) {} }
     clearDestLabel();
+    clearViaLabels();
+    clearBurst();
     photoEl.innerHTML = '';
     shownEl = null;
     veilEl.classList.remove('tfo-show');
@@ -20340,12 +20402,15 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       const via = b.mode === 'plane' ? (b.via || []) : [];
       const legBounds = L.latLngBounds([[a.lat, a.lng], ...via.map(v => [v.lat, v.lng]), [b.lat, b.lng]]);
       clearDestLabel();
+      clearViaLabels();
+      // The destination's name is on the map before the leg is even framed.
+      showDestLabel(b);
       if (!(await untilMoveEnd(r, () => map.flyToBounds(legBounds, { padding: [80, 80], maxZoom: 9, duration: 1.3 }), 2400))) return;
       let from = a;
       for (const v of via) {
         if (!(await animateLeg(r, from, v, 'plane'))) return;
         layers.push(L.circleMarker([v.lat, v.lng], { radius: 5, color: '#fff', weight: 2, fillColor: '#E04B3A', fillOpacity: 1 }).addTo(map));
-        layers.push(L.marker([v.lat, v.lng], { icon: L.divIcon({ className: 'tfo-via-label', html: `<span>${esc(v.label || '')}</span>`, iconSize: [0, 0] }), interactive: false }).addTo(map));
+        viaLabels.push(L.marker([v.lat, v.lng], { icon: L.divIcon({ className: 'tfo-via-label', html: `<span>${esc(v.label || '')}</span>`, iconSize: [0, 0] }), interactive: false }).addTo(map));
         if (!(await wait(r, 900))) return;
         from = v;
       }
@@ -20353,6 +20418,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       if (!(await arrive(r, b, stayNo(b), !(closeWithPhotos && b === last)))) return;
     }
     clearDestLabel();
+    clearViaLabels();
     if (!(await untilMoveEnd(r, () => map.flyToBounds(all, { padding: [70, 70], duration: 1.6 }), 2800))) return;
     if (closeWithPhotos) {
       showCard(trip.name || 'Trip', '');

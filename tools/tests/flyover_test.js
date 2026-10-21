@@ -426,7 +426,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   const player = extractFn('playTripsyFlyover');
   assert(/const prev = shownEl;\s*shownEl = g;[\s\S]*if \(prev\) prev\.remove\(\);/.test(player),
     'THE ASK: the next page goes over the one showing, which only then is removed -- no map between pictures');
-  assert(/veilEl\.classList\.add\('tfo-show'\)/.test(player) && /const endSlideshow = async r => \{\s*veilEl\.classList\.remove\('tfo-show'\)/.test(player)
+  assert(/veilEl\.classList\.add\('tfo-show'\)/.test(player) && /const endSlideshow = async r => \{\s*clearBurst\(\);\s*veilEl\.classList\.remove\('tfo-show'\)/.test(player)
     && /\.tfo-group \{[^}]*background: #0b1020/.test(html), 'a dark backdrop stays up for the whole slideshow and every page is opaque');
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
   assert(/How many pictures on page/.test(dlg) && /data-ss-count/.test(dlg) && /data-ss-photo/.test(dlg) && /Transition to page \$\{cur \+ 2\}/.test(dlg)
@@ -1035,7 +1035,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'arriving names the destination beside its dot and lets the tiles land before photos cover the map');
   const iLeg = play.indexOf('const legBounds'), iClear = play.indexOf('clearDestLabel();', iLeg);
   assert(iClear > iLeg && iClear < play.indexOf('map.flyToBounds(legBounds', iLeg)
-    && /clearDestLabel\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(all/.test(play),
+    && /clearDestLabel\(\);\s*clearViaLabels\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(all/.test(play),
     'the destination name is taken away before the map pulls back out (next leg, and the closing map)');
   assert(/\.tfo-dest-label\.tfo-grow span \{[^}]*scale\(1\.35\)/.test(html), 'and it grows as the map zooms in');
 }
@@ -1067,4 +1067,22 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(['single', 'pair', 'grid', 'collage'].every(l => new RegExp(`\\[data-layout="${l}"\\] img \\{ width: min\\(`).test(css)),
     'each layout sizes its frames from the page box, never from the photo\'s own shape');
   assert(!/video/.test(css.replace(/Videos keep\s+their own shape/, '')), 'videos are left at their own shape');
+}
+{
+  // Labels go up as the leg begins; layover labels go with their leg; the dot bursts into the
+  // first photo page (2026-10-21).
+  const play = extractFn('playTripsyFlyover');
+  const iLeg = play.indexOf('const legBounds');
+  const legPart = play.slice(iLeg, play.indexOf('map.flyToBounds(legBounds', iLeg));
+  assert(/clearDestLabel\(\);\s*clearViaLabels\(\);[\s\S]*showDestLabel\(b\);/.test(legPart),
+    'the destination name is placed before the leg to it is framed, and the last leg\'s names are cleared');
+  assert(/viaLabels\.push\(L\.marker/.test(play) && !/layers\.push\(L\.marker\(\[v\.lat/.test(play),
+    'layover labels are tracked so they are removed when the leg ends, not left on the map');
+  assert(/growDestLabel\(\);[\s\S]*?map\.flyTo\(arrivalCenter\(s, zoom\), zoom/.test(play),
+    'the zoom-in frames the dot and its growing label together');
+  assert(/if \(!\(await burstFromDot\(r, s\)\)\) return false;[\s\S]*?return slideshow\(r, s\);/.test(play)
+    && (play.match(/if \(prev\) prev\.remove\(\);\s*clearBurst\(\);/g) || []).length === 2,
+    'a destination with photos swells its dot to fill the screen, and the first page (photo or video) comes straight in over it');
+  assert(/@keyframes tfo-burst \{[^}]*\}[^}]*scale\(var\(--tfo-burst-scale/.test(html) && /\.tfo-burst \{[^}]*background: #E04B3A/.test(html),
+    'the burst is the dot\'s own colour');
 }

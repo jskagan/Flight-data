@@ -3695,7 +3695,23 @@ WebView's support for recording is unproven.
     zooms back out"): `showDestLabel` adds a `.tfo-via-label.tfo-dest-label` marker as the
     flyTo starts, right of the dot, and `.tfo-grow` scales it 0.75 → 1.35 over the 1.4 s
     zoom. `clearDestLabel` removes it before the next leg's `flyToBounds`, before the closing
-    whole-route map, and on Replay. Layover labels are unchanged.
+    whole-route map, and on Replay. **Revised the same day** ("Place the city labels on the map
+    before the map zooms out for the leg traveling to that city … Sometimes the labels are not
+    being deleted (Singapore and Bangkok)"): the label goes up at the START of the leg to that
+    city, before its `flyToBounds` (small, 0.75), and `growDestLabel` scales it only on the
+    arrival zoom; the zoom is centred by `arrivalCenter` so the dot AND the grown label are
+    both in view. Layover labels were pushed into `layers` and so stayed on the map all show
+    long (the "Singapore/Bangkok" leftovers) — they now live in `viaLabels`, cleared with the
+    destination label at every leg start and before the closing map (layover DOTS stay as
+    the trail). **The dot bursts into the photos** (same request: "allow the dot to entirely
+    fill the screen. When the entire screen is orange, transition to the first page"): on an
+    arrival WITH photos, `burstFromDot` adds a `.tfo-burst` circle at the dot's screen point
+    (dot colour `#E04B3A`, z 998 above the veil, below the photo layer) that scales over
+    0.9 s until it covers the screen; the veil goes up instantly underneath, the slideshow's
+    first page (photo or video) comes in over the orange, and `clearBurst` fades it out once
+    that page is in (also on `endSlideshow` and Replay). The pause rule freezes it. Arrivals
+    without photos, the opening first-destination slideshow and the closing one get no
+    burst. Verified in Chromium at 390×844: full orange, page in over it, label on screen.
   - **Tiles** come from `TRIPSY_FLYOVER_TILE_SOURCES`: **Esri World Street Map first,
     OpenStreetMap's own tiles second**, both keyless, with attribution shown.
     - **Esri is first for its ENGLISH labels** ("Can you show the names of all locations on
