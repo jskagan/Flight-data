@@ -3722,6 +3722,19 @@ WebView's support for recording is unproven.
         once held) — a quick swipe still scrolls; a mouse drags at once; tap still toggles a
         photo on/off the page. Verified in Chromium: mouse and hold-then-drag swap, a quick
         swipe doesn't.
+      - **…or drop at a photo's EDGE to move its page IN BETWEEN** ("Allow photo pages to also
+        be moved in between other pages not just swapped," same day). `wireDrag`'s `zones`
+        option (grid only) splits each target with `tripsyFlyoverDropSide`: outer 30% either
+        side (and the gap beside it) = `before`/`after`, drawn as NOTHING BUT a
+        vertical dashed line in that gap (`.tfo-ss-ins-before`/`-after`, raised above the
+        dragged tile; "just show a vertical dashed line between the pages," same day — the
+        page strip, which always moves, shows the same line on the side the page lands), middle = swap
+        (a dashed outline round the target).
+        `tripsyFlyoverInsertPhotoPage` (pure) moves the photo's PAGE next to the target's page;
+        a photo sharing its page leaves it for a new page of its own there (keeping that
+        page's transition/time); two photos on one page just change places; a photo on no page
+        gets a new page; dropping beside a photo on no page does nothing (toast). The page
+        being edited follows its page, and the grid re-lists in the new play order.
       - **Photos are listed in PLAY order everywhere** ("Always show pages in the flyover edit
         view in the order of the pages … show them in the new order I selected," 2026-10-21):
         `tripsyFlyoverPhotosInPageOrder(stop)` (pure; page 1's photos first, each with its

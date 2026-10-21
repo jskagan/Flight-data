@@ -791,9 +791,48 @@ eval(extractFn('tripsyFlyoverSwapPhotos'));
     'a video swaps only with a photo alone on its page');
   assert(pages[1].ids.join('') === 'bc' && photos[0].driveFileId === 'a', 'the inputs are not changed');
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
-  assert(/wireDrag\(gridItems, \(from, to\) => \{[\s\S]*tripsyFlyoverSwapPhotos\(pages, photos, a, b, isVideo\)[\s\S]*\}, \{ holdMs: 280 \}\);/.test(dlg) && /<div data-ss-grid/.test(dlg),
+  assert(/wireDrag\(gridItems, \(from, to, side\) => \{[\s\S]*tripsyFlyoverSwapPhotos\(pages, photos, a, b, isVideo\)[\s\S]*\}, \{ holdMs: 280, zones: true \}\);/.test(dlg) && /<div data-ss-grid/.test(dlg),
     'the grid\'s photos are draggable, with a short press-and-hold for a finger so a swipe still scrolls');
   assert(/if \(drag && drag\.el === el && drag\.held\) e\.preventDefault\(\);/.test(dlg) && /\{ passive: false \}/.test(dlg), 'once held, the finger drags instead of scrolling');
   assert(/data-ss-photo\]'\)\.forEach\(b => b\.onclick = \(\) => \{\s*if \(Date\.now\(\) < suppressTapUntil\) return;/.test(dlg), 'the release that ends a drag is not also a tap');
   assert(/Drag a photo onto another to swap them/.test(dlg), 'the grid says it can be dragged');
+}
+
+// ---- moving a photo's page IN BETWEEN others ("Allow photo pages to also be moved in between
+// other pages not just swapped," 2026-10-21) ----
+eval([extractFn('tripsyFlyoverDropSide'), extractFn('tripsyFlyoverInsertPhotoPage')].join('\n'));
+{
+  const R = { left: 100, width: 100 };
+  assert(tripsyFlyoverDropSide(R, 110) === 'before' && tripsyFlyoverDropSide(R, 150) === 'swap' && tripsyFlyoverDropSide(R, 190) === 'after'
+    && tripsyFlyoverDropSide(R, 60) === 'before' && tripsyFlyoverDropSide(R, 240) === 'after', 'the outer 30% of a photo (or the gap beside it) means in between; the middle means swap');
+  const ph = id => ({ driveFileId: id });
+  const P = () => [{ ids: ['a'], t: 1 }, { ids: ['b'], t: 2 }, { ids: ['c', 'd'], t: 3, transition: 'slide', seconds: 5 }, { ids: ['e'], t: 4 }];
+  const photos = ['a', 'b', 'c', 'd', 'e', 'x'].map(ph);
+  const ids = r => r.pages.map(p => p.ids.join('')).join('|');
+  let r = tripsyFlyoverInsertPhotoPage(P(), photos, 'a', 'e', 'before', 0);
+  assert(r.ok && ids(r) === 'b|cd|a|e' && r.cur === 2 && r.photos.map(p => p.driveFileId).join('') === 'bcdaex',
+    'THE ASK: a photo\'s page dropped before another page moves in between, and the page being edited follows it');
+  r = tripsyFlyoverInsertPhotoPage(P(), photos, 'e', 'a', 'after', 1);
+  assert(ids(r) === 'a|e|b|cd' && r.cur === 2, 'after works too, and another edited page keeps its own page');
+  r = tripsyFlyoverInsertPhotoPage(P(), photos, 'd', 'a', 'before', 2);
+  assert(ids(r) === 'd|a|b|c|e' && r.pages[0].transition === 'slide' && r.pages[0].seconds === 5 && r.pages[3].count === 1 && r.cur === 3,
+    'a photo sharing its page leaves it for a new page of its own at that spot, with the page\'s timing');
+  r = tripsyFlyoverInsertPhotoPage(P(), photos, 'd', 'c', 'before', 2);
+  assert(ids(r) === 'a|b|dc|e' && r.cur === 2, 'two photos on the same page just change places on it');
+  r = tripsyFlyoverInsertPhotoPage(P(), photos, 'x', 'b', 'after', 0);
+  assert(ids(r) === 'a|b|x|cd|e', 'a photo on no page gets a new page in between');
+  assert(!tripsyFlyoverInsertPhotoPage(P(), photos, 'a', 'x', 'before', 0).ok, 'dropping beside a photo on no page does nothing');
+  const dlg = extractFn('tripsyFlyoverSlideshowDialog');
+  assert(/if \(side !== 'swap'\) \{[\s\S]*tripsyFlyoverInsertPhotoPage\(pages, photos, a, b, side, cur\)/.test(dlg) && /\{ holdMs: 280, zones: true \}/.test(dlg)
+    && /tfo-ss-ins-before/.test(dlg), 'the grid drops in between at an edge, shown as a green bar, and swaps in the middle');
+}
+
+// ---- an in-between move shows ONLY a vertical dashed line ("just show a vertical dashed line
+// between the pages it will be moved between," 2026-10-21) ----
+{
+  assert(/\.tfo-ss-ins-before::before, \.tfo-ss-ins-after::after \{[^}]*border-left: 3px dashed #3AA76D/.test(html) && !/\.tfo-ss-ins-before::before[^}]*background:/.test(html),
+    'THE ASK: the in-between marker is a vertical dashed line in the gap, nothing else');
+  const dlg = extractFn('tripsyFlyoverSlideshowDialog');
+  assert(/\(drag\.to > drag\.from \? 'after' : 'before'\)/.test(dlg) && /c\.classList\.toggle\('tfo-ss-drop', hit && drag\.side === 'swap'\)/.test(dlg),
+    'the page strip (which always moves) shows the same line on the side the page will land; only a swap outlines the target');
 }

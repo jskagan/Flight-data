@@ -1332,8 +1332,14 @@
   .tfo-ss-chip { font-size: 12px; padding: 5px 10px; }
   .tfo-ss-page { display: inline-flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 6px; cursor: grab; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   .tfo-ss-page-empty { display: block; width: 44px; height: 33px; border-radius: 4px; border: 1px dashed var(--line); }
-  .tfo-ss-dragging { position: relative; z-index: 3; opacity: 0.85; cursor: grabbing; box-shadow: 0 6px 18px rgba(0,0,0,0.45); transition: none; }
+  .tfo-ss-dragging { position: relative; z-index: 3; opacity: 0.7; cursor: grabbing; box-shadow: 0 6px 18px rgba(0,0,0,0.45); transition: none; }
   .tfo-ss-drop { outline: 2px dashed #3AA76D !important; outline-offset: 2px; }
+  .tfo-ss-ins-before, .tfo-ss-ins-after { position: relative; z-index: 4; }
+  /* A move IN BETWEEN is shown as nothing but a vertical dashed line in the gap it will land
+     in ("just show a vertical dashed line between the pages," 2026-10-21). */
+  .tfo-ss-ins-before::before, .tfo-ss-ins-after::after { content: ''; position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 3px dashed #3AA76D; pointer-events: none; }
+  .tfo-ss-ins-before::before { left: -6px; }
+  .tfo-ss-ins-after::after { right: -5px; }
   [data-ss-grid] [data-ss-photo] { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   .tfo-ss-lift { transform: scale(1.06); box-shadow: 0 6px 18px rgba(0,0,0,0.45); }
   .tfo-ss-on { outline: 2px solid #3AA76D; outline-offset: 1px; font-weight: 700; }
@@ -17788,6 +17794,55 @@ function tripsyFlyoverSwapPhotos(pages, photos, a, b, isVideo = () => false) {
     })(),
   };
 }
+// Where on a target a drop at x lands: its outer 30% either side means in BETWEEN
+// ('before' / 'after'), the middle means 'swap'. Pure.
+function tripsyFlyoverDropSide(rect, x) {
+  if (!rect || !(rect.width > 0)) return 'swap';
+  const f = (x - rect.left) / rect.width;
+  return f < 0.3 ? 'before' : f > 0.7 ? 'after' : 'swap';
+}
+// Moves photo a's PAGE to sit just before / after the page holding photo b. A photo sharing
+// its page with others is taken off it onto a new page of its own at that spot (same
+// transition and time as the page it left); two photos on the same page just change places
+// within it. `cur` (the page being edited) follows its page. Returns {ok, pages, photos, cur}
+// with photos re-listed in the new play order (photos on no page after them). Pure.
+function tripsyFlyoverInsertPhotoPage(pages, photos, a, b, side, cur) {
+  const pageOf = id => pages.findIndex(pg => pg.ids.includes(id));
+  const pa = pageOf(a), pb = pageOf(b);
+  if (pb < 0 || a === b) return { ok: false, pages, photos, cur };
+  const curPage = pages[cur];
+  let out;
+  let moved;
+  if (pa === pb) {
+    const ids = pages[pa].ids.filter(x => x !== a);
+    const at = ids.indexOf(b) + (side === 'after' ? 1 : 0);
+    ids.splice(at, 0, a);
+    out = pages.map((pg, k) => k === pa ? { ...pg, ids } : pg);
+    moved = out[pa];
+  } else {
+    const src = pa >= 0 ? pages[pa] : null;
+    const tmpl = src || pages[pb];
+    if (src && src.ids.length === 1) {
+      moved = src;
+      out = pages.filter((_, k) => k !== pa);
+    } else {
+      moved = { ids: [a], count: 1, style: 'grid', transition: tmpl.transition, seconds: tmpl.seconds };
+      out = pages.map((pg, k) => k === pa ? { ...pg, ids: pg.ids.filter(x => x !== a), count: Math.max(1, pg.ids.length - 1) } : pg);
+    }
+    const target = out.findIndex(pg => pg.ids.includes(b));
+    out.splice(target + (side === 'after' ? 1 : 0), 0, moved);
+  }
+  let nextCur = curPage === undefined ? cur : out.indexOf(curPage);
+  if (nextCur < 0) {
+    // The edited page was rewritten (a photo left it): find it by what it still holds.
+    const keep = new Set(((curPage && curPage.ids) || []).filter(x => x !== a));
+    nextCur = keep.size ? out.findIndex(pg => pg.ids.some(x => keep.has(x))) : out.indexOf(moved);
+  }
+  const placed = out.flatMap(pg => pg.ids);
+  const byId = new Map(photos.map(p => [p.driveFileId, p]));
+  const ordered = [...placed.map(id => byId.get(id)).filter(Boolean), ...photos.filter(p => !placed.includes(p.driveFileId))];
+  return { ok: true, pages: out, photos: ordered, cur: Math.max(0, nextCur) };
+}
 // Index of the rect whose centre is nearest (x, y); null for none. Pure.
 function tripsyFlyoverNearestRect(rects, x, y) {
   let best = null, bd = Infinity;
@@ -18824,7 +18879,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
               ${(page.count > 4 ? ['collage'] : ['grid', 'collage']).map(st => `<button class="btn tfo-ss-choice${tripsyFlyoverPageLayout(page.count, page.style) === st ? ' tfo-ss-on' : ''}" data-ss-style="${st}">${tripsyFlyoverLayoutIconHtml(st)}<span>${st === 'grid' ? 'Grid' : 'Collage'}</span></button>`).join('')}
             </div>` : ''}
           <div class="tfo-ss-label">${videoPage ? 'The video on this page' : `Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)`}</div>
-          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here. Drag a photo onto another to swap them.${videoIds.size ? ' A video goes on an empty page of its own.' : ''}</div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here. Drag a photo onto another to swap them, or to the edge of one to move its page in between (a dashed line shows where).${videoIds.size ? ' A video goes on an empty page of its own.' : ''}</div>
           <div data-ss-grid style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
             ${photos.map(p => {
               const k = where.get(p.driveFileId);
@@ -18881,7 +18936,10 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
       // `holdMs` (the grid): a FINGER must press and hold that long before a drag starts, so a
       // swipe across the grid still scrolls the box; once held, the touchmove that would
       // scroll is cancelled. A mouse drags straight away.
-      const wireDrag = (items, onDrop, { holdMs = 0 } = {}) => {
+      // `zones` (the grid): the outer 30% of a target on either side means "put it in BETWEEN"
+      // (side 'before' / 'after', drawn as a green bar), the middle means swap; onDrop then
+      // gets (from, to, side).
+      const wireDrag = (items, onDrop, { holdMs = 0, zones = false } = {}) => {
         if (items.length < 2) return;
         items.forEach((el, from) => {
           el.style.touchAction = holdMs ? 'manipulation' : 'none';
@@ -18909,7 +18967,15 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
             el.classList.add('tfo-ss-dragging');
             el.style.transform = `translate(${dx}px, ${dy}px)`;
             drag.to = tripsyFlyoverNearestRect(drag.rects, e.clientX, e.clientY);
-            items.forEach((c, k) => c.classList.toggle('tfo-ss-drop', k === drag.to && k !== drag.from));
+            // The page strip always MOVES: it lands after the target when dragged forward,
+            // before it when dragged back -- shown as the same dashed line.
+            drag.side = drag.to == null ? 'swap' : zones ? tripsyFlyoverDropSide(drag.rects[drag.to], e.clientX) : (drag.to > drag.from ? 'after' : 'before');
+            items.forEach((c, k) => {
+              const hit = k === drag.to && k !== drag.from;
+              c.classList.toggle('tfo-ss-drop', hit && drag.side === 'swap');
+              c.classList.toggle('tfo-ss-ins-before', hit && drag.side === 'before');
+              c.classList.toggle('tfo-ss-ins-after', hit && drag.side === 'after');
+            });
           };
           const end = cancelled => {
             if (!drag || drag.el !== el) return;
@@ -18919,7 +18985,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
             el.classList.remove('tfo-ss-lift');
             if (!d.on) return;
             suppressTapUntil = Date.now() + 400;
-            if (!cancelled && d.to != null && d.to !== d.from) onDrop(d.from, d.to);
+            if (!cancelled && d.to != null && d.to !== d.from) onDrop(d.from, d.to, d.side || 'swap');
             render();
           };
           el.onpointerup = () => end(false);
@@ -18936,13 +19002,22 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
       // pages they are on ("I cannot click and drag pictures," same day: the grid is where
       // the owner reached for). A swap that would put a video beside photos is refused.
       const gridItems = [...ov.querySelectorAll('[data-ss-grid] [data-ss-photo]')];
-      wireDrag(gridItems, (from, to) => {
+      wireDrag(gridItems, (from, to, side) => {
         const a = gridItems[from].getAttribute('data-ss-photo'), b = gridItems[to].getAttribute('data-ss-photo');
+        if (side !== 'swap') {
+          // Dropped at an edge: the photo's page moves IN BETWEEN ("Allow photo pages to also
+          // be moved in between other pages not just swapped," 2026-10-21).
+          const m = tripsyFlyoverInsertPhotoPage(pages, photos, a, b, side, cur);
+          if (!m.ok) { toast('Put that photo on a page first, then move it.'); return; }
+          pages = m.pages; cur = m.cur;
+          photos.splice(0, photos.length, ...m.photos);
+          return;
+        }
         const r = tripsyFlyoverSwapPhotos(pages, photos, a, b, isVideo);
         if (r.ownPage) { toast('A video plays on a page of its own — it can only swap with a photo that is alone on its page.'); return; }
         pages = r.pages;
         photos.splice(0, photos.length, ...r.photos);
-      }, { holdMs: 280 });
+      }, { holdMs: 280, zones: true });
       ov.querySelectorAll('[data-ss-count]').forEach(b => b.onclick = () => {
         const n = Number(b.getAttribute('data-ss-count'));
         // Fewer than are chosen: the extras come off this page.
