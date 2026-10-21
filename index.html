@@ -19725,26 +19725,15 @@ function tripsyFlyoverMusicPreviewStart(duration) {
 // Object URLs for the owner's own music files, by Drive id, so playback can start the
 // moment Play is pressed (iOS only lets audio start inside the tap itself).
 const tripsyFlyoverMusicUrlCache = new Map();
-// A found (archive) song is fetched into a local copy too when the library allows it: a
-// local copy is what lets iOS fade the music (see tripsyFlyoverMusicFader). Unfetchable
-// (no CORS, offline) just leaves it streaming from its own address.
+// A found (archive) song streams straight from its own address -- it is NOT copied locally
+// (that copy existed only for the Web Audio fade, which left the iPad silent).
 function tripsyFlyoverMusicSrcNow(music) {
   if (!music) return null;
-  if (music.source === 'archive') return (music.url && tripsyFlyoverMusicUrlCache.get(music.url)) || music.url || null;
+  if (music.source === 'archive') return music.url || null;
   if (music.source === 'drive') return tripsyFlyoverMusicUrlCache.get(music.driveFileId) || null;
   return null;
 }
 async function tripsyFlyoverPrefetchMusic(music) {
-  if (music && music.source === 'archive' && music.url) {
-    if (tripsyFlyoverMusicUrlCache.has(music.url)) return tripsyFlyoverMusicUrlCache.get(music.url);
-    try {
-      const res = await fetch(music.url);
-      if (!res.ok) throw new Error(String(res.status));
-      const url = URL.createObjectURL(await res.blob());
-      tripsyFlyoverMusicUrlCache.set(music.url, url);
-      return url;
-    } catch (e) { return music.url; }
-  }
   if (!music || music.source !== 'drive' || !music.driveFileId) return tripsyFlyoverMusicSrcNow(music);
   if (tripsyFlyoverMusicUrlCache.has(music.driveFileId)) return tripsyFlyoverMusicUrlCache.get(music.driveFileId);
   try {
@@ -19906,26 +19895,23 @@ function tripsyFlyoverMusicPicker(current) {
 // `opts.previewStopId` plays just that destination's arrival and slideshow (the setup
 // page's Preview), with no title card, legs or ending.
 // The soundtrack's level, FADED rather than switched ("Music should fade in and out,"
-// 2026-10-21). Three ways, best first:
+// 2026-10-21). Two ways:
 //  'volume' -- the element's own volume, ramped (desktop browsers);
-//  'gain'   -- iOS keeps an element's volume fixed at 1, so there the music is routed
-//              through a Web Audio gain node instead. Only for a LOCAL copy (blob:): a
-//              cross-origin stream routed that way plays as silence. The AudioContext must
-//              be made inside the Play tap, so `begin()` is called there, before any await;
-//              the element plays muted until the context is running, then fades in.
-//  'pause'  -- neither is possible: fades are skipped and ducking pauses the music.
+//  'pause'  -- iOS keeps an element's volume fixed at 1: fades are skipped and ducking
+//              pauses the music, resuming it after.
+// NOT Web Audio: routing the song through a gain node so iOS could fade too (tried the
+// same day, for a downloaded copy) left the iPad silent ("not playing music now") -- the
+// music playing matters more than the fade. Don't re-add it without testing on the iPad.
 // `to(level, ms)` ramps to level (0..1, scaled by `base`) and resolves when done.
 function tripsyFlyoverMusicFader(audio, opts = {}) {
   const base = opts.base == null ? 0.7 : opts.base;
-  const AudioCtx = 'AudioCtx' in opts ? opts.AudioCtx : (typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext)) || null;
   let volumeWorks = false;
   try { const v0 = audio.volume; audio.volume = 0.5; volumeWorks = Math.abs(audio.volume - 0.5) < 0.01; audio.volume = v0; } catch (e) {}
   let mode = volumeWorks ? 'volume' : 'pause';
-  let level = 1, ramp = null, ctx = null, gain = null, attached = false;
+  let level = 1, ramp = null;
   const apply = () => {
     const v = Math.max(0, Math.min(1, base * level));
     if (mode === 'volume') { try { audio.volume = v; } catch (e) {} }
-    else if (mode === 'gain' && gain) gain.gain.value = v;
   };
   const stopRamp = () => { if (ramp) { clearInterval(ramp.t); const res = ramp.resolve; ramp = null; res(); } };
   const f = {
@@ -19946,28 +19932,10 @@ function tripsyFlyoverMusicFader(audio, opts = {}) {
         }, 50) };
       });
     },
-    // Call right before audio.play(), inside the user's tap. Starts the music silent and
-    // fades it in over `fadeMs`.
+    // Call right before audio.play(). Starts the music silent and fades it in over
+    // `fadeMs` where the volume can be set; otherwise it simply plays.
     begin(fadeMs = 2000) {
-      if (mode === 'volume') { f.set(0); f.to(1, fadeMs); return; }
-      if (mode === 'gain') { f.set(0); f.to(1, fadeMs); return; }
-      const src = String(audio.currentSrc || audio.src || '');
-      if (!AudioCtx || attached || !src.startsWith('blob:')) return;
-      try {
-        // iOS: let Web Audio play with the ringer switch on silent, like the element would.
-        try { if (typeof navigator !== 'undefined' && navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
-        ctx = new AudioCtx();
-        audio.muted = true;
-        const unmute = () => { audio.muted = false; };
-        Promise.resolve(ctx.resume && ctx.resume()).then(() => {
-          if (ctx.state !== 'running' || attached) return unmute();
-          const node = ctx.createMediaElementSource(audio);
-          gain = ctx.createGain();
-          node.connect(gain); gain.connect(ctx.destination);
-          attached = true; mode = 'gain';
-          f.set(0); unmute(); f.to(1, fadeMs);
-        }).catch(unmute);
-      } catch (e) { audio.muted = false; }
+      if (mode === 'volume') { f.set(0); f.to(1, fadeMs); }
     },
   };
   return f;

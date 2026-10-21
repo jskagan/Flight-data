@@ -662,7 +662,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     Object.defineProperty(a, 'volume', { get() { return a._v; }, set(v) { if (settable) a._v = v; } }); return a; };
   const fd = tripsyFlyoverMusicFader(fakeAudio(true), { AudioCtx: null });
   assert(fd.mode === 'volume' && fd.canFade, 'a settable volume fades by volume');
-  const iosArchive = tripsyFlyoverMusicFader(fakeAudio(false), { AudioCtx: function () {} });
+  const iosArchive = tripsyFlyoverMusicFader(fakeAudio(false), {});
   assert(iosArchive.mode === 'pause' && !iosArchive.canFade, 'iOS with a streamed song cannot fade, so ducking pauses');
   iosArchive.begin();
   assert(true, 'begin with a streamed song does not try Web Audio (it would play silence)');
@@ -675,21 +675,13 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     assert(Math.abs(a._v - 0.7) < 0.01, 'fade-in reaches the music level');
     await f.to(0, 150);
     assert(a._v === 0, 'and fades OUT to nothing');
-    // iOS + a local copy: routed through a gain node once the context runs
+    // iOS + a downloaded copy: never routed through Web Audio (it left the iPad silent) --
+    // the song just plays, unmuted.
     const b = fakeAudio(false); b.src = 'blob:abc';
-    let connected = 0;
-    const gainNode = { gain: { value: 1 }, connect() { connected++; } };
-    function Ctx() { this.state = 'suspended'; this.destination = {}; }
-    Ctx.prototype.resume = function () { this.state = 'running'; return Promise.resolve(); };
-    Ctx.prototype.createMediaElementSource = () => ({ connect() { connected++; } });
-    Ctx.prototype.createGain = () => gainNode;
-    const g = tripsyFlyoverMusicFader(b, { AudioCtx: Ctx });
+    let made = 0;
+    const g = tripsyFlyoverMusicFader(b, { AudioCtx: function () { made++; } });
     g.begin(100);
-    assert(b.muted, 'iOS: the song starts muted while the audio context starts');
-    await new Promise(res => setTimeout(res, 10));
-    assert(g.mode === 'gain' && connected === 2 && !b.muted, 'then it is routed through a gain node and unmuted');
-    await new Promise(res => setTimeout(res, 200));
-    assert(Math.abs(gainNode.gain.value - 0.7) < 0.01, 'and fades in by gain');
+    assert(g.mode === 'pause' && !b.muted && made === 0, 'iOS: a downloaded song plays as is, no audio context, never muted');
   })().catch(e => { console.log('FAIL fader', e); process.exitCode = 1; });
 
   const player = extractFn('playTripsyFlyover');
@@ -710,7 +702,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/uploadType=resumable/.test(up) && /Content-Range/.test(up) && /status !== 308/.test(up), 'videos upload resumably, in pieces');
   assert(/file\.size > TRIPSY_FLYOVER_VIDEO_MAX_BYTES/.test(extractFn('tripsyFlyoverUploadVideo')), 'an oversized video is refused with a message');
   assert(/data-ss-video-note/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the page dialog explains a video page instead of asking a count');
-  assert(/tripsyFlyoverMusicUrlCache\.set\(music\.url/.test(extractFn('tripsyFlyoverPrefetchMusic')), 'a found song is copied locally when it can be, so iOS can fade it');
+  assert(!/res\.blob\(\)/.test(extractFn('tripsyFlyoverPrefetchMusic')) && /return music\.url \|\| null/.test(extractFn('tripsyFlyoverMusicSrcNow')), 'a found song streams from its own address, as it did when music worked on the iPad');
 }
 
 // ---- a name that is STILL not English is never shown ("I am still seeing this," 2026-10-21:

@@ -4022,14 +4022,14 @@ WebView's support for recording is unproven.
     Verified in Chromium: the preview played unmuted; a music video ran muted while the music
     held at 0.7 throughout.
   - **Fades: `tripsyFlyoverMusicFader`**. Music fades in at the start/Replay, out before and
-    back in after each video, and out under "The end". Desktop ramps the element's volume.
-    iOS keeps an element's volume fixed at 1, so there the song is routed through a Web
-    Audio gain node — only for a LOCAL copy (`blob:`), since a cross-origin stream routed that
-    way plays as SILENCE; the AudioContext is made inside the Play tap (`begin()`, before any
-    await) and the element plays muted until it runs. To give found songs a local copy,
-    `tripsyFlyoverPrefetchMusic` (setup-page open) now also fetches archive songs into a blob
-    when archive.org's CORS allows (unverified here — the sandbox can't reach it); otherwise
-    iOS can't fade, and a video simply pauses the music and resumes it after.
+    back in after each video, and out under "The end" — by ramping the element's volume,
+    which desktop browsers allow. iOS keeps an element's volume fixed at 1, so on the iPad
+    there are NO fades: the music simply plays, a video with its own sound pauses it and it
+    resumes after. **Not Web Audio**: the first cut routed a downloaded copy of the song
+    (archive songs were fetched into a blob for it) through a Web Audio gain node so iOS could
+    fade too, and the iPad went silent ("not playing music now," 2026-10-21) — both the route
+    and the archive download were removed; found songs stream from their own address again.
+    Don't re-add it without testing on the iPad.
   - Verified in Chromium with a generated test clip: fade-in 0→0.7 over 2 s, down to 0 before
     the video, video played unmuted to its end, music back to 0.7, next page crossfaded; the
     poster frame and the dialog's own-page rule work. `flyover_test.js`.
