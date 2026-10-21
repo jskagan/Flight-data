@@ -3712,6 +3712,16 @@ WebView's support for recording is unproven.
         the transition it leaves by), and a 400 ms `suppressGotoUntil` stops the release
         counting as a tap. Nothing saves until Save, as before. Verified in Chromium with a
         mouse and with CDP touch events.
+      - **Photos in the GRID drag too: drop one on another to SWAP them** ("I cannot click and
+        drag pictures," same day — the owner reached for the grid, not the strip). Both rows
+        share one `wireDrag(items, onDrop, {holdMs})`; the grid's drop runs
+        `tripsyFlyoverSwapPhotos` (pure: swaps their pages AND their grid places; a photo on no
+        page hands that to the other; a video only swaps with a photo alone on its page, else a
+        toast). The grid is the box's scrolling surface, so a FINGER must press-and-hold
+        280 ms first (`touch-action: manipulation`; a non-passive `touchmove` is cancelled
+        once held) — a quick swipe still scrolls; a mouse drags at once; tap still toggles a
+        photo on/off the page. Verified in Chromium: mouse and hold-then-drag swap, a quick
+        swipe doesn't.
       - **Photos are listed in PLAY order everywhere** ("Always show pages in the flyover edit
         view in the order of the pages … show them in the new order I selected," 2026-10-21):
         `tripsyFlyoverPhotosInPageOrder(stop)` (pure; page 1's photos first, each with its

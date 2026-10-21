@@ -1333,7 +1333,9 @@
   .tfo-ss-page { display: inline-flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 6px; cursor: grab; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   .tfo-ss-page-empty { display: block; width: 44px; height: 33px; border-radius: 4px; border: 1px dashed var(--line); }
   .tfo-ss-dragging { position: relative; z-index: 3; opacity: 0.85; cursor: grabbing; box-shadow: 0 6px 18px rgba(0,0,0,0.45); transition: none; }
-  .tfo-ss-drop { outline: 2px dashed #3AA76D; outline-offset: 2px; }
+  .tfo-ss-drop { outline: 2px dashed #3AA76D !important; outline-offset: 2px; }
+  [data-ss-grid] [data-ss-photo] { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .tfo-ss-lift { transform: scale(1.06); box-shadow: 0 6px 18px rgba(0,0,0,0.45); }
   .tfo-ss-on { outline: 2px solid #3AA76D; outline-offset: 1px; font-weight: 700; }
   /* The page dialog's buttons stay in view ("When I edit pages on a flyover, there is no way
      to save the changes," 2026-10-21): the box is taller than a phone or a landscape iPad, and
@@ -17767,6 +17769,25 @@ function tripsyFlyoverMovePage(pages, from, to, cur) {
   order.splice(to, 0, ix);
   return { pages: out, cur: order.indexOf(cur) };
 }
+// Swaps photos a and b: their places in the photo list and the pages they sit on (a photo
+// on no page hands that to the other). A video may only land where it is alone; otherwise
+// {ownPage:true} and nothing changes. Pure.
+function tripsyFlyoverSwapPhotos(pages, photos, a, b, isVideo = () => false) {
+  const pageOf = id => pages.findIndex(pg => pg.ids.includes(id));
+  const pa = pageOf(a), pb = pageOf(b);
+  const lone = (k, id) => k < 0 || pages[k].ids.every(x => x === id);
+  if ((isVideo(a) && !lone(pb, b)) || (isVideo(b) && !lone(pa, a))) return { pages, photos, ownPage: true };
+  const sw = id => id === a ? b : id === b ? a : id;
+  return {
+    pages: pages.map(pg => ({ ...pg, ids: pg.ids.map(sw) })),
+    photos: (() => {
+      const ia = photos.findIndex(p => p.driveFileId === a), ib = photos.findIndex(p => p.driveFileId === b);
+      const out = photos.slice();
+      if (ia >= 0 && ib >= 0) { out[ia] = photos[ib]; out[ib] = photos[ia]; }
+      return out;
+    })(),
+  };
+}
 // Index of the rect whose centre is nearest (x, y); null for none. Pure.
 function tripsyFlyoverNearestRect(rects, x, y) {
   let best = null, bd = Infinity;
@@ -18762,7 +18783,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
       pages.push(pg);
       cur = pages.length - 1;
     }
-    let drag = null, suppressGotoUntil = 0;
+    let drag = null, suppressTapUntil = 0;
     const cleaned = () => pages.filter(pg => pg.ids.length).map(pg => ({ ...pg, ids: [...pg.ids], count: Math.max(pg.ids.length, 1) }));
     const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
     const draft = () => ({ ...stop, photos, pages: cleaned() });
@@ -18803,8 +18824,8 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
               ${(page.count > 4 ? ['collage'] : ['grid', 'collage']).map(st => `<button class="btn tfo-ss-choice${tripsyFlyoverPageLayout(page.count, page.style) === st ? ' tfo-ss-on' : ''}" data-ss-style="${st}">${tripsyFlyoverLayoutIconHtml(st)}<span>${st === 'grid' ? 'Grid' : 'Collage'}</span></button>`).join('')}
             </div>` : ''}
           <div class="tfo-ss-label">${videoPage ? 'The video on this page' : `Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)`}</div>
-          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here.${videoIds.size ? ' A video goes on an empty page of its own.' : ''}</div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here. Drag a photo onto another to swap them.${videoIds.size ? ' A video goes on an empty page of its own.' : ''}</div>
+          <div data-ss-grid style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
             ${photos.map(p => {
               const k = where.get(p.driveFileId);
               const here = k === cur;
@@ -18845,7 +18866,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
         </div>`;
       tripsyDiaryPaintPhotos(ov);
       ov.querySelectorAll('[data-ss-goto]').forEach(b => b.onclick = () => {
-        if (Date.now() < suppressGotoUntil) return; // the tap that ended a drag
+        if (Date.now() < suppressTapUntil) return; // the tap that ended a drag
         cur = Number(b.getAttribute('data-ss-goto')); render();
       });
       // Drag a page chip to reorder the pages ("allow the user to reorder the pages by
@@ -18853,40 +18874,75 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
       // the iPad works like a mouse: past 6 px of movement the chip follows the pointer, the
       // chip nearest the pointer is the drop spot, and letting go moves the page there. The
       // page being edited stays the one shown, wherever it lands.
-      const chips = [...ov.querySelectorAll('[data-ss-strip] [data-ss-goto]')];
-      if (chips.length > 1) chips.forEach(chip => {
-        chip.style.touchAction = 'none';
-        chip.onpointerdown = e => {
-          if (e.button) return;
-          drag = { chip, from: Number(chip.getAttribute('data-ss-goto')), x: e.clientX, y: e.clientY, on: false, to: null,
-            rects: chips.map(c => c.getBoundingClientRect()) };
-          try { chip.setPointerCapture(e.pointerId); } catch (_) {}
-        };
-        chip.onpointermove = e => {
-          if (!drag || drag.chip !== chip) return;
-          const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-          if (!drag.on && Math.hypot(dx, dy) < 6) return;
-          drag.on = true;
-          chip.classList.add('tfo-ss-dragging');
-          chip.style.transform = `translate(${dx}px, ${dy}px)`;
-          drag.to = tripsyFlyoverNearestRect(drag.rects, e.clientX, e.clientY);
-          chips.forEach((c, k) => c.classList.toggle('tfo-ss-drop', k === drag.to && k !== drag.from));
-        };
-        const end = cancelled => {
-          if (!drag || drag.chip !== chip) return;
-          const d = drag;
-          drag = null;
-          if (!d.on) return;
-          suppressGotoUntil = Date.now() + 400;
-          if (!cancelled && d.to != null && d.to !== d.from) {
-            const r = tripsyFlyoverMovePage(pages, d.from, d.to, cur);
-            pages = r.pages; cur = r.cur;
-          }
-          render();
-        };
-        chip.onpointerup = () => end(false);
-        chip.onpointercancel = () => end(true);
+      // One drag mechanism for both rows. Pointer events, not HTML5 drag-and-drop, so a
+      // finger on the iPad works like a mouse: past 6 px of movement the item follows the
+      // pointer, the item nearest the pointer is the drop spot, and letting go calls
+      // onDrop(from, to). A release that ended a drag never also counts as a tap.
+      // `holdMs` (the grid): a FINGER must press and hold that long before a drag starts, so a
+      // swipe across the grid still scrolls the box; once held, the touchmove that would
+      // scroll is cancelled. A mouse drags straight away.
+      const wireDrag = (items, onDrop, { holdMs = 0 } = {}) => {
+        if (items.length < 2) return;
+        items.forEach((el, from) => {
+          el.style.touchAction = holdMs ? 'manipulation' : 'none';
+          el.addEventListener('touchmove', e => { if (drag && drag.el === el && drag.held) e.preventDefault(); }, { passive: false });
+          el.onpointerdown = e => {
+            if (e.button) return;
+            const needHold = holdMs && e.pointerType !== 'mouse';
+            drag = { el, from, x: e.clientX, y: e.clientY, on: false, to: null, held: !needHold, rects: items.map(c => c.getBoundingClientRect()) };
+            if (needHold) {
+              const d = drag;
+              d.timer = setTimeout(() => { if (drag === d) { d.held = true; el.classList.add('tfo-ss-lift'); } }, holdMs);
+            }
+            try { el.setPointerCapture(e.pointerId); } catch (_) {}
+          };
+          el.onpointermove = e => {
+            if (!drag || drag.el !== el) return;
+            const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+            if (!drag.held) {
+              // Moved before the hold finished: it's a scroll, not a drag.
+              if (Math.hypot(dx, dy) > 8) { clearTimeout(drag.timer); drag = null; }
+              return;
+            }
+            if (!drag.on && Math.hypot(dx, dy) < 6) return;
+            drag.on = true;
+            el.classList.add('tfo-ss-dragging');
+            el.style.transform = `translate(${dx}px, ${dy}px)`;
+            drag.to = tripsyFlyoverNearestRect(drag.rects, e.clientX, e.clientY);
+            items.forEach((c, k) => c.classList.toggle('tfo-ss-drop', k === drag.to && k !== drag.from));
+          };
+          const end = cancelled => {
+            if (!drag || drag.el !== el) return;
+            const d = drag;
+            drag = null;
+            clearTimeout(d.timer);
+            el.classList.remove('tfo-ss-lift');
+            if (!d.on) return;
+            suppressTapUntil = Date.now() + 400;
+            if (!cancelled && d.to != null && d.to !== d.from) onDrop(d.from, d.to);
+            render();
+          };
+          el.onpointerup = () => end(false);
+          el.onpointercancel = () => end(true);
+        });
+      };
+      // Drag a page in the strip to reorder the pages ("allow the user to reorder the pages
+      // by dragging them," 2026-10-21); the page being edited stays the one shown.
+      wireDrag([...ov.querySelectorAll('[data-ss-strip] [data-ss-goto]')], (from, to) => {
+        const r = tripsyFlyoverMovePage(pages, from, to, cur);
+        pages = r.pages; cur = r.cur;
       });
+      // Drag a photo in the grid onto another to SWAP them -- places in the grid and the
+      // pages they are on ("I cannot click and drag pictures," same day: the grid is where
+      // the owner reached for). A swap that would put a video beside photos is refused.
+      const gridItems = [...ov.querySelectorAll('[data-ss-grid] [data-ss-photo]')];
+      wireDrag(gridItems, (from, to) => {
+        const a = gridItems[from].getAttribute('data-ss-photo'), b = gridItems[to].getAttribute('data-ss-photo');
+        const r = tripsyFlyoverSwapPhotos(pages, photos, a, b, isVideo);
+        if (r.ownPage) { toast('A video plays on a page of its own — it can only swap with a photo that is alone on its page.'); return; }
+        pages = r.pages;
+        photos.splice(0, photos.length, ...r.photos);
+      }, { holdMs: 280 });
       ov.querySelectorAll('[data-ss-count]').forEach(b => b.onclick = () => {
         const n = Number(b.getAttribute('data-ss-count'));
         // Fewer than are chosen: the extras come off this page.
@@ -18895,6 +18951,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
       });
       ov.querySelectorAll('[data-ss-style]').forEach(b => b.onclick = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, style: b.getAttribute('data-ss-style') } : pg); render(); });
       ov.querySelectorAll('[data-ss-photo]').forEach(b => b.onclick = () => {
+        if (Date.now() < suppressTapUntil) return; // the tap that ended a drag
         const r = tripsyFlyoverTogglePagePhoto(pages, cur, b.getAttribute('data-ss-photo'), isVideo);
         if (r.ownPage) { toast('A video plays on a page of its own — put it on an empty page (＋ Next page).'); return; }
         if (r.full) { toast(`Page ${cur + 1} holds ${pages[cur].count} — choose a bigger number or take one off first.`); return; }

@@ -767,10 +767,33 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverNearestRect')]
   assert(tripsyFlyoverNearestRect(rects, 90, 10) === 1 && tripsyFlyoverNearestRect(rects, 20, 100) === 2 && tripsyFlyoverNearestRect([], 0, 0) === null,
     'the drop spot is the page nearest the finger, on any row of the strip');
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
-  assert(/chip\.onpointerdown/.test(dlg) && /chip\.onpointermove/.test(dlg) && /chip\.onpointerup = \(\) => end\(false\)/.test(dlg) && /touchAction = 'none'/.test(dlg),
+  assert(/el\.onpointerdown/.test(dlg) && /el\.onpointermove/.test(dlg) && /el\.onpointerup = \(\) => end\(false\)/.test(dlg) && /holdMs \? 'manipulation' : 'none'/.test(dlg),
     'drag runs on pointer events (a finger on iPad works like a mouse) and the page strip doesn\'t scroll while dragging');
-  assert(/tripsyFlyoverMovePage\(pages, d\.from, d\.to, cur\)/.test(dlg) && /suppressGotoUntil = Date\.now\(\) \+ 400/.test(dlg),
+  assert(/tripsyFlyoverMovePage\(pages, from, to, cur\)/.test(dlg) && /suppressTapUntil = Date\.now\(\) \+ 400/.test(dlg),
     'letting go reorders the pages, and the release doesn\'t also count as a tap on a page');
   assert(/tfo-ss-page/.test(dlg) && /tripsyFlyoverThumbHtml\(first, 44, 33/.test(dlg) && /Drag a page to change the order/.test(dlg),
     'each page in the strip shows its first photo, with a hint that pages can be dragged');
+}
+
+// ---- dragging PHOTOS in the grid to swap them ("I cannot click and drag pictures," 2026-10-21) ----
+eval(extractFn('tripsyFlyoverSwapPhotos'));
+{
+  const ph = id => ({ driveFileId: id });
+  const pages = [{ ids: ['a'] }, { ids: ['b', 'c'] }, { ids: ['v'] }];
+  const photos = ['a', 'b', 'c', 'v', 'x'].map(ph);
+  const isV = id => id === 'v';
+  let r = tripsyFlyoverSwapPhotos(pages, photos, 'a', 'c', isV);
+  assert(r.pages.map(p => p.ids.join('')).join('|') === 'c|ba|v' && r.photos.map(p => p.driveFileId).join('') === 'cbavx',
+    'THE ASK: dragging a photo onto another swaps their pages and their places in the grid');
+  r = tripsyFlyoverSwapPhotos(pages, photos, 'a', 'x', isV);
+  assert(r.pages[0].ids.join('') === 'x' && r.photos.map(p => p.driveFileId).join('') === 'xbcva', 'a photo on no page swaps in, and the other comes off');
+  assert(tripsyFlyoverSwapPhotos(pages, photos, 'v', 'b', isV).ownPage && tripsyFlyoverSwapPhotos(pages, photos, 'v', 'a', isV).pages.map(p => p.ids.join('')).join('|') === 'v|bc|a',
+    'a video swaps only with a photo alone on its page');
+  assert(pages[1].ids.join('') === 'bc' && photos[0].driveFileId === 'a', 'the inputs are not changed');
+  const dlg = extractFn('tripsyFlyoverSlideshowDialog');
+  assert(/wireDrag\(gridItems, \(from, to\) => \{[\s\S]*tripsyFlyoverSwapPhotos\(pages, photos, a, b, isVideo\)[\s\S]*\}, \{ holdMs: 280 \}\);/.test(dlg) && /<div data-ss-grid/.test(dlg),
+    'the grid\'s photos are draggable, with a short press-and-hold for a finger so a swipe still scrolls');
+  assert(/if \(drag && drag\.el === el && drag\.held\) e\.preventDefault\(\);/.test(dlg) && /\{ passive: false \}/.test(dlg), 'once held, the finger drags instead of scrolling');
+  assert(/data-ss-photo\]'\)\.forEach\(b => b\.onclick = \(\) => \{\s*if \(Date\.now\(\) < suppressTapUntil\) return;/.test(dlg), 'the release that ends a drag is not also a tap');
+  assert(/Drag a photo onto another to swap them/.test(dlg), 'the grid says it can be dragged');
 }
