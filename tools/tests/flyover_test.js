@@ -1078,11 +1078,18 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'the destination name is placed before the leg to it is framed, and the last leg\'s names are cleared');
   assert(/viaLabels\.push\(L\.marker/.test(play) && !/layers\.push\(L\.marker\(\[v\.lat/.test(play),
     'layover labels are tracked so they are removed when the leg ends, not left on the map');
-  assert(/growDestLabel\(\);[\s\S]*?map\.flyTo\(arrivalCenter\(s, zoom\), zoom/.test(play),
+  assert(/growDestLabel\(\);[\s\S]*?const center = arrivalCenter\(s, zoom\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom/.test(play),
     'the zoom-in frames the dot and its growing label together');
   assert(/if \(!\(await burstFromDot\(r, s\)\)\) return false;[\s\S]*?return slideshow\(r, s\);/.test(play)
     && (play.match(/if \(prev\) prev\.remove\(\);\s*clearBurst\(\);/g) || []).length === 2,
     'a destination with photos swells its dot to fill the screen, and the first page (photo or video) comes straight in over it');
-  assert(/@keyframes tfo-burst \{[^}]*\}[^}]*scale\(var\(--tfo-burst-scale/.test(html) && /\.tfo-burst \{[^}]*background: #E04B3A/.test(html),
-    'the burst is the dot\'s own colour');
+  assert(/\.tfo-burst \{[^}]*background: #E04B3A[^}]*transition: transform 0\.9s/.test(html) && !/@keyframes tfo-burst/.test(html)
+    && /void el\.offsetWidth;\s*el\.style\.transform = `scale\(/.test(play),
+    'the burst is the dot\'s own colour, grown by a plain transition (no CSS variable inside keyframes, which iOS can drop)');
+  assert(/if \(Math\.abs\(map\.getZoom\(\) - zoom\) > 0\.01\) \{[\s\S]{0,120}map\.setView\(center, zoom, \{ animate: false \}\)/.test(play)
+    && /map\.fitBounds\(legBounds, \{ padding: \[80, 80\], maxZoom: 9, animate: false \}\)/.test(play),
+    'the map is always at its final view before the burst, and before a vehicle starts moving');
+  assert(/const ahead = path\[Math\.min\(path\.length - 1, i \+ 4\)\];[\s\S]*?map\.project\(cur, z\)[\s\S]*?heading \+= /.test(play)
+    && !/latLngToLayerPoint\(p0\)/.test(play),
+    'the plane\'s heading uses unrounded pixels a few steps ahead and turns smoothly');
 }

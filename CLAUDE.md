@@ -3712,6 +3712,23 @@ WebView's support for recording is unproven.
     that page is in (also on `endSlideshow` and Replay). The pause rule freezes it. Arrivals
     without photos, the opening first-destination slideshow and the closing one get no
     burst. Verified in Chromium at 390×844: full orange, page in over it, label on screen.
+    **Two device fixes, same day** ("The flyover does not transition from a full orange screen
+    to the first photo page - it instead shows a zoomed-out map first … sometimes when the
+    plane glyph flies between 2 destinations it oscillates left and right"): **(1)** the
+    burst grows by a plain `transition` on an inline `transform` set after a reflow — the
+    first cut used `scale(var(--tfo-burst-scale))` inside `@keyframes`, which not every iOS
+    WebKit resolves, so the dot never grew; don't move it back into keyframes. And the map is
+    forced to its FINAL view before anything runs on it: after the arrival `flyTo`, a zoom
+    still off target (a stray early `moveend`, or the time cap on a slow device) is finished
+    with `map.stop()` + `setView(…, {animate:false})`; after a leg's `flyToBounds`, the same
+    with `fitBounds(…, {animate:false})` when `getBoundsZoom` disagrees — a vehicle placed
+    during a zoom animation jumps about. **(2)** the vehicle's heading came from
+    `latLngToLayerPoint`, which ROUNDS to whole pixels, between neighbouring path points — on
+    a short or zoomed-out leg those round to angles that flip back and forth. It now uses
+    unrounded `map.project` from the vehicle to a point 4 steps ahead, eases the plane's
+    rotation toward it (20%/frame, wrap-aware), and flips a ground glyph only on a clear
+    (>3 px) sideways move. Sampled in Chromium: 173 frames of a leg with zero direction
+    reversals.
   - **Tiles** come from `TRIPSY_FLYOVER_TILE_SOURCES`: **Esri World Street Map first,
     OpenStreetMap's own tiles second**, both keyless, with attribution shown.
     - **Esri is first for its ENGLISH labels** ("Can you show the names of all locations on
