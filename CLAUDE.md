@@ -3533,8 +3533,9 @@ WebView's support for recording is unproven.
   after Rebuild, one `tripsyFlyoverAskMode` dialog at a time ("How did you get there? … from
   Paris to Rome": ✈️ Flight / 🚆 Train / 🚗 Drive / ⛴️ Ferry, or Not now — which stops asking
   until next open); an answer stamps `{mode, modeManual: true}`, and `tripsyFlyoverCarryOver`
-  keeps it across Rebuild. Each card's leg glyph is a button to change the transport any
-  time, badged ❓ while still a guess. Verified in Chromium: a Paris→Rome stay with no leg
+  keeps it across Rebuild. Each card's leg is a DROP-DOWN (`data-flyover-mode-select`,
+  owner-only; "Allow the user to change the mode of transportation with a drop down menu,"
+  same day) to change the transport any time, with a ❓ beside it while still a guess. Verified in Chromium: a Paris→Rome stay with no leg
   asked, Train saved, Rebuild kept it without asking again.
 - **Geocoded once, at build time** (`tripsyFlyoverBuild`, 4 lookups in parallel).
   - **Lookup source:** Places `searchText` with `addressComponents` (it knows hotel names and

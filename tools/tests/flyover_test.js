@@ -863,7 +863,10 @@ eval(extractFn('tripsyFlyoverStopsNeedingMode'));
     'opening the setup page asks right away, including for fly-overs saved before the flag');
   assert(/updateStop\(st\.id, \{ mode: m, modeManual: true, modeGuessed: false \}\);/.test(setup) && /if \(!m \|\| closed\) break;/.test(setup),
     'each answer is saved on its stop; Not now stops asking until next time');
-  assert(/data-flyover-mode/.test(setup) && /❓/.test(setup), 'each leg\'s transport glyph is a button to change it, marked ❓ while it is still a guess');
+  assert(/<select class="field-input" data-flyover-mode-select/.test(setup) && /❓/.test(setup)
+    && /modeSel\.onchange = \(\) => \{[\s\S]*updateStop\(id, \{ mode: m, modeManual: true, modeGuessed: false \}\);/.test(setup),
+    'THE ASK (2026-10-21): each leg\'s transport is a drop-down menu to change it, marked ❓ while it is still a guess');
+  assert(!/data-flyover-mode[^-]/.test(setup), 'the old tap-to-change button is gone');
 }
 
 // ---- a video's sound: its own, or the fly-over music ("When the user selects a video, ask the
