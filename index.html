@@ -1330,6 +1330,10 @@
   .tfo-ss-label { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
   .tfo-ss-choice { display: inline-flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 10px; font-size: 12px; min-width: 110px; }
   .tfo-ss-chip { font-size: 12px; padding: 5px 10px; }
+  .tfo-ss-page { display: inline-flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 6px; cursor: grab; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .tfo-ss-page-empty { display: block; width: 44px; height: 33px; border-radius: 4px; border: 1px dashed var(--line); }
+  .tfo-ss-dragging { position: relative; z-index: 3; opacity: 0.85; cursor: grabbing; box-shadow: 0 6px 18px rgba(0,0,0,0.45); transition: none; }
+  .tfo-ss-drop { outline: 2px dashed #3AA76D; outline-offset: 2px; }
   .tfo-ss-on { outline: 2px solid #3AA76D; outline-offset: 1px; font-weight: 700; }
   /* The page dialog's buttons stay in view ("When I edit pages on a flyover, there is no way
      to save the changes," 2026-10-21): the box is taller than a phone or a landscape iPad, and
@@ -17750,6 +17754,28 @@ function tripsyFlyoverPages(stop) {
 function tripsyFlyoverPhotosInPageOrder(stop) {
   return tripsyFlyoverPages(stop).flatMap((pg, k) => pg.photos.map(photo => ({ photo, page: k + 1 })));
 }
+// Moves page `from` to position `to`, returning {pages, cur} with `cur` (the page being
+// edited) following its page. Each page keeps its own settings, including the transition it
+// leaves by. Pure.
+function tripsyFlyoverMovePage(pages, from, to, cur) {
+  const out = pages.slice();
+  if (from < 0 || from >= out.length || to < 0 || to >= out.length || from === to) return { pages: out, cur };
+  const order = out.map((_, k) => k);
+  const [pg] = out.splice(from, 1);
+  out.splice(to, 0, pg);
+  const [ix] = order.splice(from, 1);
+  order.splice(to, 0, ix);
+  return { pages: out, cur: order.indexOf(cur) };
+}
+// Index of the rect whose centre is nearest (x, y); null for none. Pure.
+function tripsyFlyoverNearestRect(rects, x, y) {
+  let best = null, bd = Infinity;
+  (rects || []).forEach((r, k) => {
+    const d = Math.hypot(x - (r.left + r.width / 2), y - (r.top + r.height / 2));
+    if (d < bd) { bd = d; best = k; }
+  });
+  return best;
+}
 function tripsyFlyoverEnterTransitions(stop, pages) {
   const first = tripsyFlyoverSlideshowConfig(stop).transition;
   return (pages || []).map((_, i) => i === 0 ? first : pages[i - 1].transition);
@@ -18171,14 +18197,19 @@ async function showTripsyFlyover(tripKey) {
   let ov = document.getElementById('tripsy-flyover-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
   ov.innerHTML = `
-    <div class="tw-modal-paper tw-wide" style="max-width:820px;">
+    <div class="tw-modal-paper tw-wide" style="max-width:820px; max-height:88vh; max-height:88dvh; padding-bottom:0;">
       <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
         <h2 style="margin:0; font-size:18px; flex:1; min-width:0;">🗺️ Trip Fly-over — ${esc(trip.name || '')}</h2>
         <button class="btn" data-flyover-play style="font-weight:700;">▶ Play</button>
+        ${isOwner ? `<button class="tripsy-close-x tripsy-save-check" data-flyover-save title="Save" aria-label="Save">✓</button>` : ''}
         <button class="tripsy-close-x" data-flyover-close title="Close" aria-label="Close">✕</button>
       </div>
       <div data-flyover-status style="font-size:12px; color:var(--muted); min-height:16px; margin-bottom:8px;"></div>
       <div data-flyover-body><div style="padding:24px 0; color:var(--muted);">Loading…</div></div>
+      ${isOwner ? `<div class="tfo-ss-footer" style="justify-content:flex-end;">
+        <button class="btn" data-flyover-close>Close</button>
+        <button class="btn" data-flyover-save style="font-weight:700;">Save</button>
+      </div>` : '<div style="height:20px;"></div>'}
     </div>`;
   ov.style.display = 'flex';
   const body = ov.querySelector('[data-flyover-body]');
@@ -18186,8 +18217,30 @@ async function showTripsyFlyover(tripKey) {
   const setStatus = t => { statusEl.textContent = t || ''; };
   let closed = false;
   const close = () => { closed = true; ov.style.display = 'none'; ov.innerHTML = ''; };
-  ov.querySelector('[data-flyover-close]').onclick = close;
+  ov.querySelectorAll('[data-flyover-close]').forEach(b => b.onclick = close);
   ov.onclick = e => { if (e.target === ov) close(); };
+  // Explicit Save ("There should be save buttons on the flyover page," 2026-10-21). Every
+  // change already saves as it is made; Save makes sure the last one has landed -- a name
+  // still being typed is committed first (its change event fires on blur) -- says so, and
+  // closes the page.
+  ov.querySelectorAll('[data-flyover-save]').forEach(b => b.onclick = async () => {
+    const a = document.activeElement;
+    if (a && ov.contains(a) && typeof a.blur === 'function') a.blur();
+    if (!record) { close(); return; }
+    ov.querySelectorAll('[data-flyover-save]').forEach(x => { x.disabled = true; });
+    setStatus('Saving…');
+    try {
+      // The blur above may have queued the typed name's own save: wait for the chain to settle.
+      await new Promise(r => setTimeout(r, 0));
+      const ok = await save();
+      if (!ok) throw new Error('save failed');
+      toast('Fly-over saved.');
+      close();
+    } catch (e) {
+      setStatus('Couldn’t save — try again.');
+      ov.querySelectorAll('[data-flyover-save]').forEach(x => { x.disabled = false; });
+    }
+  });
 
   let record = Store.getTripsyFlyover(tripKey);
   let saveChain = Promise.resolve();
@@ -18196,7 +18249,8 @@ async function showTripsyFlyover(tripKey) {
     saveChain = saveChain.then(async () => {
       const ok = await Store.saveTripsyFlyover(snapshot);
       if (!ok) toast('Couldn’t save the fly-over to Drive — try again.', 'error');
-    });
+      return ok;
+    }, () => false);
     return saveChain;
   };
   const updateStop = (id, fields) => {
@@ -18708,6 +18762,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
       pages.push(pg);
       cur = pages.length - 1;
     }
+    let drag = null, suppressGotoUntil = 0;
     const cleaned = () => pages.filter(pg => pg.ids.length).map(pg => ({ ...pg, ids: [...pg.ids], count: Math.max(pg.ids.length, 1) }));
     const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
     const draft = () => ({ ...stop, photos, pages: cleaned() });
@@ -18730,9 +18785,13 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
             <button class="tripsy-close-x" data-ss-cancel aria-label="Close">✕</button>
           </div>
           ${intro ? `<div style="font-size:13px; color:var(--muted); margin-bottom:10px;">${esc(intro)}</div>` : ''}
-          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;">
-            ${pages.map((pg, k) => `<button class="btn tfo-ss-chip${k === cur ? ' tfo-ss-on' : ''}" data-ss-goto="${k}" title="Page ${k + 1}">${k + 1}<span style="opacity:0.6;"> · ${pg.ids.length}</span></button>`).join('')}
+          <div data-ss-strip style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:${pages.length > 1 ? 4 : 12}px;">
+            ${pages.map((pg, k) => {
+              const first = pg.ids.length ? photos.find(p => p.driveFileId === pg.ids[0]) : null;
+              return `<button class="btn tfo-ss-chip tfo-ss-page${k === cur ? ' tfo-ss-on' : ''}" data-ss-goto="${k}" title="Page ${k + 1}${pages.length > 1 ? ' — drag to reorder' : ''}">${first ? tripsyFlyoverThumbHtml(first, 44, 33, 'border-radius:4px;') : '<span class="tfo-ss-page-empty"></span>'}<span>${k + 1}<span style="opacity:0.6;"> · ${pg.ids.length}</span></span></button>`;
+            }).join('')}
           </div>
+          ${pages.length > 1 ? '<div style="font-size:11px; color:var(--muted); margin-bottom:12px;">Drag a page to change the order the pages play in.</div>' : ''}
           ${videoPage ? `
           <div data-ss-video-note style="font-size:13px; margin-bottom:14px; padding:8px 10px; border:1px solid var(--line); border-radius:8px;">🎬 Page ${cur + 1} is a video${vrec && vrec.duration ? ` (${esc(tripsyFlyoverDurationLabel(vrec.duration))})` : ''}. It plays on its own page, to its end, with its own sound — the music fades out while it plays and back in after.</div>` : `
           <div class="tfo-ss-label">How many pictures on page ${cur + 1}?</div>
@@ -18785,7 +18844,49 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
           </div>
         </div>`;
       tripsyDiaryPaintPhotos(ov);
-      ov.querySelectorAll('[data-ss-goto]').forEach(b => b.onclick = () => { cur = Number(b.getAttribute('data-ss-goto')); render(); });
+      ov.querySelectorAll('[data-ss-goto]').forEach(b => b.onclick = () => {
+        if (Date.now() < suppressGotoUntil) return; // the tap that ended a drag
+        cur = Number(b.getAttribute('data-ss-goto')); render();
+      });
+      // Drag a page chip to reorder the pages ("allow the user to reorder the pages by
+      // dragging them," 2026-10-21). Pointer events, not HTML5 drag-and-drop, so a finger on
+      // the iPad works like a mouse: past 6 px of movement the chip follows the pointer, the
+      // chip nearest the pointer is the drop spot, and letting go moves the page there. The
+      // page being edited stays the one shown, wherever it lands.
+      const chips = [...ov.querySelectorAll('[data-ss-strip] [data-ss-goto]')];
+      if (chips.length > 1) chips.forEach(chip => {
+        chip.style.touchAction = 'none';
+        chip.onpointerdown = e => {
+          if (e.button) return;
+          drag = { chip, from: Number(chip.getAttribute('data-ss-goto')), x: e.clientX, y: e.clientY, on: false, to: null,
+            rects: chips.map(c => c.getBoundingClientRect()) };
+          try { chip.setPointerCapture(e.pointerId); } catch (_) {}
+        };
+        chip.onpointermove = e => {
+          if (!drag || drag.chip !== chip) return;
+          const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+          if (!drag.on && Math.hypot(dx, dy) < 6) return;
+          drag.on = true;
+          chip.classList.add('tfo-ss-dragging');
+          chip.style.transform = `translate(${dx}px, ${dy}px)`;
+          drag.to = tripsyFlyoverNearestRect(drag.rects, e.clientX, e.clientY);
+          chips.forEach((c, k) => c.classList.toggle('tfo-ss-drop', k === drag.to && k !== drag.from));
+        };
+        const end = cancelled => {
+          if (!drag || drag.chip !== chip) return;
+          const d = drag;
+          drag = null;
+          if (!d.on) return;
+          suppressGotoUntil = Date.now() + 400;
+          if (!cancelled && d.to != null && d.to !== d.from) {
+            const r = tripsyFlyoverMovePage(pages, d.from, d.to, cur);
+            pages = r.pages; cur = r.cur;
+          }
+          render();
+        };
+        chip.onpointerup = () => end(false);
+        chip.onpointercancel = () => end(true);
+      });
       ov.querySelectorAll('[data-ss-count]').forEach(b => b.onclick = () => {
         const n = Number(b.getAttribute('data-ss-count'));
         // Fewer than are chosen: the extras come off this page.

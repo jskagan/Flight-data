@@ -3701,6 +3701,17 @@ WebView's support for recording is unproven.
         fold, reachable only by scrolling inside the box (measured: 120 px below a 700 px
         screen). The box's height also uses `dvh`, so Safari's toolbars can't push the footer
         off the screen.
+      - **Pages reorder by DRAGGING their chips in the strip** ("On the slideshow view, allow
+        the user to reorder the pages by dragging them," 2026-10-21). Each chip now shows its
+        page's first photo; a hint under the strip says to drag. Pointer events, not HTML5
+        drag-and-drop (unreliable with a finger on iPad): `touch-action:none` on the chips, a
+        6 px threshold before a drag starts, the chip follows the pointer, the drop spot is
+        the chip whose centre is nearest (`tripsyFlyoverNearestRect`, captured rects, so a
+        wrapped second row works), release runs `tripsyFlyoverMovePage(pages, from, to, cur)`
+        (pure; the page being edited follows its page; each page keeps its own settings incl.
+        the transition it leaves by), and a 400 ms `suppressGotoUntil` stops the release
+        counting as a tap. Nothing saves until Save, as before. Verified in Chromium with a
+        mouse and with CDP touch events.
       - **Photos are listed in PLAY order everywhere** ("Always show pages in the flyover edit
         view in the order of the pages … show them in the new order I selected," 2026-10-21):
         `tripsyFlyoverPhotosInPageOrder(stop)` (pure; page 1's photos first, each with its
@@ -3715,6 +3726,11 @@ WebView's support for recording is unproven.
         in the header, a green ✓ box in the ✕'s own style (`.tripsy-close-x.tripsy-save-check`
         — "a green check box in the same style as the cancel button"); every `[data-ss-save]`
         is wired, so top and bottom Save do the same.
+- **The setup page has explicit Save buttons** ("There should be save buttons on the flyover
+  page," 2026-10-21): a green ✓ beside the ✕ at the top and Close / Save in a pinned
+  `.tfo-ss-footer` (owner-only). Every change still saves as it is made; Save blurs a name
+  still being typed (its `change` saves it), waits for the save chain (`save()` now resolves
+  Drive's ok), toasts "Fly-over saved." and closes — a failed save keeps the page open.
 - **Music: one soundtrack per fly-over, chosen by genre** ("try to find different music that
   could be used of different genres and offer that to the user," same day).
   - **Data:** `record.music` is `{source:'archive', url, title, artist, license, page}` or

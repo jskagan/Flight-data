@@ -735,3 +735,42 @@ eval([extractFn('tripsyFlyoverPhotosInPageOrder')].join('\n'));
     'Save stores the photos in the new page order');
   assert(/const photos = tripsyFlyoverPhotosInPageOrder\(stop\)\.map/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the page dialog\'s grid opens in play order too');
 }
+
+// ---- Save buttons on the fly-over page ("There should be save buttons on the flyover page,"
+// 2026-10-21) ----
+{
+  const setup = extractFn('showTripsyFlyover');
+  assert(/class="tripsy-close-x tripsy-save-check" data-flyover-save[^>]*>✓<\/button>` : ''\}\s*<button class="tripsy-close-x" data-flyover-close/.test(setup),
+    'THE ASK: a green ✓ Save sits beside the ✕ at the top');
+  assert(/<div class="tfo-ss-footer"[^>]*>\s*<button class="btn" data-flyover-close>Close<\/button>\s*<button class="btn" data-flyover-save[^>]*>Save<\/button>/.test(setup),
+    'and Close / Save sit in a pinned footer at the bottom');
+  assert(/querySelectorAll\('\[data-flyover-save\]'\)\.forEach\(b => b\.onclick = async/.test(setup) && /a\.blur\(\)/.test(setup)
+    && /const ok = await save\(\);\s*if \(!ok\) throw/.test(setup) && /toast\('Fly-over saved\.'\);\s*close\(\);/.test(setup),
+    'Save commits a name still being typed, waits for Drive, says so, then closes; a failed save keeps the page open');
+  assert(/return ok;\s*\}, \(\) => false\);/.test(setup), 'save() reports whether Drive took it');
+  assert(/querySelectorAll\('\[data-flyover-close\]'\)\.forEach/.test(setup), 'both Close controls close');
+}
+
+// ---- dragging pages to reorder them ("On the slideshow view, allow the user to reorder the
+// pages by dragging them," 2026-10-21) ----
+eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverNearestRect')].join('\n'));
+{
+  const P = ['A', 'B', 'C', 'D'];
+  let r = tripsyFlyoverMovePage(P, 0, 2, 0);
+  assert(r.pages.join('') === 'BCAD' && r.cur === 2, 'THE ASK: dragging page 1 onto page 3 moves it there, and the page being edited follows it');
+  r = tripsyFlyoverMovePage(P, 3, 0, 1);
+  assert(r.pages.join('') === 'DABC' && r.cur === 2, 'another page being edited keeps its own page as the others shift');
+  r = tripsyFlyoverMovePage(P, 1, 1, 1);
+  assert(r.pages.join('') === 'ABCD' && r.cur === 1 && tripsyFlyoverMovePage(P, 9, 0, 0).pages.join('') === 'ABCD', 'a drop on itself, or out of range, changes nothing');
+  assert(P.join('') === 'ABCD', 'the input is not changed');
+  const rects = [{ left: 0, top: 0, width: 50, height: 50 }, { left: 60, top: 0, width: 50, height: 50 }, { left: 0, top: 60, width: 50, height: 50 }];
+  assert(tripsyFlyoverNearestRect(rects, 90, 10) === 1 && tripsyFlyoverNearestRect(rects, 20, 100) === 2 && tripsyFlyoverNearestRect([], 0, 0) === null,
+    'the drop spot is the page nearest the finger, on any row of the strip');
+  const dlg = extractFn('tripsyFlyoverSlideshowDialog');
+  assert(/chip\.onpointerdown/.test(dlg) && /chip\.onpointermove/.test(dlg) && /chip\.onpointerup = \(\) => end\(false\)/.test(dlg) && /touchAction = 'none'/.test(dlg),
+    'drag runs on pointer events (a finger on iPad works like a mouse) and the page strip doesn\'t scroll while dragging');
+  assert(/tripsyFlyoverMovePage\(pages, d\.from, d\.to, cur\)/.test(dlg) && /suppressGotoUntil = Date\.now\(\) \+ 400/.test(dlg),
+    'letting go reorders the pages, and the release doesn\'t also count as a tap on a page');
+  assert(/tfo-ss-page/.test(dlg) && /tripsyFlyoverThumbHtml\(first, 44, 33/.test(dlg) && /Drag a page to change the order/.test(dlg),
+    'each page in the strip shows its first photo, with a hint that pages can be dragged');
+}
