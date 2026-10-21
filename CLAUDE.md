@@ -3683,6 +3683,12 @@ WebView's support for recording is unproven.
         play after the last page, one per page, and the dialog says so.
       - **Preview** plays the unsaved draft; Save writes `pages` (empty ones dropped) +
         `photos` onto that one stop; Cancel changes nothing.
+      - **The buttons are a pinned footer** (`.tfo-ss-footer`, sticky to the box's bottom,
+        opaque): "When I edit pages on a flyover, there is no way to save the changes"
+        (2026-10-21). The box is taller than a phone or a landscape iPad, so Save sat below the
+        fold, reachable only by scrolling inside the box (measured: 120 px below a 700 px
+        screen). The box's height also uses `dvh`, so Safari's toolbars can't push the footer
+        off the screen.
 - **Music: one soundtrack per fly-over, chosen by genre** ("try to find different music that
   could be used of different genres and offer that to the user," same day).
   - **Data:** `record.music` is `{source:'archive', url, title, artist, license, page}` or
@@ -3736,6 +3742,46 @@ WebView's support for recording is unproven.
     archive.org, so whether its search and metadata endpoints answer the app's origin
     (CORS) is the one unverified piece; a failure shows "Couldn't reach the music library",
     and an own song always works.
+- **Videos, music fades and Shared Albums** ("add the ability to add videos to the flyover.
+  When videos play, cut the music and play sound from the video. Music should fade in and
+  out. Also … add photos from shared albums," 2026-10-21; the albums meant are Apple iCloud
+  Shared Albums).
+  - **Adding:** the card's **＋ Photos & videos** opens `tripsyFlyoverPickMedia`: a Photos
+    Library button (one `accept="image/*,video/*" multiple` input with NO `capture`, so iOS
+    opens its Photos picker, whose Albums / Collections list holds Shared Albums — a web page
+    can't read a Shared Album itself, so the system picker is the only way in) and a camera
+    button. Not verified on a device from here: if Shared Albums ever don't show, saving the
+    items to the library first works.
+  - **A video is a stop "photo" record** `{driveFileId, kind:'video', mime, posterId,
+    duration, width, height}`, so pages, carry-over and preloading need nothing new.
+    `tripsyFlyoverUploadVideo` refuses files over `TRIPSY_FLYOVER_VIDEO_MAX_BYTES` (250 MB,
+    with a "trim it in Photos" message), grabs a poster frame + length with
+    `tripsyFlyoverVideoInfo` (fail-soft: no poster → a 🎬 badge only), uploads through the new
+    **`uploadBlobToDriveResumable`** (8 MB pieces, `Content-Range`, 308 = continue, progress %
+    in the status line; the multipart path base64s the whole file into one string), and the
+    poster as an ordinary small JPEG. Thumbnails everywhere go through `tripsyFlyoverThumbHtml`.
+  - **A video always plays on a page of its own**: `tripsyFlyoverPhotoGroups` and
+    `tripsyFlyoverPages` split one out (in place) even from a saved page, as a `video:true`,
+    `layout:'video'` page; the dialog's toggle (`tripsyFlyoverTogglePagePhoto`'s `isVideo`
+    arg) puts a video only on an EMPTY page and nothing onto a video page (`ownPage`), and a
+    video page shows a note instead of count / style / time — it plays to its END.
+  - **Player:** `showVideoPage` lays the video page over the last one like any page, fades the
+    music out (`duckMusic`) while it comes in, then plays the video UNMUTED; if the browser
+    refuses an unmuted start it plays muted with a **🔊 Tap for sound** button. Pause/Replay
+    reach it (`curVideo`); at its end the music fades back in (`unduckMusic`) as the next page
+    crossfades in.
+  - **Fades: `tripsyFlyoverMusicFader`**. Music fades in at the start/Replay, out before and
+    back in after each video, and out under "The end". Desktop ramps the element's volume.
+    iOS keeps an element's volume fixed at 1, so there the song is routed through a Web
+    Audio gain node — only for a LOCAL copy (`blob:`), since a cross-origin stream routed that
+    way plays as SILENCE; the AudioContext is made inside the Play tap (`begin()`, before any
+    await) and the element plays muted until it runs. To give found songs a local copy,
+    `tripsyFlyoverPrefetchMusic` (setup-page open) now also fetches archive songs into a blob
+    when archive.org's CORS allows (unverified here — the sandbox can't reach it); otherwise
+    iOS can't fade, and a video simply pauses the music and resumes it after.
+  - Verified in Chromium with a generated test clip: fade-in 0→0.7 over 2 s, down to 0 before
+    the video, video played unmuted to its end, music back to 0.7, next page crossfaded; the
+    poster frame and the dialog's own-page rule work. `flyover_test.js`.
 - **Testing:** verified in Chromium against a synthetic trip, with Leaflet served from npm
   because the sandbox can't reach cdnjs or the tile host. `flyover_test.js`.
 

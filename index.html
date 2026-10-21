@@ -1328,6 +1328,12 @@
   .tfo-ss-choice { display: inline-flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 10px; font-size: 12px; min-width: 110px; }
   .tfo-ss-chip { font-size: 12px; padding: 5px 10px; }
   .tfo-ss-on { outline: 2px solid #3AA76D; outline-offset: 1px; font-weight: 700; }
+  /* The page dialog's buttons stay in view ("When I edit pages on a flyover, there is no way
+     to save the changes," 2026-10-21): the box is taller than a phone or a landscape iPad, and
+     Save sat below the fold, reachable only by scrolling inside the box. Pinned to the box's
+     bottom edge instead; the negative side margins span the box's own 20px padding. */
+  .tfo-ss-footer { position: sticky; bottom: 0; z-index: 2; display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap;
+    margin: 4px -20px 0; padding: 12px 20px calc(14px + env(safe-area-inset-bottom, 0px)); background: var(--panel); border-top: 1px solid var(--line); }
   .tfo-layout-icon { position: relative; display: block; width: 56px; height: 40px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
   .tfo-layout-icon i { position: absolute; background: #7c9cd6; border-radius: 2px; box-sizing: border-box; border: 1px solid var(--panel); }
   #tripsy-flyover-player .tfo-card { position: absolute; left: 16px; bottom: calc(28px + env(safe-area-inset-bottom, 0px)); z-index: 1000; max-width: calc(100% - 32px);
@@ -1355,6 +1361,8 @@
   @keyframes tfo-kenburns { from { transform: scale(1); } to { transform: scale(1.12) translate(-1.5%, -1%); } }
   #tripsy-flyover-player.tfo-paused * { animation-play-state: paused !important; }
   #tripsy-flyover-player .tfo-group[data-layout="single"] img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #tripsy-flyover-player .tfo-group[data-layout="video"] video { max-width: 100%; max-height: 100%; object-fit: contain; background: #000; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
+  #tripsy-flyover-player .tfo-video-sound { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); width: auto; padding: 0 14px; border-radius: 19px; font-size: 14px; pointer-events: auto; }
   #tripsy-flyover-player .tfo-group[data-layout="pair"] img { max-width: calc(50% - 6px); max-height: 100%; object-fit: contain; }
   #tripsy-flyover-player .tfo-group[data-layout="grid"] { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; }
   #tripsy-flyover-player .tfo-group[data-layout="grid"] img { width: 100%; height: 100%; object-fit: cover; min-height: 0; }
@@ -2570,6 +2578,53 @@ async function uploadBlobToDrive(blob, fileName, mimeType, parentFolderId) {
   });
   const json = await res.json();
   return json.id;
+}
+
+// A RESUMABLE upload, for files too big for the multipart body above (a fly-over video:
+// the multipart path base64s the whole file into one string, and Drive's own guidance caps
+// multipart at 5 MB). Opens an upload session, then PUTs the bytes in 8 MB pieces,
+// reporting progress as a fraction; a piece that fails on the network is retried twice.
+async function uploadBlobToDriveResumable(blob, fileName, mimeType, onProgress, parentFolderId) {
+  const folderId = parentFolderId || await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
+  const startRes = await driveApiFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': mimeType, 'X-Upload-Content-Length': String(blob.size) },
+    body: JSON.stringify({ name: fileName, mimeType, parents: [folderId] }),
+  });
+  const session = startRes.headers.get('Location');
+  if (!session) {
+    // No session address visible to this browser: small enough files still go multipart.
+    if (blob.size <= 40 * 1024 * 1024) return uploadBlobToDrive(blob, fileName, mimeType, parentFolderId);
+    throw new Error('Drive did not open an upload session.');
+  }
+  const CHUNK = 8 * 1024 * 1024; // a multiple of 256 KB, as Drive requires
+  const total = blob.size;
+  let start = 0;
+  while (true) {
+    const end = Math.min(total, start + CHUNK);
+    let res = null;
+    for (let attempt = 0; attempt < 3 && !res; attempt++) {
+      try {
+        res = await fetch(session, {
+          method: 'PUT',
+          headers: { 'Content-Range': total ? `bytes ${start}-${end - 1}/${total}` : 'bytes */0' },
+          body: blob.slice(start, end),
+        });
+      } catch (e) {
+        if (attempt === 2) throw e;
+        await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+      }
+    }
+    if (res.status === 200 || res.status === 201) {
+      if (onProgress) onProgress(1);
+      return (await res.json()).id;
+    }
+    if (res.status !== 308) throw new Error(`Drive upload failed (${res.status})`);
+    // 308 = keep going; the Range header says how much Drive actually has.
+    const m = String(res.headers.get('Range') || '').match(/bytes=0-(\d+)/);
+    start = m ? Number(m[1]) + 1 : end;
+    if (onProgress) onProgress(total ? start / total : 1);
+  }
 }
 
 // Find (or create) a folder named `folderName` that lives INSIDE `parentId`, unlike
@@ -17587,7 +17642,8 @@ function tripsyFlyoverPhotoGroups(photos, layout) {
   let cur = [];
   const flush = () => { if (cur.length) { out.push(cur); cur = []; } };
   for (const p of (photos || [])) {
-    if (per > 1 && p && p.solo) { flush(); out.push([p]); continue; }
+    // A video always plays on a page of its own.
+    if (p && (tripsyFlyoverIsVideo(p) || (per > 1 && p.solo))) { flush(); out.push([p]); continue; }
     cur.push(p);
     if (cur.length >= per) flush();
   }
@@ -17598,6 +17654,7 @@ function tripsyFlyoverPhotoGroups(photos, layout) {
 // screen rather than sitting in one cell of a grid, and two photos in a grid become a pair.
 function tripsyFlyoverGroupLayout(group, layout) {
   const n = (group || []).length;
+  if (n === 1 && tripsyFlyoverIsVideo(group[0])) return 'video';
   if (n <= 1) return 'single';
   if (layout === 'grid' && n === 2) return 'pair';
   return layout;
@@ -17612,6 +17669,23 @@ function tripsyFlyoverGroupLayout(group, layout) {
 // `transition` how THIS page gives way to the NEXT one. A stop saved before pages existed
 // has none, and plays exactly as its old per-destination settings did.
 const TRIPSY_FLYOVER_PAGE_MAX = 6;
+// ---- Videos ("add the ability to add videos to the flyover. When videos play, cut the
+// music and play sound from the video," 2026-10-21). A video is a stop "photo" record with
+// kind:'video' -- {driveFileId, kind, mime, posterId, duration, width, height} -- so it
+// rides every existing path (pages, carry-over, preloading). It always plays on a page of
+// its own, to its end, with its own sound; the music fades out under it and back in after.
+const TRIPSY_FLYOVER_VIDEO_MAX_BYTES = 250 * 1024 * 1024;
+function tripsyFlyoverIsVideo(p) { return !!p && (p.kind === 'video' || /^video\//i.test(p.mime || '')); }
+function tripsyFlyoverFileIsVideo(file) {
+  return !!file && (/^video\//i.test(file.type || '') || /\.(mov|mp4|m4v|webm|3gp|hevc)$/i.test(file.name || ''));
+}
+// "1:05" for a video's length; '' when unknown. Pure.
+function tripsyFlyoverDurationLabel(sec) {
+  const n = Number(sec);
+  if (!isFinite(n) || n <= 0) return '';
+  const t = Math.round(n);
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
 function tripsyFlyoverPageLayout(n, style) {
   if (n <= 1) return 'single';
   if (n === 2) return 'pair';
@@ -17643,14 +17717,25 @@ function tripsyFlyoverPages(stop) {
   for (const raw of ((stop && Array.isArray(stop.pages)) ? stop.pages : [])) {
     const pg = tripsyFlyoverNormalizePage(raw, cfg);
     const ids = pg.ids.filter(id => byId.has(id) && !used.has(id) && used.add(id)).slice(0, TRIPSY_FLYOVER_PAGE_MAX);
-    if (!ids.length) continue;
-    out.push({ ...pg, ids, photos: ids.map(id => byId.get(id)), layout: tripsyFlyoverPageLayout(ids.length, pg.style) });
+    // A video found on a page with photos is split out onto its own page, in place.
+    let pics = [];
+    const flush = () => {
+      if (pics.length) out.push({ ...pg, ids: pics, photos: pics.map(id => byId.get(id)), layout: tripsyFlyoverPageLayout(pics.length, pg.style) });
+      pics = [];
+    };
+    for (const id of ids) {
+      if (!tripsyFlyoverIsVideo(byId.get(id))) { pics.push(id); continue; }
+      flush();
+      out.push({ ...pg, ids: [id], count: 1, photos: [byId.get(id)], layout: 'video', video: true });
+    }
+    flush();
   }
   const rest = photos.filter(p => !used.has(p.driveFileId));
   for (const g of tripsyFlyoverPhotoGroups(rest, cfg.layout)) {
     const ids = g.map(p => p.driveFileId);
+    const layout = tripsyFlyoverGroupLayout(g, cfg.layout);
     out.push({ ids, count: ids.length, style: cfg.layout === 'collage' ? 'collage' : 'grid', transition: cfg.transition,
-      seconds: cfg.seconds, photos: g, layout: tripsyFlyoverGroupLayout(g, cfg.layout), auto: true });
+      seconds: cfg.seconds, photos: g, layout, auto: true, ...(layout === 'video' ? { video: true } : {}) });
   }
   return out;
 }
@@ -18155,14 +18240,15 @@ async function showTripsyFlyover(tripKey) {
           ${s.removed ? '' : `
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center;">
             ${photos.map((p, pi) => `
-              <div style="position:relative; width:84px; height:64px; border-radius:6px; overflow:hidden; background:var(--panel-2) center/cover no-repeat;" data-diary-img="${esc(p.driveFileId)}">
-                ${isOwner ? `<button data-flyover-photo-remove="${pi}" title="Remove photo" style="position:absolute; top:2px; right:2px; width:22px; height:22px; border-radius:50%; border:none; background:rgba(0,0,0,0.65); color:#fff; font-size:12px; cursor:pointer; padding:0;">✕</button>` : ''}
+              <div style="position:relative;">
+                ${tripsyFlyoverThumbHtml(p)}
+                ${isOwner ? `<button data-flyover-photo-remove="${pi}" title="Remove ${tripsyFlyoverIsVideo(p) ? 'video' : 'photo'}" style="position:absolute; top:2px; right:2px; width:22px; height:22px; border-radius:50%; border:none; background:rgba(0,0,0,0.65); color:#fff; font-size:12px; cursor:pointer; padding:0;">✕</button>` : ''}
               </div>`).join('')}
             ${!tripsyFlyoverStopVisited(s, todayKey)
               ? `<span style="font-size:12px; color:var(--muted);">🔒 Photos open once you get here (${esc(tripsyFlyoverDatesLabel(s))}).</span>`
               : `${!photos.length ? `<span style="font-size:12px; color:var(--muted);">No photos yet.</span>` : ''}
             ${isOwner ? `
-              <button class="btn" data-flyover-add-own style="font-size:12px;">＋ My photos</button>
+              <button class="btn" data-flyover-add-own style="font-size:12px;" title="From the camera or your Photos library, including Shared Albums">＋ Photos & videos</button>
               <button class="btn" data-flyover-add-suggested style="font-size:12px;">🔍 Suggested photos</button>` : ''}`}
           </div>
           ${isOwner && photos.length && tripsyFlyoverStopVisited(s, todayKey) ? `
@@ -18231,22 +18317,37 @@ async function showTripsyFlyover(tripKey) {
         };
       });
       const own = card.querySelector('[data-flyover-add-own]');
-      if (own) own.onclick = () => tripsyPickImageFile(async files => {
+      if (own) own.onclick = () => tripsyFlyoverPickMedia(async files => {
         let done = 0;
-        setStatus(`Uploading ${files.length} photo${files.length === 1 ? '' : 's'}…`);
-        for (const file of files) {
+        const problems = [];
+        const n = files.length;
+        for (let k = 0; k < n; k++) {
+          const file = files[k];
+          const isVid = tripsyFlyoverFileIsVideo(file);
+          const what = `${isVid ? 'video' : 'photo'}${n > 1 ? ` ${k + 1} of ${n}` : ''}`;
+          setStatus(`Uploading ${what}…`);
           try {
-            const small = await tripsyResizeImageBlob(file, 1600, 0.85);
-            const driveFileId = await uploadBlobToDrive(small, `flyover-photo-${Date.now()}-${done}`, 'image/jpeg');
-            tripsyPutCachedPhotoBlob(driveFileId, small);
-            updateStop(id, { photos: [...(stop().photos || []), { driveFileId, addedAt: new Date().toISOString() }] });
+            let rec;
+            if (isVid) {
+              rec = await tripsyFlyoverUploadVideo(file, f => { if (!closed) setStatus(`Uploading ${what}… ${Math.round(f * 100)}%`); });
+            } else {
+              const small = await tripsyResizeImageBlob(file, 1600, 0.85);
+              const driveFileId = await uploadBlobToDrive(small, `flyover-photo-${Date.now()}-${done}`, 'image/jpeg');
+              tripsyPutCachedPhotoBlob(driveFileId, small);
+              rec = { driveFileId, addedAt: new Date().toISOString() };
+            }
+            updateStop(id, { photos: [...(stop().photos || []), rec] });
             done++;
-          } catch (e) { console.error('fly-over photo upload failed:', e); }
+          } catch (e) {
+            console.error('fly-over media upload failed:', e);
+            problems.push(e && e.userFacing ? e.message : `${isVid ? 'A video' : 'A photo'} couldn’t be uploaded.`);
+          }
         }
-        setStatus(done === files.length ? '' : `${files.length - done} photo${files.length - done === 1 ? '' : 's'} couldn’t be uploaded.`);
+        setStatus(problems.join(' '));
+        if (problems.some(m => m.includes('the limit is'))) toast(problems.find(m => m.includes('the limit is')), 'error');
         if (done) {
           save();
-          if (!closed) { render(); openSlideshowOptions(id, `${done} photo${done === 1 ? '' : 's'} added. Choose how this place’s photos play.`); }
+          if (!closed) { render(); openSlideshowOptions(id, `${done} item${done === 1 ? '' : 's'} added. Choose how this place’s photos and videos play.`); }
         }
       });
       const sug = card.querySelector('[data-flyover-add-suggested]');
@@ -18313,6 +18414,109 @@ function tripsyFlyoverAskPlace(trip, stop) {
     input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); find(); } };
     setTimeout(() => input.focus(), 50);
   });
+}
+
+// One thumbnail of a stop's photo or video. A video shows its poster frame (a small JPEG
+// saved beside it) with a 🎬 badge and its length; without a poster, just the badge.
+function tripsyFlyoverThumbHtml(p, w = 84, h = 64, extra = '') {
+  const vid = tripsyFlyoverIsVideo(p);
+  const paintId = vid ? (p.posterId || '') : p.driveFileId;
+  const len = vid ? tripsyFlyoverDurationLabel(p.duration) : '';
+  return `<div style="position:relative; width:${w}px; height:${h}px; border-radius:6px; overflow:hidden; background:${vid ? '#111' : 'var(--panel-2)'} center/cover no-repeat; ${extra}"${paintId ? ` data-diary-img="${esc(paintId)}"` : ''}>${vid
+    ? `<span style="position:absolute; left:4px; bottom:3px; font-size:11px; font-weight:700; color:#fff; background:rgba(0,0,0,0.65); padding:1px 5px; border-radius:4px;">🎬${len ? ` ${len}` : ''}</span>`
+    : ''}</div>`;
+}
+// Photos AND videos, from the camera or the photo library. The library button opens the
+// iPhone/iPad Photos picker, whose Albums (Collections) list includes iCloud Shared Albums
+// ("can we add ability to add photos from shared albums to flyover," 2026-10-21) -- a web
+// page can't read a Shared Album itself, so the system picker is the way in. Calls back with
+// an ARRAY of files in the order picked.
+function tripsyFlyoverPickMedia(onPick) {
+  let ov = document.getElementById('tripsy-flyover-media-pick-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-media-pick-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483200';
+  ov.innerHTML = `
+    <div class="tw-modal-paper" style="max-width:380px; text-align:center;">
+      <h2 style="margin:0 0 6px; font-size:17px;">Add photos & videos</h2>
+      <div style="font-size:12px; color:var(--muted); margin-bottom:14px;">For an iCloud Shared Album, choose Photos Library, then Albums (Collections on newer iPhones) → Shared Albums.</div>
+      <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:12px;">
+        <button type="button" class="btn" data-mpick-lib style="font-weight:700;">🖼 Photos Library & Shared Albums</button>
+        <button type="button" class="btn" data-mpick-cam>📷 Take Photo or Video</button>
+      </div>
+      <input type="file" data-mpick-cam-input accept="image/*,video/*" capture="environment" style="display:none;">
+      <input type="file" data-mpick-lib-input accept="image/*,video/*" multiple style="display:none;">
+      <button class="btn" data-mpick-cancel style="font-size:12px;">Cancel</button>
+    </div>`;
+  ov.style.display = 'flex';
+  const close = () => { ov.style.display = 'none'; ov.onclick = null; };
+  const wire = (inputSel, btnSel) => {
+    const input = ov.querySelector(inputSel);
+    input.value = '';
+    input.onchange = () => {
+      const files = [...(input.files || [])];
+      close();
+      if (files.length) onPick(files);
+    };
+    ov.querySelector(btnSel).onclick = e => { e.preventDefault(); e.stopPropagation(); input.click(); };
+  };
+  wire('[data-mpick-cam-input]', '[data-mpick-cam]');
+  wire('[data-mpick-lib-input]', '[data-mpick-lib]');
+  ov.onclick = e => { if (e.target === ov || e.target.closest('[data-mpick-cancel]')) close(); };
+}
+// A video's length, size and a poster frame (a JPEG, up to 640 px) for its thumbnail.
+// Fails soft: a video whose frame can't be drawn just has no poster.
+function tripsyFlyoverVideoInfo(file) {
+  return new Promise(resolve => {
+    const v = document.createElement('video');
+    const url = URL.createObjectURL(file);
+    let settled = false;
+    const finish = poster => {
+      if (settled) return;
+      settled = true;
+      const info = { poster, duration: isFinite(v.duration) ? v.duration : null, width: v.videoWidth || null, height: v.videoHeight || null };
+      try { v.pause(); } catch (e) {}
+      v.removeAttribute('src'); try { v.load(); } catch (e) {}
+      URL.revokeObjectURL(url);
+      resolve(info);
+    };
+    setTimeout(() => finish(null), 10000);
+    v.muted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.preload = 'auto';
+    v.onerror = () => finish(null);
+    v.onloadedmetadata = () => { try { v.currentTime = Math.min(1, (v.duration || 0) / 4); } catch (e) { finish(null); } };
+    v.onseeked = () => {
+      try {
+        const w = v.videoWidth, h = v.videoHeight;
+        if (!w || !h) return finish(null);
+        const k = Math.min(1, 640 / Math.max(w, h));
+        const c = document.createElement('canvas');
+        c.width = Math.round(w * k); c.height = Math.round(h * k);
+        c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+        c.toBlob(b => finish(b || null), 'image/jpeg', 0.8);
+      } catch (e) { finish(null); }
+    };
+    v.src = url;
+  });
+}
+// Uploads one video (resumable) plus its poster frame, and returns the stop's record for
+// it. Too-big files are refused with a message the owner can act on.
+async function tripsyFlyoverUploadVideo(file, onProgress) {
+  if (file.size > TRIPSY_FLYOVER_VIDEO_MAX_BYTES) {
+    const e = new Error(`“${file.name || 'This video'}” is ${Math.round(file.size / 1048576)} MB — the limit is ${Math.round(TRIPSY_FLYOVER_VIDEO_MAX_BYTES / 1048576)} MB. Trim it in Photos first.`);
+    e.userFacing = true;
+    throw e;
+  }
+  const info = await tripsyFlyoverVideoInfo(file);
+  const mime = file.type || 'video/mp4';
+  const driveFileId = await uploadBlobToDriveResumable(file, `flyover-video-${Date.now()}`, mime, onProgress);
+  tripsyPutCachedPhotoBlob(driveFileId, file);
+  let posterId = null;
+  if (info.poster) {
+    try {
+      posterId = await uploadBlobToDrive(info.poster, `flyover-video-poster-${Date.now()}`, 'image/jpeg');
+      tripsyPutCachedPhotoBlob(posterId, info.poster);
+    } catch (e) { console.error('fly-over video poster upload failed:', e); }
+  }
+  return { driveFileId, kind: 'video', mime, posterId, duration: info.duration, width: info.width, height: info.height, addedAt: new Date().toISOString() };
 }
 
 // Places photos of the destination (its city, then its hotels) to pick from; each tap
@@ -18394,7 +18598,8 @@ function tripsyFlyoverLayoutIconHtml(key) {
 function tripsyFlyoverSlideshowSummary(stop) {
   const pages = tripsyFlyoverPages(stop);
   const n = pages.length;
-  return `${n} page${n === 1 ? '' : 's'}: ${pages.map(pg => pg.ids.length).join(' · ')} photo${pages.length === 1 && pages[0].ids.length === 1 ? '' : 's'} per page`;
+  const vids = pages.filter(pg => pg.video).length;
+  return `${n} page${n === 1 ? '' : 's'}: ${pages.map(pg => pg.video ? '🎬' : pg.ids.length).join(' · ')} photo${pages.length === 1 && pages[0].ids.length === 1 ? '' : 's'} per page${vids ? ` (🎬 = ${vids === 1 ? 'a video' : `${vids} videos`})` : ''}`;
 }
 // The page being edited in the dialog, as plain data. Pure.
 function tripsyFlyoverDialogPages(stop) {
@@ -18405,13 +18610,18 @@ function tripsyFlyoverDialogPages(stop) {
 }
 // Taps a photo on the page being edited: on this page -> off it; elsewhere -> moved here,
 // when the page has room. Returns {pages, full} without touching its input. Pure.
-function tripsyFlyoverTogglePagePhoto(pages, cur, id) {
+// A video goes only onto an EMPTY page (which it then fills), and nothing joins a page
+// holding one: {ownPage:true} says so. `isVideo(id)` tells which ids are videos.
+function tripsyFlyoverTogglePagePhoto(pages, cur, id, isVideo = () => false) {
   const out = pages.map(pg => ({ ...pg, ids: [...pg.ids] }));
   const page = out[cur];
   if (!page) return { pages: out, full: false };
   if (page.ids.includes(id)) { page.ids = page.ids.filter(x => x !== id); return { pages: out, full: false }; }
-  if (page.ids.length >= page.count) return { pages, full: true };
+  const vid = !!isVideo(id);
+  if (vid ? page.ids.length > 0 : page.ids.some(x => isVideo(x))) return { pages, full: false, ownPage: true };
+  if (!vid && page.ids.length >= page.count) return { pages, full: true };
   for (const pg of out) pg.ids = pg.ids.filter(x => x !== id);
+  if (vid) page.count = 1;
   page.ids.push(id);
   return { pages: out, full: false };
 }
@@ -18428,6 +18638,8 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
     // Preview plays on top of the dialog and drops back to it.
     ov.style.zIndex = '2147483065';
     const photos = ((stop && stop.photos) || []).map(p => ({ ...p }));
+    const videoIds = new Set(photos.filter(tripsyFlyoverIsVideo).map(p => p.driveFileId));
+    const isVideo = id => videoIds.has(id);
     const cfg = tripsyFlyoverSlideshowConfig(stop);
     let pages = tripsyFlyoverDialogPages(stop);
     const onPage = () => new Set(pages.flatMap(pg => pg.ids));
@@ -18453,8 +18665,10 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
       const maxCount = Math.max(1, Math.min(TRIPSY_FLYOVER_PAGE_MAX, photos.length));
       const secOpts = [...new Set([...TRIPSY_FLYOVER_SECONDS_OPTIONS, page.seconds])].sort((a, b) => a - b);
       const isLast = cur === pages.length - 1 && !unplaced.length;
+      const videoPage = page.ids.some(isVideo);
+      const vrec = videoPage ? photos.find(p => p.driveFileId === page.ids[0]) : null;
       ov.innerHTML = `
-        <div class="tw-modal-paper tw-wide" style="max-width:660px;">
+        <div class="tw-modal-paper tw-wide" style="max-width:660px; max-height:88vh; max-height:88dvh; padding-bottom:0;">
           <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
             <h2 style="margin:0; font-size:17px; flex:1;">🎞 ${esc(stop.label || 'Photos')} — page ${cur + 1} of ${pages.length}</h2>
             <button class="tripsy-close-x" data-ss-cancel aria-label="Close">✕</button>
@@ -18463,16 +18677,18 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
           <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;">
             ${pages.map((pg, k) => `<button class="btn tfo-ss-chip${k === cur ? ' tfo-ss-on' : ''}" data-ss-goto="${k}" title="Page ${k + 1}">${k + 1}<span style="opacity:0.6;"> · ${pg.ids.length}</span></button>`).join('')}
           </div>
+          ${videoPage ? `
+          <div data-ss-video-note style="font-size:13px; margin-bottom:14px; padding:8px 10px; border:1px solid var(--line); border-radius:8px;">🎬 Page ${cur + 1} is a video${vrec && vrec.duration ? ` (${esc(tripsyFlyoverDurationLabel(vrec.duration))})` : ''}. It plays on its own page, to its end, with its own sound — the music fades out while it plays and back in after.</div>` : `
           <div class="tfo-ss-label">How many pictures on page ${cur + 1}?</div>
           <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:${page.count >= 3 ? 8 : 14}px;">
             ${Array.from({ length: maxCount }, (_, k) => k + 1).map(n => `<button class="btn tfo-ss-chip${n === page.count ? ' tfo-ss-on' : ''}" data-ss-count="${n}">${n}</button>`).join('')}
-          </div>
-          ${page.count >= 3 ? `
+          </div>`}
+          ${!videoPage && page.count >= 3 ? `
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
               ${(page.count > 4 ? ['collage'] : ['grid', 'collage']).map(st => `<button class="btn tfo-ss-choice${tripsyFlyoverPageLayout(page.count, page.style) === st ? ' tfo-ss-on' : ''}" data-ss-style="${st}">${tripsyFlyoverLayoutIconHtml(st)}<span>${st === 'grid' ? 'Grid' : 'Collage'}</span></button>`).join('')}
             </div>` : ''}
-          <div class="tfo-ss-label">Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)</div>
-          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here.</div>
+          <div class="tfo-ss-label">${videoPage ? 'The video on this page' : `Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)`}</div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here.${videoIds.size ? ' A video goes on an empty page of its own.' : ''}</div>
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
             ${photos.map(p => {
               const k = where.get(p.driveFileId);
@@ -18480,7 +18696,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
               const order = here ? page.ids.indexOf(p.driveFileId) + 1 : 0;
               return `
               <button class="btn" data-ss-photo="${esc(p.driveFileId)}" style="padding:3px; position:relative; ${here ? 'outline:3px solid #3AA76D; outline-offset:1px;' : k != null ? 'opacity:0.55;' : ''}">
-                <div style="width:84px; height:64px; border-radius:5px; background:var(--panel-2) center/cover no-repeat;" data-diary-img="${esc(p.driveFileId)}"></div>
+                ${tripsyFlyoverThumbHtml(p, 84, 64, 'border-radius:5px;')}
                 <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:${here ? '#3AA76D' : 'rgba(0,0,0,0.65)'}; color:#fff;">${here ? `✓ ${order}` : k != null ? `Page ${k + 1}` : 'Not on a page'}</span>
               </button>`;
             }).join('')}
@@ -18490,15 +18706,16 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
           <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px;">
             ${TRIPSY_FLYOVER_TRANSITIONS.map(t => `<button class="btn tfo-ss-chip${t.key === page.transition ? ' tfo-ss-on' : ''}" data-ss-tr="${t.key}">${esc(t.label)}</button>`).join('')}
           </div>`}
+          ${videoPage ? '' : `
           <div class="tfo-ss-label">Time on screen</div>
           <div style="display:flex; gap:8px; align-items:center; margin-bottom:14px; font-size:13px;">
             <select class="field-input" data-ss-seconds style="width:auto; padding:4px 8px;">
               ${secOpts.map(v => `<option value="${v}"${v === page.seconds ? ' selected' : ''}>${v} seconds</option>`).join('')}
             </select>
             <span style="color:var(--muted);">for page ${cur + 1}</span>
-          </div>
+          </div>`}
           ${unplaced.length ? `<div style="font-size:12px; color:var(--muted); margin-bottom:12px;">${unplaced.length} photo${unplaced.length === 1 ? ' is' : 's are'} on no page yet — ${unplaced.length === 1 ? 'it plays' : 'they play'} after the last page, one per page.</div>` : ''}
-          <div style="display:flex; gap:8px; justify-content:space-between; flex-wrap:wrap;">
+          <div class="tfo-ss-footer">
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
               <button class="btn" data-ss-prev${cur === 0 ? ' disabled' : ''}>◀ Page ${Math.max(1, cur)}</button>
               <button class="btn" data-ss-next>${cur < pages.length - 1 ? `Page ${cur + 2} ▶` : '＋ Next page ▶'}</button>
@@ -18521,14 +18738,15 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null } =
       });
       ov.querySelectorAll('[data-ss-style]').forEach(b => b.onclick = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, style: b.getAttribute('data-ss-style') } : pg); render(); });
       ov.querySelectorAll('[data-ss-photo]').forEach(b => b.onclick = () => {
-        const r = tripsyFlyoverTogglePagePhoto(pages, cur, b.getAttribute('data-ss-photo'));
+        const r = tripsyFlyoverTogglePagePhoto(pages, cur, b.getAttribute('data-ss-photo'), isVideo);
+        if (r.ownPage) { toast('A video plays on a page of its own — put it on an empty page (＋ Next page).'); return; }
         if (r.full) { toast(`Page ${cur + 1} holds ${pages[cur].count} — choose a bigger number or take one off first.`); return; }
         pages = r.pages;
         render();
       });
       ov.querySelectorAll('[data-ss-tr]').forEach(b => b.onclick = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, transition: b.getAttribute('data-ss-tr') } : pg); render(); });
       const sec = ov.querySelector('[data-ss-seconds]');
-      sec.onchange = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, seconds: Number(sec.value) } : pg); render(); };
+      if (sec) sec.onchange = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, seconds: Number(sec.value) } : pg); render(); };
       const prev = ov.querySelector('[data-ss-prev]');
       if (prev) prev.onclick = () => { if (cur > 0) { cur--; render(); } };
       ov.querySelector('[data-ss-next]').onclick = () => {
@@ -18705,13 +18923,26 @@ function tripsyFlyoverMusicPreviewStart(duration) {
 // Object URLs for the owner's own music files, by Drive id, so playback can start the
 // moment Play is pressed (iOS only lets audio start inside the tap itself).
 const tripsyFlyoverMusicUrlCache = new Map();
+// A found (archive) song is fetched into a local copy too when the library allows it: a
+// local copy is what lets iOS fade the music (see tripsyFlyoverMusicFader). Unfetchable
+// (no CORS, offline) just leaves it streaming from its own address.
 function tripsyFlyoverMusicSrcNow(music) {
   if (!music) return null;
-  if (music.source === 'archive') return music.url || null;
+  if (music.source === 'archive') return (music.url && tripsyFlyoverMusicUrlCache.get(music.url)) || music.url || null;
   if (music.source === 'drive') return tripsyFlyoverMusicUrlCache.get(music.driveFileId) || null;
   return null;
 }
 async function tripsyFlyoverPrefetchMusic(music) {
+  if (music && music.source === 'archive' && music.url) {
+    if (tripsyFlyoverMusicUrlCache.has(music.url)) return tripsyFlyoverMusicUrlCache.get(music.url);
+    try {
+      const res = await fetch(music.url);
+      if (!res.ok) throw new Error(String(res.status));
+      const url = URL.createObjectURL(await res.blob());
+      tripsyFlyoverMusicUrlCache.set(music.url, url);
+      return url;
+    } catch (e) { return music.url; }
+  }
   if (!music || music.source !== 'drive' || !music.driveFileId) return tripsyFlyoverMusicSrcNow(music);
   if (tripsyFlyoverMusicUrlCache.has(music.driveFileId)) return tripsyFlyoverMusicUrlCache.get(music.driveFileId);
   try {
@@ -18872,6 +19103,74 @@ function tripsyFlyoverMusicPicker(current) {
 // ---- Player ---------------------------------------------------------------------
 // `opts.previewStopId` plays just that destination's arrival and slideshow (the setup
 // page's Preview), with no title card, legs or ending.
+// The soundtrack's level, FADED rather than switched ("Music should fade in and out,"
+// 2026-10-21). Three ways, best first:
+//  'volume' -- the element's own volume, ramped (desktop browsers);
+//  'gain'   -- iOS keeps an element's volume fixed at 1, so there the music is routed
+//              through a Web Audio gain node instead. Only for a LOCAL copy (blob:): a
+//              cross-origin stream routed that way plays as silence. The AudioContext must
+//              be made inside the Play tap, so `begin()` is called there, before any await;
+//              the element plays muted until the context is running, then fades in.
+//  'pause'  -- neither is possible: fades are skipped and ducking pauses the music.
+// `to(level, ms)` ramps to level (0..1, scaled by `base`) and resolves when done.
+function tripsyFlyoverMusicFader(audio, opts = {}) {
+  const base = opts.base == null ? 0.7 : opts.base;
+  const AudioCtx = 'AudioCtx' in opts ? opts.AudioCtx : (typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext)) || null;
+  let volumeWorks = false;
+  try { const v0 = audio.volume; audio.volume = 0.5; volumeWorks = Math.abs(audio.volume - 0.5) < 0.01; audio.volume = v0; } catch (e) {}
+  let mode = volumeWorks ? 'volume' : 'pause';
+  let level = 1, ramp = null, ctx = null, gain = null, attached = false;
+  const apply = () => {
+    const v = Math.max(0, Math.min(1, base * level));
+    if (mode === 'volume') { try { audio.volume = v; } catch (e) {} }
+    else if (mode === 'gain' && gain) gain.gain.value = v;
+  };
+  const stopRamp = () => { if (ramp) { clearInterval(ramp.t); const res = ramp.resolve; ramp = null; res(); } };
+  const f = {
+    get mode() { return mode; },
+    get level() { return level; },
+    get canFade() { return mode !== 'pause'; },
+    set(v) { stopRamp(); level = v; apply(); },
+    to(target, ms) {
+      stopRamp();
+      if (mode === 'pause' || !(ms > 0)) { level = target; apply(); return Promise.resolve(); }
+      const from = level, t0 = Date.now();
+      return new Promise(resolve => {
+        ramp = { resolve, t: setInterval(() => {
+          const k = Math.min(1, (Date.now() - t0) / ms);
+          level = from + (target - from) * k;
+          apply();
+          if (k >= 1) stopRamp();
+        }, 50) };
+      });
+    },
+    // Call right before audio.play(), inside the user's tap. Starts the music silent and
+    // fades it in over `fadeMs`.
+    begin(fadeMs = 2000) {
+      if (mode === 'volume') { f.set(0); f.to(1, fadeMs); return; }
+      if (mode === 'gain') { f.set(0); f.to(1, fadeMs); return; }
+      const src = String(audio.currentSrc || audio.src || '');
+      if (!AudioCtx || attached || !src.startsWith('blob:')) return;
+      try {
+        // iOS: let Web Audio play with the ringer switch on silent, like the element would.
+        try { if (typeof navigator !== 'undefined' && navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+        ctx = new AudioCtx();
+        audio.muted = true;
+        const unmute = () => { audio.muted = false; };
+        Promise.resolve(ctx.resume && ctx.resume()).then(() => {
+          if (ctx.state !== 'running' || attached) return unmute();
+          const node = ctx.createMediaElementSource(audio);
+          gain = ctx.createGain();
+          node.connect(gain); gain.connect(ctx.destination);
+          attached = true; mode = 'gain';
+          f.set(0); unmute(); f.to(1, fadeMs);
+        }).catch(unmute);
+      } catch (e) { audio.muted = false; }
+    },
+  };
+  return f;
+}
+
 async function playTripsyFlyover(trip, record, opts = {}) {
   let stops = tripsyFlyoverPlayableStops(record);
   const preview = !!opts.previewStopId;
@@ -18883,16 +19182,23 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   let musicBtnEl = null;
   let musicMuted = false;
   let musicEnded = false;
+  // True while a video plays: the music is faded to nothing (or, where it can't fade,
+  // paused) so the video's own sound is heard.
+  let ducked = false;
   const music = (record && record.music) || null;
   const audio = music ? new Audio() : null;
+  const fader = audio ? tripsyFlyoverMusicFader(audio) : null;
   const updateMusicBtn = () => {
     if (!musicBtnEl || !audio) return;
     musicBtnEl.textContent = (audio.paused || musicMuted) ? '🔇' : '🔊';
     musicBtnEl.title = (audio.paused || musicMuted) ? 'Play music' : 'Mute music';
   };
-  const startMusic = () => {
+  // fadeIn: the music starts silent and fades up (the start, Replay, after a video).
+  const startMusic = (fadeIn = false) => {
     if (!audio || !audio.src || musicMuted || musicEnded) return;
-    audio.volume = 0.7;
+    if (ducked && !fader.canFade) return;
+    if (fadeIn) fader.begin(2000);
+    else if (ducked) fader.set(0);
     const p = audio.play();
     if (p && p.catch) p.catch(() => updateMusicBtn());
     if (p && p.then) p.then(updateMusicBtn);
@@ -18900,15 +19206,18 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   if (audio) {
     audio.loop = true;
     const src = tripsyFlyoverMusicSrcNow(music);
-    if (src) { audio.src = src; startMusic(); }
-    else tripsyFlyoverPrefetchMusic(music).then(u => { if (u && !musicEnded) { audio.src = u; startMusic(); } });
+    if (src) { audio.src = src; startMusic(true); }
+    else tripsyFlyoverPrefetchMusic(music).then(u => { if (u && !musicEnded) { audio.src = u; startMusic(true); } });
   }
   const stopMusic = () => { musicEnded = true; if (audio) { try { audio.pause(); } catch (e) {} audio.removeAttribute('src'); } };
   let L;
   try { L = await tripsyFlyoverLoadLeaflet(); }
   catch (e) { stopMusic(); toast('Couldn’t load the map — check the connection and try again.', 'error'); return; }
-  // Start every photo downloading now (memoized), so each is ready when its stop arrives.
+  // Start every photo (and video) downloading now (memoized), so each is ready when its
+  // stop arrives.
   for (const s of stops) for (const p of (s.photos || [])) tripsyPlacePhotoDisplayUrl(p.driveFileId).catch(() => {});
+  // The video playing right now, so pause/resume reaches it.
+  let curVideo = null;
 
   const old = document.getElementById('tripsy-flyover-player');
   if (old) old.remove();
@@ -18954,6 +19263,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     run.paused = !run.paused;
     pauseBtn.textContent = run.paused ? '▶' : '❚❚';
     ov.classList.toggle('tfo-paused', run.paused);
+    if (curVideo) { try { if (run.paused) curVideo.pause(); else curVideo.play().catch(() => {}); } catch (e) {} }
     if (audio) { if (run.paused) audio.pause(); else startMusic(); updateMusicBtn(); }
   };
   pauseBtn.onclick = togglePause;
@@ -18963,7 +19273,9 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     run = { cancelled: false, paused: false };
     pauseBtn.textContent = '❚❚';
     ov.classList.remove('tfo-paused');
-    if (audio) { try { audio.currentTime = 0; } catch (e) {} startMusic(); }
+    if (curVideo) { try { curVideo.pause(); } catch (e) {} curVideo = null; }
+    ducked = false;
+    if (audio) { try { audio.currentTime = 0; } catch (e) {} startMusic(true); }
     play(run);
   };
 
@@ -19002,7 +19314,92 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   // slideshow, and each page is opaque, so the map shows only before the first page and
   // after the last.
   let shownEl = null;
+  // Music out before a video, back in after it.
+  const duckMusic = async () => {
+    ducked = true;
+    if (!audio || audio.paused) return;
+    if (fader.canFade) await fader.to(0, 700);
+    else audio.pause();
+  };
+  const unduckMusic = () => {
+    if (!ducked) return;
+    ducked = false;
+    if (!audio || musicMuted || musicEnded || run.paused) return;
+    if (fader.canFade) { if (audio.paused) startMusic(); fader.to(1, 1500); }
+    else startMusic();
+    updateMusicBtn();
+  };
+  // Plays a video page to its end (pause-aware), resolving false when the run is cancelled.
+  const runVideo = (r, v, maxMs) => new Promise(resolve => {
+    let finished = false, elapsed = 0, last = performance.now(), wasPaused = r.paused;
+    const fin = ok => { if (finished) return; finished = true; clearInterval(t); resolve(ok); };
+    v.onended = () => fin(!r.cancelled);
+    v.onerror = () => fin(!r.cancelled);
+    const t = setInterval(() => {
+      if (r.cancelled) { try { v.pause(); } catch (e) {} return fin(false); }
+      const now = performance.now();
+      if (!r.paused) elapsed += now - last;
+      last = now;
+      if (wasPaused && !r.paused && v.paused && !v.ended) v.play().catch(() => {});
+      wasPaused = r.paused;
+      if (elapsed > maxMs) fin(true);
+    }, 100);
+  });
+  const showVideoPage = async (r, page, enterTr) => {
+    const rec = page.photos && page.photos[0];
+    let url;
+    try { url = await tripsyPlacePhotoDisplayUrl(page.ids[0]); } catch (e) { return !r.cancelled; }
+    if (r.cancelled) return false;
+    const v = document.createElement('video');
+    v.playsInline = true; v.setAttribute('playsinline', ''); v.preload = 'auto';
+    v.muted = false;
+    const ready = await new Promise(res => {
+      const tm = setTimeout(() => res(v.readyState >= 2), 20000);
+      v.onloadeddata = () => { clearTimeout(tm); res(true); };
+      v.onerror = () => { clearTimeout(tm); res(false); };
+      v.src = url;
+    });
+    if (r.cancelled) return false;
+    if (!ready) return true; // a video that won't load is skipped
+    const g = document.createElement('div');
+    g.className = 'tfo-group';
+    g.dataset.layout = 'video';
+    g.dataset.tr = enterTr;
+    g.appendChild(v);
+    veilEl.classList.add('tfo-show');
+    photoEl.appendChild(g);
+    const duck = duckMusic();
+    await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
+    g.classList.add('tfo-in');
+    const prev = shownEl;
+    shownEl = g;
+    const tMs = enterTr === 'none' ? 0 : 650;
+    if (!(await wait(r, tMs))) return false;
+    if (prev) prev.remove();
+    await duck;
+    if (r.cancelled) return false;
+    curVideo = v;
+    try { await v.play(); }
+    catch (e) {
+      // No sound without a tap (iOS can refuse an unmuted start): play muted, offer sound.
+      v.muted = true;
+      v.play().catch(() => {});
+      const b = document.createElement('button');
+      b.className = 'tfo-btn tfo-video-sound';
+      b.textContent = '🔊 Tap for sound';
+      b.onclick = ev => { ev.stopPropagation(); v.muted = false; v.play().catch(() => {}); b.remove(); };
+      g.appendChild(b);
+    }
+    if (r.paused) v.pause();
+    const secs = Number(rec && rec.duration) || v.duration;
+    const ok = await runVideo(r, v, ((isFinite(secs) && secs > 0) ? secs : 600) * 1000 + 8000);
+    if (curVideo === v) curVideo = null;
+    if (!ok) return false;
+    unduckMusic();
+    return true;
+  };
   const showPage = async (r, page, enterTr) => {
+    if (page.video || page.layout === 'video') return showVideoPage(r, page, enterTr);
     const urls = [];
     for (const id of page.ids) {
       try { urls.push(await tripsyPlacePhotoDisplayUrl(id)); } catch (e) { /* skip a photo that won't load */ }
@@ -19143,8 +19540,8 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     showCard(trip.name || 'Trip', 'The end');
     // Let the music fade out under the closing card.
     if (audio && !audio.paused) {
-      const v0 = audio.volume;
-      for (let i = 1; i <= 25 && !r.cancelled; i++) { await wait(r, 100); audio.volume = Math.max(0, v0 * (1 - i / 25)); }
+      if (fader.canFade) await fader.to(0, 2500);
+      else await wait(r, 2500);
       if (!r.cancelled) audio.pause();
       updateMusicBtn();
     }

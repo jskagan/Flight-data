@@ -311,7 +311,7 @@ assert(/tripsyFlyoverSeedItineraryPhotos\(record, trip, tripsyTodayDayKey\(\), d
 eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MIN'), constLine('TRIPSY_FLYOVER_SECONDS_MAX'),
   (html.match(/const TRIPSY_FLYOVER_LAYOUTS = \[[\s\S]*?\];/) || [''])[0],
   (html.match(/const TRIPSY_FLYOVER_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0],
-  extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverPhotoGroups')].join('\n'));
+  extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverIsVideo'), extractFn('tripsyFlyoverPhotoGroups')].join('\n'));
 {
   const def = tripsyFlyoverSlideshowConfig({});
   assert(def.layout === 'single' && def.transition === 'fade' && def.seconds === 3.2, 'defaults: one photo at a time, fading, 3.2 s each');
@@ -375,7 +375,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
 eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MIN'), constLine('TRIPSY_FLYOVER_SECONDS_MAX'),
   (html.match(/const TRIPSY_FLYOVER_LAYOUTS = \[[\s\S]*?\];/) || [''])[0],
   (html.match(/const TRIPSY_FLYOVER_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0],
-  extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverPhotoGroups'),
+  extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverIsVideo'), extractFn('tripsyFlyoverPhotoGroups'),
   extractFn('tripsyFlyoverGroupLayout'), constLine('TRIPSY_FLYOVER_PAGE_MAX'), extractFn('tripsyFlyoverPageLayout'),
   extractFn('tripsyFlyoverNormalizePage'), extractFn('tripsyFlyoverPages'), extractFn('tripsyFlyoverEnterTransitions'),
   extractFn('tripsyFlyoverDialogPages'), extractFn('tripsyFlyoverTogglePagePhoto'), extractFn('tripsyFlyoverSlideshowSummary')].join('\n'));
@@ -433,7 +433,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/slideshow: \{ \.\.\.p\.slideshow \}/.test(extractFn('tripsyFlyoverCarryOver')) && /pages: p\.pages\.map/.test(extractFn('tripsyFlyoverCarryOver')),
     'rebuilding the destinations keeps each one\'s pages and settings');
   const setup = extractFn('showTripsyFlyover');
-  assert(/if \(!closed\) \{ render\(\); openSlideshowOptions\(id, `\$\{done\} photo/.test(setup), 'THE ASK: adding your own photos opens the options box straight away');
+  assert(/if \(!closed\) \{ render\(\); openSlideshowOptions\(id, `\$\{done\} item/.test(setup), 'THE ASK: adding your own photos opens the options box straight away');
   assert(/added => \{\s*if \(added && !closed\) openSlideshowOptions\(id,/.test(setup), 'and so does closing the suggested photos after picking some');
   assert(/close = \(\) => \{[^}]*if \(onClosed\) onClosed\(added\);/.test(extractFn('tripsyFlyoverSuggestedPhotos')), 'the suggestions grid reports how many it added');
 }
@@ -514,7 +514,7 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   const player = extractFn('playTripsyFlyover');
   const firstAwait = player.indexOf('await ');
   assert(player.indexOf('const audio = music ? new Audio() : null;') > 0 && player.indexOf('const audio = music ? new Audio() : null;') < firstAwait
-    && player.indexOf('startMusic();') < firstAwait, 'music starts before the first await, inside the Play tap (iOS only allows that)');
+    && player.indexOf('startMusic(true);') > 0 && player.indexOf('startMusic(true);') < firstAwait, 'music starts before the first await, inside the Play tap (iOS only allows that)');
   assert(/data-tfo-music/.test(player) && /musicMuted = true; audio\.pause\(\)/.test(player), 'a music button mutes, and plays when the browser blocked autoplay');
   assert(/if \(run\.paused\) audio\.pause\(\); else startMusic\(\);/.test(player) && /run\.cancelled = true;\s*stopMusic\(\);/.test(player), 'pause pauses the music; closing stops it');
   assert(/if \(prevRecord && prevRecord\.music\) rec\.music = prevRecord\.music;/.test(extractFn('tripsyFlyoverBuild')), 'a rebuild keeps the chosen music');
@@ -573,4 +573,105 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   })().catch(e => { console.log('FAIL english labels', e); process.exitCode = 1; });
   assert(/tripsyFlyoverEnglishLabels\(record\)\.then/.test(extractFn('showTripsyFlyover')), 'the setup page re-names an older fly-over behind the page');
   assert(/playTripsyFlyover\(trip, record\);\s*\/\/ Older fly-overs pick up English names/.test(html), 'and View does it after starting playback, so music still starts in the tap');
+}
+
+// ---- the page dialog's Save is always reachable ("When I edit pages on a flyover, there is
+// no way to save the changes," 2026-10-21 — Save sat below the fold on a phone/iPad) ----
+{
+  const dlg = extractFn('tripsyFlyoverSlideshowDialog');
+  assert(/<div class="tfo-ss-footer">[\s\S]*data-ss-cancel[\s\S]*data-ss-save/.test(dlg), 'THE ASK: Save and Cancel sit in the pinned footer');
+  assert(/\.tfo-ss-footer \{ position: sticky; bottom: 0;/.test(html) && /background: var\(--panel\)/.test((html.match(/\.tfo-ss-footer \{[^}]*\}/) || [''])[0]),
+    'the footer is pinned to the bottom of the box and opaque, so it stays on screen while the photos scroll under it');
+  assert(/max-height:88vh; max-height:88dvh;/.test(dlg), 'the box fits the visible screen (dvh), not the full one under Safari\'s toolbars');
+}
+
+// ---- videos + fades + Shared Albums ("add the ability to add videos to the flyover. When
+// videos play, cut the music and play sound from the video. Music should fade in and out.
+// Also … add photos from shared albums," 2026-10-21) ----
+eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MIN'), constLine('TRIPSY_FLYOVER_SECONDS_MAX'),
+  (html.match(/const TRIPSY_FLYOVER_LAYOUTS = \[[\s\S]*?\];/) || [''])[0],
+  (html.match(/const TRIPSY_FLYOVER_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0],
+  extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverIsVideo'), extractFn('tripsyFlyoverFileIsVideo'),
+  extractFn('tripsyFlyoverDurationLabel'), extractFn('tripsyFlyoverPhotoGroups'),
+  extractFn('tripsyFlyoverGroupLayout'), constLine('TRIPSY_FLYOVER_PAGE_MAX'), extractFn('tripsyFlyoverPageLayout'),
+  extractFn('tripsyFlyoverNormalizePage'), extractFn('tripsyFlyoverPages'), extractFn('tripsyFlyoverTogglePagePhoto'),
+  extractFn('tripsyFlyoverSlideshowSummary'), extractFn('tripsyFlyoverMusicFader')].join('\n').replace(/^const /gm, 'var '));
+{
+  const ph = id => ({ driveFileId: id });
+  const vid = id => ({ driveFileId: id, kind: 'video', duration: 65 });
+  assert(tripsyFlyoverIsVideo(vid('v')) && tripsyFlyoverIsVideo({ mime: 'video/quicktime' }) && !tripsyFlyoverIsVideo(ph('p')), 'a video record is told from a photo');
+  assert(tripsyFlyoverFileIsVideo({ type: 'video/quicktime', name: 'IMG_1.MOV' }) && tripsyFlyoverFileIsVideo({ type: '', name: 'clip.mp4' })
+    && !tripsyFlyoverFileIsVideo({ type: 'image/heic', name: 'IMG_2.HEIC' }), 'a picked file is a video by its type or extension');
+  assert(tripsyFlyoverDurationLabel(65) === '1:05' && tripsyFlyoverDurationLabel(null) === '', 'video length reads m:ss');
+  // auto pages: a video is always its own page, the photos around it keep their order
+  const auto = tripsyFlyoverPages({ slideshow: { layout: 'grid' }, photos: [ph('a'), ph('b'), vid('v'), ph('c')] });
+  assert(auto.map(pg => pg.ids.join('')).join('|') === 'ab|v|c' && auto[1].video && auto[1].layout === 'video',
+    'THE ASK: a video plays on a page of its own, between the photos around it');
+  // a saved page holding a video with photos is split, in place
+  const saved = tripsyFlyoverPages({ photos: [ph('a'), vid('v'), ph('b')], pages: [{ ids: ['a', 'v', 'b'], count: 3 }] });
+  assert(saved.map(pg => pg.ids.join('')).join('|') === 'a|v|b' && saved[1].layout === 'video', 'a video saved onto a photo page is split onto its own');
+  assert(/🎬/.test(tripsyFlyoverSlideshowSummary({ photos: [ph('a'), vid('v')] })), 'the card summary marks the video page');
+  // the dialog's toggle
+  const isV = id => id === 'v';
+  let r = tripsyFlyoverTogglePagePhoto([{ ids: ['a'], count: 2 }], 0, 'v', isV);
+  assert(r.ownPage && r.pages[0].ids.join('') === 'a', 'a video cannot join a page of photos');
+  r = tripsyFlyoverTogglePagePhoto([{ ids: ['a'], count: 2 }, { ids: [], count: 3 }], 1, 'v', isV);
+  assert(!r.ownPage && r.pages[1].ids.join('') === 'v' && r.pages[1].count === 1, 'a video fills an empty page');
+  r = tripsyFlyoverTogglePagePhoto([{ ids: ['v'], count: 1 }], 0, 'a', isV);
+  assert(r.ownPage, 'and no photo joins a video page');
+  assert(tripsyFlyoverTogglePagePhoto([{ ids: ['a'], count: 2 }], 0, 'b').pages[0].ids.join('') === 'ab', 'photos toggle as before without the video test');
+
+  // the fader
+  const fakeAudio = settable => { const a = { _v: 1, src: 'https://x/song.mp3', muted: false, paused: false };
+    Object.defineProperty(a, 'volume', { get() { return a._v; }, set(v) { if (settable) a._v = v; } }); return a; };
+  const fd = tripsyFlyoverMusicFader(fakeAudio(true), { AudioCtx: null });
+  assert(fd.mode === 'volume' && fd.canFade, 'a settable volume fades by volume');
+  const iosArchive = tripsyFlyoverMusicFader(fakeAudio(false), { AudioCtx: function () {} });
+  assert(iosArchive.mode === 'pause' && !iosArchive.canFade, 'iOS with a streamed song cannot fade, so ducking pauses');
+  iosArchive.begin();
+  assert(true, 'begin with a streamed song does not try Web Audio (it would play silence)');
+  (async () => {
+    const a = fakeAudio(true);
+    const f = tripsyFlyoverMusicFader(a, { AudioCtx: null, base: 0.7 });
+    f.begin(200);
+    assert(a._v === 0, 'THE ASK: music starts silent and fades IN');
+    await new Promise(res => setTimeout(res, 320));
+    assert(Math.abs(a._v - 0.7) < 0.01, 'fade-in reaches the music level');
+    await f.to(0, 150);
+    assert(a._v === 0, 'and fades OUT to nothing');
+    // iOS + a local copy: routed through a gain node once the context runs
+    const b = fakeAudio(false); b.src = 'blob:abc';
+    let connected = 0;
+    const gainNode = { gain: { value: 1 }, connect() { connected++; } };
+    function Ctx() { this.state = 'suspended'; this.destination = {}; }
+    Ctx.prototype.resume = function () { this.state = 'running'; return Promise.resolve(); };
+    Ctx.prototype.createMediaElementSource = () => ({ connect() { connected++; } });
+    Ctx.prototype.createGain = () => gainNode;
+    const g = tripsyFlyoverMusicFader(b, { AudioCtx: Ctx });
+    g.begin(100);
+    assert(b.muted, 'iOS: the song starts muted while the audio context starts');
+    await new Promise(res => setTimeout(res, 10));
+    assert(g.mode === 'gain' && connected === 2 && !b.muted, 'then it is routed through a gain node and unmuted');
+    await new Promise(res => setTimeout(res, 200));
+    assert(Math.abs(gainNode.gain.value - 0.7) < 0.01, 'and fades in by gain');
+  })().catch(e => { console.log('FAIL fader', e); process.exitCode = 1; });
+
+  const player = extractFn('playTripsyFlyover');
+  assert(/const duckMusic = async \(\) => \{[\s\S]*fader\.to\(0, 700\)[\s\S]*else audio\.pause\(\)/.test(player), 'THE ASK: the music fades out (or stops) before a video');
+  assert(/const duck = duckMusic\(\);[\s\S]*await duck;[\s\S]*await v\.play\(\)/.test(player), 'the video starts with its sound once the music is down');
+  assert(/v\.muted = false;/.test(player) && /Tap for sound/.test(player), 'the video plays unmuted, with a tap-for-sound fallback');
+  assert(/if \(!ok\) return false;\s*unduckMusic\(\);/.test(player) && /fader\.to\(1, 1500\)/.test(player), 'the music fades back in after the video');
+  assert(/startMusic\(true\)/.test(player) && /fader\.to\(0, 2500\)/.test(player), 'music fades in at the start and out at the end');
+  assert(/if \(curVideo\) \{ try \{ if \(run\.paused\) curVideo\.pause\(\)/.test(player), 'pause reaches the playing video');
+  const pick = extractFn('tripsyFlyoverPickMedia');
+  assert(/accept="image\/\*,video\/\*" multiple/.test(pick) && !/data-mpick-lib-input[^>]*capture/.test(pick),
+    'THE ASK: the library picker takes photos and videos, with no capture, so iOS shows the Photos library (Albums → Shared Albums)');
+  assert(/Shared Albums/.test(pick), 'the picker says where Shared Albums are');
+  assert(/tripsyFlyoverPickMedia\(async files =>/.test(extractFn('showTripsyFlyover')) && /tripsyFlyoverUploadVideo\(file/.test(extractFn('showTripsyFlyover')),
+    'the setup page uses the media picker and uploads videos');
+  const up = extractFn('uploadBlobToDriveResumable');
+  assert(/uploadType=resumable/.test(up) && /Content-Range/.test(up) && /status !== 308/.test(up), 'videos upload resumably, in pieces');
+  assert(/file\.size > TRIPSY_FLYOVER_VIDEO_MAX_BYTES/.test(extractFn('tripsyFlyoverUploadVideo')), 'an oversized video is refused with a message');
+  assert(/data-ss-video-note/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the page dialog explains a video page instead of asking a count');
+  assert(/tripsyFlyoverMusicUrlCache\.set\(music\.url/.test(extractFn('tripsyFlyoverPrefetchMusic')), 'a found song is copied locally when it can be, so iOS can fade it');
 }
