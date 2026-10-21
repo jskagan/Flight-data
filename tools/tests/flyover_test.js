@@ -1058,3 +1058,13 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     && !/\.then\(r => \{ if \(r\.changed\) Store\.saveTripsyFlyover\(r\.record\)/.test(view.slice(0, 3000)),
     'View no longer writes the copy taken at the tap back over later changes');
 }
+{
+  // Every photo in the same 4:3 frame, cropped to fill (2026-10-21).
+  const css = (html.match(/@supports \(width: 1cqw\) \{[\s\S]*?\n  \}\n/) || [''])[0];
+  assert(/\.tfo-group \{ container-type: size; \}/.test(css)
+    && /\[data-layout="collage"\] img \{ aspect-ratio: 4 \/ 3;[^}]*object-fit: cover;/.test(css),
+    'every photo layout shares one 4:3, cropped-to-fill frame shape');
+  assert(['single', 'pair', 'grid', 'collage'].every(l => new RegExp(`\\[data-layout="${l}"\\] img \\{ width: min\\(`).test(css)),
+    'each layout sizes its frames from the page box, never from the photo\'s own shape');
+  assert(!/video/.test(css.replace(/Videos keep\s+their own shape/, '')), 'videos are left at their own shape');
+}

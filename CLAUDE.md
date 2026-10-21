@@ -3755,6 +3755,15 @@ WebView's support for recording is unproven.
     plays just that destination (`playTripsyFlyover(…, {previewStopId})`: no title card,
     legs or ending). `tripsyFlyoverCarryOver` keeps `pages` and `slideshow` across Rebuild
     (it used to drop `slideshow`).
+    - **Every photo shows in the SAME 4:3 frame, cropped to fill it** ("Keep all photos the
+      same size on the flyover," 2026-10-21; the owner chose "same frame on every page" over
+      identical-everywhere or uncropped): a one-photo page is one large frame whether the
+      photo is tall or wide, and the 2–6 photos sharing a page are all equal. An
+      `@supports (width: 1cqw)` block makes `.tfo-group` a size container and gives each
+      layout `aspect-ratio: 4/3; object-fit: cover` with a width from container units against
+      the page box (single, pair, 2×2 grid, collage; portrait variants); the older per-shape
+      rules stay above it as the fallback. Videos keep their own shape. Measured in Chromium
+      at 1180×820 and 820×1180 with mixed tall/wide photos: equal frames on every layout.
     - **Transitions** (`TRIPSY_FLYOVER_TRANSITIONS`): fade, slide, zoom in, slow pan & zoom
       (a Ken Burns keyframe sized to the page's time), and cut.
     - **Pages go DIRECTLY from one to the next — the map never shows between pictures**
