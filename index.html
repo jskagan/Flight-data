@@ -1408,6 +1408,7 @@
       #tripsy-flyover-player .tfo-group[data-layout="collage"] img { width: min(58cqw, 30cqh * 4 / 3); }
     }
   }
+  .tfo-dot { background: #E04B3A; border: 2px solid #fff; border-radius: 50%; box-sizing: border-box; box-shadow: 0 0 2px rgba(0,0,0,0.35); }
   .tfo-via-label { background: none; border: none; }
   .tfo-via-label span { display: inline-block; transform: translate(-50%, -150%); white-space: nowrap; font: 700 13px/1.2 system-ui, sans-serif; color: #fff; background: rgba(11,16,32,0.82); padding: 3px 8px; border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,0.4); }
   /* A destination's own name: to the right of its dot, growing as the map zooms in. */
@@ -1417,7 +1418,7 @@
   .tfo-dest-label span { transform: translate(12px, -50%) scale(1); transform-origin: left center; transition: transform 1.4s ease-out; font-size: 20px; padding: 4px 10px; border-radius: 8px; }
   .tfo-dest-label.tfo-grow span { transform: translate(12px, -50%) scale(1.5); }
   /* The arrival burst: the destination dot swelling to fill the screen before its photos. */
-  #tripsy-flyover-player .tfo-burst { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: #E04B3A; z-index: 998; pointer-events: none; transform: scale(1); transition: transform 0.9s ease-in; will-change: transform; }
+  #tripsy-flyover-player .tfo-burst { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: #E04B3A; z-index: 998; pointer-events: none; transform: scale(1); will-change: transform; }
   .tfo-vehicle span { display: block; font-size: 32px; line-height: 40px; text-align: center; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5)); }
   /* ---- Wardrobe (Phase 1: garment library + per-trip selection) ---- */
   .tw-group { margin-bottom: 22px; }
@@ -17554,6 +17555,9 @@ const TRIPSY_FLYOVER_TILE_SOURCES = [
 const TRIPSY_FLYOVER_TILE_FAIL_LIMIT = 4;
 // The origin/destination name's scale as it appears and once grown on arrival -- mirrors the
 // .tfo-dest-label CSS, so arrivalCenter can frame the grown name before it has grown.
+// How long the dot takes to grow into the full orange screen, from the start of the arrival
+// zoom (1.4 s) -- one linear rate the whole way.
+const TRIPSY_FLYOVER_BURST_MS = 2400;
 const TRIPSY_FLYOVER_DEST_LABEL_SCALE = { start: 1, grown: 1.5 };
 // GOOGLE MAP TILES come first when they can ("Add Google Map Tiles with the Places key,"
 // 2026-10-21 — the keyless sources have no @2x tiles, so the map looked pixelated on the
@@ -20287,7 +20291,12 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     g.remove();
     return ok;
   };
-  const dot = s => L.circleMarker([s.lat, s.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#E04B3A', fillOpacity: 1 }).addTo(map);
+  // Dots are MARKERS, not SVG circles ("The map still zooms first before the dot," 2026-10-21):
+  // Leaflet repositions a marker on every frame of a zoom, exactly like the name labels, while an
+  // SVG path is drawn once per settled view and stretched in between -- on the iPad the per-frame
+  // path redraw did not keep up, so the dot visibly lagged the map.
+  const dotIcon = size => L.divIcon({ className: 'tfo-dot' + (size < 14 ? ' tfo-dot-small' : ''), html: '', iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+  const dot = s => L.marker([s.lat, s.lng], { icon: dotIcon(14), interactive: false, keyboard: false, zIndexOffset: 500 }).addTo(map);
   // One dot per stop, added the first time it is needed: a destination's dot goes up with its
   // name as the leg TO it begins ("the destination orange dot should appear on the map when the
   // map first appears," 2026-10-21), so arriving there must not add a second one.
@@ -20406,23 +20415,40 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     el.style.opacity = '0';
     setTimeout(() => el.remove(), 500);
   };
-  const burstFromDot = (r, s) => {
+  // The dot grows into the orange screen at ONE constant rate, starting the moment the arrival
+  // zoom starts ("I want the orange dot to expand at a constant rate, starting when the map
+  // zooms," 2026-10-22 -- it used to ride the zoom at dot size, then grow on an ease-in
+  // transition afterwards, which read as two different speeds). Driven per frame rather than
+  // by a CSS transition so it can follow the dot's screen point while the map is still moving,
+  // and so pause freezes it; its diameter grows linearly from the dot's 14 px to past the
+  // farthest screen corner over TRIPSY_FLYOVER_BURST_MS.
+  const startBurst = (r, s) => {
     clearBurst();
-    const pt = map.latLngToContainerPoint([s.lat, s.lng]);
-    const w = ov.clientWidth, h = ov.clientHeight;
-    const far = Math.max(Math.hypot(pt.x, pt.y), Math.hypot(w - pt.x, pt.y), Math.hypot(pt.x, h - pt.y), Math.hypot(w - pt.x, h - pt.y));
     const el = document.createElement('div');
     el.className = 'tfo-burst';
-    el.style.left = `${pt.x}px`;
-    el.style.top = `${pt.y}px`;
     ov.appendChild(el);
     burstEl = el;
-    // A plain transition on an inline transform: a CSS variable inside @keyframes (the
-    // first cut) is not resolved by every iOS WebKit, and there the dot never grew and the
-    // map showed instead of the orange ("it instead shows a zoomed-out map first").
-    void el.offsetWidth;
-    el.style.transform = `scale(${Math.ceil((far * 2) / 14) + 2})`;
-    return wait(r, 950);
+    const done = new Promise(resolve => {
+      let elapsed = 0, last = performance.now();
+      const frame = () => {
+        if (r.cancelled || burstEl !== el) return resolve(false);
+        const now = performance.now();
+        if (!r.paused) elapsed += now - last;
+        last = now;
+        const pt = map.latLngToContainerPoint([s.lat, s.lng]);
+        const w = ov.clientWidth, h = ov.clientHeight;
+        const far = Math.max(Math.hypot(pt.x, pt.y), Math.hypot(w - pt.x, pt.y), Math.hypot(pt.x, h - pt.y), Math.hypot(w - pt.x, h - pt.y));
+        const p = Math.min(1, elapsed / TRIPSY_FLYOVER_BURST_MS);
+        const scale = 1 + ((far * 2 + 28) / 14 - 1) * p;
+        el.style.left = `${pt.x}px`;
+        el.style.top = `${pt.y}px`;
+        el.style.transform = `scale(${scale})`;
+        if (p >= 1) return resolve(true);
+        requestAnimationFrame(frame);
+      };
+      frame();
+    });
+    return { done };
   };
   // Waits (briefly, at most maxMs) for the tiles at the new view to finish loading.
   const untilTilesLoaded = (r, maxMs) => new Promise(resolve => {
@@ -20468,19 +20494,25 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     growDestLabel();
     const zoom = s.kind === 'stay' ? 10 : 9;
     const center = arrivalCenter(s, zoom);
+    const burstWanted = withPhotos && tripsyFlyoverPages(s).length > 0;
+    // The pictures were all asked for at the start; this is normally instant.
+    const pagesReady = burstWanted ? firstPageLoads(r, s) : null;
+    const burst = burstWanted ? startBurst(r, s) : null;
     if (!(await untilMoveEnd(r, () => map.flyTo(center, zoom, { duration: 1.4 }), 2600))) return false;
     // A slow device can still be mid-flight here (a stray early moveend, or the time cap):
     // finish the zoom outright, so the burst and the photos never start over a map that is
     // still zoomed out.
     if (Math.abs(map.getZoom() - zoom) > 0.01) { try { map.stop(); } catch (e) {} map.setView(center, zoom, { animate: false }); }
     showCard(s.label, stopSub(s, i));
-    if (!(await untilTilesLoaded(r, 1500))) return false;
-    if (!withPhotos || !tripsyFlyoverPages(s).length) return wait(r, 1800);
-    // The orange only goes up once a page CAN follow it: if none of this stop's pictures load
-    // (a failed download), the screen would go orange and then straight back to the map.
-    if (!(await firstPageLoads(r, s))) { console.warn('fly-over: no photo of', s.label, 'loaded'); return wait(r, 1800); }
-    if (r.cancelled) return false;
-    if (!(await burstFromDot(r, s))) return false;
+    if (!burst) {
+      if (!(await untilTilesLoaded(r, 1500))) return false;
+      return wait(r, 1800);
+    }
+    const [grown, ready] = await Promise.all([burst.done, pagesReady]);
+    if (!grown || r.cancelled) return false;
+    // If none of this stop's pictures load (a failed download), the orange fades back to the
+    // map rather than leading nowhere.
+    if (!ready) { console.warn('fly-over: no photo of', s.label, 'loaded'); clearBurst(); return wait(r, 1800); }
     // The backdrop goes up at once under the orange, so no map shows round the first page.
     veilEl.style.transition = 'none';
     veilEl.classList.add('tfo-show');
@@ -20572,7 +20604,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       let from = a;
       for (const v of via) {
         if (!(await animateLeg(r, from, v, 'plane'))) return;
-        layers.push(L.circleMarker([v.lat, v.lng], { radius: 5, color: '#fff', weight: 2, fillColor: '#E04B3A', fillOpacity: 1 }).addTo(map));
+        layers.push(L.marker([v.lat, v.lng], { icon: dotIcon(10), interactive: false, keyboard: false, zIndexOffset: 500 }).addTo(map));
         viaLabels.push(L.marker([v.lat, v.lng], { icon: L.divIcon({ className: 'tfo-via-label', html: `<span>${esc(v.label || '')}</span>`, iconSize: [0, 0] }), interactive: false }).addTo(map));
         if (!(await wait(r, 900))) return;
         from = v;

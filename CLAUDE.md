@@ -3714,6 +3714,15 @@ WebView's support for recording is unproven.
     that page is in (also on `endSlideshow` and Replay). The pause rule freezes it. Arrivals
     without photos, the opening first-destination slideshow and the closing one get no
     burst. Verified in Chromium at 390×844: full orange, page in over it, label on screen.
+    **Superseded 2026-10-22** ("I want the orange dot to expand at a constant rate, starting
+    when the map zooms" — riding the zoom at dot size and THEN easing out over 0.9 s read as two
+    speeds): `startBurst` (replacing `burstFromDot`) begins as the arrival `flyTo` begins and
+    is driven per frame — pause-aware clock, re-centred on the dot's live screen point while
+    the map moves, diameter LINEAR from 14 px to past the farthest corner over
+    `TRIPSY_FLYOVER_BURST_MS` (2400; the zoom is 1.4 s of it). No CSS transition on
+    `.tfo-burst` (it would smooth the per-frame steps into a second rate). `firstPageLoads`
+    runs alongside; if no photo loads, the orange fades back to the map. Measured in Chromium:
+    ~55 px per 80 ms from first zoom frame to full cover.
     **Two device fixes, same day** ("The flyover does not transition from a full orange screen
     to the first photo page - it instead shows a zoomed-out map first … sometimes when the
     plane glyph flies between 2 destinations it oscillates left and right"): **(1)** the
@@ -3762,7 +3771,12 @@ WebView's support for recording is unproven.
     Leaflet 1.9.4 internals, pinned): the dot rides the map at its own 7 px beside its name and
     the route stays a thin line. Verified in Chromium by sampling the arrival every 80 ms: the
     Singapore dot stays 14 px wide and 12 px left of its label throughout. The two earlier
-    defenses stay.
+    defenses stay. **On the iPad the dot STILL trailed the map** ("The map still zooms first
+    before the dot," same day), so the DOTS are no longer SVG at all: destination (14 px) and
+    layover (10 px) dots are `L.marker`s with a `.tfo-dot` divIcon (`dotIcon(size)`), which
+    Leaflet repositions on every zoom frame exactly like the name labels that were already
+    keeping up. `redrawPathsAtZoom` now only matters for the route lines. Don't go back to
+    `circleMarker` for anything that must move with the zoom.
     **A destination's dot goes up with its name** ("the destination orange dot should appear on
     the map when the map first appears," same day): the opening map shows the origin's AND the
     first destination's dots, and each later leg adds its destination's dot as the leg begins —

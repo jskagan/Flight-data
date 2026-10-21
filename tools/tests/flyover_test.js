@@ -1067,6 +1067,9 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     // "the destination orange dot should appear on the map when the map first appears"
     assert(/ensureDot\(first\);\s*ensureDot\(stops\[1\]\);/.test(play), 'the opening map shows the first destination\'s dot as well as the origin\'s');
     assert(/showDestLabel\(b\);\s*ensureDot\(b\);/.test(play), 'each later destination\'s dot goes up with its name as its leg begins');
+    assert(!/L\.circleMarker/.test(play) && /const dot = s => L\.marker\(\[s\.lat, s\.lng\], \{ icon: dotIcon\(14\)/.test(play)
+      && /layers\.push\(L\.marker\(\[v\.lat, v\.lng\], \{ icon: dotIcon\(10\)/.test(play),
+      'destination and layover dots are divIcon markers (repositioned every zoom frame like the labels), never SVG circles');
     // "make the labels with the origin and destination larger when they appear on the map"
     const css = (html.match(/\.tfo-dest-label span \{[^}]*\}/) || [''])[0];
     const grownCss = (html.match(/\.tfo-dest-label\.tfo-grow span \{[^}]*\}/) || [''])[0];
@@ -1078,8 +1081,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       && /dotted = new Set\(\);/.test(play.slice(play.indexOf('const play = async'))), 'one dot per stop, never a second on arrival, reset on Replay');
   }
   const arriveSrc = play.slice(play.indexOf('const arrive = async'), play.indexOf('const play = async'));
-  assert(arriveSrc.indexOf('firstPageLoads(r, s)') > -1 && arriveSrc.indexOf('firstPageLoads(r, s)') < arriveSrc.indexOf('burstFromDot(r, s)'),
-    'the orange only goes up once a photo of that stop has loaded');
+  assert(arriveSrc.indexOf('firstPageLoads(r, s)') > -1 && /const \[grown, ready\] = await Promise\.all\(\[burst\.done, pagesReady\]\);[\s\S]*?if \(!ready\) \{[^}]*clearBurst\(\);/.test(arriveSrc),
+    'the slideshow only follows the orange once a photo of that stop has loaded; otherwise the orange fades back to the map');
   // "for the first leg do not zoom. Start with the unzoomed map with labels for origin and destination"
   const playSrc = play.slice(play.indexOf('const play = async'));
   assert(/if \(stops\.length > 1\) \{\s*ensureDot\(first\);[\s\S]*?tfo-dest-label[\s\S]*?showDestLabel\(stops\[1\]\)/.test(playSrc),
@@ -1132,16 +1135,17 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   const legPart = play.slice(iLeg, play.indexOf('map.flyToBounds(legBounds', iLeg));
   assert(/clearDestLabel\(\);\s*clearViaLabels\(\);[\s\S]*showDestLabel\(b\);/.test(legPart),
     'the destination name is placed before the leg to it is framed, and the last leg\'s names are cleared');
-  assert(/viaLabels\.push\(L\.marker/.test(play) && !/layers\.push\(L\.marker\(\[v\.lat/.test(play),
+  assert(/viaLabels\.push\(L\.marker/.test(play) && !/layers\.push\(L\.marker\(\[v\.lat, v\.lng\], \{ icon: L\.divIcon\(\{ className: 'tfo-via-label/.test(play),
     'layover labels are tracked so they are removed when the leg ends, not left on the map');
-  assert(/growDestLabel\(\);[\s\S]*?const center = arrivalCenter\(s, zoom\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom/.test(play),
-    'the zoom-in frames the dot and its growing label together');
-  assert(/if \(!\(await burstFromDot\(r, s\)\)\) return false;[\s\S]*?return slideshow\(r, s\);/.test(play)
+  assert(/growDestLabel\(\);[\s\S]*?const center = arrivalCenter\(s, zoom\);[\s\S]*?const burst = burstWanted \? startBurst\(r, s\) : null;\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom/.test(play),
+    'the zoom-in frames the dot and its growing label together, and the orange starts growing as the zoom starts');
+  assert(/if \(!grown \|\| r\.cancelled\) return false;[\s\S]*?return slideshow\(r, s\);/.test(play)
     && (play.match(/if \(prev\) prev\.remove\(\);\s*clearBurst\(\);/g) || []).length === 2,
     'a destination with photos swells its dot to fill the screen, and the first page (photo or video) comes straight in over it');
-  assert(/\.tfo-burst \{[^}]*background: #E04B3A[^}]*transition: transform 0\.9s/.test(html) && !/@keyframes tfo-burst/.test(html)
-    && /void el\.offsetWidth;\s*el\.style\.transform = `scale\(/.test(play),
-    'the burst is the dot\'s own colour, grown by a plain transition (no CSS variable inside keyframes, which iOS can drop)');
+  assert(/\.tfo-burst \{[^}]*background: #E04B3A/.test(html) && !/\.tfo-burst \{[^}]*transition/.test(html) && !/@keyframes tfo-burst/.test(html)
+    && /const p = Math\.min\(1, elapsed \/ TRIPSY_FLYOVER_BURST_MS\);\s*const scale = 1 \+ \(\(far \* 2 \+ 28\) \/ 14 - 1\) \* p;/.test(play)
+    && /if \(!r\.paused\) elapsed \+= now - last;[\s\S]*?const pt = map\.latLngToContainerPoint\(\[s\.lat, s\.lng\]\);/.test(play.slice(play.indexOf('const startBurst'))),
+    'the burst is the dot\'s own colour, grown per frame at ONE linear rate (no transition or easing), following the dot and honoring pause');
   assert(/if \(Math\.abs\(map\.getZoom\(\) - zoom\) > 0\.01\) \{[\s\S]{0,120}map\.setView\(center, zoom, \{ animate: false \}\)/.test(play)
     && /map\.fitBounds\(legBounds, \{ padding: \[80, 80\], maxZoom: 9, animate: false \}\)/.test(play),
     'the map is always at its final view before the burst, and before a vehicle starts moving');
