@@ -3693,8 +3693,10 @@ WebView's support for recording is unproven.
   - **Each destination is NAMED beside its dot** (same day: "create a label like you do for
     Bangkok that sits next to the dot and gets bigger … delete that label as soon as the map
     zooms back out"): `showDestLabel` adds a `.tfo-via-label.tfo-dest-label` marker as the
-    flyTo starts, right of the dot, and `.tfo-grow` scales it 0.75 → 1.35 over the 1.4 s
-    zoom. `clearDestLabel` removes it before the next leg's `flyToBounds`, before the closing
+    flyTo starts, right of the dot, and `.tfo-grow` scales it over the 1.4 s zoom (since
+    "make the labels with the origin and destination larger when they appear," same day: 20px as
+    it appears, 1 → 1.5 on arrival; `TRIPSY_FLYOVER_DEST_LABEL_SCALE` mirrors the CSS scales so
+    `arrivalCenter` frames the grown name — keep the two in step). `clearDestLabel` removes it before the next leg's `flyToBounds`, before the closing
     whole-route map, and on Replay. **Revised the same day** ("Place the city labels on the map
     before the map zooms out for the leg traveling to that city … Sometimes the labels are not
     being deleted (Singapore and Bangkok)"): the label goes up at the START of the leg to that
@@ -3746,6 +3748,22 @@ WebView's support for recording is unproven.
     before; a one-destination trip still lands on it). Names sit to the right of their dots, so
     one at the map's edge is slid into view with `panBy` at the same zoom (asymmetric fitBounds
     padding cost a whole zoom level under `zoomSnap: 1`).
+    **The screen recording found the real cause** (same day, 17 s from the iPad: zoomed out
+    → giant "Malaysia" and thick red dashes → a screen-filling red circle WITH the dot's white
+    ring → the normal-zoom map with a small dot → the burst → the photos): Leaflet draws the
+    dots and route lines (SVG, `overlayPane`) once per settled view and CSS-SCALES them during
+    a zoom, so the eight-level arrival zoom blew the 7-px dot up ~256× (the pane measured
+    1,416 → 362,387 px wide in Chromium), and it snapped back to size when the zoom ended —
+    the "orange, then the zoomed-out map, then zooming in again" was that, not the burst.
+    `arrive` now hides the overlay pane (`hideOverlays`) for the zoom in and shows it again
+    (`showOverlays`, one frame after the map settles and redraws) before the burst; names are
+    markers, which are repositioned rather than scaled, so they stay up. The two earlier
+    defenses stay.
+    **A destination's dot goes up with its name** ("the destination orange dot should appear on
+    the map when the map first appears," same day): the opening map shows the origin's AND the
+    first destination's dots, and each later leg adds its destination's dot as the leg begins —
+    one per stop through `ensureDot` (a `dotted` set, reset on Replay), so arriving never adds a
+    second.
   - **Google Map Tiles come FIRST when available** ("Add Google Map Tiles with the Places
     key," 2026-10-21 — the keyless sources have no @2x tiles, so the map looked pixelated on
     the iPad). `tripsyFlyoverGoogleTileSource` creates a Map Tiles API session (`roadmap`,

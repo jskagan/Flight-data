@@ -1054,12 +1054,35 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   // "The entire screen does go to orange, but then the app immediately shows the zoomed out
   // map with the orange dot and zooms in on the dot a second time" (2026-10-21).
   assert(/zoomAnimation: false/.test(play), 'no separate CSS zoom animation that could spring the map back after an instant jump');
+  // The screen recording (2026-10-21): the dot and route lines are CSS-scaled while the map
+  // zooms in, so the dot filled the screen and then snapped back before the real burst.
+  {
+    const arr = play.slice(play.indexOf('const arrive = async'), play.indexOf('const play = async'));
+    assert(arr.indexOf('hideOverlays()') > -1 && arr.indexOf('hideOverlays()') < arr.indexOf('map.flyTo(center, zoom'),
+      'dots and route lines are hidden before the arrival zoom in');
+    assert(arr.indexOf('await showOverlays()', arr.indexOf('map.setView(center, zoom')) > -1
+      && arr.indexOf('await showOverlays()', arr.indexOf('map.setView(center, zoom')) < arr.indexOf('burstFromDot(r, s)'),
+      'and shown again once the map has settled, before the burst');
+    assert(/if \(overlayPane\) overlayPane\.style\.visibility = 'hidden'/.test(play), 'only the overlay pane is hidden; names stay up');
+    // "the destination orange dot should appear on the map when the map first appears"
+    assert(/ensureDot\(first\);\s*ensureDot\(stops\[1\]\);/.test(play), 'the opening map shows the first destination\'s dot as well as the origin\'s');
+    assert(/showDestLabel\(b\);\s*ensureDot\(b\);/.test(play), 'each later destination\'s dot goes up with its name as its leg begins');
+    // "make the labels with the origin and destination larger when they appear on the map"
+    const css = (html.match(/\.tfo-dest-label span \{[^}]*\}/) || [''])[0];
+    const grownCss = (html.match(/\.tfo-dest-label\.tfo-grow span \{[^}]*\}/) || [''])[0];
+    const sc = (html.match(/const TRIPSY_FLYOVER_DEST_LABEL_SCALE = \{ start: ([\d.]+), grown: ([\d.]+) \}/) || []);
+    assert(/font-size: 20px/.test(css) && new RegExp(`scale\\(${sc[1]}\\)`).test(css) && new RegExp(`scale\\(${sc[2]}\\)`).test(grownCss),
+      'origin/destination names appear at 20px and the centring constants match the CSS scales');
+    assert(/TRIPSY_FLYOVER_DEST_LABEL_SCALE\.start \* TRIPSY_FLYOVER_DEST_LABEL_SCALE\.grown/.test(play), 'the arrival zoom frames the GROWN name');
+    assert(/ensureDot = s => \{ if \(dotted\.has\(s\)\) return;/.test(play) && /ensureDot\(s\);\s*showDestLabel\(s\)/.test(arr)
+      && /dotted = new Set\(\);/.test(play.slice(play.indexOf('const play = async'))), 'one dot per stop, never a second on arrival, reset on Replay');
+  }
   const arriveSrc = play.slice(play.indexOf('const arrive = async'), play.indexOf('const play = async'));
   assert(arriveSrc.indexOf('firstPageLoads(r, s)') > -1 && arriveSrc.indexOf('firstPageLoads(r, s)') < arriveSrc.indexOf('burstFromDot(r, s)'),
     'the orange only goes up once a photo of that stop has loaded');
   // "for the first leg do not zoom. Start with the unzoomed map with labels for origin and destination"
   const playSrc = play.slice(play.indexOf('const play = async'));
-  assert(/if \(stops\.length > 1\) \{\s*layers\.push\(dot\(first\)\);[\s\S]*?tfo-dest-label[\s\S]*?showDestLabel\(stops\[1\]\)/.test(playSrc),
+  assert(/if \(stops\.length > 1\) \{\s*ensureDot\(first\);[\s\S]*?tfo-dest-label[\s\S]*?showDestLabel\(stops\[1\]\)/.test(playSrc),
     'the opening map carries the origin dot and both names');
   assert(/if \(stops\.length === 1 && !\(await arrive\(r, first/.test(playSrc), 'no zoom onto the origin when there is a leg to fly');
   assert(/if \(k > 1\) \{[\s\S]*?flyToBounds\(legBounds/.test(playSrc), 'the first leg is flown on the whole-route map, later legs are framed');
@@ -1070,7 +1093,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(iClear > iLeg && iClear < play.indexOf('map.flyToBounds(legBounds', iLeg)
     && /clearDestLabel\(\);\s*clearViaLabels\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(all/.test(play),
     'the destination name is taken away before the map pulls back out (next leg, and the closing map)');
-  assert(/\.tfo-dest-label\.tfo-grow span \{[^}]*scale\(1\.35\)/.test(html), 'and it grows as the map zooms in');
+  assert(/\.tfo-dest-label\.tfo-grow span \{[^}]*scale\(1\.5\)/.test(html), 'and it grows as the map zooms in');
 }
 {
   eval(extractFn('tripsyFlyoverMergeLookupFields'));
@@ -1111,7 +1134,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'the destination name is placed before the leg to it is framed, and the last leg\'s names are cleared');
   assert(/viaLabels\.push\(L\.marker/.test(play) && !/layers\.push\(L\.marker\(\[v\.lat/.test(play),
     'layover labels are tracked so they are removed when the leg ends, not left on the map');
-  assert(/growDestLabel\(\);[\s\S]*?const center = arrivalCenter\(s, zoom\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom/.test(play),
+  assert(/growDestLabel\(\);[\s\S]*?const center = arrivalCenter\(s, zoom\);\s*hideOverlays\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom/.test(play),
     'the zoom-in frames the dot and its growing label together');
   assert(/if \(!\(await burstFromDot\(r, s\)\)\) return false;[\s\S]*?return slideshow\(r, s\);/.test(play)
     && (play.match(/if \(prev\) prev\.remove\(\);\s*clearBurst\(\);/g) || []).length === 2,
