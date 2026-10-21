@@ -582,6 +582,10 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   assert(/<div class="tfo-ss-footer">[\s\S]*data-ss-cancel[\s\S]*data-ss-save/.test(dlg), 'THE ASK: Save and Cancel sit in the pinned footer');
   assert(/\.tfo-ss-footer \{ position: sticky; bottom: 0;/.test(html) && /background: var\(--panel\)/.test((html.match(/\.tfo-ss-footer \{[^}]*\}/) || [''])[0]),
     'the footer is pinned to the bottom of the box and opaque, so it stays on screen while the photos scroll under it');
+  assert(/class="tripsy-close-x tripsy-save-check" data-ss-save data-ss-save-top[^>]*>✓<\/button>\s*<button class="tripsy-close-x" data-ss-cancel/.test(dlg),
+    'THE ASK (2026-10-21): a green ✓ Save box, styled like the ✕, sits next to it at the top');
+  assert(/\.tripsy-close-x\.tripsy-save-check \{ border-color: #3AA76D; color: #3AA76D; \}/.test(html), 'the ✓ box is the ✕ box in green');
+  assert(/querySelectorAll\('\[data-ss-save\]'\)\.forEach/.test(dlg), 'both Save buttons save');
   assert(/max-height:88vh; max-height:88dvh;/.test(dlg), 'the box fits the visible screen (dvh), not the full one under Safari\'s toolbars');
 }
 
@@ -664,9 +668,10 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/startMusic\(true\)/.test(player) && /fader\.to\(0, 2500\)/.test(player), 'music fades in at the start and out at the end');
   assert(/if \(curVideo\) \{ try \{ if \(run\.paused\) curVideo\.pause\(\)/.test(player), 'pause reaches the playing video');
   const pick = extractFn('tripsyFlyoverPickMedia');
-  assert(/accept="image\/\*,video\/\*" multiple/.test(pick) && !/data-mpick-lib-input[^>]*capture/.test(pick),
-    'THE ASK: the library picker takes photos and videos, with no capture, so iOS shows the Photos library (Albums → Shared Albums)');
-  assert(/Shared Albums/.test(pick), 'the picker says where Shared Albums are');
+  assert(/input\.accept = 'image\/\*,video\/\*'/.test(pick) && /input\.multiple = true/.test(pick) && !/capture/.test(pick.replace(/\/\/.*$/gm, '')),
+    'THE ASK: one input for photos and videos, with no capture, so iOS shows its own Photos Library / camera sheet');
+  assert(/input\.click\(\);\s*\}$/.test(pick.trim()) && !/tw-modal|innerHTML/.test(pick),
+    'THE ASK (2026-10-21, "this is inefficient"): no in-app menu in front of the system picker — the tap opens it directly');
   assert(/tripsyFlyoverPickMedia\(async files =>/.test(extractFn('showTripsyFlyover')) && /tripsyFlyoverUploadVideo\(file/.test(extractFn('showTripsyFlyover')),
     'the setup page uses the media picker and uploads videos');
   const up = extractFn('uploadBlobToDriveResumable');

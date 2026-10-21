@@ -3689,6 +3689,12 @@ WebView's support for recording is unproven.
         fold, reachable only by scrolling inside the box (measured: 120 px below a 700 px
         screen). The box's height also uses `dvh`, so Safari's toolbars can't push the footer
         off the screen.
+      - **Save also sits at the TOP, beside the ✕** ("The save button for changes to the
+        flyover should be next to the close window button on the top of the window. There
+        should also be cancel and save buttons at the bottom," same day): `data-ss-save-top`
+        in the header, a green ✓ box in the ✕'s own style (`.tripsy-close-x.tripsy-save-check`
+        — "a green check box in the same style as the cancel button"); every `[data-ss-save]`
+        is wired, so top and bottom Save do the same.
 - **Music: one soundtrack per fly-over, chosen by genre** ("try to find different music that
   could be used of different genres and offer that to the user," same day).
   - **Data:** `record.music` is `{source:'archive', url, title, artist, license, page}` or
@@ -3746,12 +3752,15 @@ WebView's support for recording is unproven.
   When videos play, cut the music and play sound from the video. Music should fade in and
   out. Also … add photos from shared albums," 2026-10-21; the albums meant are Apple iCloud
   Shared Albums).
-  - **Adding:** the card's **＋ Photos & videos** opens `tripsyFlyoverPickMedia`: a Photos
-    Library button (one `accept="image/*,video/*" multiple` input with NO `capture`, so iOS
-    opens its Photos picker, whose Albums / Collections list holds Shared Albums — a web page
-    can't read a Shared Album itself, so the system picker is the only way in) and a camera
-    button. Not verified on a device from here: if Shared Albums ever don't show, saving the
-    items to the library first works.
+  - **Adding:** the card's **＋ Photos & videos** calls `tripsyFlyoverPickMedia`, which clicks
+    ONE hidden `accept="image/*,video/*" multiple` input with NO `capture`, synchronously
+    inside the tap — so iOS opens its own sheet (Photo Library / Take Photo or Video) straight
+    away, and the Photo Library's Albums / Collections list holds Shared Albums (a web page
+    can't read a Shared Album itself, so the system picker is the only way in). There is NO
+    in-app menu in front of it: the first cut had one (Library / Camera buttons), which put a
+    redundant step before the iOS sheet that already offers both ("This is inefficient,"
+    2026-10-21) — the garment photo button's lesson; don't re-add it. Not verified on a device
+    from here: if Shared Albums ever don't show, saving the items to the library first works.
   - **A video is a stop "photo" record** `{driveFileId, kind:'video', mime, posterId,
     duration, width, height}`, so pages, carry-over and preloading need nothing new.
     `tripsyFlyoverUploadVideo` refuses files over `TRIPSY_FLYOVER_VIDEO_MAX_BYTES` (250 MB,
