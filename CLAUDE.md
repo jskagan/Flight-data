@@ -3640,6 +3640,16 @@ WebView's support for recording is unproven.
     waits in the save chain. It used to queue the whole `saveTripsyFlyover` call, so the
     in-memory record lagged behind earlier writes and View from the ⚙️ menu could play the
     old slideshow.
+  - **Background lookups merge FIELDS, never whole snapshots** (same day: "the flyover is not
+    playing the music when the video plays, although I selected that" — the live record's
+    video had no `audio`). View on an older fly-over starts the layover and English-name
+    lookups from the record AS TAPPED, and they finished seconds later by saving that whole
+    copy, so any change made meanwhile (a video's sound picked in the page dialog) was written
+    back over. `tripsyFlyoverMergeLookups` / `tripsyFlyoverMergeLookupFields` (pure) copy only
+    the lookup's own fields (`via`/`label`/`autoLabel`/`airport` + `layoversAt`/`layoversV`;
+    `label`/`autoLabel`/`labelLang`) stop by stop onto `Store.getTripsyFlyover` as it is THEN,
+    never over a typed name. A video added before the sound choice existed (07:53 that day)
+    also has no `audio` and plays its own sound until one is picked.
   - **Rebuild destinations** re-derives the stops through `tripsyFlyoverCarryOver`, matching
     by stop id and then by kind + city. Photos, a renamed label and a REMOVED stop all
     survive; a rebuild never resurrects a stop the owner removed.
@@ -3672,10 +3682,20 @@ WebView's support for recording is unproven.
   `tripsyConfirmDialog`.
   - **Map:** Leaflet 1.9.4 loads on demand from cdnjs (`tripsyFlyoverLoadLeaflet`, a
     memoized promise that is cleared on failure so a retry works).
-  - **Tiles load at screen resolution** (`detectRetina: true` in `tripsyFlyoverAddTiles`;
-    "The maps are very pixelated when you zoom in," 2026-10-21): neither keyless source has
-    @2x tiles, so on a high-density screen each tile is fetched one zoom level deeper and
-    drawn at half size — sharp, with labels drawn smaller.
+  - **Sharpness: whole zoom levels, and the tiles land before photos cover them** ("The maps
+    are very pixelated when you zoom in," 2026-10-21). The player uses `zoomSnap: 1` (a
+    fractional zoom stretches every tile), and `arrive` waits up to 1.5 s for the tile layer's
+    `load` (`untilTilesLoaded`, tracking the CURRENT layer through `layeradd`, since the
+    fallback can swap it) before the slideshow. **Not `detectRetina`**: tried the same day, it
+    fetched tiles a level deeper than shown, and Esri's gaps at those levels left the map
+    partly blank ("they do appear to be missing some data") — don't re-add it. Neither keyless
+    source has @2x tiles, so a 2x screen still shows 1x tiles.
+  - **Each destination is NAMED beside its dot** (same day: "create a label like you do for
+    Bangkok that sits next to the dot and gets bigger … delete that label as soon as the map
+    zooms back out"): `showDestLabel` adds a `.tfo-via-label.tfo-dest-label` marker as the
+    flyTo starts, right of the dot, and `.tfo-grow` scales it 0.75 → 1.35 over the 1.4 s
+    zoom. `clearDestLabel` removes it before the next leg's `flyToBounds`, before the closing
+    whole-route map, and on Replay. Layover labels are unchanged.
   - **Tiles** come from `TRIPSY_FLYOVER_TILE_SOURCES`: **Esri World Street Map first,
     OpenStreetMap's own tiles second**, both keyless, with attribution shown.
     - **Esri is first for its ENGLISH labels** ("Can you show the names of all locations on

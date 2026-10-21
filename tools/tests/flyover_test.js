@@ -184,7 +184,7 @@ assert(/completedAt: new Date\(\)\.toISOString\(\)/.test(setupSrc) && /renderTri
 assert(/if \(prevRecord && prevRecord\.completedAt\) rec\.completedAt = prevRecord\.completedAt;/.test(extractFn('tripsyFlyoverBuild')), 'a rebuild from Edit keeps the fly-over completed');
 assert(/tripsyFlyoverMenuItems\(isOwner, Store\.getTripsyFlyover\(trip\.key\)\)\.map\(it => menuListButtonHtml\(`data-tripsy-flyover data-mode="\$\{it\.mode\}"/.test(html), 'the ⚙️ Trip menu carries the state-dependent items');
 assert(/btn\.dataset\.mode === 'view'[\s\S]{0,700}playTripsyFlyover\(trip, record, layovers \? \{ layovers \} : \{\}\)/.test(html), 'View plays the fly-over straight away');
-assert(/container\.querySelectorAll\("\[data-tripsy-flyover\]"\)[\s\S]{0,1800}showTripsyFlyover\(btn\.dataset\.key\)/.test(html), 'Start/Finish/Edit open the setup page');
+assert(/container\.querySelectorAll\("\[data-tripsy-flyover\]"\)[\s\S]{0,2600}showTripsyFlyover\(btn\.dataset\.key\)/.test(html), 'Start/Finish/Edit open the setup page');
 assert(/driveData\.tripsyFlyovers = driveData\.tripsyFlyovers\.filter\(r => keys\.has\(r\.tripKey\)\)/.test(extractFn('pruneDriveDataInMemory')),
   'prune rule: a fly-over goes when its trip does');
 const player = extractFn('playTripsyFlyover');
@@ -370,7 +370,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   ok.fire('tileload');
   for (let i = 0; i < 10; i++) ok.fire('tileerror');
   assert(added.length === 1, 'once tiles have loaded, later stray errors never swap the map out');
-  assert(/tripsyFlyoverAddTiles\(L, map\);/.test(extractFn('playTripsyFlyover')), 'the player adds its tiles through the fallback helper');
+  assert(/tripsyFlyoverAddTiles\(L, map\)/.test(extractFn('playTripsyFlyover')), 'the player adds its tiles through the fallback helper');
 }
 
 // ---- options when photos are added: "some may be one per page and others several in a
@@ -576,7 +576,7 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
     assert(L('f').label === 'Somewhere' && !L('f').labelLang, 'a failed lookup is retried next time');
   })().catch(e => { console.log('FAIL english labels', e); process.exitCode = 1; });
   assert(/tripsyFlyoverEnglishLabels\(record\)\.then/.test(extractFn('showTripsyFlyover')), 'the setup page re-names an older fly-over behind the page');
-  assert(/playTripsyFlyover\(trip, record, layovers \? \{ layovers \} : \{\}\);[\s\S]{0,300}\/\/ Older fly-overs pick up English names/.test(html), 'and View does it after starting playback, so music still starts in the tap');
+  assert(/playTripsyFlyover\(trip, record, layovers \? \{ layovers \} : \{\}\);[\s\S]{0,700}\/\/ Older fly-overs pick up English names/.test(html), 'and View does it after starting playback, so music still starts in the tap');
 }
 
 // ---- the page dialog's Save is always reachable ("When I edit pages on a flyover, there is
@@ -1029,5 +1029,32 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(iClose > iEndMap && /arrive\(r, b, stayNo\(b\), !\(closeWithPhotos && b === last\)\)/.test(play)
     && play.indexOf("'The end'") > iClose,
     'the last destination\'s pictures play after the closing map, before "The end"');
-  assert(/detectRetina: true/.test(extractFn('tripsyFlyoverAddTiles')), 'map tiles load at screen resolution (retina)');
+  assert(!/detectRetina: true/.test(extractFn('tripsyFlyoverAddTiles')) && /zoomSnap: 1 \}/.test(play),
+    'tiles are fetched at the zoom shown (no retina offset, which left gaps) and only whole zoom levels are used');
+  assert(/showDestLabel\(s\);[\s\S]*?untilTilesLoaded\(r, 1500\)/.test(play),
+    'arriving names the destination beside its dot and lets the tiles land before photos cover the map');
+  const iLeg = play.indexOf('const legBounds'), iClear = play.indexOf('clearDestLabel();', iLeg);
+  assert(iClear > iLeg && iClear < play.indexOf('map.flyToBounds(legBounds', iLeg)
+    && /clearDestLabel\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(all/.test(play),
+    'the destination name is taken away before the map pulls back out (next leg, and the closing map)');
+  assert(/\.tfo-dest-label\.tfo-grow span \{[^}]*scale\(1\.35\)/.test(html), 'and it grows as the map zooms in');
+}
+{
+  eval(extractFn('tripsyFlyoverMergeLookupFields'));
+  const current = { tripKey: 'a', music: { x: 1 }, stops: [
+    { id: 's1', label: 'Narita', photos: [{ driveFileId: 'v', kind: 'video', audio: 'music' }] },
+    { id: 's2', label: 'Mine', labelEdited: true, via: [{ label: 'old' }] } ] };
+  const looked = { tripKey: 'a', layoversV: 2, stops: [
+    { id: 's1', label: 'Tokyo', via: [{ label: 'Seoul' }], photos: [{ driveFileId: 'v', kind: 'video' }] },
+    { id: 's2', label: 'Auto' } ] };
+  const m = tripsyFlyoverMergeLookupFields(current, looked, ['via', 'label'], ['layoversV']);
+  assert(m.stops[0].label === 'Tokyo' && m.stops[0].via[0].label === 'Seoul' && m.stops[0].photos[0].audio === 'music'
+    && m.music && m.layoversV === 2,
+    'a background lookup copies only its own fields onto the record as it is now — a video\'s sound choice survives');
+  assert(m.stops[1].label === 'Mine' && !('via' in m.stops[1]), 'a typed name is kept; a layover the lookup no longer finds is dropped');
+  const view = html.slice(html.indexOf('container.querySelectorAll("[data-tripsy-flyover]")'));
+  assert(/layovers\.then\(r => \{ if \(r\.changed\) tripsyFlyoverMergeLookups\(/.test(view)
+    && /tripsyFlyoverEnglishLabels\(record\)\.then\(r => \{ if \(r\.changed\) tripsyFlyoverMergeLookups\(/.test(view)
+    && !/\.then\(r => \{ if \(r\.changed\) Store\.saveTripsyFlyover\(r\.record\)/.test(view.slice(0, 3000)),
+    'View no longer writes the copy taken at the tap back over later changes');
 }
