@@ -3544,6 +3544,23 @@ WebView's support for recording is unproven.
   hike/trek/walk/"on foot" derives as one (`tripsyFlyoverModeOf`, whole words); rank 0.5,
   below a drive, so a mixed leg still draws as its vehicle. Verified in Chromium: a Paris→Rome stay with no leg
   asked, Train saved, Rebuild kept it without asking again.
+- **Layovers are flown THROUGH, never visited** ("where there is a layover on a flight, show
+  the flight to the layover cities, but do not zoom the map, or show photos. Just display the
+  name of the city," 2026-10-21). `tripsyFlyoverDeriveStops` collects the flights assigned to
+  each stop's leg; every arrival but the last is a connection, stored on the stop as `via:
+  [{label, query}]` in flying order (an arrival that is itself a stop — the no-lodging case —
+  never counts). `tripsyFlyoverGeocodeVias` places them at build time (English city name, a
+  non-Latin answer keeps the flight's wording, an unfound one is dropped); the build stamps
+  `layoversAt`, and a fly-over built before this picks them up once via
+  `tripsyFlyoverAddLayovers` (fresh derivation matched by stop id) — behind the setup page, and
+  on View as an `opts.layovers` promise the player waits on at most 5 s after its first await,
+  so music still starts in the tap; owner saves. `tripsyFlyoverPlayableStops` unwraps via
+  longitudes in sequence (and drops them from the first stop shown). In the player a FLIGHT leg
+  (`b.mode === 'plane'` — a leg the owner switched to another mode ignores them) is framed WITH
+  its layovers, flown segment by segment as a plane, and at each one gets a small dot + a
+  `.tfo-via-label` name tag and a 0.9 s pause — no flyTo, no card, no slideshow. The setup
+  card shows "via …" beside the leg. Verified in Chromium (LAX → NRT → SIN: Narita labelled, no
+  zoom).
 - **Geocoded once, at build time** (`tripsyFlyoverBuild`, 4 lookups in parallel).
   - **Lookup source:** Places `searchText` with `addressComponents` (it knows hotel names and
     airport codes) first, falling back to the weather pipeline's free Open-Meteo city

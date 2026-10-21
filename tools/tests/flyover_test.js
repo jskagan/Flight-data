@@ -183,7 +183,7 @@ assert(/data-flyover-complete \$\{tripOver \? '' : 'disabled'\}/.test(setupSrc),
 assert(/completedAt: new Date\(\)\.toISOString\(\)/.test(setupSrc) && /renderTripsyEventsList\(\);/.test(setupSrc), 'completing stamps completedAt and re-renders the menu');
 assert(/if \(prevRecord && prevRecord\.completedAt\) rec\.completedAt = prevRecord\.completedAt;/.test(extractFn('tripsyFlyoverBuild')), 'a rebuild from Edit keeps the fly-over completed');
 assert(/tripsyFlyoverMenuItems\(isOwner, Store\.getTripsyFlyover\(trip\.key\)\)\.map\(it => menuListButtonHtml\(`data-tripsy-flyover data-mode="\$\{it\.mode\}"/.test(html), 'the ⚙️ Trip menu carries the state-dependent items');
-assert(/btn\.dataset\.mode === 'view'[\s\S]{0,300}playTripsyFlyover\(trip, record\)/.test(html), 'View plays the fly-over straight away');
+assert(/btn\.dataset\.mode === 'view'[\s\S]{0,700}playTripsyFlyover\(trip, record, layovers \? \{ layovers \} : \{\}\)/.test(html), 'View plays the fly-over straight away');
 assert(/container\.querySelectorAll\("\[data-tripsy-flyover\]"\)[\s\S]{0,1400}showTripsyFlyover\(btn\.dataset\.key\)/.test(html), 'Start/Finish/Edit open the setup page');
 assert(/driveData\.tripsyFlyovers = driveData\.tripsyFlyovers\.filter\(r => keys\.has\(r\.tripKey\)\)/.test(extractFn('pruneDriveDataInMemory')),
   'prune rule: a fly-over goes when its trip does');
@@ -205,6 +205,7 @@ assert(bs.map(s => s.kind).join(',') === 'origin,stay,return' && bs[1].needsPlac
 assert(bs[1].mode === 'plane', 'and is still reached by plane');
 (async () => {
   eval(extractFn('tripsyFlyoverBuild'));
+  global.tripsyFlyoverGeocodeVias = async st => st;
   const geo = { 'BUR airport': { lat: 34.2, lng: -118.36, city: 'Burbank' } };
   global.tripsyFlyoverGeocode = async q => geo[q] || null;
   let asked = [];
@@ -573,7 +574,7 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
     assert(L('f').label === 'Somewhere' && !L('f').labelLang, 'a failed lookup is retried next time');
   })().catch(e => { console.log('FAIL english labels', e); process.exitCode = 1; });
   assert(/tripsyFlyoverEnglishLabels\(record\)\.then/.test(extractFn('showTripsyFlyover')), 'the setup page re-names an older fly-over behind the page');
-  assert(/playTripsyFlyover\(trip, record\);\s*\/\/ Older fly-overs pick up English names/.test(html), 'and View does it after starting playback, so music still starts in the tap');
+  assert(/playTripsyFlyover\(trip, record, layovers \? \{ layovers \} : \{\}\);[\s\S]{0,300}\/\/ Older fly-overs pick up English names/.test(html), 'and View does it after starting playback, so music still starts in the tap');
 }
 
 // ---- the page dialog's Save is always reachable ("When I edit pages on a flyover, there is
@@ -903,3 +904,62 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     && tripsyFlyoverModeOf({ category: 'other' }, 'Walkabout tour') === 'car', 'a transport leg the trip names as a hike or walk draws as one (whole words only)');
   assert(/mode === 'hike' \? '2 7'/.test(extractFn('playTripsyFlyover')), 'a hike is drawn as a dotted trail');
 }
+
+// ---- Layovers ("where there is a layover on a flight, show the flight to the layover cities,
+// but do not zoom the map, or show photos. Just display the name of the city," 2026-10-21) ----
+{
+  const trip = { events: [
+    leg(901, 'airplane', 'Flight from LAX to NRT', 'LAX', 'NRT', '2030-03-01T10:00:00', '2030-03-02T14:00:00'),
+    leg(902, 'airplane', 'Flight from NRT to SIN', 'NRT', 'SIN', '2030-03-02T17:00:00', '2030-03-02T23:00:00'),
+    stay(911, 'Raffles', '1 Beach Rd, Singapore 189673', '2030-03-02T15:00:00', '2030-03-06T11:00:00'),
+    leg(903, 'airplane', 'Flight from SIN to HKG', 'SIN', 'HKG', '2030-03-06T09:00:00', '2030-03-06T13:00:00'),
+    leg(904, 'airplane', 'Flight from HKG to LAX', 'HKG', 'LAX', '2030-03-06T15:00:00', '2030-03-06T12:00:00'),
+  ] };
+  const st = tripsyFlyoverDeriveStops(trip);
+  const raffles = st.find(s => s.kind === 'stay'), home = st.find(s => s.kind === 'return');
+  assert(raffles && raffles.via && raffles.via.length === 1 && raffles.via[0].label === 'NRT' && raffles.via[0].query === 'NRT airport',
+    'two flights into a stay: the first arrival is a layover on that leg');
+  assert(home && home.via && home.via.map(v => v.label).join() === 'HKG', 'the flights home carry their connection too');
+  assert(!st.find(s => s.kind === 'origin').via, 'the departure airport has no layover');
+  // a trip with no lodging: each arrival is a destination, never a layover
+  const hop = { events: [
+    leg(921, 'airplane', 'Flight from LAX to SFO', 'LAX', 'SFO', '2030-04-01T08:00:00', '2030-04-01T09:30:00'),
+    leg(922, 'airplane', 'Flight from SFO to SEA', 'SFO', 'SEA', '2030-04-01T11:00:00', '2030-04-01T13:00:00'),
+    leg(923, 'airplane', 'Flight from SEA to LAX', 'SEA', 'LAX', '2030-04-03T08:00:00', '2030-04-03T10:30:00'),
+  ] };
+  assert(tripsyFlyoverDeriveStops(hop).every(s => !(s.via || []).some(v => v.label === 'SFO')), 'an arrival that is itself a destination is not a layover');
+  // a single flight: no layover
+  const one = { events: [leg(931, 'airplane', 'Flight from LAX to SIN', 'LAX', 'SIN', '2030-05-01T10:00:00', '2030-05-02T18:00:00'),
+    stay(932, 'Raffles', '1 Beach Rd, Singapore 189673', '2030-05-02T15:00:00', '2030-05-06T11:00:00')] };
+  assert(tripsyFlyoverDeriveStops(one).every(s => !s.via), 'a nonstop flight has no layover');
+  // playback: layover longitudes unwrap with the route, and the first stop shown has none
+  const p = tripsyFlyoverPlayableStops({ stops: [
+    { id: 'a', lat: 34, lng: -118, via: [{ label: 'X', lat: 1, lng: 1 }] },
+    { id: 'b', lat: 1.3, lng: 103.8, via: [{ label: 'Tokyo', lat: 35.7, lng: 139.7 }, { label: 'Nowhere' }] },
+  ] });
+  assert(p[0].via.length === 0, 'the first stop shown has no leg in, so no layover');
+  assert(p[1].via.length === 1 && p[1].via[0].label === 'Tokyo' && p[1].via[0].lng < -180 && p[1].lng < -180,
+    'a layover is unwrapped in sequence (LAX → Tokyo → Singapore across the Pacific); one with no place is skipped');
+}
+{
+  const play = extractFn('playTripsyFlyover');
+  assert(/const via = b\.mode === 'plane' \? \(b\.via \|\| \[\]\) : \[\];/.test(play), 'only a flight leg is drawn through its layovers');
+  assert(/L\.latLngBounds\(\[\[a\.lat, a\.lng\], \.\.\.via\.map/.test(play), 'the leg is framed WITH its layovers (no zoom into them)');
+  const loop = play.slice(play.indexOf('for (const v of via)'), play.indexOf('from = v;'));
+  assert(/animateLeg\(r, from, v, 'plane'\)/.test(loop) && /tfo-via-label/.test(loop) && !/flyTo|showPage|showCard|arrive\(/.test(loop),
+    'at a layover: fly there, show the city name, no zoom, no card, no photos');
+  assert(/tripsyFlyoverGeocodeVias\(stops\)/.test(extractFn('tripsyFlyoverBuild')) && /layoversAt/.test(extractFn('tripsyFlyoverBuild')), 'a build places the layovers');
+  assert(/tripsyFlyoverAddLayovers\(record, trip\)/.test(extractFn('showTripsyFlyover')), 'an older fly-over picks layovers up on the setup page');
+  assert(/opts\.layovers/.test(play) && /tripsyFlyoverAddLayovers\(record, trip\)/.test(html.slice(html.indexOf('[data-tripsy-flyover]'), html.indexOf('[data-tripsy-flyover]') + 2000)),
+    'and on View, before it plays');
+}
+// geocoding vias: placed, English name, unfound dropped
+(async () => {
+  const fake = new Function('tripsyFlyoverGeocode', 'tripsyFlyoverNameIsNonLatin', extractFn('tripsyFlyoverGeocodeVias') + '; return tripsyFlyoverGeocodeVias;')(
+    async q => q === 'NRT airport' ? { lat: 35.7, lng: 140.4, city: 'Narita' } : q === 'BKK airport' ? { lat: 13.7, lng: 100.7, city: 'กรุงเทพ' } : null,
+    n => /[^\u0000-ɏ]/.test(n));
+  const stops = [{ id: 's', via: [{ label: 'NRT', query: 'NRT airport' }, { label: 'BKK', query: 'BKK airport' }, { label: 'ZZZ', query: 'ZZZ airport' }] }, { id: 't', via: [{ label: 'ZZZ', query: 'ZZZ airport' }] }];
+  await fake(stops);
+  assert(stops[0].via.map(v => v.label).join() === 'Narita,BKK' && stops[0].via[0].lat === 35.7, 'layovers take their English city name; a non-Latin answer keeps the flight\'s own wording');
+  assert(!('via' in stops[1]), 'a layover that can\'t be found is dropped');
+})();
