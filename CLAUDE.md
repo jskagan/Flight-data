@@ -4376,10 +4376,12 @@ WebView's support for recording is unproven.
   `.tfo-ss-footer` (owner-only). **The footer pair LOOKS like the header pair** ("The cancel and save
   buttons on the top and bottom of the flyover screen should be consistent," 2026-10-22): the
   bottom buttons are the same red ✕ / green ✓ boxes widened to carry their word
-  (`.tripsy-close-x--wide`, glyph in `.tripsy-close-x-glyph`) — "✕ Close / ✓ Save" on the setup
-  page (every change is already saved, so ✕ only closes), "✕ Cancel / ✓ Save" on the Edit
-  destinations and Slideshow options dialogs (where ✕ discards the draft); the top ✕ carries the
-  same word as its footer twin in its title. Every change still saves as it is made; Save blurs a name
+  (`.tripsy-close-x--wide`, glyph in `.tripsy-close-x-glyph`) — "✕ Cancel / ✓ Save" on the Edit
+  destinations and Slideshow options dialogs (where ✕ discards the draft). **The SETUP page's
+  footer pair is word-free** ("The save and close buttons at the bottom of the flyover menu
+  should not have words in them," 2026-10-22): plain `.tripsy-close-x` ✕ and `.tripsy-save-check`
+  ✓ boxes, identical to the header pair, with Close/Save only in `title`/`aria-label` (every
+  change is already saved, so ✕ only closes). Every change still saves as it is made; Save blurs a name
   still being typed (its `change` saves it), waits for the save chain (`save()` now resolves
   Drive's ok), toasts "Fly-over saved." and closes — a failed save keeps the page open.
 - **The setup page and both editing dialogs are WIDE, and pages reorder by dragging the

@@ -1034,9 +1034,11 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), 
   assert(/class="tripsy-close-x tripsy-save-check" data-flyover-save[^>]*>✓<\/button>` : ''\}\s*<button class="tripsy-close-x" data-flyover-close/.test(setup),
     'THE ASK: a green ✓ Save sits beside the ✕ at the top');
   // "The cancel and save buttons on the top and bottom of the flyover screen should be
-  // consistent" (2026-10-22): the footer pair is the header pair's wide twin, same colours.
-  assert(/<div class="tfo-ss-footer"[^>]*>\s*<button class="tripsy-close-x tripsy-close-x--wide" data-flyover-close><span class="tripsy-close-x-glyph">✕<\/span>Close<\/button>\s*<button class="tripsy-close-x tripsy-save-check tripsy-close-x--wide" data-flyover-save><span class="tripsy-close-x-glyph">✓<\/span>Save<\/button>/.test(setup),
-    'and ✕ Close / ✓ Save sit in a pinned footer at the bottom, as the same red/green boxes as the top');
+  // consistent" (2026-10-22), then "The save and close buttons at the bottom of the flyover
+  // menu should not have words in them" (same day): the footer pair is the header pair exactly,
+  // glyph-only, same colours.
+  assert(/<div class="tfo-ss-footer"[^>]*>\s*<button class="tripsy-close-x" data-flyover-close title="Close" aria-label="Close">✕<\/button>\s*<button class="tripsy-close-x tripsy-save-check" data-flyover-save title="Save" aria-label="Save">✓<\/button>/.test(setup),
+    'and ✕ / ✓ sit in a pinned footer at the bottom, as the same word-free red/green boxes as the top');
   assert(/\.tripsy-close-x\.tripsy-close-x--wide \{ width: auto;/.test(html), 'the wide variant keeps the box style and just makes room for the word');
   for (const [dlg, cancel] of [['tripsyFlyoverEditDestinationsDialog', 'data-fe-cancel'], ['tripsyFlyoverSlideshowDialog', 'data-ss-cancel']]) {
     const fn = extractFn(dlg);
