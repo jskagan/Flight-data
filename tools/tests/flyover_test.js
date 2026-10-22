@@ -491,6 +491,13 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/g\.dataset\.layout = layout;\s*g\.dataset\.tr = enterTr;/.test(player), 'the page\'s layout and entering transition drive its CSS');
   assert(/ov\.classList\.toggle\('tfo-paused', run\.paused\)/.test(player) && /\.tfo-paused \* \{ animation-play-state: paused !important; \}/.test(html), 'pause also freezes the pan-and-zoom animation');
   assert(/if \(preview\) return all\.filter\(s => s\.id === opts\.previewStopId\);/.test(player), 'Preview plays just that destination');
+  // "remove any zoom in or zoom out on the screen before showing the preview" (2026-10-22):
+  // the map is SET on the destination (no flyTo, no arrive/burst) and the pictures start.
+  const pv = (player.match(/if \(preview\) \{[\s\S]*?\n      return;\n    \}/) || [''])[0];
+  assert(/map\.setView\(\[s\.lat, s\.lng\], s\.kind === 'stay' \? 10 : 9, \{ animate: false \}\);/.test(pv) && /ensureDot\(s\);\s*showDestLabel\(s\);\s*showCard\(s\.label, stopSub\(s, 0\)\);/.test(pv)
+    && /if \(tripsyFlyoverPages\(s\)\.length\) \{[\s\S]*veilEl\.classList\.add\('tfo-show'\);[\s\S]*await slideshow\(r, s\)/.test(pv)
+    && !/arrive\(/.test(pv) && !/flyTo/.test(pv) && !/startBurst/.test(pv),
+    'a preview sets the map straight on the destination and plays its pictures with no zoom in, zoom out or burst');
   for (const k of ['slide', 'zoom', 'none']) assert(html.includes(`.tfo-group[data-tr="${k}"]`), `the ${k} transition has its CSS`);
   for (const k of ['pair', 'grid', 'collage']) assert(html.includes(`.tfo-group[data-layout="${k}"]`), `the ${k} layout has its CSS`);
   const setup = extractFn('showTripsyFlyover');

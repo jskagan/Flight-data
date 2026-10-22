@@ -4090,7 +4090,14 @@ WebView's support for recording is unproven.
     gives each page the transition it ENTERS with: the first page uses the stop's own
     (fade by default), every later page the one the page before it chose. **▶ Preview**
     plays just that destination (`playTripsyFlyover(…, {previewStopId})`: no title card,
-    legs or ending). `tripsyFlyoverCarryOver` keeps `pages` and `slideshow` across Rebuild
+    legs or ending). **And no zoom at all** ("When the user selects preview for a portion of
+    the flyover, remove any zoom in or zoom out on the screen before showing the preview,"
+    2026-10-22 — it used to set the map at zoom 6 and run the full `arrive`, i.e. the fly-in
+    and the burst): the preview branch of `play` sets the map STRAIGHT on the destination at its
+    settled zoom (10 for a stay, 9 otherwise, `animate:false`), puts up its dot, name and card,
+    waits for the tiles, and goes directly into `slideshow` with the veil raised instantly (a stop
+    with no pictures just holds the card); the ↺ Replay does the same. Sampled in Chromium every
+    50 ms: no zoom animation and no burst at any point before the first page. `tripsyFlyoverCarryOver` keeps `pages` and `slideshow` across Rebuild
     (it used to drop `slideshow`).
     - **Every photo shows in the SAME 4:3 frame, cropped to fill it** ("Keep all photos the
       same size on the flyover," 2026-10-21; the owner chose "same frame on every page" over
