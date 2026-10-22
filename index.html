@@ -18896,6 +18896,13 @@ function tripsyFlyoverKeepManualStops(rebuiltStops, prevStops) {
   });
   return out;
 }
+// The stop a leg STARTS from: the nearest earlier stop still in the fly-over (a removed one
+// is not on the map, so the leg runs from the one before it). -1 for the first shown stop.
+// Pure (tested).
+function tripsyFlyoverLegFromIndex(stops, i) {
+  for (let k = i - 1; k >= 0; k--) if (!(stops[k] && stops[k].removed)) return k;
+  return -1;
+}
 function tripsyFlyoverEditDestinationsDialog(trip, record, opts = {}) {
   return new Promise(resolve => {
     let draft = { ...record, stops: (record.stops || []).map(s => ({ ...s })) };
@@ -18922,9 +18929,21 @@ function tripsyFlyoverEditDestinationsDialog(trip, record, opts = {}) {
                 <span style="font-family:var(--mono); font-size:12px; color:var(--muted); min-width:18px;">${i + 1}</span>
                 ${i === 0 && !s.mode ? `<span style="font-size:18px;" title="Where the trip starts">📍</span>`
                   : `<select class="field-input" data-fe-mode title="How you got here" aria-label="How you got here" style="width:auto; padding:3px 6px; font-size:13px;">${TRIPSY_FLYOVER_MODES.map(m => `<option value="${m}"${m === (s.mode || 'car') ? ' selected' : ''}>${tripsyFlyoverModeGlyphText(m)} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}</select>`}
-                ${s.removed
-                  ? `<s style="flex:1; min-width:120px; color:var(--muted);">${esc(s.label || 'Location')}</s>`
-                  : `<input class="field-input" data-fe-label value="${esc(s.label || '')}" placeholder="Location" style="flex:1; min-width:120px; font-weight:700;">`}
+                ${(() => {
+                  // Each leg reads FROM → TO, both editable ("show the origin and destination on
+                  // each leg instead of just the destination and allow the user to modify both,"
+                  // 2026-10-22). The origin IS the previous shown stop, so editing it here edits
+                  // that stop (the row above re-renders to match); the first row has no leg in.
+                  const fi = tripsyFlyoverLegFromIndex(stops, i);
+                  const from = fi >= 0 ? stops[fi] : null;
+                  const fromHtml = !from ? `<span style="font-size:12px; color:var(--muted);">start</span>`
+                    : s.removed ? `<span style="font-size:12px; color:var(--muted);">from</span><s style="min-width:100px; color:var(--muted);">${esc(from.label || 'Location')}</s><span style="color:var(--muted);">→</span>`
+                    : `<span style="font-size:12px; color:var(--muted);">from</span><input class="field-input" data-fe-from data-fe-from-id="${esc(from.id)}" value="${esc(from.label || '')}" placeholder="Origin" title="Where this leg starts (the previous destination)" style="flex:1; min-width:100px;"><button class="btn" data-fe-from-place title="Change where this leg starts" style="font-size:11px; padding:2px 6px;">📍</button><span style="color:var(--muted);">→</span>`;
+                  const toHtml = s.removed
+                    ? `<s style="flex:1; min-width:100px; color:var(--muted);">${esc(s.label || 'Location')}</s>`
+                    : `<input class="field-input" data-fe-label value="${esc(s.label || '')}" placeholder="Destination" title="Where this leg ends" style="flex:1; min-width:100px; font-weight:700;">`;
+                  return fromHtml + toHtml;
+                })()}
                 ${s.kind === 'transit' ? `<span style="font-size:12px; color:var(--muted);">airport transfer</span>` : ''}
                 <span style="font-size:12px; color:var(--muted);">${esc(tripsyFlyoverDatesLabel(s))}</span>
                 <button class="btn" data-fe-up ${i === 0 ? 'disabled' : ''} title="Move up" style="font-size:12px; padding:3px 8px;">↑</button>
@@ -18975,6 +18994,24 @@ function tripsyFlyoverEditDestinationsDialog(trip, record, opts = {}) {
           const v = label.value.trim();
           if (!v || v === stop().label) { label.value = stop().label || ''; return; }
           update(id, { label: v, labelEdited: true });
+          render(); // the next row's "from" shows this name too
+        };
+        // The leg's origin: the previous shown stop, edited in place here.
+        const fromIn = card.querySelector('[data-fe-from]');
+        const fromId = fromIn ? fromIn.getAttribute('data-fe-from-id') : null;
+        if (fromIn) fromIn.onchange = () => {
+          const fs = draft.stops.find(x => x.id === fromId);
+          const v = fromIn.value.trim();
+          if (!fs || !v || v === fs.label) { fromIn.value = fs ? (fs.label || '') : ''; return; }
+          update(fromId, { label: v, labelEdited: true });
+          render();
+        };
+        const fromPlace = card.querySelector('[data-fe-from-place]');
+        if (fromPlace) fromPlace.onclick = async () => {
+          const fs = draft.stops.find(x => x.id === fromId);
+          if (!fs) return;
+          const r = await tripsyFlyoverAskPlace(trip, fs);
+          if (r) { update(fromId, { lat: r.lat, lng: r.lng, label: r.label, labelEdited: true, manualPlace: r.query, needsPlace: false }); render(); }
         };
         const mode = card.querySelector('[data-fe-mode]');
         if (mode) mode.onchange = () => { if (TRIPSY_FLYOVER_MODE_GLYPH[mode.value]) { update(id, { mode: mode.value, modeManual: true, modeGuessed: false }); render(); } };

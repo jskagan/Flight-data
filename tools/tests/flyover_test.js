@@ -169,6 +169,16 @@ assert(tripsyFlyoverDeriveStops(old).every(s => s.kind !== 'transit-arr' && !Str
 assert(/const TRIPSY_FLYOVER_MODES = \[[^\]]*'taxi'/.test(html) && /const TRIPSY_FLYOVER_MODE_RANK = \{[^}]*car: 1, taxi: 1/.test(html) && /taxi: 'Taxi'/.test(html),
   'taxi is in the mode list ("there is no taxi option appearing"), labelled, and ranks as a drive');
 assert(/data-fe-add-after/.test(html) && /addDestination\(i \+ 1\)/.test(html), 'Edit destinations: a + on every row adds a destination right after it');
+// Each leg reads FROM → TO, both editable (2026-10-22); the origin is the previous shown stop.
+eval(extractFn('tripsyFlyoverLegFromIndex'));
+const legStops = [{ id: 'a' }, { id: 'b', removed: true }, { id: 'c' }, { id: 'd' }];
+assert(tripsyFlyoverLegFromIndex(legStops, 0) === -1 && tripsyFlyoverLegFromIndex(legStops, 2) === 0 && tripsyFlyoverLegFromIndex(legStops, 3) === 2,
+  'a leg starts at the nearest earlier stop still shown (a removed one is skipped); the first stop has no leg in');
+const feDlg = extractFn('tripsyFlyoverEditDestinationsDialog');
+assert(/data-fe-from data-fe-from-id=/.test(feDlg) && /data-fe-label/.test(feDlg) && /data-fe-from-place/.test(feDlg),
+  'the row shows an editable origin (with its own 📍) and an editable destination');
+assert(/update\(fromId, \{ label: v, labelEdited: true \}\)/.test(feDlg) && /update\(id, \{ label: v, labelEdited: true \}\);\s*render\(\)/.test(feDlg),
+  'editing the origin renames the previous stop, and either edit re-renders so both rows agree');
 assert(/data-mode-select/.test(html) && /<select[^>]*data-mode-select/.test(html), 'the mode question is a drop-down');
 assert(/b\.kind === 'transit'\) \{ if \(!\(await wait\(r, 900\)\)\) return; continue; \}/.test(html), 'the player passes through a transfer like a layover (no arrival, no photos)');
 assert(/\(dx > 0\) !== facesRight/.test(html), 'the taxi picture faces right, so it flips the other way round');

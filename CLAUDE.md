@@ -4219,6 +4219,14 @@ WebView's support for recording is unproven.
   one `addDestination(at)` (the bottom ＋ Add destination button uses it too, at the end /
   before a trailing return). The new stop is a `tripsyFlyoverManualStop` (guessed drive), so
   after Save the page's `askMissingModes` asks how it was reached.
+  **Each row reads FROM → TO, both editable** ("show the origin and destination on each leg
+  instead of just the destination and allow the user to modify both," 2026-10-22): the leg's
+  origin is the previous SHOWN stop (`tripsyFlyoverLegFromIndex(stops, i)`, pure — a removed
+  stop is skipped; the first row reads "start"), rendered as its own input (`data-fe-from`,
+  carrying `data-fe-from-id`) plus a 📍 (`data-fe-from-place`, the same `tripsyFlyoverAskPlace`)
+  before the destination input. There is ONE name per stop: editing a row's origin edits the
+  stop above (`labelEdited`), and either edit re-renders the list so the two rows showing that
+  name agree. A removed row shows both ends struck through.
 - **🚕 Taxi is a fly-over transport, and AIRPORT TRANSFERS are derived as stops of their own**
   ("On the edit destinations drop-downs there is no taxi option appearing. Also … the app
   should automatically add transportation legs where there is a need, and it should present
