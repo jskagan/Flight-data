@@ -1500,6 +1500,24 @@ step 4; git history has it if ever needed.
   lowercased, whitespace-collapsed `departure→arrival` descriptions). `drainTripsyEntryRequirementsRelay`
   runs in `syncTripsyRelays`, sanitizes each entry through the same `tripsyEntryNormalizeRecord` the
   model's answer uses, and never replaces a NEWER record. `entryreqs_test.js`.
+- **⚙️ Trip → Verify Travel Details names CITIES, and a flight covers a move only if it
+  leaves the city you're checking out of** ("Why does the verify trip details view not
+  identify a missing transportation link from beppu to fukuoka," 2026-10-22). It did list the
+  drive — as "Marugamiya → FUK", unreadable as Beppu → Fukuoka — while the same day's
+  stay-to-stay row "Marugamiya → Andaz Seoul" read green, because ANY transport overlapping
+  the checkout→check-in window counted. `tripsyTransportationGaps` now: **(1)** gives every
+  move `fromLabel`/`toLabel` for display — a lodging gets "(City)" from
+  `tripsyVerifyLodgingCity` unless its name already says it (Japanese addresses parse to the
+  PREFECTURE, so a prefecture result takes the comma segment before it — Beppu, Nakatsu, Hita,
+  Taketa — unless that is a ward like "Chuo-ku"; `TRIPSY_JP_PREFECTURES`), and a bare airport
+  code reads "Fukuoka airport (FUK)" via the fly-over's `TRIPSY_AIRPORT_CITIES`; `from`/`to`
+  stay the raw names because they prefill the Add form. **(2)** when the move's first flight
+  departs a city other than the stay's (`tripsyFlyoverAirportCity` vs. the lodging city, also
+  `tripsyDescMatchesCity`) and no GROUND leg departs before that flight (a car at the arrival
+  end doesn't count), the move becomes the missing drive "Stay (City) → City airport (CODE)",
+  and the departure-transfer row for the same drive is not listed twice. Unknown city on either
+  side → the old lenient rule. Run against all 35 live trips: only the Beppu leg changed.
+  `verifygaps_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS

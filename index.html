@@ -24959,19 +24959,41 @@ function tripsyPlacesLikelySame(a, b) {
 // Effective events include pending create_event hostings/transportation queued
 // for the trip. Advisory only: a leg you drove yourself and never logged is a
 // legitimate "gap".
+// Japan's 47 prefectures: a Japanese address ends "..., Beppu, Oita 874-0045", and the
+// generic parser takes the PREFECTURE (Oita) as the city.
+const TRIPSY_JP_PREFECTURES = new Set(['hokkaido', 'aomori', 'iwate', 'miyagi', 'akita', 'yamagata', 'fukushima',
+  'ibaraki', 'tochigi', 'gunma', 'saitama', 'chiba', 'tokyo', 'kanagawa', 'niigata', 'toyama', 'ishikawa', 'fukui',
+  'yamanashi', 'nagano', 'gifu', 'shizuoka', 'aichi', 'mie', 'shiga', 'kyoto', 'osaka', 'hyogo', 'nara', 'wakayama',
+  'tottori', 'shimane', 'okayama', 'hiroshima', 'yamaguchi', 'tokushima', 'kagawa', 'ehime', 'kochi', 'fukuoka',
+  'saga', 'nagasaki', 'kumamoto', 'oita', 'miyazaki', 'kagoshima', 'okinawa']);
+// The town a lodging is in, for the Verify Travel Details labels and the "does this flight
+// leave from here" test. When the parsed city is a Japanese prefecture, the comma segment
+// before it is the town (Beppu, Nakatsu, Hita) -- unless that is a ward ("Chuo-ku") or
+// district, where the prefecture-named city (Fukuoka) is the right answer.
+function tripsyVerifyLodgingCity(address) {
+  if (!address) return '';
+  const city = tripsyPrimaryCityFromAddress(address);
+  if (!city || !TRIPSY_JP_PREFECTURES.has(city.toLowerCase())) return city;
+  const parts = String(address).split(',').map(x => x.trim()).filter(Boolean);
+  const i = parts.findIndex(x => x.toLowerCase().startsWith(city.toLowerCase()));
+  const prev = i > 0 ? parts[i - 1] : '';
+  if (!prev || /\d/.test(prev) || /-(ku|gun|cho|machi|mura)$/i.test(prev) || prev.split(/\s+/).length > 2) return city;
+  return prev.replace(/[- ]shi$/i, '');
+}
 function tripsyTransportationGaps(trip, pendingChanges) {
   const events = trip.events || [];
   const lodgings = [];
   const transports = []; // every transport leg (flights included), for stay moves
   const flights = [];    // flights only, with airports + full timestamps, for transfers
-  const addLodging = (name, ciIso, coIso) => {
+  const addLodging = (name, ciIso, coIso, address) => {
     const ci = tripsyDayKey(ciIso);
     if (!ci) return; // needs a date to place it in the chain
-    lodgings.push({ name: name || 'Lodging', ci, co: tripsyDayKey(coIso) || ci });
+    lodgings.push({ name: name || 'Lodging', ci, co: tripsyDayKey(coIso) || ci,
+      city: tripsyVerifyLodgingCity(address) });
   };
   const addTransport = (depIso, arrIso, category) => {
     const dep = tripsyDayKey(depIso) || tripsyDayKey(arrIso);
-    if (dep) transports.push({ dep, arr: tripsyDayKey(arrIso) || dep, category: category || null });
+    if (dep) transports.push({ dep, arr: tripsyDayKey(arrIso) || dep, depIso: depIso || arrIso || '', category: category || null });
   };
   const addFlight = (depIso, arrIso, depDesc, arrDesc) => {
     const depDay = tripsyDayKey(depIso), arrDay = tripsyDayKey(arrIso);
@@ -24985,7 +25007,7 @@ function tripsyTransportationGaps(trip, pendingChanges) {
   events.forEach(e => {
     const r = e.tripsyRaw;
     if (!r) return;
-    if (r.resource === 'hosting') addLodging(r.name || e.summary, e.start, e.end);
+    if (r.resource === 'hosting') addLodging(r.name || e.summary, e.start, e.end, r.address);
     else if (r.resource === 'transportation') {
       addTransport(e.start, e.end, r.category);
       if (r.category === 'airplane') addFlight(e.start, e.end, r.departureDescription, r.arrivalDescription);
@@ -24993,7 +25015,7 @@ function tripsyTransportationGaps(trip, pendingChanges) {
   });
   (pendingChanges || []).forEach(c => {
     if (c.type !== 'create_event' || c.tripKey !== trip.key || !c.fields) return;
-    if (c.tripsyResource === 'hosting') addLodging(c.fields.name, c.fields.startsAt, c.fields.endsAt);
+    if (c.tripsyResource === 'hosting') addLodging(c.fields.name, c.fields.startsAt, c.fields.endsAt, c.fields.address);
     else if (c.tripsyResource === 'transportation') {
       addTransport(c.fields.departureAt, c.fields.arrivalAt, c.fields.category);
       if (c.fields.category === 'airplane') addFlight(c.fields.departureAt, c.fields.arrivalAt, c.fields.departureDescription, c.fields.arrivalDescription);
@@ -25007,6 +25029,16 @@ function tripsyTransportationGaps(trip, pendingChanges) {
   lodgings.sort((a, b) => a.ci.localeCompare(b.ci));
   let moves = 0;
   const allMoves = []; // every move (stay-to-stay + airport transfer), covered or not
+  // Display labels name the CITY ("make both changes," 2026-10-22: the Beppu -> Fukuoka
+  // drive was listed as "Marugamiya -> FUK", which nobody reads as Beppu to Fukuoka). A
+  // lodging gets its address's city unless its name already says it; a bare airport code
+  // reads "Fukuoka airport (FUK)". from/to stay the raw names -- they prefill the Add form.
+  const stayLabel = l => l.city && !l.name.toLowerCase().includes(l.city.toLowerCase()) ? `${l.name} (${l.city})` : l.name;
+  const airportPlaceLabel = desc => {
+    const d = String(desc || '').trim();
+    const city = /^[A-Z]{3}$/.test(d) ? tripsyFlyoverAirportCity(d) : '';
+    return city ? `${city} airport (${d})` : (d || 'Airport');
+  };
 
   // (1) Stay-to-stay moves.
   for (let i = 0; i + 1 < lodgings.length; i++) {
@@ -25018,7 +25050,20 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     // A transport spans the move if its [departure, arrival] day range overlaps
     // the checkout->next-checkin window at all.
     const covering = transports.filter(t => t.dep <= windowEnd && t.arr >= windowStart);
-    allMoves.push({ from: A.name, to: B.name, day: windowStart, covered: covering.length > 0, method: dedupMethods(covering), kind: 'stay' });
+    // ...but a FLIGHT only gets you from A if it leaves A's city. When the first flight of
+    // the move departs somewhere else (Beppu -> a flight out of Fukuoka) and no ground leg
+    // runs before it, the move is the drive to that airport, and it is missing.
+    const firstFlight = flights.filter(f => f.depDay >= windowStart && f.depDay <= windowEnd)
+      .reduce((a, b) => (!a || b.depIso < a.depIso ? b : a), null);
+    const flightCity = firstFlight ? tripsyFlyoverAirportCity(firstFlight.depDesc) : '';
+    const leavesElsewhere = !!(A.city && flightCity && flightCity.toLowerCase() !== A.city.toLowerCase()
+      && !tripsyDescMatchesCity(firstFlight.depDesc, A.city.toLowerCase()));
+    if (leavesElsewhere && !covering.some(t => t.category !== 'airplane' && t.depIso <= firstFlight.depIso)) {
+      const to = firstFlight.depDesc || 'Airport';
+      allMoves.push({ from: A.name, to, fromLabel: stayLabel(A), toLabel: airportPlaceLabel(to), day: firstFlight.depDay, covered: false, method: '', kind: 'stay' });
+      continue;
+    }
+    allMoves.push({ from: A.name, to: B.name, fromLabel: stayLabel(A), toLabel: stayLabel(B), day: windowStart, covered: covering.length > 0, method: dedupMethods(covering), kind: 'stay' });
   }
 
   // (2) Airport transfers (hotel <-> airport, on a same-day flight).
@@ -25029,17 +25074,19 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
   };
   const seen = new Set();
-  const addTransfer = (from, to, day, key) => {
+  const addTransfer = (from, to, day, key, fromLabel, toLabel) => {
     if (!day || seen.has(key)) return;
     seen.add(key);
+    // The same drive already reported as a missing stay move (above) is not listed twice.
+    if (allMoves.some(m => m.kind === 'stay' && !m.covered && m.day === day && m.from === from && m.to === to)) return;
     const covering = ground.filter(t => t.dep <= day && t.arr >= day); // ground transport that day
-    allMoves.push({ from, to, day, covered: covering.length > 0, method: dedupMethods(covering), kind: 'transfer' });
+    allMoves.push({ from, to, fromLabel, toLabel, day, covered: covering.length > 0, method: dedupMethods(covering), kind: 'transfer' });
   };
   lodgings.forEach(l => {
     const arrFlights = flights.filter(f => f.arrDay === l.ci); // land the day you check in
     if (arrFlights.length) {
       const f = arrFlights.reduce((a, b) => (b.arrIso > a.arrIso ? b : a)); // last to land
-      addTransfer(airportLabel(f.arrDesc), l.name, l.ci, `arr:${l.ci}:${l.name}`);
+      addTransfer(airportLabel(f.arrDesc), l.name, l.ci, `arr:${l.ci}:${l.name}`, airportPlaceLabel(f.arrDesc), stayLabel(l));
     }
     // The day you'd fly out AFTER this stay: the real check-out day if it has
     // one, else check-in + 1 (a stay with no logged check-out has co defaulted
@@ -25052,7 +25099,7 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     const depFlights = flights.filter(f => f.depDay === departDay); // leave the morning after your last night
     if (depFlights.length) {
       const f = depFlights.reduce((a, b) => (b.depIso < a.depIso ? b : a)); // first to leave
-      addTransfer(l.name, airportLabel(f.depDesc), departDay, `dep:${departDay}:${l.name}`);
+      addTransfer(l.name, airportLabel(f.depDesc), departDay, `dep:${departDay}:${l.name}`, stayLabel(l), airportPlaceLabel(f.depDesc));
     }
   });
 
@@ -25151,7 +25198,7 @@ async function showTripsyVerifyTravelDialog(trip) {
   const moveRow = (m, third, thirdColor, isWarning) => `
     <button class="tvv-gap" data-tvv-day="${esc(m.day || '')}"${isWarning ? ` data-tvv-kind="transport" data-tvv-from="${esc(m.from || '')}" data-tvv-to="${esc(m.to || '')}"` : ''} style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
       <span style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--amber); flex-shrink:0; min-width:104px;">${esc(m.day ? tripsyDayHeaderLabel(m.day) : '')}</span>
-      <span style="font-size:13px; flex:1;">${esc(m.from)} <span style="color:var(--muted);">→</span> ${esc(m.to)}</span>
+      <span style="font-size:13px; flex:1;">${esc(m.fromLabel || m.from)} <span style="color:var(--muted);">→</span> ${esc(m.toLabel || m.to)}</span>
       <span style="font-size:12px; font-weight:700; color:${thirdColor}; flex-shrink:0; text-align:right; min-width:44px;">${esc(third)}</span>
     </button>`;
   const okLine = txt => `<div style="font-size:13px; color:var(--home-green); font-weight:600;">✓ ${esc(txt)}</div>`;
