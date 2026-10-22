@@ -4024,6 +4024,17 @@ WebView's support for recording is unproven.
     back to that end of the journey. A cut plays exactly like a whole journey from its first
     stop (opening slideshow, legs, closing map); "Stop N of M" counts the cut's stays.
     `flyover_test.js`.
+    **…or ONE destination's slideshow alone** ("Add a third option—just play the slideshow from
+    a single location, and allow the user to select that location from a drop down menu,"
+    2026-10-22): a third box, "Or one destination's slideshow", with a **Destination**
+    drop-down over `tripsyFlyoverSlideshowStops(stops)` (pure: shown, non-transit stops holding
+    at least one picture or video — an LAX endpoint counts, since it carries the built-in
+    photo; the box is omitted when nothing qualifies), each named by its play-order number and
+    picture count, and **▶ Play this slideshow** → `onPick({previewStopId})`. The Play handler
+    turns that into the player's existing per-destination preview mode (`previewStopId`: no
+    title card, legs or ending, no zoom), after the same map choice. Verified in Chromium:
+    options list only stops with pictures, the pick reaches the player as `previewStopId`, the
+    box is hidden when no stop has pictures.
   - **…then WHICH map** ("When the user selects play fly-over
     from the trip fly-over page, present a user dialog asking if he wants to use the free
     mapping service or the service that uses credits," 2026-10-22):
@@ -4164,9 +4175,21 @@ WebView's support for recording is unproven.
       linger outside the next page either). After: the change spreads across the fade and the
       removal frame is identical to the one before it. `flyover_test.js`.
     - **The page-by-page dialog opens BY ITSELF after photos are added**
-      (`tripsyFlyoverSlideshowDialog`), and from each card's **Slideshow options** button;
+      (`tripsyFlyoverSlideshowDialog`), and from each card's **Edit slideshow** button;
       the card shows a one-line `tripsyFlyoverSlideshowSummary` ("3 pages: 2 · 3 · 1 photos
-      per page").
+      per page"). **The button is "🎞 Edit slideshow" and sits on the destination row,
+      directly LEFT of the transport drop-down** ("Change the name of the slideshow options
+      button to edit slideshow, and put the button to the left of the button showing the method
+      of transport for that location," 2026-10-22 — it was "Slideshow options" in the bottom
+      row beside Preview; same `data-flyover-slideshow` wiring and gate: owner, photos,
+      visited). **The strip has a ＋ chip** ("to the left of the last existing page show a
+      button that is the same size as the images of each page with a plus sign in it. If the
+      user selects that, create a new page at the end of the slideshow," same day):
+      `data-ss-add-page`, a page chip's own shape (the 44×33 `tfo-ss-page-empty` box holding
+      ＋, labelled "New page"), rendered immediately BEFORE the last page's chip — literally to
+      its left, as asked — and it runs `addPageAtEnd()` (factored out of Next ▶'s past-the-last
+      branch: a blank page at the END, seeded with the next photo on no page, opened at once).
+      It carries no `data-ss-goto`, so the strip's drag ignores it.
       - **Triggers:** an own-photos upload batch, and closing the Suggested grid after
         picking some (`tripsyFlyoverSuggestedPhotos`' third arg `onClosed(added)`).
       - **One page at a time:** "Page N of M" with a page strip to jump between pages; "How
@@ -4227,11 +4250,35 @@ WebView's support for recording is unproven.
       - **Photos are listed in PLAY order everywhere** ("Always show pages in the flyover edit
         view in the order of the pages … show them in the new order I selected," 2026-10-21):
         `tripsyFlyoverPhotosInPageOrder(stop)` (pure; page 1's photos first, each with its
-        page number) drives the setup card's thumbnails (drawn exactly like the page dialog's grid — framed
-        84×64 tile, "Page N" badge top-left, per "show the photos in the same way they display
-        on the slideshow options page," same day; ✕ removes by
-        `driveFileId`, since screen order is no longer storage order) and the dialog's grid at
-        open, and Save rewrites `stop.photos` in that order so every list agrees.
+        page number) drives the dialog's grid at open, and Save rewrites `stop.photos` in that
+        order so every list agrees.
+        **A page's photos sit inside ONE narrow border in that grid** ("when multiple photos
+        are on the same page draw a narrow border around all of the photos on that page so they
+        are grouped together," 2026-10-22): because the grid is in play order, a page's photos
+        are adjacent, and `tripsyFlyoverGridGroups(photos, where)` (pure) cuts the list into
+        consecutive same-page runs; a run of 2+ renders inside `<div data-ss-page-group>` (1px
+        `var(--line)`, green `#3AA76D` for the page being edited; `flex-wrap` + `max-width:100%`
+        so a long group wraps on a phone). A lone photo and a photo on no page stand bare. The
+        buttons are unchanged, so tap and drag inside a group work as before (verified in
+        Chromium: tap adds a fourth photo to the group, a drag swaps two inside it).
+        **The setup card shows ONE tile per PAGE** ("On the flyover page, show each page as a
+        single thumbnail. On a page where there are multiple photos, divide that thumbnail into
+        as many vertical sections as there are photos on that page, and show a vertical segment
+        of that photo on the thumbnail," 2026-10-22 — it used to show one tile per photo, badged
+        with its page). `tripsyFlyoverPageThumbHtml(page, w, h)`: a page of one photo (or a
+        video) is the ordinary `tripsyFlyoverThumbHtml`; a page of several is the same 84×64
+        frame split into equal vertical strips (flex, one `[data-diary-img]` div per photo,
+        `center/cover` — the middle band of each photo — thin dividers between), painted by the
+        same `tripsyDiaryPaintPhotos` pass. Tiles are `tripsyFlyoverPages(s)` in play order,
+        badged "Page N" (plus "· K" on a page of K photos), so a tile's index IS its page
+        index: the drag-to-reorder now runs `tripsyFlyoverMoveStopPage(stop, fromPage, toPage)`
+        (pure; `tripsyFlyoverMoveThumbPage` delegates to it), a TAP on a tile opens the
+        Slideshow options page ON that page (`tripsyFlyoverSlideshowDialog`'s `page` option →
+        `cur`), and the tile's ✕ (`data-flyover-page-remove`) removes that page's photos by id,
+        asking first through `tripsyConfirmDialog` when the page holds several. Verified in
+        Chromium: a 3-photo page shows three 28 px strips, a drag swaps the pages, tapping
+        opens page 1 of 2 / 2 of 2, Keep leaves the page and Remove takes its three photos, a
+        one-photo ✕ asks nothing.
       - **Save also sits at the TOP, beside the ✕** ("The save button for changes to the
         flyover should be next to the close window button on the top of the window. There
         should also be cancel and save buttons at the bottom," same day): `data-ss-save-top`

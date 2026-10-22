@@ -221,8 +221,8 @@ assert(tripsyFlyoverRangeStops(route, 'c', 'a').map(s => s.id).join('') === 'abc
 assert(tripsyFlyoverRangeStops(route, 'zzz', 'b').map(s => s.id).join('') === 'oab', 'an unknown start falls back to the departure');
 assert(tripsyFlyoverRangeStops(route, 'b', undefined).map(s => s.id).join('') === 'bcr', 'no end plays through to the home airport');
 assert(tripsyFlyoverRangeStops(route, 'b', 'b').length === 1, 'the same city twice is one stop (the dialog refuses it; the player would just land there)');
-assert(/tripsyFlyoverRangeDialog\(record, range =>/.test(html) && /tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, \.\.\.\(range \? \{ range \} : \{\}\) \}\)\)/.test(html),
-  'the setup page\'s Play asks whole-or-part first, then which map, and passes the range to the player');
+assert(/tripsyFlyoverRangeDialog\(record, range =>/.test(html) && /const extra = !range \? \{\} : range\.previewStopId \? \{ previewStopId: range\.previewStopId \} : \{ range \};\s*tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, \.\.\.extra \}\)\)/.test(html),
+  'the setup page\'s Play asks whole / part / one slideshow first, then which map, and passes the range or the one destination to the player');
 assert(/data-range-all/.test(html) && /data-range-from/.test(html) && /data-range-to/.test(html) && /data-range-part/.test(html) && /<ol/.test(extractFn('tripsyFlyoverRangeDialog')),
   'the dialog lists the cities numbered, with Entire journey and From/To + Play this part');
 assert(/if \(opts\.range\) return tripsyFlyoverRangeStops\(all, opts\.range\.fromId, opts\.range\.toId\)/.test(html) && !/if \(preview\) stops = stops\.filter/.test(html),
@@ -504,7 +504,22 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   for (const k of ['pair', 'grid', 'collage']) assert(html.includes(`.tfo-group[data-layout="${k}"]`), `the ${k} layout has its CSS`);
   const setup = extractFn('showTripsyFlyover');
   assert(/data-flyover-slideshow/.test(setup) && /data-flyover-preview/.test(setup) && /tripsyFlyoverSlideshowSummary\(s\)/.test(setup),
-    'each destination shows how its photos play, with Slideshow options and Preview buttons');
+    'each destination shows how its photos play, with Edit slideshow and Preview buttons');
+  // "Change the name of the slideshow options button to edit slideshow, and put the button to
+  // the left of the button showing the method of transport for that location" (2026-10-22).
+  assert(/<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">\s*\$\{isOwner && !s\.removed && photos\.length && tripsyFlyoverStopVisited\(s, todayKey\) \? `<button class="btn" data-flyover-slideshow [^`]*>🎞 Edit slideshow<\/button>` : ''\}\s*\$\{legHtml\}/.test(setup)
+    && !/Slideshow options<\/button>/.test(setup),
+    'the card\'s "Edit slideshow" button sits directly left of the transport drop-down on the destination row');
+  // "to the left of the last existing page show a button that is the same size as the images
+  // of each page with a plus sign in it. If the user selects that, create a new page at the
+  // end of the slideshow" (same day).
+  const dlgAdd = extractFn('tripsyFlyoverSlideshowDialog');
+  assert(/const addChip = k === pages\.length - 1 \? `<button class="btn tfo-ss-chip tfo-ss-page" data-ss-add-page [^`]*><span class="tfo-ss-page-empty"[^`]*>＋<\/span><span>New page<\/span><\/button>` : '';\s*return `\$\{addChip\}<button class="btn tfo-ss-chip tfo-ss-page/.test(dlgAdd),
+    'a ＋ chip in the page chips\' own size sits to the left of the last page chip');
+  assert(/const addPageAtEnd = \(\) => \{[\s\S]*pages = \[\.\.\.pages, pg\];\s*cur = pages\.length - 1;\s*render\(\);\s*\};/.test(dlgAdd)
+    && /if \(cur < pages\.length - 1\) \{ cur\+\+; render\(\); return; \}\s*addPageAtEnd\(\);/.test(dlgAdd)
+    && /if \(addChip\) addChip\.onclick = \(\) => \{ if \(Date\.now\(\) < dragState\.suppressTapUntil\) return; addPageAtEnd\(\); \};/.test(dlgAdd),
+    'the ＋ chip and Next ▶ past the last page both add a page at the END and open it');
   assert(/updateStop\(id, \{ pages: r\.pages, photos: tripsyFlyoverPhotosInPageOrder/.test(setup), 'Save in the options box writes the pages onto that one stop');
 }
 
@@ -945,21 +960,35 @@ eval([extractFn('tripsyFlyoverPhotosInPageOrder')].join('\n'));
   assert(o.map(x => x.photo.driveFileId + x.page).join(',') === 'c1,a2,d2,b3',
     'THE ASK: photos come back in the order their pages play, each with its page; one on no page plays last');
   const setup = extractFn('showTripsyFlyover');
-  assert(/const ordered = tripsyFlyoverPhotosInPageOrder\(s\);/.test(setup) && /ordered\.map\(\(\{ photo: p, page \}, k\)/.test(setup) && />Page \$\{page\}<\/span>/.test(setup)
-    && /<div class="btn" data-flyover-thumb="\$\{k\}" data-flyover-thumb-page="\$\{page\}" style="padding:3px; position:relative; cursor:[^\n]*>\s*\$\{tripsyFlyoverThumbHtml\(p, 84, 64, 'border-radius:5px;'\)\}/.test(setup),
-    'the setup page lists each destination\'s photos in play order, drawn like the page dialog\'s grid (framed, "Page N" badge)');
-  assert(/data-flyover-photo-remove="\$\{esc\(p\.driveFileId\)\}"/.test(setup) && /ph\.driveFileId !== fid/.test(setup),
-    'removing a photo goes by its id, not its position (the order on screen is no longer the stored order)');
+  // Since 2026-10-22 the setup card shows ONE tile per PAGE, in play order ("show each page
+  // as a single thumbnail"), so the photo-per-tile pins became page-per-tile pins.
+  assert(/const pageTiles = tripsyFlyoverPages\(s\);/.test(setup) && /pageTiles\.map\(\(pg, k\)/.test(setup) && />Page \$\{k \+ 1\}\$\{pg\.photos\.length > 1 \? ` · \$\{pg\.photos\.length\}` : ''\}<\/span>/.test(setup)
+    && /<div class="btn" data-flyover-thumb="\$\{k\}" data-flyover-thumb-page="\$\{k \+ 1\}" style="padding:3px; position:relative; cursor:[^\n]*>\s*\$\{tripsyFlyoverPageThumbHtml\(pg, 84, 64, 'border-radius:5px;'\)\}/.test(setup),
+    'the setup page lists each destination\'s PAGES in play order, one framed tile each with a "Page N" badge (and a photo count on a page of several)');
+  assert(/data-flyover-page-remove="\$\{k\}"/.test(setup) && /const fids = new Set\(pg\.photos\.map\(ph => ph\.driveFileId\)\);/.test(setup) && /filter\(ph => !fids\.has\(ph\.driveFileId\)\)/.test(setup)
+    && /if \(fids\.size > 1 && !\(await tripsyConfirmDialog\(`Remove the \$\{fids\.size\} photos on this page\?`/.test(setup),
+    'a tile\'s ✕ removes that page\'s photos by id, asking first when there are several');
   assert(/photos: tripsyFlyoverPhotosInPageOrder\(\{ \.\.\.st, pages: r\.pages, photos: r\.photos \}\)\.map\(x => x\.photo\)/.test(setup),
     'Save stores the photos in the new page order');
   assert(/const photos = tripsyFlyoverPhotosInPageOrder\(stop\)\.map/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the page dialog\'s grid opens in play order too');
+  // "On a page where there are multiple photos, divide that thumbnail into as many vertical
+  // sections as there are photos on that page, and show a vertical segment of that photo"
+  // (2026-10-22).
+  const thumbSrc = extractFn('tripsyFlyoverPageThumbHtml');
+  assert(/if \(photos\.length <= 1\) return tripsyFlyoverThumbHtml\(photos\[0\] \|\| \{\}, w, h, extra\);/.test(thumbSrc), 'a page of one photo (or a video) is the ordinary thumbnail');
+  assert(/display:flex;[^`]*\$\{photos\.map\(\(p, i\) => `<div style="flex:1 1 0; min-width:0; height:100%; background:var\(--panel-2\) center\/cover no-repeat;/.test(thumbSrc) && /data-diary-img="\$\{esc\(p\.driveFileId\)\}"/.test(thumbSrc),
+    'THE ASK: a page of several is one frame split into equal vertical strips, each painted with the middle band of its photo (center/cover in a narrow strip)');
+  const fakeEsc = s => String(s);
+  const html3 = new Function('esc', 'tripsyFlyoverThumbHtml', thumbSrc + '; return tripsyFlyoverPageThumbHtml({ photos: [{driveFileId:"x"},{driveFileId:"y"},{driveFileId:"z"}] }, 84, 64);')(fakeEsc, () => 'SINGLE');
+  assert((html3.match(/data-diary-img="/g) || []).length === 3 && /width:84px; height:64px/.test(html3) && (html3.match(/border-left/g) || []).length === 2,
+    'three photos make three strips in one 84×64 frame, divided by two lines');
 }
 
 // ---- reordering pages from the fly-over page itself, and the wider panels ("Make the pages
 // for creating and editing the flyover view much wider. Also, allow the user to edit the order
 // of pages from the flyover page by selecting pages and re-ordering them in the same way he
 // can from the slideshow edit page," 2026-10-22) ----
-eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), extractFn('tripsyFlyoverMoveThumbPage')].join('\n'));
+eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), extractFn('tripsyFlyoverMoveStopPage'), extractFn('tripsyFlyoverMoveThumbPage')].join('\n'));
 {
   const ph = id => ({ driveFileId: id });
   const st = { photos: ['A', 'B', 'C', 'D'].map(ph), pages: [{ ids: ['A'], count: 1, seconds: 3 }, { ids: ['B', 'C'], count: 2, seconds: 3 }, { ids: ['D'], count: 1, seconds: 3 }] };
@@ -976,12 +1005,20 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), 
   r = tripsyFlyoverMoveThumbPage(st2, 2, 0);
   assert(r && r.pages.length === 3 && r.pages[0].ids.join('') === 'C' && r.pages.every(p => !('photos' in p) && !('auto' in p)),
     'a stop whose pages were only derived gets them saved, in the new order, without the derived-only fields');
+  // One tile per PAGE since later the same day ("show each page as a single thumbnail"): a
+  // tile's index IS its page index, so the move is tripsyFlyoverMoveStopPage.
+  r = tripsyFlyoverMoveStopPage(st, 0, 2);
+  assert(r && r.pages.map(p => p.ids.join('')).join('|') === 'BC|D|A' && tripsyFlyoverMoveStopPage(st, 1, 1) === null && tripsyFlyoverMoveStopPage(st, 0, 5) === null,
+    'moving by page index moves the page; the same page, or a missing one, changes nothing');
   const setup = extractFn('showTripsyFlyover');
-  assert(/tripsyFlyoverWireDrag\(\[\.\.\.card\.querySelectorAll\('\[data-flyover-thumb\]'\)\], \(from, to\) => \{\s*const r = tripsyFlyoverMoveThumbPage\(stop\(\), from, to\);\s*if \(!r\) return;\s*updateStop\(id, r\);\s*save\(\);\s*\}, \{ holdMs: 280, state: dragState, afterDrop: \(\) => \{ if \(!closed\) render\(\); \} \}\);/.test(setup),
-    'the setup page\'s thumbnails drag through the shared mechanism with a press-and-hold, saving the move at once');
-  assert(/if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;[^\n]*\n\s*const fid = b\.getAttribute\('data-flyover-photo-remove'\)/.test(setup),
-    'the release that ended a drag never removes a photo');
-  assert(/Drag a photo onto another to move its page there\./.test(setup), 'the card says its photos can be dragged');
+  assert(/const tiles = \[\.\.\.card\.querySelectorAll\('\[data-flyover-thumb\]'\)\];\s*tripsyFlyoverWireDrag\(tiles, \(from, to\) => \{\s*const r = tripsyFlyoverMoveStopPage\(stop\(\), from, to\);\s*if \(!r\) return;\s*updateStop\(id, r\);\s*save\(\);\s*\}, \{ holdMs: 280, state: dragState, afterDrop: \(\) => \{ if \(!closed\) render\(\); \} \}\);/.test(setup),
+    'the setup page\'s page tiles drag through the shared mechanism with a press-and-hold, saving the move at once');
+  assert(/if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;[^\n]*\n\s*const pg = tripsyFlyoverPages\(stop\(\)\)\[Number\(b\.getAttribute\('data-flyover-page-remove'\)\)\]/.test(setup),
+    'the release that ended a drag never removes a page');
+  assert(/Tap a page to edit it\. Drag a page onto another to move it there\./.test(setup), 'the card says its pages can be tapped and dragged');
+  assert(/tiles\.forEach\(t => t\.onclick = e => \{\s*if \(!isOwner \|\| e\.target\.closest\('button'\)\) return;\s*if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;[^\n]*\n\s*openSlideshowOptions\(id, '', Number\(t\.getAttribute\('data-flyover-thumb'\)\)\);/.test(setup)
+    && /if \(page != null && pages\[page\]\) cur = page;/.test(extractFn('tripsyFlyoverSlideshowDialog')),
+    'tapping a page tile opens the Slideshow options page on that page');
   const wd = extractFn('tripsyFlyoverWireDrag');
   assert(/if \(e\.button \|\| \(btn && btn !== el\)\) return;/.test(wd), 'a tap on the ✕ inside a thumbnail is never the start of a drag (a chip that IS a button still drags)');
   assert(/<div class="tw-modal-paper tw-wide" style="max-width:1240px;/.test(setup)
@@ -1473,7 +1510,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   ok(/b\.onclick = \(\) => \{ close\(\); onPick\(b\.dataset\.mapChoice\); \};/.test(dlg) && !/await/.test(dlg),
     'a choice starts playback synchronously inside its own tap (no await), so iOS music can still start');
   ok(/data-map-choice-cancel\]'\)\.onclick = close;/.test(dlg), 'Cancel plays nothing');
-  ok(/\[data-flyover-play\]'\)\.onclick = \(\) => \{[\s\S]*?tripsyFlyoverRangeDialog\(record, range => \{\s*tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, /.test(html2),
+  ok(/\[data-flyover-play\]'\)\.onclick = \(\) => \{[\s\S]*?tripsyFlyoverRangeDialog\(record, range => \{[\s\S]*?tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, /.test(html2),
     'the setup page\'s Play asks whole-or-part, then which map, before playing');
   ok(/const googleTilesP = opts\.mapService === 'free' \? Promise\.resolve\(null\) : Promise\.race\(\[/.test(html2),
     'the free map never asks Google for a tile session');
@@ -1497,4 +1534,41 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   const loop = html.slice(html.indexOf('const carry = via.length ?'), html.indexOf('const carry = via.length ?') + 500);
   assert(/animateLeg\(r, from, v, 'plane', carry\)[\s\S]*if \(carry\) carry\.keep = false;[\s\S]*animateLeg\(r, from, b, via\.length \? 'plane' : '', carry\)/.test(loop),
     'every layover leg keeps the plane, and the final leg removes it');
+}
+
+// A page's photos are drawn inside one narrow border in the Slideshow options grid ("when
+// multiple photos are on the same page draw a narrow border around all of the photos on that
+// page so they are grouped together," 2026-10-22).
+{
+  eval(extractFn('tripsyFlyoverGridGroups'));
+  const ph = ['A', 'B', 'C', 'D', 'E'].map(driveFileId => ({ driveFileId }));
+  const where = new Map([['A', 0], ['B', 1], ['C', 1], ['D', 1]]);
+  const g = tripsyFlyoverGridGroups(ph, where);
+  assert(g.map(x => `${x.page}:${x.photos.map(p => p.driveFileId).join('')}`).join(' ') === '0:A 1:BCD null:E',
+    'consecutive photos of one page form a run; a lone photo and an unplaced one stand alone');
+  const g2 = tripsyFlyoverGridGroups([ph[4], ph[4]], new Map());
+  assert(g2.length === 2 && g2.every(x => x.page === null), 'photos on no page never group together');
+  const dlg = html.slice(html.indexOf('<div data-ss-grid'), html.indexOf('How should the ${page.count} photos appear?'));
+  assert(/tripsyFlyoverGridGroups\(photos, where\)\.map\(g => g\.page != null && g\.photos\.length > 1\s*\? `<div data-ss-page-group="\$\{g\.page\}" style="[^"]*border:1px solid \$\{g\.page === cur \? '#3AA76D' : 'var\(--line\)'\}; border-radius:9px;">\$\{g\.photos\.map\(tile\)\.join\(''\)\}<\/div>`\s*: g\.photos\.map\(tile\)\.join\(''\)\)/.test(dlg),
+    'the grid wraps a run of 2+ photos on one page in a bordered group, green for the page being edited');
+  assert(/<div data-ss-page-group="\$\{g\.page\}" style="display:flex; gap:8px; flex-wrap:wrap; max-width:100%;/.test(dlg), 'a group wraps inside itself on a narrow screen');
+}
+
+
+// The Play dialog's third option: one destination's slideshow alone, picked from a drop-down
+// ("Add a third option—just play the slideshow from a single location, and allow the user to
+// select that location from a drop down menu," 2026-10-22).
+{
+  eval(extractFn('tripsyFlyoverSlideshowStops'));
+  const st = [
+    { id: 'o', kind: 'origin', photos: [] }, { id: 'a', kind: 'stay', photos: [{ driveFileId: 'x' }] },
+    { id: 't', kind: 'transit', photos: [{ driveFileId: 'y' }] }, { id: 'b', kind: 'stay', removed: true, photos: [{ driveFileId: 'z' }] },
+    { id: 'c', kind: 'stay' }, { id: 'r', kind: 'return', photos: [{ driveFileId: 'w' }] }];
+  assert(tripsyFlyoverSlideshowStops(st).map(s => s.id).join('') === 'ar', 'only shown, non-transit stops with pictures are offered; empty or removed ones are not');
+  assert(tripsyFlyoverSlideshowStops(null).length === 0, 'no stops, no options');
+  const dlg = extractFn('tripsyFlyoverRangeDialog');
+  assert(/const slideshowStops = tripsyFlyoverSlideshowStops\(stops\);/.test(dlg) && /\$\{slideshowStops\.length \? `[\s\S]*<select id="tripsy-flyover-range-one" class="field-input" data-range-one[\s\S]*data-range-one-play[\s\S]*` : ''\}/.test(dlg),
+    'the dialog shows a Destination drop-down and Play this slideshow only when some destination has pictures');
+  assert(/if \(onePlay\) onePlay\.onclick = \(\) => \{\s*const id = ov\.querySelector\('\[data-range-one\]'\)\.value;\s*if \(!slideshowStops\.some\(s => s\.id === id\)\) return;\s*close\(\); onPick\(\{ previewStopId: id \}\);/.test(dlg),
+    'Play this slideshow hands the picked destination to onPick as previewStopId, synchronously in its tap');
 }

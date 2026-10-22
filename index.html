@@ -18296,6 +18296,22 @@ function tripsyFlyoverPages(stop) {
 function tripsyFlyoverPhotosInPageOrder(stop) {
   return tripsyFlyoverPages(stop).flatMap((pg, k) => pg.photos.map(photo => ({ photo, page: k + 1 })));
 }
+// The Slideshow options grid's photos as consecutive runs sharing one page: [{page, photos}],
+// `page` the 0-based page index or null for a photo on no page (each of those is its own run).
+// The grid lists photos in play order, so a page's photos are adjacent, and a run of 2+ is
+// drawn inside one narrow border ("draw a narrow border around all of the photos on that page
+// so they are grouped together," 2026-10-22). `where` maps driveFileId -> page index. Pure.
+function tripsyFlyoverGridGroups(photos, where) {
+  const groups = [];
+  for (const p of photos) {
+    const k = where.get(p.driveFileId);
+    const page = k == null ? null : k;
+    const last = groups[groups.length - 1];
+    if (last && page != null && last.page === page) last.photos.push(p);
+    else groups.push({ page, photos: [p] });
+  }
+  return groups;
+}
 // Moves page `from` to position `to`, returning {pages, cur} with `cur` (the page being
 // edited) following its page. Each page keeps its own settings, including the transition it
 // leaves by. Pure.
@@ -18396,9 +18412,15 @@ function tripsyFlyoverNearestRect(rects, x, y) {
 function tripsyFlyoverMoveThumbPage(stop, from, to) {
   const ordered = tripsyFlyoverPhotosInPageOrder(stop);
   const a = ordered[from], b = ordered[to];
-  if (!a || !b || a.page === b.page) return null;
+  if (!a || !b) return null;
+  return tripsyFlyoverMoveStopPage(stop, a.page - 1, b.page - 1);
+}
+// Moves a stop's page `fromPage` to position `toPage` (indexes into tripsyFlyoverPages(stop)),
+// returning {pages, photos} to store, or null when nothing moves. Pure.
+function tripsyFlyoverMoveStopPage(stop, fromPage, toPage) {
   const pages = tripsyFlyoverPages(stop).map(tripsyFlyoverPageRecord);
-  const moved = tripsyFlyoverMovePage(pages, a.page - 1, b.page - 1, 0).pages;
+  if (fromPage === toPage || !pages[fromPage] || !pages[toPage]) return null;
+  const moved = tripsyFlyoverMovePage(pages, fromPage, toPage, 0).pages;
   return { pages: moved, photos: tripsyFlyoverPhotosInPageOrder({ ...stop, pages: moved }).map(x => x.photo) };
 }
 // ONE drag mechanism for every row of draggable tiles (the Slideshow options page strip and
@@ -19360,11 +19382,12 @@ async function showTripsyFlyover(tripKey) {
 
   // The options box opens by itself right after photos are added, and from each
   // destination's "Slideshow options" button. Nothing changes until Save.
-  const openSlideshowOptions = async (id, intro) => {
+  const openSlideshowOptions = async (id, intro, page) => {
     const st = record.stops.find(x => x.id === id);
     if (!st) return;
     const r = await tripsyFlyoverSlideshowDialog(st, {
       intro,
+      page,
       hasMusic: !!record.music,
       playPreview: draft => {
         if (draft.lat == null) { toast('Set this destination\'s location first.', 'error'); return; }
@@ -19423,9 +19446,9 @@ async function showTripsyFlyover(tripKey) {
       </div>
       ${record.stops.map((s, i) => {
         const photos = s.photos || [];
-        // Shown in PLAY order -- page 1's photos first -- with each one's page number, so a
-        // re-ordered slideshow reads back in the order chosen.
-        const ordered = tripsyFlyoverPhotosInPageOrder(s);
+        // One tile per PAGE, in play order ("show each page as a single thumbnail," 2026-10-22):
+        // a page of several photos is one frame split into vertical strips, one per photo.
+        const pageTiles = tripsyFlyoverPages(s);
         const needsMode = needModeIds.has(s.id);
         const legHtml = !s.mode ? `<span style="font-size:18px;">📍</span>`
           // A drop-down to change how the trip got here ("Allow the user to change the mode of
@@ -19451,6 +19474,7 @@ async function showTripsyFlyover(tripKey) {
         return `
         <div data-flyover-stop="${esc(s.id)}" style="border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:10px; ${s.removed ? 'opacity:0.5;' : ''}">
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            ${isOwner && !s.removed && photos.length && tripsyFlyoverStopVisited(s, todayKey) ? `<button class="btn" data-flyover-slideshow style="font-size:12px;" title="Edit this destination's slideshow pages">🎞 Edit slideshow</button>` : ''}
             ${legHtml}${s.mode === 'plane' && (s.via || []).length ? `<span style="font-size:12px; color:var(--muted);" title="Layovers: the flight is shown through these cities">via ${esc(s.via.map(v => v.label).join(', '))}</span>` : ''}
             <span style="font-family:var(--mono); font-size:12px; color:var(--muted);">${i + 1}</span>
             ${isOwner && !s.removed
@@ -19465,16 +19489,16 @@ async function showTripsyFlyover(tripKey) {
           ${noPlace && !s.removed ? `<div style="font-size:12px; color:#E0A33A; margin-top:4px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">⚠️ Not on the map yet — it will be skipped.${isOwner ? ` <button class="btn" data-flyover-set-place style="font-size:12px;">📍 Set location</button>` : ''}</div>` : ''}
           ${s.removed ? '' : `
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center;">
-            ${ordered.map(({ photo: p, page }, k) => `
-              <div class="btn" data-flyover-thumb="${k}" data-flyover-thumb-page="${page}" style="padding:3px; position:relative; cursor:${isOwner && ordered.length > 1 ? 'grab' : 'default'}; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none;"${isOwner && ordered.length > 1 ? ' title="Press and hold, then drag onto another photo to move this page there"' : ''}>
-                ${tripsyFlyoverThumbHtml(p, 84, 64, 'border-radius:5px;')}
-                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:rgba(0,0,0,0.65); color:#fff;">Page ${page}</span>
-                ${isOwner ? `<button data-flyover-photo-remove="${esc(p.driveFileId)}" title="Remove ${tripsyFlyoverIsVideo(p) ? 'video' : 'photo'}" style="position:absolute; top:5px; right:5px; width:22px; height:22px; border-radius:50%; border:none; background:rgba(0,0,0,0.65); color:#fff; font-size:12px; cursor:pointer; padding:0;">✕</button>` : ''}
+            ${pageTiles.map((pg, k) => `
+              <div class="btn" data-flyover-thumb="${k}" data-flyover-thumb-page="${k + 1}" style="padding:3px; position:relative; cursor:${isOwner ? 'pointer' : 'default'}; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none;"${isOwner ? ` title="${pageTiles.length > 1 ? 'Tap to edit this page; press and hold, then drag onto another page to move it there' : 'Tap to edit this page'}"` : ''}>
+                ${tripsyFlyoverPageThumbHtml(pg, 84, 64, 'border-radius:5px;')}
+                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:rgba(0,0,0,0.65); color:#fff;">Page ${k + 1}${pg.photos.length > 1 ? ` · ${pg.photos.length}` : ''}</span>
+                ${isOwner ? `<button data-flyover-page-remove="${k}" title="Remove ${pg.video ? 'this video' : pg.photos.length > 1 ? `the ${pg.photos.length} photos on this page` : 'this photo'}" style="position:absolute; top:5px; right:5px; width:22px; height:22px; border-radius:50%; border:none; background:rgba(0,0,0,0.65); color:#fff; font-size:12px; cursor:pointer; padding:0;">✕</button>` : ''}
               </div>`).join('')}
             ${!tripsyFlyoverStopVisited(s, todayKey)
               ? `<span style="font-size:12px; color:var(--muted);">🔒 Photos open once you get here (${esc(tripsyFlyoverDatesLabel(s))}).</span>`
               : `${!photos.length ? `<span style="font-size:12px; color:var(--muted);">No photos yet.</span>` : ''}
-            ${isOwner && tripsyFlyoverPages(s).length > 1 ? `<span style="font-size:11px; color:var(--muted); flex-basis:100%;">Drag a photo onto another to move its page there.</span>` : ''}
+            ${isOwner && pageTiles.length > 1 ? `<span style="font-size:11px; color:var(--muted); flex-basis:100%;">Tap a page to edit it. Drag a page onto another to move it there.</span>` : ''}
             ${(() => { const u = tripsyFlyoverUploadState(s); if (!u.uploading && !u.failed) return '';
               const failedIds = photos.filter(p => tripsyFlyoverPhotoIsPending(p.driveFileId) && tripsyFlyoverFailedUploads.has(p.driveFileId)).map(p => p.driveFileId);
               return `<span style="font-size:12px; color:${u.failed ? '#E0A33A' : 'var(--muted)'}; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">${u.uploading ? `⬆️ Uploading ${u.uploading} photo${u.uploading === 1 ? '' : 's'} in the background — you can use the rest of the app.` : ''}${u.failed ? ` ⚠️ ${u.failed} upload${u.failed === 1 ? '' : 's'} failed.${isOwner ? failedIds.map(fid => ` <button class="btn" data-flyover-retry-upload="${esc(fid)}" style="font-size:11px; padding:2px 8px;">Retry</button>`).join('') : ''}` : ''}</span>`; })()}
@@ -19485,7 +19509,6 @@ async function showTripsyFlyover(tripKey) {
           ${isOwner && photos.length && tripsyFlyoverStopVisited(s, todayKey) ? `
             <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; font-size:12px; color:var(--muted);">
               <span>🎞 ${esc(tripsyFlyoverSlideshowSummary(s))}</span>
-              <button class="btn" data-flyover-slideshow style="font-size:12px;">Slideshow options</button>
               <button class="btn" data-flyover-preview style="font-size:12px;">▶ Preview</button>
             </div>` : ''}`}
         </div>`;
@@ -19566,18 +19589,31 @@ async function showTripsyFlyover(tripKey) {
       // from the flyover page … in the same way he can from the slideshow edit page,"
       // 2026-10-22). A press-and-hold for a finger, since the page scrolls; a drop on a photo
       // of the same page changes nothing. Saved at once, like every other change here.
-      tripsyFlyoverWireDrag([...card.querySelectorAll('[data-flyover-thumb]')], (from, to) => {
-        const r = tripsyFlyoverMoveThumbPage(stop(), from, to);
+      // Since 2026-10-22 each tile IS a page, so the indexes are page indexes.
+      const tiles = [...card.querySelectorAll('[data-flyover-thumb]')];
+      tripsyFlyoverWireDrag(tiles, (from, to) => {
+        const r = tripsyFlyoverMoveStopPage(stop(), from, to);
         if (!r) return;
         updateStop(id, r);
         save();
       }, { holdMs: 280, state: dragState, afterDrop: () => { if (!closed) render(); } });
-      card.querySelectorAll('[data-flyover-photo-remove]').forEach(b => {
-        b.onclick = e => {
+      // A tap on a page tile opens the Slideshow options page ON that page.
+      tiles.forEach(t => t.onclick = e => {
+        if (!isOwner || e.target.closest('button')) return;
+        if (Date.now() < dragState.suppressTapUntil) return; // the release that ended a drag
+        openSlideshowOptions(id, '', Number(t.getAttribute('data-flyover-thumb')));
+      });
+      card.querySelectorAll('[data-flyover-page-remove]').forEach(b => {
+        b.onclick = async e => {
           e.stopPropagation();
           if (Date.now() < dragState.suppressTapUntil) return; // the release that ended a drag
-          const fid = b.getAttribute('data-flyover-photo-remove');
-          updateStop(id, { photos: (stop().photos || []).filter(ph => ph.driveFileId !== fid) });
+          const pg = tripsyFlyoverPages(stop())[Number(b.getAttribute('data-flyover-page-remove'))];
+          if (!pg) return;
+          const fids = new Set(pg.photos.map(ph => ph.driveFileId));
+          // Several photos go at once, so that is confirmed; one goes as it always did.
+          if (fids.size > 1 && !(await tripsyConfirmDialog(`Remove the ${fids.size} photos on this page?`, { yes: 'Remove', no: 'Keep' }))) return;
+          if (closed) return;
+          updateStop(id, { photos: (stop().photos || []).filter(ph => !fids.has(ph.driveFileId)) });
           save(); render();
         };
       });
@@ -19659,7 +19695,10 @@ async function showTripsyFlyover(tripKey) {
     // starting and ending city," 2026-10-22) -- then which map. The range dialog's own Play
     // tap opens the map choice, whose pick starts playback synchronously (the iOS music rule).
     tripsyFlyoverRangeDialog(record, range => {
-      tripsyFlyoverMapChoiceDialog(mapService => playTripsyFlyover(trip, record, { mapService, ...(range ? { range } : {}) }));
+      // A third answer, one destination's slideshow alone, rides the per-destination preview
+      // mode ("just play the slideshow from a single location," 2026-10-22).
+      const extra = !range ? {} : range.previewStopId ? { previewStopId: range.previewStopId } : { range };
+      tripsyFlyoverMapChoiceDialog(mapService => playTripsyFlyover(trip, record, { mapService, ...extra }));
     });
   };
 }
@@ -19677,12 +19716,21 @@ function tripsyFlyoverRangeStops(stops, fromId, toId) {
   if (a > b) [a, b] = [b, a];
   return list.slice(a, b + 1);
 }
-// The numbered city list with "Entire journey" or a start/end pick. onPick(null) plays the
-// whole journey, onPick({fromId, toId}) the cut; Cancel or a tap outside plays nothing.
-// onPick runs synchronously inside the Play button's click, so the map-choice dialog it opens
-// is still inside a user tap.
+// The destinations whose slideshow can play on its own: a shown stop with at least one
+// photo or video (an airport transfer or an empty stop has nothing to show). Pure.
+function tripsyFlyoverSlideshowStops(stops) {
+  return (stops || []).filter(s => s && !s.removed && s.kind !== 'transit' && Array.isArray(s.photos) && s.photos.length > 0);
+}
+// The numbered city list with "Entire journey", a start/end pick, or one destination's
+// slideshow alone ("Add a third option—just play the slideshow from a single location, and
+// allow the user to select that location from a drop down menu," 2026-10-22). onPick(null)
+// plays the whole journey, onPick({fromId, toId}) the cut, onPick({previewStopId}) that one
+// destination's slideshow (the per-destination preview mode); Cancel or a tap outside plays
+// nothing. onPick runs synchronously inside the Play button's click, so the map-choice dialog
+// it opens is still inside a user tap.
 function tripsyFlyoverRangeDialog(record, onPick) {
   const stops = tripsyFlyoverPlayableStops(record);
+  const slideshowStops = tripsyFlyoverSlideshowStops(stops);
   let ov = document.getElementById('tripsy-flyover-range-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-range-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
   ov.style.zIndex = '2147483100';
@@ -19705,6 +19753,15 @@ function tripsyFlyoverRangeDialog(record, onPick) {
         <div data-range-note style="font-size:12px; color:var(--muted); min-height:16px; margin-top:6px;"></div>
         <button class="btn" data-range-part style="display:block; width:100%; padding:8px 12px; font-weight:700; margin-top:8px;">▶ Play this part</button>
       </div>
+      ${slideshowStops.length ? `
+      <div style="border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:12px;">
+        <div style="font-weight:700; font-size:14px; margin-bottom:8px;">Or one destination's slideshow</div>
+        <div style="display:grid; grid-template-columns:auto 1fr; gap:8px 10px; align-items:center; font-size:13px;">
+          <label for="tripsy-flyover-range-one">Destination</label><select id="tripsy-flyover-range-one" class="field-input" data-range-one style="padding:6px 8px;">${slideshowStops.map(s => `<option value="${esc(s.id)}">${stops.indexOf(s) + 1}. ${esc(s.label || 'Location')} (${s.photos.length} ${s.photos.length === 1 ? 'picture' : 'pictures'})</option>`).join('')}</select>
+        </div>
+        <div style="font-size:12px; color:var(--muted); margin-top:6px;">Just that destination's pictures — no legs, no other cities.</div>
+        <button class="btn" data-range-one-play style="display:block; width:100%; padding:8px 12px; font-weight:700; margin-top:8px;">▶ Play this slideshow</button>
+      </div>` : ''}
       <div style="text-align:center;"><button class="btn" data-range-cancel>Cancel</button></div>
     </div>`;
   ov.style.display = 'flex';
@@ -19721,6 +19778,12 @@ function tripsyFlyoverRangeDialog(record, onPick) {
     const c = cut();
     if (c.length < 2) { describe(); return; }
     close(); onPick({ fromId: c[0].id, toId: c[c.length - 1].id });
+  };
+  const onePlay = ov.querySelector('[data-range-one-play]');
+  if (onePlay) onePlay.onclick = () => {
+    const id = ov.querySelector('[data-range-one]').value;
+    if (!slideshowStops.some(s => s.id === id)) return;
+    close(); onPick({ previewStopId: id });
   };
   ov.querySelector('[data-range-cancel]').onclick = close;
   ov.onclick = e => { if (e.target === ov) close(); };
@@ -19958,6 +20021,17 @@ function tripsyFlyoverThumbHtml(p, w = 84, h = 64, extra = '') {
   return `<div style="position:relative; width:${w}px; height:${h}px; border-radius:6px; overflow:hidden; background:${vid ? '#111' : 'var(--panel-2)'} center/cover no-repeat; ${extra}"${paintId ? ` data-diary-img="${esc(paintId)}"` : ''}>${vid
     ? `<span style="position:absolute; left:4px; bottom:3px; font-size:11px; font-weight:700; color:#fff; background:rgba(0,0,0,0.65); padding:1px 5px; border-radius:4px;" title="${tripsyFlyoverVideoAudio(p) === 'music' ? 'Plays under the fly-over music' : 'Plays with its own sound'}">🎬${len ? ` ${len}` : ''} ${tripsyFlyoverVideoAudio(p) === 'music' ? '🎵' : '🔊'}</span>`
     : badge}</div>`;
+}
+// ONE tile per PAGE on the setup page ("show each page as a single thumbnail. On a page where
+// there are multiple photos, divide that thumbnail into as many vertical sections as there are
+// photos on that page, and show a vertical segment of that photo on the thumbnail,"
+// 2026-10-22): a page of one photo (or a video) is the ordinary thumbnail; a page of several
+// is the same frame split into equal vertical strips, each painted with the MIDDLE band of its
+// photo (`center/cover` inside a narrow strip is exactly that slice), in play order.
+function tripsyFlyoverPageThumbHtml(page, w = 84, h = 64, extra = '') {
+  const photos = (page && page.photos) || [];
+  if (photos.length <= 1) return tripsyFlyoverThumbHtml(photos[0] || {}, w, h, extra);
+  return `<div style="position:relative; width:${w}px; height:${h}px; border-radius:6px; overflow:hidden; display:flex; background:var(--panel-2); ${extra}">${photos.map((p, i) => `<div style="flex:1 1 0; min-width:0; height:100%; background:var(--panel-2) center/cover no-repeat;${i ? ' border-left:1px solid rgba(255,255,255,0.45);' : ''}" data-diary-img="${esc(p.driveFileId)}"></div>`).join('')}</div>`;
 }
 // Photos AND videos in ONE step: a single hidden input with NO `capture`, clicked
 // synchronously from the button's own tap, so iOS opens its own sheet (Photo Library /
@@ -20198,7 +20272,7 @@ function tripsyFlyoverTogglePagePhoto(pages, cur, id, isVideo = () => false) {
 // and ask about the transition to the next page," 2026-10-20). Resolves {pages, photos} on
 // Save, null on Cancel; nothing changes until Save. Photos left on no page play after the
 // pages, one per page. `playPreview(stopDraft)` plays the draft without saving it.
-function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, hasMusic = true } = {}) {
+function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, hasMusic = true, page = null } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-slideshow-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-slideshow-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -20222,6 +20296,8 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
       pages.push(pg);
       cur = pages.length - 1;
     }
+    // Opened from a page tile on the setup page: start on that page.
+    if (page != null && pages[page]) cur = page;
     const dragState = { drag: null, suppressTapUntil: 0 };
     const cleaned = () => pages.filter(pg => pg.ids.length).map(pg => ({ ...pg, ids: [...pg.ids], count: Math.max(pg.ids.length, 1) }));
     const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
@@ -20248,7 +20324,12 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
           <div data-ss-strip style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:${pages.length > 1 ? 4 : 12}px;">
             ${pages.map((pg, k) => {
               const first = pg.ids.length ? photos.find(p => p.driveFileId === pg.ids[0]) : null;
-              return `<button class="btn tfo-ss-chip tfo-ss-page${k === cur ? ' tfo-ss-on' : ''}" data-ss-goto="${k}" title="Page ${k + 1}${pages.length > 1 ? ' — drag to reorder' : ''}">${first ? tripsyFlyoverThumbHtml(first, 44, 33, 'border-radius:4px;') : '<span class="tfo-ss-page-empty"></span>'}<span>${k + 1}<span style="opacity:0.6;"> · ${pg.ids.length}</span></span></button>`;
+              // A ＋ chip the size of a page chip sits to the LEFT of the last page ("to the
+              // left of the last existing page show a button that is the same size as the
+              // images of each page with a plus sign in it. If the user selects that, create a
+              // new page at the end of the slideshow," 2026-10-22).
+              const addChip = k === pages.length - 1 ? `<button class="btn tfo-ss-chip tfo-ss-page" data-ss-add-page title="Add a new page at the end of the slideshow"><span class="tfo-ss-page-empty" style="display:flex; align-items:center; justify-content:center; font-size:22px; line-height:1;">＋</span><span>New page</span></button>` : '';
+              return `${addChip}<button class="btn tfo-ss-chip tfo-ss-page${k === cur ? ' tfo-ss-on' : ''}" data-ss-goto="${k}" title="Page ${k + 1}${pages.length > 1 ? ' — drag to reorder' : ''}">${first ? tripsyFlyoverThumbHtml(first, 44, 33, 'border-radius:4px;') : '<span class="tfo-ss-page-empty"></span>'}<span>${k + 1}<span style="opacity:0.6;"> · ${pg.ids.length}</span></span></button>`;
             }).join('')}
           </div>
           ${pages.length > 1 ? '<div style="font-size:11px; color:var(--muted); margin-bottom:12px;">Drag a page to change the order the pages play in.</div>' : ''}
@@ -20273,17 +20354,27 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
             </div>` : ''}
           <div class="tfo-ss-label">${videoPage ? 'The video on this page' : `Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)`}</div>
           <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here. Drag a photo onto another to swap them, or to the edge of one to move its page in between (a dashed line shows where).${videoIds.size ? ' A video goes on an empty page of its own.' : ''}</div>
-          <div data-ss-grid style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
-            ${photos.map(p => {
-              const k = where.get(p.driveFileId);
-              const here = k === cur;
-              const order = here ? page.ids.indexOf(p.driveFileId) + 1 : 0;
-              return `
+          <div data-ss-grid style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start; margin-bottom:14px;">
+            ${(() => {
+              // Photos are listed in play order, so one page's photos sit side by side; a page
+              // holding several is wrapped in a narrow border so they read as one group
+              // ("when multiple photos are on the same page draw a narrow border around all of
+              // the photos on that page so they are grouped together," 2026-10-22). The buttons
+              // keep their data-ss-photo, so the tap and drag wiring is unchanged.
+              const tile = p => {
+                const k = where.get(p.driveFileId);
+                const here = k === cur;
+                const order = here ? page.ids.indexOf(p.driveFileId) + 1 : 0;
+                return `
               <button class="btn" data-ss-photo="${esc(p.driveFileId)}" style="padding:3px; position:relative; ${here ? 'outline:3px solid #3AA76D; outline-offset:1px;' : k != null ? 'opacity:0.55;' : ''}">
                 ${tripsyFlyoverThumbHtml(p, 84, 64, 'border-radius:5px;')}
                 <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:${here ? '#3AA76D' : 'rgba(0,0,0,0.65)'}; color:#fff;">${here ? `✓ ${order}` : k != null ? `Page ${k + 1}` : 'Not on a page'}</span>
               </button>`;
-            }).join('')}
+              };
+              return tripsyFlyoverGridGroups(photos, where).map(g => g.page != null && g.photos.length > 1
+                ? `<div data-ss-page-group="${g.page}" style="display:flex; gap:8px; flex-wrap:wrap; max-width:100%; padding:5px; border:1px solid ${g.page === cur ? '#3AA76D' : 'var(--line)'}; border-radius:9px;">${g.photos.map(tile).join('')}</div>`
+                : g.photos.map(tile).join('')).join('');
+            })()}
           </div>
           ${!videoPage && page.count >= 2 ? `
           <div class="tfo-ss-label">How should the ${page.count} photos appear?</div>
@@ -20392,9 +20483,9 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
       if (sec) sec.onchange = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, seconds: Number(sec.value) } : pg); render(); };
       const prev = ov.querySelector('[data-ss-prev]');
       if (prev) prev.onclick = () => { if (cur > 0) { cur--; render(); } };
-      ov.querySelector('[data-ss-next]').onclick = () => {
-        if (cur < pages.length - 1) { cur++; render(); return; }
-        // A new page starts with the next photo on no page, if there is one.
+      // A new page at the END, opened straight away; it starts with the next photo on no page,
+      // if there is one. Reached from Next ▶ past the last page and from the strip's ＋ chip.
+      const addPageAtEnd = () => {
         const placed = onPage();
         const pg = blank();
         const nextPhoto = photos.find(p => !placed.has(p.driveFileId));
@@ -20403,6 +20494,12 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
         cur = pages.length - 1;
         render();
       };
+      ov.querySelector('[data-ss-next]').onclick = () => {
+        if (cur < pages.length - 1) { cur++; render(); return; }
+        addPageAtEnd();
+      };
+      const addChip = ov.querySelector('[data-ss-add-page]');
+      if (addChip) addChip.onclick = () => { if (Date.now() < dragState.suppressTapUntil) return; addPageAtEnd(); };
       const del = ov.querySelector('[data-ss-delete]');
       if (del) del.onclick = () => { pages = pages.filter((_, k) => k !== cur); cur = Math.max(0, cur - 1); render(); };
       ov.querySelectorAll('[data-ss-cancel]').forEach(b => b.onclick = () => done(null));
