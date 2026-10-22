@@ -37,7 +37,7 @@ assert(/renderTripsyViewPanel\(panel, effectiveRaw, display\.summary, onEdit, fo
 // ---- id-space conversion: guide/outfit ids are "resource-id" (hyphen), this raw
 // event's own key everywhere else is "resource:id" (colon) -- built straight from
 // raw.resource/raw.id, not by re-deriving from a key string ----
-assert(/const attireEventId = \(tripKey && raw && raw\.resource && raw\.id != null\) \? `\$\{raw\.resource\}-\$\{raw\.id\}` : null;/.test(panelFn),
+assert(/let attireEventId = \(tripKey && raw && raw\.resource && raw\.id != null\) \? `\$\{raw\.resource\}-\$\{raw\.id\}` : null;/.test(panelFn),
   'attireEventId is built in the guide\'s hyphen id space, only when tripKey is present');
 
 // ---- the button itself: bottom-right (margin-left:auto pushes it away from

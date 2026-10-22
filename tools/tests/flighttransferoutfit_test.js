@@ -159,7 +159,7 @@ assert(/tripsyAttireMarkInFlightDays\(guide\.days, trip\)/.test(html.slice(html.
   'a saved guide is retrofitted on read, so the live Oct 7 heals with no regeneration');
 // "October 7 still shows a different outfit" (2026-10-06): the outfit read looked the guide up
 // raw, bypassing the getter that marks in-flight days, so the link was never seen there.
-assert(/const guide = await Store\.getTripsyAttireGuide\(tripKey\);\s*\n\s*if \(rec && guide\) tripsyOutfitSyncFlightTransfers\(guide, rec\);/.test(html),
+assert(/const guide = await Store\.getTripsyAttireGuide\(tripKey\);[\s\S]{0,400}if \(rec && guide\) tripsyOutfitSyncFlightTransfers\(guide, rec\);/.test(html),
   'the outfit read fetches the guide through the marking getter before syncing');
 assert(/const attireGuideObj = [^\n]*\n[^\n]*\n[^\n]*\n\s*if \(attireGuideObj\) \{ try \{ tripsyAttireMarkInFlightDays\(attireGuideObj\.days, trip\); \}/.test(html),
   'the My Trips card builder marks in-flight days on its first touch of the guide');

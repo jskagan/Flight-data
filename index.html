@@ -4070,6 +4070,8 @@ const Store = {
     if (guide && typeof tripsyDecryptedTrips !== 'undefined' && Array.isArray(tripsyDecryptedTrips)) {
       const trip = tripsyDecryptedTrips.find(t => t.key === tripKey);
       try { if (trip) tripsyAttireMarkInFlightDays(guide.days, trip); } catch (e) { /* best-effort */ }
+      // Transportation has no outfit except the first and last flight (2026-10-22).
+      try { if (trip) tripsyAttireDropOutfitlessTransit(guide, trip); } catch (e) { /* best-effort */ }
     }
     return guide;
   },
@@ -4115,6 +4117,9 @@ const Store = {
       // different outfit," 2026-10-06 -- a raw read here never saw the mark, so the
       // in-flight block was never linked to its flight).
       const guide = await Store.getTripsyAttireGuide(tripKey);
+      const trip = (typeof tripsyDecryptedTrips !== 'undefined' && Array.isArray(tripsyDecryptedTrips))
+        ? tripsyDecryptedTrips.find(t => t.key === tripKey) : null;
+      if (rec && trip) tripsyOutfitDropOutfitlessTransit(rec, trip);
       if (rec && guide) tripsyOutfitSyncFlightTransfers(guide, rec);
     } catch (e) { console.error('flight-transfer outfit sync failed (non-fatal):', e); }
     return rec;
@@ -14104,12 +14109,16 @@ function showTripsyEntryRequirements(routeKey) {
 
 function tripsyOutfitEventPersonsMap(tripKey) {
   const map = new Map();
+  const trip = (typeof tripsyDecryptedTrips !== 'undefined' && Array.isArray(tripsyDecryptedTrips))
+    ? tripsyDecryptedTrips.find(t => t.key === tripKey) : null;
+  const noOutfit = trip ? tripsyAttireOutfitlessTransitIds(trip) : new Set();
   for (const o of (driveData.tripsyTripOutfits || [])) {
     if (o.tripKey !== tripKey) continue;
     const person = o.person || 'him';
     for (const b of (o.blocks || [])) {
       if (!(b.garmentIds || []).length) continue;
       for (const id of (b.eventIds || [])) {
+        if (noOutfit.has(tripsyAttireEventBaseId(id))) continue; // transit wears no outfit
         if (!map.has(id)) map.set(id, new Set());
         map.get(id).add(person);
       }
@@ -22251,6 +22260,9 @@ const TRIPSY_TRAVEL_AGENT_FIELDS = [
   { key: 'agencyReservationNumber', label: 'Agency Reservation Number', kind: 'text', group: 'travelAgent' },
   { key: 'agentWebsite', label: 'Website', kind: 'text', group: 'travelAgent' },
 ];
+// Edit-form sections a taxi ride or a walk never needs (see renderTripsyEditPanel).
+const TRIPSY_TAXI_HIDDEN_EDIT_GROUPS = ['seat', 'travelAgent'];
+const TRIPSY_NO_SEAT_OR_AGENT_TYPES = ['taxi', 'walk'];
 const TRIPSY_EDIT_FIELDS = {
   activity: [
     { key: 'name', label: 'Name', kind: 'text', group: 'eventDetails' },
@@ -22712,7 +22724,13 @@ function renderTripsyViewPanel(panel, raw, eventSummary, onEdit, tripKey = null)
   // raw event's own "<resource>:<id>" (colon) key everywhere else in My Trips (see
   // tripsyEventKey/tripsyAttireGoToEvent's reverse conversion). Built straight from
   // raw.resource/raw.id rather than re-deriving from a key string.
-  const attireEventId = (tripKey && raw && raw.resource && raw.id != null) ? `${raw.resource}-${raw.id}` : null;
+  let attireEventId = (tripKey && raw && raw.resource && raw.id != null) ? `${raw.resource}-${raw.id}` : null;
+  // A car, train or mid-trip flight wears no outfit (only the first and last flight do),
+  // so its detail panel offers no Outfit button.
+  if (attireEventId && raw.resource === 'transportation') {
+    const t = (tripsyDecryptedTrips || []).find(x => x.key === tripKey);
+    if (t && tripsyAttireOutfitlessTransitIds(t).has(attireEventId)) attireEventId = null;
+  }
   panel.innerHTML = `
     <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
       ${sections || `<div style="font-size:13px; color:var(--muted);">No details available.</div>`}
@@ -22913,11 +22931,16 @@ function tripsyConflictOtherActionDialog(otherIsNew, otherName) {
 
 // Save / Discard / Keep-editing dialog for the unsaved-changes guard on the Tripsy
 // edit panels. Resolves to 'save' | 'discard' | 'cancel'.
+// Pinned above EVERY form it can guard (2026-10-22: "When I selected a transportation event
+// from the verify trip details page and I hit the cancel button, nothing happened" -- the
+// Verify form's overlay sits at z 10003 and this dialog opened at 10002, BEHIND it, so the
+// question was invisible and Cancel waited forever for an answer). Also above
+// tripsyConfirmDialog (2147483100), which never opens one of these over itself.
 function tripsyConfirmDiscardChanges() {
   return new Promise(resolve => {
     _tripsyDiscardDialogOpen = true;
     const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10002; display:flex; align-items:center; justify-content:center; padding:20px;';
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:2147483110; display:flex; align-items:center; justify-content:center; padding:20px;';
     overlay.innerHTML = `
       <div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; max-width:400px; box-shadow:0 12px 40px rgba(0,0,0,0.5);">
         <div style="font-size:15px; font-weight:700; color:var(--text); margin-bottom:8px;">Unsaved changes</div>
@@ -23269,7 +23292,7 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
   // the hour/minute/AM-PM trio never genuinely fit half a column anyway.
   const { groupOrder, byGroup } = tripsyFieldGroups(raw.resource);
   const sectionHtml = group => `
-    <div style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px 18px;">
+    <div data-tripsy-edit-group="${esc(group)}" style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px 18px;">
       <div style="font-family:var(--mono); font-size:13px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:var(--amber); margin-bottom:12px;">${esc(TRIPSY_EDIT_GROUP_LABEL[group] || group)}</div>
       <div class="tp-edit-grid">
         ${byGroup[group].map(f => `
@@ -23306,6 +23329,19 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
     };
     if (categorySelect) categorySelect.addEventListener('change', refreshAirlineOptions);
     refreshAirlineOptions();
+    // A taxi or a walk has no seat and no travel agent ("For a taxi event, there is no need
+    // to have fields for travel agent or seat," then the same for walk, 2026-10-22): those
+    // sections hide while Type is one of TRIPSY_NO_SEAT_OR_AGENT_TYPES and come back if the
+    // Type changes. Hidden, not removed, so the save still reads every field.
+    const refreshTaxiSections = () => {
+      const isTaxi = !!categorySelect && TRIPSY_NO_SEAT_OR_AGENT_TYPES.includes(categorySelect.value);
+      TRIPSY_TAXI_HIDDEN_EDIT_GROUPS.forEach(g => {
+        const sec = panel.querySelector(`[data-tripsy-edit-group="${g}"]`);
+        if (sec) sec.style.display = isTaxi ? 'none' : '';
+      });
+    };
+    if (categorySelect) categorySelect.addEventListener('change', refreshTaxiSections);
+    refreshTaxiSections();
   }
 
   // Start/end (or departure/arrival) date coupling. Up front, an empty side
@@ -36515,8 +36551,96 @@ function tripsyAttireMarkInFlightDays(days, trip) {
   }
   return changed;
 }
+// ---- Transportation gets no outfit, except the trip's first and last flight ----
+// "For transportation events, there should not be an outfit associated with them, except
+// for the initial and final flight of each trip" (2026-10-22). A car, train, ferry, taxi
+// or mid-trip flight is time spent in whatever you already have on, so it is no
+// occasion to dress for: it is left out of the attire guide (no dress code, no time
+// block, no occasion count), the Daily Dress Guide, the composed outfits and the 👔
+// buttons. The departing flight and the flight home stay -- the clothes you travel in
+// are worth planning, and the flight-worn packing lines hang off the departing flight --
+// each with its CONNECTING legs (the next flight with nothing but transportation between
+// and at most two days later, the same journey in the same clothes).
+// Returns the Set of hyphen-form event ids ("transportation-123") that get no outfit.
+// Pure over the live trip.
+function tripsyAttireOutfitlessTransitIds(trip) {
+  const out = new Set();
+  if (!trip || !Array.isArray(trip.events)) return out;
+  const evs = trip.events.filter(e => e && e.tripsyRaw && e.id)
+    .slice().sort((a, b) => String(a.start || a.end || '').localeCompare(String(b.start || b.end || '')));
+  const isTransport = e => e.tripsyRaw.resource === 'transportation';
+  const isFlight = e => isTransport(e) && (e.tripsyRaw.category === 'airplane'
+    || (!e.tripsyRaw.category && /^\s*flight\b/i.test(String(e.summary || ''))));
+  const flights = evs.map((e, i) => (isFlight(e) ? i : -1)).filter(i => i >= 0);
+  const keep = new Set();
+  const dayMs = e => Date.parse(tripsyDayKey(e.start) || tripsyDayKey(e.end) || '');
+  const connects = (i, j) => {
+    const a = Math.min(i, j), b = Math.max(i, j);
+    for (let k = a + 1; k < b; k++) if (!isTransport(evs[k])) return false;
+    const gap = Math.abs(dayMs(evs[j]) - dayMs(evs[i])) / 86400000;
+    return Number.isFinite(gap) && gap <= 2;
+  };
+  if (flights.length) {
+    let cur = flights[0]; keep.add(evs[cur].id);
+    for (const j of flights.slice(1)) { if (!connects(cur, j)) break; keep.add(evs[j].id); cur = j; }
+    cur = flights[flights.length - 1]; keep.add(evs[cur].id);
+    for (const j of flights.slice(0, -1).reverse()) { if (!connects(j, cur)) break; keep.add(evs[j].id); cur = j; }
+  }
+  for (const e of evs) if (isTransport(e) && !keep.has(e.id)) out.add(e.id);
+  return out;
+}
+// The guide/outfit side of an id: a multi-day row carries a -begin/-end (or check-in/out) suffix.
+function tripsyAttireEventBaseId(id) {
+  return String(id || '').replace(/-(checkin|checkout|begin|end)$/, '');
+}
+// Applies the rule to a SAVED guide in memory (Store.getTripsyAttireGuide), so a guide
+// built before it agrees with a fresh build at once: drops the outfitless transit events,
+// gives a day left empty its free-day placeholder (what a fresh build has there), and
+// re-derives blocks/counts and the event fingerprint from the result -- the fingerprint is
+// a function of the day list, so a guide that was otherwise current stays current and one
+// that was stale for another reason stays stale. Idempotent; returns whether it changed.
+function tripsyAttireDropOutfitlessTransit(guide, trip) {
+  if (!guide || !Array.isArray(guide.days) || !trip) return false;
+  const drop = tripsyAttireOutfitlessTransitIds(trip);
+  if (!drop.size) return false;
+  let removed = 0;
+  const days = guide.days.map(day => {
+    const events = (day.events || []).filter(ev => {
+      const gone = ev.resource === 'transportation' && drop.has(tripsyAttireEventBaseId(ev.id));
+      if (gone) removed++;
+      return !gone;
+    });
+    return { ...day, events: events.length ? events : [tripsyAttireFreeDayEvent(day.dayKey)] };
+  });
+  if (!removed) return false;
+  days.forEach(d => d.events.forEach(ev => { if (ev.freeDay && !ev.category) ev.category = 'casual'; }));
+  guide.days = days;
+  try { tripsyAttireMarkInFlightDays(guide.days, trip); } catch (e) { /* best-effort */ }
+  tripsyAttireApplyRecomputedBlocks(guide, computeTripsyAttireBlocks(guide.days));
+  guide.eventFingerprint = tripsyAttireFingerprint(guide.days.flatMap(d => d.events));
+  return true;
+}
+// The same rule on a person's saved outfits: an outfitless transit event leaves every
+// block's eventIds, and a block left with no event is dropped (nothing left to dress).
+// Mutates in memory; returns whether anything changed.
+function tripsyOutfitDropOutfitlessTransit(outfits, trip) {
+  if (!outfits || !Array.isArray(outfits.blocks) || !trip) return false;
+  const drop = tripsyAttireOutfitlessTransitIds(trip);
+  if (!drop.size) return false;
+  let changed = false;
+  outfits.blocks = outfits.blocks.map(b => {
+    const ids = (b.eventIds || []).filter(id => !drop.has(tripsyAttireEventBaseId(id)));
+    if (ids.length !== (b.eventIds || []).length) { changed = true; return { ...b, eventIds: ids }; }
+    return b;
+  }).filter(b => {
+    if ((b.eventIds || []).length) return true;
+    changed = true; return false;
+  });
+  return changed;
+}
 async function tripsyAttireBuildDays(trip) {
   const { effectiveTrip, dayKeys, byDay } = await buildTripsyPrintDayData(trip);
+  const outfitlessTransit = tripsyAttireOutfitlessTransitIds(effectiveTrip || trip);
   const days = [];
   for (const dayKey of dayKeys) {
     if (dayKey === 'undated') continue;
@@ -36538,7 +36662,8 @@ async function tripsyAttireBuildDays(trip) {
           address: display.location,
         };
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter(ev => !(ev.resource === 'transportation' && outfitlessTransit.has(tripsyAttireEventBaseId(ev.id))));
     if (dayEvents.length) days.push({ dayKey, events: dayEvents });
   }
   // Fill the gaps: dayKeys above only lists days that HAVE events, so walk

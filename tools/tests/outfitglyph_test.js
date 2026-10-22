@@ -52,6 +52,9 @@ assert(/const person = persons\.includes\(tripsyDressGuidePerson\) \? tripsyDres
 
 // ---- executed: the map-building logic itself, against fixtures ----
 (async () => {
+  // Transit-without-outfit rule (2026-10-22): no trips loaded here, so nothing is excluded.
+  var tripsyAttireEventBaseId = id => String(id || '').replace(/-(checkin|checkout|begin|end)$/, '');
+  var tripsyAttireOutfitlessTransitIds = () => new Set();
   eval(mapFn.replace(/^function tripsyOutfitEventPersonsMap/, 'var tripsyOutfitEventPersonsMap = function'));
   const driveData = {
     tripsyTripOutfits: [

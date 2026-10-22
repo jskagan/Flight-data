@@ -69,3 +69,20 @@ assert((html.match(/raw\.category === 'airplane' \|\| raw\.category === 'car' \|
 assert(/const isTaxi = category === 'taxi';\s*let photoDataUrl = \(isSkipped \|\| isTaxi\) \? null/.test(html)
   && /isTaxi \? `[\s\S]{0,200}TRIPSY_TAXI_GLYPH_URL/.test(html),
   'a taxi itinerary card shows the cab and never searches Places for a photo');
+
+// The edit form hides Seat and Travel Agent for a taxi ("For a taxi event, there is no need
+// to have fields for travel agent or seat," 2026-10-22), tracking the Type select.
+const ep = extractFn('renderTripsyEditPanel');
+assert(/const TRIPSY_TAXI_HIDDEN_EDIT_GROUPS = \['seat', 'travelAgent'\];/.test(html), 'the hidden sections are Seat and Travel Agent');
+assert(/data-tripsy-edit-group="\$\{esc\(group\)\}"/.test(ep), 'every edit-form section is addressable by its group');
+assert(/TRIPSY_NO_SEAT_OR_AGENT_TYPES\.includes\(categorySelect\.value\)[\s\S]{0,200}sec\.style\.display = isTaxi \? 'none' : ''/.test(ep)
+  && /categorySelect\.addEventListener\('change', refreshTaxiSections\);\s*refreshTaxiSections\(\);/.test(ep),
+  'the sections hide while Type is Taxi, on open and on every Type change');
+
+// Walk gets the same (same day), and the unsaved-changes question opens ABOVE every form:
+// on the Verify Travel Details form (z 10003) it used to open at 10002, behind it, so
+// Cancel looked dead ("I hit the cancel button, nothing happened and the page stayed visible").
+assert(/const TRIPSY_NO_SEAT_OR_AGENT_TYPES = \['taxi', 'walk'\];/.test(html), 'a walk also hides Seat and Travel Agent');
+const discard = extractFn('tripsyConfirmDiscardChanges');
+const z = Number((discard.match(/z-index:(\d+)/) || [])[1]);
+assert(z > 10003 && z > 2147483000, `the discard question sits above the Verify form and other overlays (z ${z})`);

@@ -1570,6 +1570,18 @@ step 4; git history has it if ever needed.
   car for the no-write-up rules (all four `airplane || car` checks), and its itinerary card
   shows the cab glyph with NO Places photo search (`isTaxi` in `tripsyTransportationCardHtml`);
   the van-transfer photo rule stays car-only. Fly-over already reads `taxi` as a drive.
+  **A taxi's edit form has no Seat or Travel Agent section** ("For a taxi event, there is no need
+  to have fields for travel agent or seat," same day): every edit-form section carries
+  `data-tripsy-edit-group`, and `renderTripsyEditPanel` hides the `TRIPSY_TAXI_HIDDEN_EDIT_GROUPS`
+  sections while Type reads Taxi (on open and on every Type change; hidden, not removed, so the
+  save still reads every field). The read-only view already omits empty sections. A WALK hides
+  them too (same day) -- the rule keys on `TRIPSY_NO_SEAT_OR_AGENT_TYPES` (`taxi`, `walk`).
+  **Cancel on the Verify form now works after an edit** ("When i selected a transportation event
+  from the verify trip details page and I hit the cancel button, nothing happened," same day):
+  Cancel on an edited form asks `tripsyConfirmDiscardChanges` first, and that dialog opened at
+  z 10002 -- BEHIND the Verify form's own overlay (z 10003) -- so the question was invisible and
+  Cancel waited on it forever. It is pinned at z `2147483110` now, above every form it can guard
+  (and above `tripsyConfirmDialog`). Any new overlay hosting an edit form must stay below it.
   `taxi_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
@@ -2481,6 +2493,29 @@ step 4; git history has it if ever needed.
   to compose) is unchanged. Verified live: Oct 23 took the Oct 22 outfit; the same-day Oct 12
   (SIN→BKK→CEI) and Oct 17 (CEI→DMK→DAD) connections link as well, with no count change (same-day
   legs were already one run). `flighttransferoutfit_test.js`.
+- **Transportation wears NO outfit — except the trip's first and last flight** ("For
+  transportation events, there should not be an outfit associated with them, except for the
+  initial and final flight of each trip," 2026-10-22). `tripsyAttireOutfitlessTransitIds(trip)`
+  (pure, over the live trip, time-sorted) keeps the FIRST flight and the LAST flight, each with
+  its connecting legs (the next/previous flight with only transportation between and ≤2 days
+  apart), and returns every other transportation event's id — cars, trains, taxis, mid-trip
+  flights, and the airport rides that used to wear the flight's outfit. Those are left out of
+  attire entirely: `tripsyAttireBuildDays` filters them before the free-day gap fill (no dress
+  code, no time block, no occasion count, not in the Daily Dress Guide), and two in-memory read
+  retrofits make saved records agree with no regeneration —
+  `tripsyAttireDropOutfitlessTransit` in `Store.getTripsyAttireGuide` (drops them, gives an
+  emptied day its free-day placeholder, re-derives blocks/counts AND `eventFingerprint` from the
+  corrected days, so an otherwise-current guide stays current) and
+  `tripsyOutfitDropOutfitlessTransit` in `Store.getTripsyTripOutfits` (strips their ids from
+  every block, dropping a block left with none; it runs before the flight-transfer sync).
+  `tripsyOutfitEventPersonsMap` skips them (no 👔 row glyph) and `renderTripsyViewPanel` gives
+  them no Outfit button. Ids compare by base (`tripsyAttireEventBaseId` strips the
+  -begin/-end halves). A block that had worn the flight's outfit onto an airport ride keeps its
+  `wornFromFlightDayKey` stamp (it now dresses just the hotel arrival you reach in those
+  clothes, still counted as one wearing). Checked on the live Singapore GP data: SQ37 and the
+  ICN→LAX flight home keep their outfits, 13 legs lose theirs, no day empties, all 31 outfit
+  blocks survive, and no block is left uncovered (no new ⚠️). The flight-transfer rules above
+  still govern the kept flights (their in-flight days and connecting legs). `transitnooutfit_test.js`.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"
   2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day
