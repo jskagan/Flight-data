@@ -4118,6 +4118,28 @@ WebView's support for recording is unproven.
       Verified in Chromium at 1180×820 (single and pair pages, tall + wide fixtures).
     - **Transitions** (`TRIPSY_FLYOVER_TRANSITIONS`): fade, slide, zoom in, slow pan & zoom
       (a Ken Burns keyframe sized to the page's time), and cut.
+    - **A page of SEVERAL photos is asked how its photos appear, and how each comes in** ("On a
+      page with multiples photos, ask the user how the photos should appear - all at the same
+      time or sequentially, and if there should be transitions for the photos - the same
+      transition should apply to all on a page (fade, wipe, etc.)," 2026-10-22). Two more
+      per-page fields, normalized by `tripsyFlyoverNormalizePage`: `reveal`
+      (`TRIPSY_FLYOVER_PHOTO_REVEALS`: `together` / `sequence`) and `photoTransition`
+      (`TRIPSY_FLYOVER_PHOTO_TRANSITIONS`: `none` / `fade` / `wipe` / `slide` / `zoom`) — ONE
+      transition for every photo on the page, by design. The defaults (`together`, `none`) are
+      exactly how pages played before, so a saved page is unchanged. The Slideshow options page
+      shows both rows for a page with `count >= 2` (not a video page), chips `data-ss-reveal` /
+      `data-ss-ptr`, and says the transition is the same for every photo. `tripsyFlyoverPageRecord`
+      is the one place a page's SAVED fields are listed (used by `tripsyFlyoverDialogPages` and the
+      setup page's thumbnail move) — add a field there when adding one to a page. In the player,
+      `showPage` gives each photo of such a page class `tfo-ph` with `--ph-name` / `--ph-ms` /
+      `--ph-delay` (`i × TRIPSY_FLYOVER_PHOTO_STAGGER_MS` for a sequence, 0 for together);
+      `.tfo-group.tfo-in .tfo-ph` runs the keyframe named (`tfo-ph-cut`, a 1 ms step, when the
+      transition is none but the order is a sequence), and the pan-and-zoom page variant lists
+      its own `tfo-kenburns` alongside so neither animation cancels the other. ANIMATIONS, not
+      transitions, so the `.tfo-paused *` rule freezes them. The page holds at least until the
+      last photo has arrived plus a second (`revealMs + 1000`). A single-photo page is untouched.
+      Verified in Chromium: three photos wipe in left to right 700 ms apart, zoom likewise, the
+      default plays all three at once, and the dialog saves the picks. `flyover_test.js`.
     - **Pages go DIRECTLY from one to the next — the map never shows between pictures**
       ("transition directly from picture to picture. Do not go to the map between pictures,"
       2026-10-20; each screen used to fade fully out, uncovering the map, before the next came

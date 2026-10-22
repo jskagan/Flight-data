@@ -1384,6 +1384,17 @@
   #tripsy-flyover-player .tfo-group.tfo-out { opacity: 0; }
   #tripsy-flyover-player .tfo-group[data-tr="kenburns"] img { animation: tfo-kenburns var(--tfo-ms, 3200ms) ease-out forwards; }
   @keyframes tfo-kenburns { from { transform: scale(1); } to { transform: scale(1.12) translate(-1.5%, -1%); } }
+  /* The photos on a page of several come in one by one or all at once, each the same way
+     (`--ph-name` / `--ph-delay` per photo, set by showPage). Animations, not transitions, so the
+     pause rule freezes them; the pan-and-zoom page variant keeps its own animation alongside. */
+  #tripsy-flyover-player .tfo-group .tfo-ph { opacity: 0; }
+  #tripsy-flyover-player .tfo-group.tfo-in .tfo-ph { animation: var(--ph-name, tfo-ph-cut) var(--ph-ms, 600ms) ease-out var(--ph-delay, 0ms) both; }
+  #tripsy-flyover-player .tfo-group[data-tr="kenburns"].tfo-in .tfo-ph { animation: var(--ph-name, tfo-ph-cut) var(--ph-ms, 600ms) ease-out var(--ph-delay, 0ms) both, tfo-kenburns var(--tfo-ms, 3200ms) ease-out forwards; }
+  @keyframes tfo-ph-cut { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes tfo-ph-fade { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes tfo-ph-wipe { from { opacity: 1; clip-path: inset(0 100% 0 0); } to { opacity: 1; clip-path: inset(0 0 0 0); } }
+  @keyframes tfo-ph-slide { from { opacity: 0; translate: 0 40px; } to { opacity: 1; translate: 0 0; } }
+  @keyframes tfo-ph-zoom { from { opacity: 0; scale: 0.6; } to { opacity: 1; scale: 1; } }
   #tripsy-flyover-player.tfo-paused * { animation-play-state: paused !important; }
   #tripsy-flyover-player .tfo-group[data-layout="single"] img { max-width: 100%; max-height: 100%; object-fit: contain; }
   #tripsy-flyover-player .tfo-group[data-layout="video"] video { max-width: 100%; max-height: 100%; object-fit: contain; background: #000; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
@@ -17788,6 +17799,25 @@ const TRIPSY_FLYOVER_TRANSITIONS = [
   { key: 'kenburns', label: 'Slow pan & zoom' },
   { key: 'none', label: 'Cut' },
 ];
+// How the PHOTOS on a page of several appear ("On a page with multiples photos, ask the user how
+// the photos should appear - all at the same time or sequentially, and if there should be
+// transitions for the photos - the same transition should apply to all on a page," 2026-10-22):
+// `reveal` is all at once or one after another (TRIPSY_FLYOVER_PHOTO_STAGGER_MS apart), and
+// `photoTransition` is how EACH photo comes in, the same for every photo on the page. The
+// defaults (together, no transition) are exactly how pages played before the choice existed.
+const TRIPSY_FLYOVER_PHOTO_REVEALS = [
+  { key: 'together', label: 'All at the same time' },
+  { key: 'sequence', label: 'One after another' },
+];
+const TRIPSY_FLYOVER_PHOTO_TRANSITIONS = [
+  { key: 'none', label: 'None' },
+  { key: 'fade', label: 'Fade' },
+  { key: 'wipe', label: 'Wipe' },
+  { key: 'slide', label: 'Slide up' },
+  { key: 'zoom', label: 'Zoom in' },
+];
+const TRIPSY_FLYOVER_PHOTO_STAGGER_MS = 700;
+const TRIPSY_FLYOVER_PHOTO_IN_MS = 600;
 const TRIPSY_FLYOVER_SECONDS_MIN = 1;
 const TRIPSY_FLYOVER_SECONDS_MAX = 15;
 const TRIPSY_FLYOVER_SECONDS_OPTIONS = [1.5, 2, 2.5, 3, 3.2, 4, 5, 6, 8, 10, 12, 15];
@@ -18210,7 +18240,15 @@ function tripsyFlyoverNormalizePage(pg, fallback) {
   if (!isFinite(count) || count < 1) count = Math.max(1, ids.length);
   count = Math.min(TRIPSY_FLYOVER_PAGE_MAX, Math.max(count, Math.min(ids.length, TRIPSY_FLYOVER_PAGE_MAX)));
   const style = (pg && pg.style) === 'collage' ? 'collage' : 'grid';
-  return { ids, count, style, transition, seconds };
+  const reveal = TRIPSY_FLYOVER_PHOTO_REVEALS.some(r => r.key === (pg && pg.reveal)) ? pg.reveal : 'together';
+  const photoTransition = TRIPSY_FLYOVER_PHOTO_TRANSITIONS.some(t => t.key === (pg && pg.photoTransition)) ? pg.photoTransition : 'none';
+  return { ids, count, style, transition, seconds, reveal, photoTransition };
+}
+// The fields a page SAVES (the dialog's draft and the setup page's thumbnail move both write
+// pages through this), stripped of the derived `photos`/`layout`/`auto`/`video`.
+function tripsyFlyoverPageRecord(pg) {
+  const { ids, count, style, transition, seconds, reveal, photoTransition } = pg;
+  return { ids: [...ids], count, style, transition, seconds, reveal, photoTransition };
 }
 // The pages a stop actually plays, in order, each with its `photos` (the stop's photo
 // records) and drawn `layout`. Saved pages lose photos no longer on the stop (and a photo
@@ -18246,7 +18284,7 @@ function tripsyFlyoverPages(stop) {
     const ids = g.map(p => p.driveFileId);
     const layout = tripsyFlyoverGroupLayout(g, cfg.layout);
     out.push({ ids, count: ids.length, style: cfg.layout === 'collage' ? 'collage' : 'grid', transition: cfg.transition,
-      seconds: cfg.seconds, photos: g, layout, auto: true, ...(layout === 'video' ? { video: true } : {}) });
+      seconds: cfg.seconds, reveal: 'together', photoTransition: 'none', photos: g, layout, auto: true, ...(layout === 'video' ? { video: true } : {}) });
   }
   return out;
 }
@@ -18359,7 +18397,7 @@ function tripsyFlyoverMoveThumbPage(stop, from, to) {
   const ordered = tripsyFlyoverPhotosInPageOrder(stop);
   const a = ordered[from], b = ordered[to];
   if (!a || !b || a.page === b.page) return null;
-  const pages = tripsyFlyoverPages(stop).map(({ ids, count, style, transition, seconds }) => ({ ids: [...ids], count, style, transition, seconds }));
+  const pages = tripsyFlyoverPages(stop).map(tripsyFlyoverPageRecord);
   const moved = tripsyFlyoverMovePage(pages, a.page - 1, b.page - 1, 0).pages;
   return { pages: moved, photos: tripsyFlyoverPhotosInPageOrder({ ...stop, pages: moved }).map(x => x.photo) };
 }
@@ -20136,7 +20174,7 @@ function tripsyFlyoverDialogPages(stop) {
   const saved = Array.isArray(stop && stop.pages);
   return tripsyFlyoverPages(stop)
     .filter(pg => saved ? !pg.auto : true)
-    .map(({ ids, count, style, transition, seconds }) => ({ ids: [...ids], count, style, transition, seconds }));
+    .map(tripsyFlyoverPageRecord);
 }
 // Taps a photo on the page being edited: on this page -> off it; elsewhere -> moved here,
 // when the page has room. Returns {pages, full} without touching its input. Pure.
@@ -20174,7 +20212,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
     const cfg = tripsyFlyoverSlideshowConfig(stop);
     let pages = tripsyFlyoverDialogPages(stop);
     const onPage = () => new Set(pages.flatMap(pg => pg.ids));
-    const blank = () => ({ ids: [], count: 1, style: 'grid', transition: cfg.transition, seconds: cfg.seconds });
+    const blank = () => ({ ids: [], count: 1, style: 'grid', transition: cfg.transition, seconds: cfg.seconds, reveal: 'together', photoTransition: 'none' });
     // Photos on no page yet (just added) get a new page at the end, opened straight away.
     let cur = 0;
     const unplaced0 = photos.filter(p => !onPage().has(p.driveFileId));
@@ -20247,6 +20285,16 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
               </button>`;
             }).join('')}
           </div>
+          ${!videoPage && page.count >= 2 ? `
+          <div class="tfo-ss-label">How should the ${page.count} photos appear?</div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px;">
+            ${TRIPSY_FLYOVER_PHOTO_REVEALS.map(r => `<button class="btn tfo-ss-chip${r.key === page.reveal ? ' tfo-ss-on' : ''}" data-ss-reveal="${r.key}">${esc(r.label)}</button>`).join('')}
+          </div>
+          <div class="tfo-ss-label">How each photo comes in</div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:6px;">The same transition applies to every photo on this page.</div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px;">
+            ${TRIPSY_FLYOVER_PHOTO_TRANSITIONS.map(t => `<button class="btn tfo-ss-chip${t.key === page.photoTransition ? ' tfo-ss-on' : ''}" data-ss-ptr="${t.key}">${esc(t.label)}</button>`).join('')}
+          </div>` : ''}
           <div class="tfo-ss-label">${isLast ? 'After this page (the last), back to the map' : `Transition to page ${cur + 2}`}</div>
           ${isLast ? '<div style="font-size:12px; color:var(--muted); margin-bottom:14px;">The last page fades back to the map.</div>' : `
           <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px;">
@@ -20338,6 +20386,8 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
         render();
       };
       ov.querySelectorAll('[data-ss-tr]').forEach(b => b.onclick = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, transition: b.getAttribute('data-ss-tr') } : pg); render(); });
+      ov.querySelectorAll('[data-ss-reveal]').forEach(b => b.onclick = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, reveal: b.getAttribute('data-ss-reveal') } : pg); render(); });
+      ov.querySelectorAll('[data-ss-ptr]').forEach(b => b.onclick = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, photoTransition: b.getAttribute('data-ss-ptr') } : pg); render(); });
       const sec = ov.querySelector('[data-ss-seconds]');
       if (sec) sec.onchange = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, seconds: Number(sec.value) } : pg); render(); };
       const prev = ov.querySelector('[data-ss-prev]');
@@ -21039,10 +21089,23 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     g.dataset.tr = enterTr;
     g.style.setProperty('--tfo-ms', `${ms + 600}ms`);
     const portrait = window.innerHeight > window.innerWidth;
+    // Several photos: each comes in the page's chosen way (same for all), all at once or
+    // one after another; a single photo keeps the page's own entrance.
+    const sequence = urls.length > 1 && page.reveal === 'sequence';
+    const perPhoto = urls.length > 1 && (sequence || (page.photoTransition && page.photoTransition !== 'none'));
+    const stagger = sequence ? TRIPSY_FLYOVER_PHOTO_STAGGER_MS : 0;
+    const phName = page.photoTransition && page.photoTransition !== 'none' ? `tfo-ph-${page.photoTransition}` : 'tfo-ph-cut';
+    const phMs = phName === 'tfo-ph-cut' ? 1 : TRIPSY_FLYOVER_PHOTO_IN_MS;
     await Promise.all(urls.map((u, i) => new Promise(res => {
       const img = document.createElement('img');
       img.alt = '';
       img.onload = res; img.onerror = res;
+      if (perPhoto) {
+        img.classList.add('tfo-ph');
+        img.style.setProperty('--ph-name', phName);
+        img.style.setProperty('--ph-ms', `${phMs}ms`);
+        img.style.setProperty('--ph-delay', `${i * stagger}ms`);
+      }
       if (layout === 'collage') {
         const [x, y, rot] = (portrait ? COLLAGE_SPOTS_PORTRAIT : COLLAGE_SPOTS)[i % 6];
         img.style.left = `${x}%`; img.style.top = `${y}%`;
@@ -21064,7 +21127,9 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     if (!(await wait(r, tMs))) return false;
     if (prev) prev.remove();
     clearBurst();
-    return wait(r, Math.max(0, ms - tMs));
+    // A sequence holds long enough for the last photo to arrive and be seen.
+    const revealMs = perPhoto ? (urls.length - 1) * stagger + phMs : 0;
+    return wait(r, Math.max(0, ms - tMs, revealMs + 1000 - tMs));
   };
   // After a destination's last page: back to the map.
   const endSlideshow = async r => {

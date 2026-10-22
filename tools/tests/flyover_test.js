@@ -469,6 +469,8 @@ assert(/tripsyFlyoverSeedItineraryPhotos\(record, trip, tripsyTodayDayKey\(\), d
 eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MIN'), constLine('TRIPSY_FLYOVER_SECONDS_MAX'),
   (html.match(/const TRIPSY_FLYOVER_LAYOUTS = \[[\s\S]*?\];/) || [''])[0],
   (html.match(/const TRIPSY_FLYOVER_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0],
+  (html.match(/const TRIPSY_FLYOVER_PHOTO_REVEALS = \[[\s\S]*?\];/) || [''])[0],
+  (html.match(/const TRIPSY_FLYOVER_PHOTO_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0], extractFn('tripsyFlyoverPageRecord'),
   extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverIsVideo'), extractFn('tripsyFlyoverPhotoGroups')].join('\n'));
 {
   const def = tripsyFlyoverSlideshowConfig({});
@@ -487,7 +489,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
 {
   const player = extractFn('playTripsyFlyover');
   assert(/const pages = tripsyFlyoverPages\(s\);[\s\S]*const enter = tripsyFlyoverEnterTransitions\(s, pages\);[\s\S]*showPage\(r, pages\[k\], enter\[k\]\)/.test(player), 'each destination plays its OWN pages');
-  assert(/const ms = Math\.round\(page\.seconds \* 1000\);[\s\S]*return wait\(r, Math\.max\(0, ms - tMs\)\);/.test(player), 'each page holds for its own seconds, pause-aware');
+  assert(/const ms = Math\.round\(page\.seconds \* 1000\);[\s\S]*return wait\(r, Math\.max\(0, ms - tMs, revealMs \+ 1000 - tMs\)\);/.test(player), 'each page holds for its own seconds (longer only if its photos are still arriving), pause-aware');
   assert(/g\.dataset\.layout = layout;\s*g\.dataset\.tr = enterTr;/.test(player), 'the page\'s layout and entering transition drive its CSS');
   assert(/ov\.classList\.toggle\('tfo-paused', run\.paused\)/.test(player) && /\.tfo-paused \* \{ animation-play-state: paused !important; \}/.test(html), 'pause also freezes the pan-and-zoom animation');
   assert(/if \(preview\) return all\.filter\(s => s\.id === opts\.previewStopId\);/.test(player), 'Preview plays just that destination');
@@ -568,6 +570,8 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
 eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MIN'), constLine('TRIPSY_FLYOVER_SECONDS_MAX'),
   (html.match(/const TRIPSY_FLYOVER_LAYOUTS = \[[\s\S]*?\];/) || [''])[0],
   (html.match(/const TRIPSY_FLYOVER_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0],
+  (html.match(/const TRIPSY_FLYOVER_PHOTO_REVEALS = \[[\s\S]*?\];/) || [''])[0],
+  (html.match(/const TRIPSY_FLYOVER_PHOTO_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0], extractFn('tripsyFlyoverPageRecord'),
   extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverIsVideo'), extractFn('tripsyFlyoverPhotoGroups'),
   extractFn('tripsyFlyoverGroupLayout'), constLine('TRIPSY_FLYOVER_PAGE_MAX'), extractFn('tripsyFlyoverPageLayout'),
   extractFn('tripsyFlyoverNormalizePage'), extractFn('tripsyFlyoverPages'), extractFn('tripsyFlyoverEnterTransitions'),
@@ -588,6 +592,34 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   const legacy = tripsyFlyoverPages({ slideshow: { layout: 'grid', transition: 'slide', seconds: 4 }, photos: ph });
   assert(legacy.map(pg => pg.ids.join('')).join('|') === 'p1|p2|p3p4p5|p6|p7' && legacy.every(pg => pg.transition === 'slide' && pg.seconds === 4),
     'old per-destination settings become the same pages');
+  // ---- how the photos on a page of several appear ("On a page with multiples photos, ask the
+  // user how the photos should appear - all at the same time or sequentially, and if there
+  // should be transitions for the photos - the same transition should apply to all on a page,"
+  // 2026-10-22) ----
+  assert(legacy.every(pg => pg.reveal === 'together' && pg.photoTransition === 'none'),
+    'a page saved before the choice existed plays as it did: all at once, no per-photo transition');
+  const nz = tripsyFlyoverNormalizePage({ ids: ['a', 'b'], count: 2, reveal: 'sequence', photoTransition: 'wipe' });
+  assert(nz.reveal === 'sequence' && nz.photoTransition === 'wipe', 'THE ASK: a page keeps its reveal order and its one per-photo transition');
+  const nz2 = tripsyFlyoverNormalizePage({ ids: ['a'], count: 1, reveal: 'random', photoTransition: 'dissolve' });
+  assert(nz2.reveal === 'together' && nz2.photoTransition === 'none', 'an unknown choice falls back to the defaults');
+  const keysOf = name => ((html.match(new RegExp(`const ${name} = \\[[\\s\\S]*?\\];`)) || [''])[0].match(/key: '([a-z]+)'/g) || []).map(m => m.slice(6, -1)).join();
+  assert(keysOf('TRIPSY_FLYOVER_PHOTO_REVEALS') === 'together,sequence' && keysOf('TRIPSY_FLYOVER_PHOTO_TRANSITIONS') === 'none,fade,wipe,slide,zoom', 'the two choices offered');
+  const rec = tripsyFlyoverPageRecord({ ids: ['a'], count: 1, style: 'grid', transition: 'fade', seconds: 3, reveal: 'sequence', photoTransition: 'zoom', photos: [{}], layout: 'single', auto: true });
+  assert(JSON.stringify(Object.keys(rec)) === JSON.stringify(['ids', 'count', 'style', 'transition', 'seconds', 'reveal', 'photoTransition']),
+    'a saved page record carries the two choices and none of the derived fields');
+  const dlgR = extractFn('tripsyFlyoverSlideshowDialog');
+  assert(/\$\{!videoPage && page\.count >= 2 \? `[\s\S]*How should the \$\{page\.count\} photos appear\?[\s\S]*data-ss-reveal="\$\{r\.key\}"[\s\S]*How each photo comes in[\s\S]*The same transition applies to every photo on this page\.[\s\S]*data-ss-ptr="\$\{t\.key\}"/.test(dlgR),
+    'a page of two or more asks both questions, saying the transition is the same for every photo; a one-photo or video page does not');
+  assert(/\[data-ss-reveal\]'\)\.forEach\(b => b\.onclick = \(\) => \{ pages = pages\.map\(\(pg, k\) => k === cur \? \{ \.\.\.pg, reveal: b\.getAttribute\('data-ss-reveal'\) \}/.test(dlgR)
+    && /\[data-ss-ptr\]'\)\.forEach\(b => b\.onclick = \(\) => \{ pages = pages\.map\(\(pg, k\) => k === cur \? \{ \.\.\.pg, photoTransition: b\.getAttribute\('data-ss-ptr'\) \}/.test(dlgR),
+    'each pick is stored on the page being edited');
+  const playerR = extractFn('playTripsyFlyover');
+  assert(/const sequence = urls\.length > 1 && page\.reveal === 'sequence';/.test(playerR) && /img\.style\.setProperty\('--ph-delay', `\$\{i \* stagger\}ms`\)/.test(playerR)
+    && /img\.classList\.add\('tfo-ph'\)/.test(playerR) && /Math\.max\(0, ms - tMs, revealMs \+ 1000 - tMs\)/.test(playerR),
+    'the player staggers the photos of a sequence page, gives each the page\'s one transition, and holds the page until the last has arrived');
+  assert(/\.tfo-group\.tfo-in \.tfo-ph \{ animation: var\(--ph-name, tfo-ph-cut\)/.test(html) && /\[data-tr="kenburns"\]\.tfo-in \.tfo-ph \{ animation: [^}]*tfo-kenburns/.test(html)
+    && ['cut', 'fade', 'wipe', 'slide', 'zoom'].every(k => new RegExp(`@keyframes tfo-ph-${k} `).test(html)),
+    'per-photo entrances are animations (so pause freezes them), with keyframes for every choice and the pan-and-zoom page keeping its own');
   // ---- pages, each configured on its own ----
   const Q = [1, 2, 3, 4, 5, 6].map(n => ({ driveFileId: 'q' + n }));
   const stop = { photos: Q, pages: [
@@ -789,6 +821,8 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
 eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MIN'), constLine('TRIPSY_FLYOVER_SECONDS_MAX'),
   (html.match(/const TRIPSY_FLYOVER_LAYOUTS = \[[\s\S]*?\];/) || [''])[0],
   (html.match(/const TRIPSY_FLYOVER_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0],
+  (html.match(/const TRIPSY_FLYOVER_PHOTO_REVEALS = \[[\s\S]*?\];/) || [''])[0],
+  (html.match(/const TRIPSY_FLYOVER_PHOTO_TRANSITIONS = \[[\s\S]*?\];/) || [''])[0], extractFn('tripsyFlyoverPageRecord'),
   extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverIsVideo'), extractFn('tripsyFlyoverFileIsVideo'),
   extractFn('tripsyFlyoverDurationLabel'), extractFn('tripsyFlyoverPhotoGroups'),
   extractFn('tripsyFlyoverGroupLayout'), constLine('TRIPSY_FLYOVER_PAGE_MAX'), extractFn('tripsyFlyoverPageLayout'),
@@ -925,7 +959,7 @@ eval([extractFn('tripsyFlyoverPhotosInPageOrder')].join('\n'));
 // for creating and editing the flyover view much wider. Also, allow the user to edit the order
 // of pages from the flyover page by selecting pages and re-ordering them in the same way he
 // can from the slideshow edit page," 2026-10-22) ----
-eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverMoveThumbPage')].join('\n'));
+eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), extractFn('tripsyFlyoverMoveThumbPage')].join('\n'));
 {
   const ph = id => ({ driveFileId: id });
   const st = { photos: ['A', 'B', 'C', 'D'].map(ph), pages: [{ ids: ['A'], count: 1, seconds: 3 }, { ids: ['B', 'C'], count: 2, seconds: 3 }, { ids: ['D'], count: 1, seconds: 3 }] };
