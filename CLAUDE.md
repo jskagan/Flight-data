@@ -4257,7 +4257,9 @@ WebView's support for recording is unproven.
         are grouped together," 2026-10-22): because the grid is in play order, a page's photos
         are adjacent, and `tripsyFlyoverGridGroups(photos, where)` (pure) cuts the list into
         consecutive same-page runs; a run of 2+ renders inside `<div data-ss-page-group>` (1px
-        `var(--line)`, green `#3AA76D` for the page being edited; `flex-wrap` + `max-width:100%`
+        `rgba(255,255,255,0.65)` — a bright line, since `var(--line)` was near-invisible on the
+        dark panel: "Make the border around photos on the same page brighter," 2026-10-22; green
+        `#3AA76D` for the page being edited; `flex-wrap` + `max-width:100%`
         so a long group wraps on a phone). A lone photo and a photo on no page stand bare. The
         buttons are unchanged, so tap and drag inside a group work as before (verified in
         Chromium: tap adds a fourth photo to the group, a drag swaps two inside it).

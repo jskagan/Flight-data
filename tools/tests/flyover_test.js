@@ -1552,8 +1552,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   const g2 = tripsyFlyoverGridGroups([ph[4], ph[4]], new Map());
   assert(g2.length === 2 && g2.every(x => x.page === null), 'photos on no page never group together');
   const dlg = html.slice(html.indexOf('<div data-ss-grid'), html.indexOf('How should the ${page.count} photos appear?'));
-  assert(/tripsyFlyoverGridGroups\(photos, where\)\.map\(g => g\.page != null && g\.photos\.length > 1\s*\? `<div data-ss-page-group="\$\{g\.page\}" style="[^"]*border:1px solid \$\{g\.page === cur \? '#3AA76D' : 'var\(--line\)'\}; border-radius:9px;">\$\{g\.photos\.map\(tile\)\.join\(''\)\}<\/div>`\s*: g\.photos\.map\(tile\)\.join\(''\)\)/.test(dlg),
-    'the grid wraps a run of 2+ photos on one page in a bordered group, green for the page being edited');
+  assert(/tripsyFlyoverGridGroups\(photos, where\)\.map\(g => g\.page != null && g\.photos\.length > 1\s*\? `<div data-ss-page-group="\$\{g\.page\}" style="[^"]*border:1px solid \$\{g\.page === cur \? '#3AA76D' : 'rgba\(255,255,255,0\.65\)'\}; border-radius:9px;">\$\{g\.photos\.map\(tile\)\.join\(''\)\}<\/div>`\s*: g\.photos\.map\(tile\)\.join\(''\)\)/.test(dlg),
+    'the grid wraps a run of 2+ photos on one page in a bright bordered group, green for the page being edited');
   assert(/<div data-ss-page-group="\$\{g\.page\}" style="display:flex; gap:8px; flex-wrap:wrap; max-width:100%;/.test(dlg), 'a group wraps inside itself on a narrow screen');
 }
 
