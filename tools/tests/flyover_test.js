@@ -968,8 +968,11 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(/const via = b\.mode === 'plane' \? \(b\.via \|\| \[\]\) : \[\];/.test(play), 'only a flight leg is drawn through its layovers');
   assert(/L\.latLngBounds\(\[\[a\.lat, a\.lng\], \.\.\.via\.map/.test(play), 'the leg is framed WITH its layovers (no zoom into them)');
   const loop = play.slice(play.indexOf('for (const v of via)'), play.indexOf('from = v;'));
-  assert(/animateLeg\(r, from, v, 'plane'\)/.test(loop) && /tfo-via-label/.test(loop) && !/flyTo|showPage|showCard|arrive\(/.test(loop),
-    'at a layover: fly there, show the city name, no zoom, no card, no photos');
+  assert(/animateLeg\(r, from, v, 'plane'\)/.test(loop) && !/tfo-via-label/.test(loop) && !/flyTo|showPage|showCard|arrive\(/.test(loop),
+    'at a layover: fly there and pause -- no zoom, no card, no photos (its name is already up)');
+  assert(/const showLayovers = via => via\.map\(v => \{\s*ensureDot\(v\);[\s\S]*?tfo-via-label tfo-dest-label[\s\S]*?viaLabels\.push\(m\);/.test(play)
+    && /const viaMarks1 = showLayovers\(via1\);/.test(play) && /ensureDot\(b\);\s*const viaMarks = showLayovers\(via\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(legBounds/.test(play),
+    'a leg\'s layover dots and names go up WITH the destination\'s, as the leg begins (first leg included)');
   assert(/tripsyFlyoverGeocodeVias\(stops\)/.test(extractFn('tripsyFlyoverBuild')) && /layoversAt/.test(extractFn('tripsyFlyoverBuild')), 'a build places the layovers');
   assert(/tripsyFlyoverAddLayovers\(record, trip\)/.test(extractFn('showTripsyFlyover')), 'an older fly-over picks layovers up on the setup page');
   assert(/opts\.layovers/.test(play) && /tripsyFlyoverAddLayovers\(record, trip\)/.test(html.slice(html.indexOf('[data-tripsy-flyover]'), html.indexOf('[data-tripsy-flyover]') + 2000)),
@@ -1068,7 +1071,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/ensureDot\(first\);\s*ensureDot\(stops\[1\]\);/.test(play), 'the opening map shows the first destination\'s dot as well as the origin\'s');
     assert(/showDestLabel\(b\);\s*ensureDot\(a\);\s*ensureDot\(b\);/.test(play), 'each later destination\'s dot goes up with its name as its leg begins');
     assert(!/L\.circleMarker/.test(play) && /const dot = s => L\.marker\(\[s\.lat, s\.lng\], \{ icon: dotIcon\(14\)/.test(play)
-      && /layers\.push\(L\.marker\(\[v\.lat, v\.lng\], \{ icon: dotIcon\(14\)/.test(play),
+      && /ensureDot\(v\)/.test(play),
       'destination and layover dots are divIcon markers (repositioned every zoom frame like the labels), never SVG circles');
     // "make the labels with the origin and destination larger when they appear on the map"
     const css = (html.match(/\.tfo-dest-label span \{[^}]*\}/) || [''])[0];
@@ -1097,7 +1100,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     && /clearDestLabel\(\);\s*clearViaLabels\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(all/.test(play),
     'the destination name is taken away before the map pulls back out (next leg, and the closing map)');
   assert(/\.tfo-dot \{ background: #111;/.test(html), 'location dots are black');
-  assert(/viaLabels\.push\(L\.marker\(\[v\.lat, v\.lng\], \{ icon: L\.divIcon\(\{ className: 'tfo-via-label tfo-dest-label'/.test(play),
+  assert(/const m = L\.marker\(\[v\.lat, v\.lng\], \{ icon: L\.divIcon\(\{ className: 'tfo-via-label tfo-dest-label'/.test(play),
     'a layover name is drawn exactly like every other name, to the right of its dot');
 }
 {
@@ -1140,12 +1143,12 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(/viaLabels\.push\(L\.marker/.test(play) && !/layers\.push\(L\.marker\(\[v\.lat, v\.lng\], \{ icon: L\.divIcon\(\{ className: 'tfo-via-label/.test(play),
     'layover labels are tracked so they are removed when the leg ends, not left on the map');
   assert(/const keepLabelsInView = \(labelMarkers, dotStops\) => \{[\s\S]*?map\.panBy\(\[shift, 0\], \{ animate: false \}\);/.test(play)
-    && /keepLabelsInView\(\[viaLabels\[viaLabels\.length - 1\], destLabel\], \[first, stops\[1\]\]\);/.test(play)
-    && /map\.fitBounds\(legBounds[^\n]*\n\s*keepLabelsInView\(\[fromLabel, destLabel\], \[a, \.\.\.via, b\]\);/.test(play),
+    && /keepLabelsInView\(\[originLabel, destLabel, \.\.\.viaMarks1\], \[first, \.\.\.via1, stops\[1\]\]\);/.test(play)
+    && /map\.fitBounds\(legBounds[^\n]*\n\s*keepLabelsInView\(\[fromLabel, destLabel, \.\.\.viaMarks\], \[a, \.\.\.via, b\]\);/.test(play),
     'every leg, not just the first, slides the map so both names stay inside the screen');
   assert(/viaLabels\.push\(L\.marker\(\[a\.lat, a\.lng\][^\n]*tfo-dest-label[^\n]*\n\s*const fromLabel = viaLabels\[viaLabels\.length - 1\];\s*showDestLabel\(b\);/.test(play),
     'each later leg names the city being left as well as the destination');
-  assert(/showDestLabel\(b\);\s*ensureDot\(a\);\s*ensureDot\(b\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(legBounds/.test(play),
+  assert(/showDestLabel\(b\);\s*ensureDot\(a\);\s*ensureDot\(b\);\s*const viaMarks = showLayovers\(via\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(legBounds/.test(play),
     'both ends of every leg have their dot (and name) before the zoomed-out leg view appears');
   assert(/growDestLabel\(\);[\s\S]*?const center = arrivalCenter\(s, zoom\);[\s\S]*?const burst = burstWanted \? startBurst\(r, s\) : null;\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom/.test(play),
     'the zoom-in frames the dot and its growing label together, and the orange starts growing as the zoom starts');
@@ -1153,10 +1156,10 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     && (play.match(/if \(prev\) prev\.remove\(\);\s*clearBurst\(\);/g) || []).length === 2,
     'a destination with photos swells its dot to fill the screen, and the first page (photo or video) comes straight in over it');
   assert(/\.tfo-burst \{[^}]*background: #111/.test(html) && !/\.tfo-burst \{[^}]*transition/.test(html) && !/@keyframes tfo-burst/.test(html)
-    && /const p = Math\.min\(1, elapsed \/ TRIPSY_FLYOVER_BURST_MS\);[\s\S]*?const endD = \(far \+ 4\) \* 14 \/ 5;\s*const d = 14 \+ \(endD - 14\) \* p;[\s\S]*?el\.style\.width = el\.style\.height = `\$\{d\}px`;[\s\S]*?el\.style\.borderWidth = `\$\{d \/ 7\}px`;/.test(play)
+    && /const p = Math\.min\(1, elapsed \/ TRIPSY_FLYOVER_BURST_MS\);[\s\S]*?const ring = TRIPSY_FLYOVER_BURST_RING_MAX;\s*const endD = 2 \* \(far \+ 2 \+ ring\);\s*const d = 14 \+ \(endD - 14\) \* p;[\s\S]*?el\.style\.width = el\.style\.height = `\$\{d\}px`;[\s\S]*?el\.style\.borderWidth = `\$\{Math\.min\(d \/ 7, ring\)\}px`;/.test(play)
     && !/el\.style\.transform = `scale/.test(play.slice(play.indexOf('const startBurst'))) && /\.tfo-burst \{[^}]*border: 2px solid #fff/.test(html)
     && /if \(!r\.paused\) elapsed \+= now - last;[\s\S]*?const pt = map\.latLngToContainerPoint\(\[s\.lat, s\.lng\]\);/.test(play.slice(play.indexOf('const startBurst'))),
-    'the burst is the dot\'s own colour, grown per frame at ONE linear rate (no transition or easing), following the dot and honoring pause');
+    'the burst is the dot\'s own colour, its ring stops growing at the photos\' border thickness, grown per frame at ONE linear rate (no transition or easing), following the dot and honoring pause');
   assert(/if \(Math\.abs\(map\.getZoom\(\) - zoom\) > 0\.01\) \{[\s\S]{0,120}map\.setView\(center, zoom, \{ animate: false \}\)/.test(play)
     && /map\.fitBounds\(legBounds, \{ padding: \[80, 80\], maxZoom: 9, animate: false \}\)/.test(play),
     'the map is always at its final view before the burst, and before a vehicle starts moving');
@@ -1180,4 +1183,11 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'the setup page\'s Play asks which map before playing');
   ok(/const googleTilesP = opts\.mapService === 'free' \? Promise\.resolve\(null\) : Promise\.race\(\[/.test(html2),
     'the free map never asks Google for a tile session');
+}
+{
+  const html3 = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'index.html'), 'utf8');
+  const m = html3.match(/const TRIPSY_FLYOVER_BURST_RING_MAX = (\d+);/);
+  const photo = html3.match(/#tripsy-flyover-player \.tfo-photo img \{[^}]*border: (\d+)px solid #fff/);
+  if (m && photo && m[1] === photo[1]) console.log('ok   the burst ring stops at the photos\' own border thickness');
+  else { console.log('FAIL the burst ring stops at the photos\' own border thickness'); process.exitCode = 1; }
 }

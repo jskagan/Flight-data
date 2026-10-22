@@ -3809,6 +3809,15 @@ WebView's support for recording is unproven.
     `border-width` of d/7 (the dot's own 2-of-14 ring), so the disc and ring are rendered at
     full resolution. The end size `(far + 4) × 14/5` puts the ring's INNER edge past the
     farthest corner, so the ring leaves the screen exactly as it goes all black.
+    **The ring stops growing at the photos' border thickness** ("have it stop when it reaches
+    the thickness of the border around the photos," same day): `border-width` is
+    `min(d/7, TRIPSY_FLYOVER_BURST_RING_MAX)`, the constant mirroring `.tfo-photo img`'s 4px
+    white border (a test pins the two equal), and the end size is `2 × (far + 2 + ring)`.
+    **Layover dots and names go up WITH the destination's, as the leg begins** ("The layover
+    labels should appear at the same time as the destination labels," same day):
+    `showLayovers(via)` (ensureDot + a right-of-dot name, pushed into `viaLabels`) runs on the
+    opening map for leg 1 and before each later leg's framing, and its names join
+    `keepLabelsInView`; the flight still pauses 0.9 s at each layover, but adds nothing there.
     **A destination's dot goes up with its name** ("the destination orange dot should appear on
     the map when the map first appears," same day): the opening map shows the origin's AND the
     first destination's dots, and each later leg adds its destination's dot as the leg begins —

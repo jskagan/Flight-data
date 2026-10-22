@@ -17558,6 +17558,9 @@ const TRIPSY_FLYOVER_TILE_FAIL_LIMIT = 4;
 // How long the dot takes to grow into the full screen (its own black), from the start of the arrival
 // zoom (1.4 s) -- one linear rate the whole way.
 const TRIPSY_FLYOVER_BURST_MS = 2400;
+// The burst's white ring grows with the dot only until it is as thick as the white border
+// round the slideshow photos (.tfo-photo img's 4px), then stays that thick.
+const TRIPSY_FLYOVER_BURST_RING_MAX = 4;
 const TRIPSY_FLYOVER_DEST_LABEL_SCALE = { start: 1, grown: 1 };
 // GOOGLE MAP TILES come first when they can ("Add Google Map Tiles with the Places key,"
 // 2026-10-21 — the keyless sources have no @2x tiles, so the map looked pixelated on the
@@ -20479,15 +20482,18 @@ async function playTripsyFlyover(trip, record, opts = {}) {
         // and its white ring stay sharp the whole way ("put a white border around them that will
         // grow with them and will keep high resolution until the border disappears when the
         // screen becomes completely black," 2026-10-22). The ring keeps the dot's own 2-of-14
-        // proportion, and the end size puts the ring's INNER edge past the farthest corner, so
-        // the ring has left the screen exactly as the screen is all black.
-        const endD = (far + 4) * 14 / 5;
+        // proportion only until it is as thick as the photos' border, then holds ("have it stop
+        // when it reaches the thickness of the border around the photos," same day); the end
+        // size puts the ring's INNER edge past the farthest corner, so the ring has left the
+        // screen exactly as the screen is all black.
+        const ring = TRIPSY_FLYOVER_BURST_RING_MAX;
+        const endD = 2 * (far + 2 + ring);
         const d = 14 + (endD - 14) * p;
         el.style.left = `${pt.x}px`;
         el.style.top = `${pt.y}px`;
         el.style.width = el.style.height = `${d}px`;
         el.style.margin = `${-d / 2}px 0 0 ${-d / 2}px`;
-        el.style.borderWidth = `${d / 7}px`;
+        el.style.borderWidth = `${Math.min(d / 7, ring)}px`;
         if (p >= 1) return resolve(true);
         requestAnimationFrame(frame);
       };
@@ -20586,6 +20592,17 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     if (shift > 0) map.panBy([shift, 0], { animate: false });
   };
 
+  // A leg's layovers get their dot and name when the leg begins, together with the
+  // destination's ("The layover labels should appear at the same time as the destination
+  // labels," 2026-10-22) -- not when the plane reaches them. Named exactly like every other
+  // stop: to the right of its dot, same size. Returns the name markers (for keepLabelsInView).
+  const showLayovers = via => via.map(v => {
+    ensureDot(v);
+    const m = L.marker([v.lat, v.lng], { icon: L.divIcon({ className: 'tfo-via-label tfo-dest-label', html: `<span>${esc(v.label || '')}</span>`, iconSize: [0, 0] }), interactive: false, zIndexOffset: 900 }).addTo(map);
+    viaLabels.push(m);
+    return m;
+  });
+
   const play = async r => {
     while (layers.length) { try { layers.pop().remove(); } catch (e) {} }
     dotted = new Set();
@@ -20628,8 +20645,11 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       ensureDot(first);
       ensureDot(stops[1]);
       viaLabels.push(L.marker([first.lat, first.lng], { icon: L.divIcon({ className: 'tfo-via-label tfo-dest-label', html: `<span>${esc(first.label || '')}</span>`, iconSize: [0, 0] }), interactive: false, zIndexOffset: 900 }).addTo(map));
+      const originLabel = viaLabels[viaLabels.length - 1];
       showDestLabel(stops[1]);
-      keepLabelsInView([viaLabels[viaLabels.length - 1], destLabel], [first, stops[1]]);
+      const via1 = stops[1].mode === 'plane' ? (stops[1].via || []) : [];
+      const viaMarks1 = showLayovers(via1);
+      keepLabelsInView([originLabel, destLabel, ...viaMarks1], [first, ...via1, stops[1]]);
     }
     showCard(trip.name || 'Trip', formatTripDateRange(tripsyItineraryStartDayKey(trip), tripsyItineraryEndDayKey(trip)));
     if (!(await wait(r, 2200))) return;
@@ -20651,20 +20671,17 @@ async function playTripsyFlyover(trip, record, opts = {}) {
         showDestLabel(b);
         ensureDot(a);
         ensureDot(b);
+        const viaMarks = showLayovers(via);
         if (!(await untilMoveEnd(r, () => map.flyToBounds(legBounds, { padding: [80, 80], maxZoom: 9, duration: 1.3 }), 2400))) return;
         // As on arrival: never start the vehicle while the map is still zooming (a vehicle
         // placed during a zoom animation jumps about).
         const want = Math.min(9, map.getBoundsZoom(legBounds, false, L.point(160, 160)));
         if (Math.abs(map.getZoom() - want) > 0.01) { try { map.stop(); } catch (e) {} map.fitBounds(legBounds, { padding: [80, 80], maxZoom: 9, animate: false }); }
-        keepLabelsInView([fromLabel, destLabel], [a, ...via, b]);
+        keepLabelsInView([fromLabel, destLabel, ...viaMarks], [a, ...via, b]);
       }
       let from = a;
       for (const v of via) {
         if (!(await animateLeg(r, from, v, 'plane'))) return;
-        layers.push(L.marker([v.lat, v.lng], { icon: dotIcon(14), interactive: false, keyboard: false, zIndexOffset: 500 }).addTo(map)); // same size as every stop's dot
-        // Drawn exactly like every other name: to the right of its dot ("The label for Bangkok on
-        // the return flight … is not in the same format as other labels," 2026-10-22).
-        viaLabels.push(L.marker([v.lat, v.lng], { icon: L.divIcon({ className: 'tfo-via-label tfo-dest-label', html: `<span>${esc(v.label || '')}</span>`, iconSize: [0, 0] }), interactive: false, zIndexOffset: 900 }).addTo(map));
         if (!(await wait(r, 900))) return;
         from = v;
       }
