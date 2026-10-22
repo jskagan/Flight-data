@@ -1039,12 +1039,13 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), 
   // glyph-only, same colours.
   assert(/<div class="tfo-ss-footer"[^>]*>\s*<button class="tripsy-close-x" data-flyover-close title="Close" aria-label="Close">✕<\/button>\s*<button class="tripsy-close-x tripsy-save-check" data-flyover-save title="Save" aria-label="Save">✓<\/button>/.test(setup),
     'and ✕ / ✓ sit in a pinned footer at the bottom, as the same word-free red/green boxes as the top');
-  assert(/\.tripsy-close-x\.tripsy-close-x--wide \{ width: auto;/.test(html), 'the wide variant keeps the box style and just makes room for the word');
-  for (const [dlg, cancel] of [['tripsyFlyoverEditDestinationsDialog', 'data-fe-cancel'], ['tripsyFlyoverSlideshowDialog', 'data-ss-cancel']]) {
+  // "Do the same for the edit destinations and slideshow dialogs" (2026-10-22): their footers are
+  // glyph-only too, and the wide word-carrying variant is gone.
+  assert(!/tripsy-close-x--wide/.test(html), 'no wide word-carrying ✕/✓ variant remains anywhere');
+  for (const [dlg, cancel, save] of [['tripsyFlyoverEditDestinationsDialog', 'data-fe-cancel', 'data-fe-save'], ['tripsyFlyoverSlideshowDialog', 'data-ss-cancel', 'data-ss-save']]) {
     const fn = extractFn(dlg);
-    assert(new RegExp(`<button class="tripsy-close-x tripsy-close-x--wide" ${cancel}><span class="tripsy-close-x-glyph">✕</span>Cancel</button>`).test(fn)
-      && /tripsy-close-x tripsy-save-check tripsy-close-x--wide" data-(fe|ss)-save><span class="tripsy-close-x-glyph">✓<\/span>Save/.test(fn),
-      `${dlg}'s footer is ✕ Cancel / ✓ Save in the same boxes`);
+    assert(new RegExp(`<div class="tfo-ss-footer"[\\s\\S]*?<button class="tripsy-close-x" ${cancel} title="Cancel" aria-label="Cancel">✕</button>\\s*<button class="tripsy-close-x tripsy-save-check" ${save} title="Save" aria-label="Save">✓</button>`).test(fn),
+      `${dlg}'s footer is a word-free ✕ / ✓ pair in the same boxes as its header`);
   }
   assert(/querySelectorAll\('\[data-flyover-save\]'\)\.forEach\(b => b\.onclick = async/.test(setup) && /a\.blur\(\)/.test(setup)
     && /const ok = await save\(\);\s*if \(!ok\) throw/.test(setup) && /toast\('Fly-over saved\.'\);\s*close\(\);/.test(setup),

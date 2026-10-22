@@ -4373,15 +4373,15 @@ WebView's support for recording is unproven.
   stop card. `flyover_test.js`.
 - **The setup page has explicit Save buttons** ("There should be save buttons on the flyover
   page," 2026-10-21): a green ✓ beside the ✕ at the top and Close / Save in a pinned
-  `.tfo-ss-footer` (owner-only). **The footer pair LOOKS like the header pair** ("The cancel and save
-  buttons on the top and bottom of the flyover screen should be consistent," 2026-10-22): the
-  bottom buttons are the same red ✕ / green ✓ boxes widened to carry their word
-  (`.tripsy-close-x--wide`, glyph in `.tripsy-close-x-glyph`) — "✕ Cancel / ✓ Save" on the Edit
-  destinations and Slideshow options dialogs (where ✕ discards the draft). **The SETUP page's
-  footer pair is word-free** ("The save and close buttons at the bottom of the flyover menu
-  should not have words in them," 2026-10-22): plain `.tripsy-close-x` ✕ and `.tripsy-save-check`
-  ✓ boxes, identical to the header pair, with Close/Save only in `title`/`aria-label` (every
-  change is already saved, so ✕ only closes). Every change still saves as it is made; Save blurs a name
+  `.tfo-ss-footer` (owner-only). **The footer pair IS the header pair** ("The cancel and save
+  buttons on the top and bottom of the flyover screen should be consistent," 2026-10-22; then
+  "The save and close buttons at the bottom of the flyover menu should not have words in them"
+  and "Do the same for the edit destinations and slideshow dialogs," same day): on the setup
+  page, the Edit destinations dialog and the Slideshow options dialog alike, the bottom buttons
+  are plain word-free `.tripsy-close-x` ✕ and `.tripsy-save-check` ✓ boxes identical to the top
+  pair, with Close/Cancel/Save only in `title`/`aria-label` (on the setup page every change is
+  already saved, so ✕ only closes; in the two dialogs ✕ discards the draft). The interim wide
+  word-carrying variant (`.tripsy-close-x--wide`) is gone; don't re-add it. Every change still saves as it is made; Save blurs a name
   still being typed (its `change` saves it), waits for the save chain (`save()` now resolves
   Drive's ok), toasts "Fly-over saved." and closes — a failed save keeps the page open.
 - **The setup page and both editing dialogs are WIDE, and pages reorder by dragging the
