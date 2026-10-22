@@ -1518,6 +1518,17 @@ step 4; git history has it if ever needed.
   and the departure-transfer row for the same drive is not listed twice. Unknown city on either
   side → the old lenient rule. Run against all 35 live trips: only the Beppu leg changed.
   `verifygaps_test.js`.
+  **The report is never stored — it is rebuilt from the live trip on every open, and after
+  filling a gap it reopens from the SAVED trip** ("When does the trip details list
+  regenerate," 2026-10-22). `openTripsyVerifyGapEdit` used to reopen it 350 ms after the add
+  form closed, from the trip object captured when the form opened, counting on the
+  pending-changes list (always empty since the Tripsy migration) — but a save REPLACES the
+  trip object and finishes in the background, so the gap just filled still read missing. The
+  form's create path now takes `createOptions.onWriteStart` (called before `onClose`) and
+  `onWriteDone(ok)` (after `Store.queueTripsyChange` settles; a caller with it gets no
+  reopened form on failure, since its overlay is gone — the toast still shows and the gap is
+  still listed). Verify uses them: Cancel reopens at once, Save reopens once the write has
+  landed, both from `tripsyDecryptedTrips`' current copy. `verifyreopen_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS

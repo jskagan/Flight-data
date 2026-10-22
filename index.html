@@ -23491,6 +23491,10 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
       panel.style.display = "none";
       panel.innerHTML = "";
       positionTripsyTimelineConnectors();
+      // A caller that must act on the SAVED data (Verify Travel Details reopens its
+      // report) learns a write is under way before onClose, and when it lands.
+      const writeDone = createOptions && createOptions.onWriteDone;
+      if (createOptions && createOptions.onWriteStart) createOptions.onWriteStart();
       if (onClose) onClose();
       (async () => {
         // Geocode a new activity's address now (Places), so its create carries
@@ -23512,9 +23516,12 @@ function renderTripsyEditPanel(panel, raw, tripKey, tripName, eventSummary, crea
           updateTripsyPendingWarningBadge();
         } else {
           toast("Could not save changes — storage error. Please try again.", "error");
-          renderTripsyEditPanel(panel, { ...tripsyBlankRaw(raw.resource, raw.category), ...newFields }, tripKey, tripName, eventSummary, createOptions, onClose, source);
-          panel.style.display = "block";
+          if (!writeDone) {
+            renderTripsyEditPanel(panel, { ...tripsyBlankRaw(raw.resource, raw.category), ...newFields }, tripKey, tripName, eventSummary, createOptions, onClose, source);
+            panel.style.display = "block";
+          }
         }
+        if (writeDone) writeDone(ok);
       })();
       return;
     }
@@ -25263,9 +25270,9 @@ async function showTripsyVerifyTravelDialog(trip) {
 // missing leg, and any transport clears the gap) dated to the gap day, with
 // its origin/destination filled from the move. The form's own Save/Cancel and
 // unsaved-changes guard apply; a backdrop click routes through that guard. On
-// close (save or cancel) the verify report reopens -- after a short delay so an
-// optimistic Save's queued create is in the in-memory pending list, so the gap
-// it fills shows resolved.
+// close the verify report reopens from the trip as it now stands -- at once after a
+// Cancel, and after the write has landed after a Save, so the gap it fills shows
+// resolved.
 function openTripsyVerifyGapEdit(trip, kind, gap) {
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.62); z-index:10003; display:flex; align-items:flex-start; justify-content:center; padding:24px 14px; overflow-y:auto; -webkit-overflow-scrolling:touch;';
@@ -25279,10 +25286,19 @@ function openTripsyVerifyGapEdit(trip, kind, gap) {
     prefill = { ...tripsyBlankRaw('transportation', 'car'), departureAt: gap.day ? `${gap.day}T09:00:00` : null, departureDescription: gap.from || null, arrivalDescription: gap.to || null };
     label = 'Transportation';
   }
-  const back = () => { overlay.remove(); setTimeout(() => showTripsyVerifyTravelDialog(trip), 350); };
+  // The report reopens from the trip as it NOW stands ("When does the trip details list
+  // regenerate," 2026-10-22): a save replaces the trip object, so the copy captured when
+  // the form opened lacks the new item, and the save finishes in the background. A
+  // Cancel reopens at once; a Save reopens only after its write has landed (success or
+  // failure -- a failed save toasts, and the gap is still listed to try again).
+  const currentTrip = () => (tripsyDecryptedTrips || []).find(t => t.key === trip.key) || trip;
+  let saving = false;
+  const back = () => { overlay.remove(); if (!saving) setTimeout(() => showTripsyVerifyTravelDialog(currentTrip()), 150); };
   renderTripsyEditPanel(panel, prefill, trip.key, trip.name, label, {
     pendingChangeId: crypto.randomUUID(),
     tripsyTripId: tripsyTripIdFromKey(trip.key),
+    onWriteStart: () => { saving = true; },
+    onWriteDone: () => showTripsyVerifyTravelDialog(currentTrip()),
   }, back);
   panel.style.display = 'block';
   // Backdrop click -> the panel's own guarded Exit (Save/Discard/Keep-editing).
