@@ -4130,6 +4130,17 @@ WebView's support for recording is unproven.
       map together. Pause also sets `.tfo-paused`, which freezes the pan-and-zoom animation.
       Verified in Chromium by sampling a two-page preview every 100 ms: an opaque page was on
       screen at every sample until the final fade to the map.
+      **Each page is its own STACKING CONTEXT and clips to its box** ("On the flyover view, the
+      transition from collage photo pages to single photo pages is not smooth," 2026-10-22). A
+      collage's photos carry inline `z-index` 1–6, and `.tfo-group` (positioned, no z-index,
+      opacity 1 once in) formed no stacking context of its own — so those photos joined
+      `.tfo-photo`'s context and painted ABOVE the next page the whole time it faded in, then
+      vanished in one frame when the old page was removed 650 ms later (measured in Chromium with
+      a frame-to-frame pixel diff: a 51-point jump at removal, nothing during the fade). Now
+      `.tfo-group` has `isolation: isolate` (z-indexes stay inside the page) and
+      `overflow: hidden` (a rotated collage corner or a pan-and-zoom running past the box can't
+      linger outside the next page either). After: the change spreads across the fade and the
+      removal frame is identical to the one before it. `flyover_test.js`.
     - **The page-by-page dialog opens BY ITSELF after photos are added**
       (`tripsyFlyoverSlideshowDialog`), and from each card's **Slideshow options** button;
       the card shows a one-line `tripsyFlyoverSlideshowSummary` ("3 pages: 2 · 3 · 1 photos

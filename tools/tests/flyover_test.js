@@ -1378,6 +1378,10 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'every photo layout shares one 4:3 frame shape with the whole picture letterboxed inside it');
   assert(!/#tripsy-flyover-player \.tfo-group\[data-layout="[a-z]+"\] img \{[^}]*object-fit: cover/.test(html),
     'no photo layout crops a picture to fill its frame');
+  // "the transition from collage photo pages to single photo pages is not smooth" (2026-10-22):
+  // a collage's z-indexed photos painted above the next page until the old page was removed.
+  assert(/#tripsy-flyover-player \.tfo-group \{ position: absolute; inset: 0;[^}]*isolation: isolate; overflow: hidden;/.test(html),
+    'every page is its own stacking context and clips to its box, so the old page never shows through or past the one coming in');
   assert(['single', 'pair', 'grid', 'collage'].every(l => new RegExp(`\\[data-layout="${l}"\\] img \\{ width: min\\(`).test(css)),
     'each layout sizes its frames from the page box, never from the photo\'s own shape');
   assert(!/video/.test(css.replace(/Videos keep\s+their own shape/, '')), 'videos are left at their own shape');
