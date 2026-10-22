@@ -1074,8 +1074,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     const css = (html.match(/\.tfo-dest-label span \{[^}]*\}/) || [''])[0];
     const grownCss = (html.match(/\.tfo-dest-label\.tfo-grow span \{[^}]*\}/) || [''])[0];
     const sc = (html.match(/const TRIPSY_FLYOVER_DEST_LABEL_SCALE = \{ start: ([\d.]+), grown: ([\d.]+) \}/) || []);
-    assert(/font-size: 20px/.test(css) && new RegExp(`scale\\(${sc[1]}\\)`).test(css) && new RegExp(`scale\\(${sc[2]}\\)`).test(grownCss),
-      'origin/destination names appear at 20px and the centring constants match the CSS scales');
+    assert(/\.tfo-via-label span \{[^}]*font: 700 20px/.test(html) && !/\.tfo-dest-label span \{[^}]*font-size/.test(html) && sc[1] === '1' && sc[2] === '1' && new RegExp(`scale\\(${sc[1]}\\)`).test(css) && new RegExp(`scale\\(${sc[2]}\\)`).test(grownCss),
+      'every name on the map (origin, destination, layover) is one 20px size that never grows, and the centring constants match the CSS');
     assert(/TRIPSY_FLYOVER_DEST_LABEL_SCALE\.start \* TRIPSY_FLYOVER_DEST_LABEL_SCALE\.grown/.test(play), 'the arrival zoom frames the GROWN name');
     assert(/ensureDot = s => \{ if \(dotted\.has\(s\)\) return;/.test(play) && /ensureDot\(s\);\s*showDestLabel\(s\)/.test(arr)
       && /dotted = new Set\(\);/.test(play.slice(play.indexOf('const play = async'))), 'one dot per stop, never a second on arrival, reset on Replay');
@@ -1096,7 +1096,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(iClear > iLeg && iClear < play.indexOf('map.flyToBounds(legBounds', iLeg)
     && /clearDestLabel\(\);\s*clearViaLabels\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(all/.test(play),
     'the destination name is taken away before the map pulls back out (next leg, and the closing map)');
-  assert(/\.tfo-dest-label\.tfo-grow span \{[^}]*scale\(1\.5\)/.test(html), 'and it grows as the map zooms in');
+  assert(/\.tfo-dot \{ background: #111;/.test(html), 'location dots are black');
 }
 {
   eval(extractFn('tripsyFlyoverMergeLookupFields'));
@@ -1150,7 +1150,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(/if \(!grown \|\| r\.cancelled\) return false;[\s\S]*?return slideshow\(r, s\);/.test(play)
     && (play.match(/if \(prev\) prev\.remove\(\);\s*clearBurst\(\);/g) || []).length === 2,
     'a destination with photos swells its dot to fill the screen, and the first page (photo or video) comes straight in over it');
-  assert(/\.tfo-burst \{[^}]*background: #E04B3A/.test(html) && !/\.tfo-burst \{[^}]*transition/.test(html) && !/@keyframes tfo-burst/.test(html)
+  assert(/\.tfo-burst \{[^}]*background: #111/.test(html) && !/\.tfo-burst \{[^}]*transition/.test(html) && !/@keyframes tfo-burst/.test(html)
     && /const p = Math\.min\(1, elapsed \/ TRIPSY_FLYOVER_BURST_MS\);\s*const scale = 1 \+ \(\(far \* 2 \+ 28\) \/ 14 - 1\) \* p;/.test(play)
     && /if \(!r\.paused\) elapsed \+= now - last;[\s\S]*?const pt = map\.latLngToContainerPoint\(\[s\.lat, s\.lng\]\);/.test(play.slice(play.indexOf('const startBurst'))),
     'the burst is the dot\'s own colour, grown per frame at ONE linear rate (no transition or easing), following the dot and honoring pause');

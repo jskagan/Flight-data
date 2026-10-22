@@ -3789,6 +3789,14 @@ WebView's support for recording is unproven.
     Leaflet repositions on every zoom frame exactly like the name labels that were already
     keeping up. `redrawPathsAtZoom` now only matters for the route lines. Don't go back to
     `circleMarker` for anything that must move with the zoom.
+    **Dots are BLACK, and every name on the map is ONE size** ("Make the location dots black
+    instead of orange and make all location labels on the map the same size font," 2026-10-22):
+    `.tfo-dot` is `#111` with its white ring, and the arrival burst (`.tfo-burst`, "the dot
+    filling the screen") is the same black; the route trails stay orange. Origin, destination
+    and layover names all use `.tfo-via-label span`'s 20px and no longer grow on arrival
+    (`.tfo-grow` scales 1, `TRIPSY_FLYOVER_DEST_LABEL_SCALE` is `{start: 1, grown: 1}` — the
+    grow wiring stays, inert, so `arrivalCenter` needs no change). Earlier notes in this section
+    that say "orange dot", "20 → 30px" or "1 → 1.5" describe the behaviour before this.
     **A destination's dot goes up with its name** ("the destination orange dot should appear on
     the map when the map first appears," same day): the opening map shows the origin's AND the
     first destination's dots, and each later leg adds its destination's dot as the leg begins —
