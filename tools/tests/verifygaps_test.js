@@ -146,3 +146,12 @@ assert(/\.\.\.extra \}/.test(og) && /tripsyPlaceHint = gap\.prefill\.cityHint/.t
 const nl = extractFn('tripsyWireNameLookupAutofill');
 assert(/placeHint \|\| \(trip && trip\.location\)/.test(nl) && /t\.key === 'address' && placeHint && same\(current, placeHint\)/.test(nl),
   'the name lookup searches near the hinted city and replaces the placeholder city with the real address');
+
+// The transportation form must work when rendered BEFORE it is attached to the page
+// (Verify Travel Details does that): its airline datalist is looked up inside the panel.
+// A document.getElementById lookup returned null there and threw, so no form ever opened
+// ("it does not open to an add event page," 2026-10-22).
+const ep = extractFn('renderTripsyEditPanel');
+assert(!/document\.getElementById\(airlineDatalistId\)/.test(ep) && /panel\.querySelector\(`datalist\[id="\$\{airlineDatalistId\}"\]`\)/.test(ep)
+  && /if \(!airlineDatalist \|\| !categorySelect\) return;/.test(ep),
+  'the edit form finds its airline list inside the panel, so a detached render cannot throw');

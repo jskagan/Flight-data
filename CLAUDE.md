@@ -1546,6 +1546,31 @@ step 4; git history has it if ever needed.
   (`tripsyWireNameLookupAutofill`) uses as its search hint and replaces outright with the real
   address instead of raising the conflict dialog. The dialog finds a row's move by `data-tvv-idx`
   into its own `missingMoves`. `verifygaps_test.js`.
+  **A missing TRANSPORTATION row never opened its form at all** ("When I select a missing
+  transportation event from the verify travel details menu, it does not open to an add event
+  page," same day): `openTripsyVerifyGapEdit` renders the form BEFORE attaching its overlay, and
+  `renderTripsyEditPanel` found the transportation form's airline `<datalist>` with
+  `document.getElementById` -- null while detached, so the form threw and nothing appeared
+  (lodging has no datalist, so it worked). The lookup is now `panel.querySelector`, guarded, so a
+  detached render works for every caller. Reproduced and verified in Chromium.
+  **Every missing leg also offers 🚕 Taxi, and a taxi has its own checker-cab glyph** ("For
+  missing transportation events, add an option to take a taxi. If the user selects that option,
+  use a glyph for a yellow NYC cab with a checkerboard design on it," same day). `taxi` is a
+  transportation type (`TRIPSY_TRANSPORTATION_TYPES`, so it is in every Type menu; 🚕 for the
+  plain-text header label; dot colour `#24425E`). The glyph is an inline SVG
+  (`TRIPSY_TAXI_GLYPH_SVG` → `TRIPSY_TAXI_GLYPH_URL`, a yellow Checker cab with a black-and-white
+  checkerboard band) on the bike's marker convention: `tripsyTimelineDotIcon` returns
+  `TRIPSY_TAXI_ICON_MARKER`, and **every place a dot glyph is drawn goes through
+  `tripsyDotGlyphHtml`** (My Trips dot, Travel View `.tv-icon`, both itinerary card photo
+  fallbacks) -- those last three used to `esc()` the glyph, so the existing bike marker printed
+  as its raw `__tripsy_bike_icon__` string there; that is fixed by the same helper. In Verify, a
+  missing row is a flex pair: the row button (prefilled Add form, as before) and a sibling Taxi
+  button (`data-tvv-taxi`, not nested -- a button inside a button is invalid) opening the SAME
+  prefill with `category: 'taxi'` and the form headed "Taxi" (`gap.label`). A taxi counts as a
+  car for the no-write-up rules (all four `airplane || car` checks), and its itinerary card
+  shows the cab glyph with NO Places photo search (`isTaxi` in `tripsyTransportationCardHtml`);
+  the van-transfer photo rule stays car-only. Fly-over already reads `taxi` as a drive.
+  `taxi_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS
