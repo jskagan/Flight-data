@@ -1066,7 +1066,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       'every zoom frame re-projects and redraws the dots and route lines, so they ride the map at their own size');
     // "the destination orange dot should appear on the map when the map first appears"
     assert(/ensureDot\(first\);\s*ensureDot\(stops\[1\]\);/.test(play), 'the opening map shows the first destination\'s dot as well as the origin\'s');
-    assert(/showDestLabel\(b\);\s*ensureDot\(b\);/.test(play), 'each later destination\'s dot goes up with its name as its leg begins');
+    assert(/showDestLabel\(b\);\s*ensureDot\(a\);\s*ensureDot\(b\);/.test(play), 'each later destination\'s dot goes up with its name as its leg begins');
     assert(!/L\.circleMarker/.test(play) && /const dot = s => L\.marker\(\[s\.lat, s\.lng\], \{ icon: dotIcon\(14\)/.test(play)
       && /layers\.push\(L\.marker\(\[v\.lat, v\.lng\], \{ icon: dotIcon\(10\)/.test(play),
       'destination and layover dots are divIcon markers (repositioned every zoom frame like the labels), never SVG circles');
@@ -1089,7 +1089,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'the opening map carries the origin dot and both names');
   assert(/if \(stops\.length === 1 && !\(await arrive\(r, first/.test(playSrc), 'no zoom onto the origin when there is a leg to fly');
   assert(/if \(k > 1\) \{[\s\S]*?flyToBounds\(legBounds/.test(playSrc), 'the first leg is flown on the whole-route map, later legs are framed');
-  assert(/map\.panBy\(\[shift, 0\], \{ animate: false \}\)/.test(playSrc), 'a name at the right edge is slid into view without changing zoom');
+  assert(/keepLabelsInView\(/.test(playSrc), 'a name at the right edge is slid into view without changing zoom');
   assert(/showDestLabel\(s\);[\s\S]*?untilTilesLoaded\(r, 1500\)/.test(play),
     'arriving names the destination beside its dot and lets the tiles land before photos cover the map');
   const iLeg = play.indexOf('const legBounds'), iClear = play.indexOf('clearDestLabel();', iLeg);
@@ -1137,6 +1137,14 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'the destination name is placed before the leg to it is framed, and the last leg\'s names are cleared');
   assert(/viaLabels\.push\(L\.marker/.test(play) && !/layers\.push\(L\.marker\(\[v\.lat, v\.lng\], \{ icon: L\.divIcon\(\{ className: 'tfo-via-label/.test(play),
     'layover labels are tracked so they are removed when the leg ends, not left on the map');
+  assert(/const keepLabelsInView = \(labelMarkers, dotStops\) => \{[\s\S]*?map\.panBy\(\[shift, 0\], \{ animate: false \}\);/.test(play)
+    && /keepLabelsInView\(\[viaLabels\[viaLabels\.length - 1\], destLabel\], \[first, stops\[1\]\]\);/.test(play)
+    && /map\.fitBounds\(legBounds[^\n]*\n\s*keepLabelsInView\(\[fromLabel, destLabel\], \[a, \.\.\.via, b\]\);/.test(play),
+    'every leg, not just the first, slides the map so both names stay inside the screen');
+  assert(/viaLabels\.push\(L\.marker\(\[a\.lat, a\.lng\][^\n]*tfo-dest-label[^\n]*\n\s*const fromLabel = viaLabels\[viaLabels\.length - 1\];\s*showDestLabel\(b\);/.test(play),
+    'each later leg names the city being left as well as the destination');
+  assert(/showDestLabel\(b\);\s*ensureDot\(a\);\s*ensureDot\(b\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(legBounds/.test(play),
+    'both ends of every leg have their dot (and name) before the zoomed-out leg view appears');
   assert(/growDestLabel\(\);[\s\S]*?const center = arrivalCenter\(s, zoom\);[\s\S]*?const burst = burstWanted \? startBurst\(r, s\) : null;\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom/.test(play),
     'the zoom-in frames the dot and its growing label together, and the orange starts growing as the zoom starts');
   assert(/if \(!grown \|\| r\.cancelled\) return false;[\s\S]*?return slideshow\(r, s\);/.test(play)
@@ -1152,4 +1160,21 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(/const ahead = path\[Math\.min\(path\.length - 1, i \+ 4\)\];[\s\S]*?map\.project\(cur, z\)[\s\S]*?heading \+= /.test(play)
     && !/latLngToLayerPoint\(p0\)/.test(play),
     'the plane\'s heading uses unrounded pixels a few steps ahead and turns smoothly');
+}
+
+// ---- The setup page's Play asks which map service to use (2026-10-22) ----
+{
+  const html2 = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'index.html'), 'utf8');
+  const ok = (c, m) => { if (c) console.log('ok   ' + m); else { console.log('FAIL ' + m); process.exitCode = 1; } };
+  const dlgStart = html2.indexOf('function tripsyFlyoverMapChoiceDialog(onPick)');
+  const dlg = html2.slice(dlgStart, html2.indexOf('\n}\n', dlgStart));
+  ok(dlgStart > -1 && /data-map-choice="\$\{value\}"/.test(dlg) && /choice\('free'/.test(dlg) && /choice\('google'/.test(dlg),
+    'the map dialog offers the free map and Google (credits)');
+  ok(/b\.onclick = \(\) => \{ close\(\); onPick\(b\.dataset\.mapChoice\); \};/.test(dlg) && !/await/.test(dlg),
+    'a choice starts playback synchronously inside its own tap (no await), so iOS music can still start');
+  ok(/data-map-choice-cancel\]'\)\.onclick = close;/.test(dlg), 'Cancel plays nothing');
+  ok(/\[data-flyover-play\]'\)\.onclick = \(\) => \{[\s\S]*?tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService \}\)\);/.test(html2),
+    'the setup page\'s Play asks which map before playing');
+  ok(/const googleTilesP = opts\.mapService === 'free' \? Promise\.resolve\(null\) : Promise\.race\(\[/.test(html2),
+    'the free map never asks Google for a tile session');
 }

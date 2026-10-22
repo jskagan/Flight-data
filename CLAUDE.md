@@ -3757,6 +3757,18 @@ WebView's support for recording is unproven.
     before; a one-destination trip still lands on it). Names sit to the right of their dots, so
     one at the map's edge is slid into view with `panBy` at the same zoom (asymmetric fitBounds
     padding cost a whole zoom level under `zoomSnap: 1`).
+    **Every leg does that now, and names both ends** ("Some of the map destination labels are
+    not appearing when the map showing the leg to that destination first appears," 2026-10-22):
+    the slide is `keepLabelsInView(labelMarkers, dotStops)`, run on the opening map AND after
+    each later leg's framing (`fromLabel` + `destLabel`, the leg's dots incl. layovers bounding
+    how far left it may go) — later legs are framed tightly, so an eastern destination's name
+    (Fukuoka, the return to Los Angeles) ran past the right edge on an iPad-width screen. Each
+    later leg also labels the city being LEFT (pushed into `viaLabels`, so it is cleared with
+    them at the next leg). Verified in Chromium at 820 px: both names inside on every leg.
+    And both DOTS are guaranteed there too ("Make sure that when the first appears in
+    zoomed-out mode for each leg both the origin and destination are marked with orange dots
+    and labeled," same day): `ensureDot(a)` + `ensureDot(b)` run with the two names, before
+    the leg is framed (a's dot normally exists from its arrival; this makes it explicit).
     **The screen recording found the real cause** (same day, 17 s from the iPad: zoomed out
     → giant "Malaysia" and thick red dashes → a screen-filling red circle WITH the dot's white
     ring → the normal-zoom map with a small dot → the burst → the photos): Leaflet draws the
@@ -3798,6 +3810,15 @@ WebView's support for recording is unproven.
     restrictions, if any, must allow it); free tier 100k tile requests/month. Verified in
     Chromium with Google stubbed (session granted → Google tiles + copyright; 403 → Esri);
     the live API is unreachable from the sandbox.
+  - **The setup page's ▶ Play asks WHICH map first** ("When the user selects play fly-over
+    from the trip fly-over page, present a user dialog asking if he wants to use the free
+    mapping service or the service that uses credits," 2026-10-22):
+    `tripsyFlyoverMapChoiceDialog(onPick)` offers **Free map** (Esri / OpenStreetMap) or
+    **Google Maps (uses credits)**; Cancel plays nothing. The pick reaches the player as
+    `opts.mapService`, and `'free'` never even asks for a Google tile session. `onPick` runs
+    SYNCHRONOUSLY in the button's click — never behind an await — because the player must
+    start the music inside a user tap on iOS. Only that Play button asks: View Fly-Over from
+    the ⚙️ menu and the per-destination previews keep the automatic Google-first behaviour.
   - **Keyless tiles** come from `TRIPSY_FLYOVER_TILE_SOURCES`: **Esri World Street Map first,
     OpenStreetMap's own tiles second**, both keyless, with attribution shown.
     - **Esri is first for its ENGLISH labels** ("Can you show the names of all locations on
