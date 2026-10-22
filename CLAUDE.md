@@ -123,6 +123,23 @@ preferring an already-parsed entry over a pending twin so nothing re-parses; pla
 merge per key newest-wins; stranded mid-copy proposals are NOT resurrected), write the result
 into the OLDEST file, trash the rest. Validated against the four real incident files: the in-app
 merge reproduced the hand-built merge exactly.
+**A recurrence, 2026-10-22, with two more defenses** ("Please figure out the stray duplicate"):
+a 6 KB `flight-log-data.json` appeared at 04:41 UTC — empty invoices/reservations, the insurance
+doc list, a weather cache for Fukuoka/Oita/Seoul, nothing else: the exact shape of the
+offline/splash-preview stand-in's MINIMAL `driveData` (`enterOfflineMode` adds the cached
+insurance docs). Travel View's weather chips ran `tripsyLoadWeather` → `persistDriveData()`, which
+with no `driveFileId` CREATED a file. And no daily-use device ever repaired it, because the
+sign-in repair only runs when the NAME SEARCH runs, and a device whose cached id verifies never
+searches. Fixes: **(1)** `persistDriveData` never creates a file — with no id open it logs and
+keeps the write in memory (the only create is `completeSignIn`'s double-checked owner path), and
+`tripsyLoadWeather` skips its persist offline; **(2)** `sweepDriveDataDuplicates` (owner-only,
+from `runBackgroundSyncs`, once per session) lists same-named files: on the OLDEST it merges the
+strays into the live data via `tripsyMergeDataCopies` through the ordinary guarded write and
+trashes them (toast); on a NEWER copy it forgets the cached id so the next sign-in's search runs
+the full repair; **(3)** in `tripsyMergeDataCopies` an EMPTY array in the newest copy never
+replaces a non-empty one — a shell copy's `reservations: []` is no information, not a deletion
+(the invoices rule, generalized). The stray itself held nothing the main file lacks.
+`dupedatafile_test.js`.
 
 **Auth model** (`index.html:15075`-`15227` area): a single hardcoded `OWNER_EMAIL` gets
 read/write access (upload, edit, delete, sync); anyone else who signs in with a Google account the
@@ -3677,6 +3694,14 @@ WebView's support for recording is unproven.
   `.tfo-via-label` name tag and a 0.9 s pause — no flyTo, no card, no slideshow. The setup
   card shows "via …" beside the leg. Verified in Chromium (LAX → NRT → SIN: Narita labelled, no
   zoom).
+  **The plane stays on the map through the stopover** ("When the plane on a flyover does a
+  stopover, do not make the plane disappear from the map," 2026-10-22): `animateLeg` used to
+  remove its vehicle at the end of every leg, so during each layover's 0.9 s pause there was no
+  plane until the next leg added a fresh one. It now takes a `carry` (`{keep, marker, heading}`):
+  a leg ending at a layover leaves its marker (and heading) for the next leg, which moves it to
+  its own start; only the final leg removes it, and a carried marker joins `layers` so Replay
+  clears one left waiting. Sampled in Chromium every 50 ms (LAX → NRT → BKK → SIN): the old
+  build had no plane at 8.0–8.95 s and 12.85–13.75 s, the new one never drops it.
 - **Airport destinations and layovers are named for the CITY of the airport the itinerary
   lists** ("Where there are flight destinations use the city names from the airports listed in
   the itinerary," 2026-10-21 — geocoding an airport lands on the town it sits in: NRT → Narita,
@@ -3958,6 +3983,14 @@ WebView's support for recording is unproven.
     points unwrapped onto another copy of the world (≥180° of longitude apart) are never
     joined. `ensureDot` is keyed by POSITION (lat/lng to 5 places), not by the stop object, so
     a shared point gets one marker, and the route lines meet at it.
+    **Sharing needs the NAMES to match** ("How come nakatsu, hita, and beppu all have the same
+    location," same day — the saved coordinates were right; the player's distance-only 40 km
+    rule had joined three towns 25–35 km apart onto Nakatsu's dot). The 40 km rule is for an
+    airport and a hotel of ONE city, so it now applies only when the labels match ("Bangkok" at
+    BKK and DMK, the "Singapore" airport layover and the Singapore stay — airport points carry
+    their city's name); differently-named points join only within
+    `TRIPSY_FLYOVER_SAME_POINT_KM` (2 — the same place geocoded a street apart). Checked on the
+    live record: the four Oita towns keep their own dots, Bangkok's two airports still share one.
   - **Google Map Tiles come FIRST when available** ("Add Google Map Tiles with the Places
     key," 2026-10-21 — the keyless sources have no @2x tiles, so the map looked pixelated on
     the iPad). `tripsyFlyoverGoogleTileSource` creates a Map Tiles API session (`roadmap`,
@@ -4140,9 +4173,39 @@ WebView's support for recording is unproven.
         in the header, a green ✓ box in the ✕'s own style (`.tripsy-close-x.tripsy-save-check`
         — "a green check box in the same style as the cancel button"); every `[data-ss-save]`
         is wired, so top and bottom Save do the same.
+- **✏️ Edit destinations — a draft list to rename, reorder, add, remove or REBUILD, applied on
+  Save only** ("instead of just an option to rebuild the destinations, make the button 'edit
+  destinations' and then display a list of destinations that the user can edit. Also give an
+  option to 'Rebuild Destinations' which would cause the app to automatically re-generate the
+  list of destinations, but again allow the user to fully edit before confirming," 2026-10-22).
+  The setup page's "↻ Rebuild destinations" button (which rebuilt AND saved in one go) is now
+  "✏️ Edit destinations" (`data-flyover-edit-dests`), opening `tripsyFlyoverEditDestinationsDialog
+  (trip, record, {rebuild})` (own overlay `tripsy-flyover-edit-overlay`, z `2147483060` — below
+  the place/mode dialogs it opens at 2147483070+) on a COPY of the record: per row a transport
+  drop-down (the first stop keeps its 📍), the name, dates, ↑ ↓ (`tripsyFlyoverMoveStop`, pure),
+  Remove/Restore, 📍 Set/Change location (`tripsyFlyoverAskPlace`), plus **＋ Add destination**
+  (`tripsyFlyoverManualStop`, pure: a hand-placed, hand-named, undated stay reached by car with
+  `modeGuessed`, so the page's mode question asks about it; `manual: true`, `afterId` = the stop
+  it was put after; it goes before a trailing return flight) and **↻ Rebuild destinations**
+  (`opts.rebuild(draft)` → `tripsyFlyoverBuild(trip, draft, {})` — no `askPlace`, since the list
+  is on screen to fix; an unplaced stop shows ⚠️ + Set location — then
+  `tripsyFlyoverKeepManualStops` (pure) puts added destinations back after their predecessor,
+  else at their old index). Cancel/✕/click-outside return null and nothing changes; Save returns
+  the draft, and the page seeds itinerary photos, saves, re-renders, asks for missing modes and
+  re-renders My Trips. The per-card controls on the page itself (name, mode, Remove, photos)
+  are unchanged. Verified in Chromium against the harness: move, remove, add (geocode stubbed),
+  rebuild (stubbed), rename, Save returns the draft with the source record untouched, Cancel
+  returns null. `flyovereditdests_test.js` (its scaffold skips the parameter list before
+  counting braces — an `opts = {}` default otherwise ends the extraction at once).
 - **The setup page has explicit Save buttons** ("There should be save buttons on the flyover
   page," 2026-10-21): a green ✓ beside the ✕ at the top and Close / Save in a pinned
-  `.tfo-ss-footer` (owner-only). Every change still saves as it is made; Save blurs a name
+  `.tfo-ss-footer` (owner-only). **The footer pair LOOKS like the header pair** ("The cancel and save
+  buttons on the top and bottom of the flyover screen should be consistent," 2026-10-22): the
+  bottom buttons are the same red ✕ / green ✓ boxes widened to carry their word
+  (`.tripsy-close-x--wide`, glyph in `.tripsy-close-x-glyph`) — "✕ Close / ✓ Save" on the setup
+  page (every change is already saved, so ✕ only closes), "✕ Cancel / ✓ Save" on the Edit
+  destinations and Slideshow options dialogs (where ✕ discards the draft); the top ✕ carries the
+  same word as its footer twin in its title. Every change still saves as it is made; Save blurs a name
   still being typed (its `change` saves it), waits for the save chain (`save()` now resolves
   Drive's ok), toasts "Fly-over saved." and closes — a failed save keeps the page open.
 - **Music: one soundtrack per fly-over, chosen by genre** ("try to find different music that

@@ -29,7 +29,7 @@ function isTripsyEventEffectivelyHidden(ev) { return !!ev.hidden; }
 eval([
   (html.match(/const TV_STRIP_LOC = new Set\(\[[\s\S]*?\]\);/) || [''])[0],
   html.slice(sliceStart, extractorEnd),
-  constLine('TRIPSY_FLYOVER_MODE_RANK'), constLine('TRIPSY_FLYOVER_MERGE_KM'), constLine('TRIPSY_FLYOVER_SHARED_DOT_KM'),
+  constLine('TRIPSY_FLYOVER_MODE_RANK'), constLine('TRIPSY_FLYOVER_MERGE_KM'), constLine('TRIPSY_FLYOVER_SHARED_DOT_KM'), constLine('TRIPSY_FLYOVER_SAME_POINT_KM'),
   ...['tripsyFlyoverModeOf', 'tripsyFlyoverAirportQuery', 'tripsyFlyoverDeriveStops', 'tripsyFlyoverDistanceKm',
     'tripsyFlyoverMergeNearby', 'tripsyFlyoverCarryOver', 'tripsyFlyoverGreatCircle', 'tripsyFlyoverStraight',
     'tripsyFlyoverUnwrap', 'tripsyFlyoverPlayableStops', 'tripsyFlyoverLegMs'].map(extractFn),
@@ -765,8 +765,17 @@ eval([extractFn('tripsyFlyoverPhotosInPageOrder')].join('\n'));
   const setup = extractFn('showTripsyFlyover');
   assert(/class="tripsy-close-x tripsy-save-check" data-flyover-save[^>]*>✓<\/button>` : ''\}\s*<button class="tripsy-close-x" data-flyover-close/.test(setup),
     'THE ASK: a green ✓ Save sits beside the ✕ at the top');
-  assert(/<div class="tfo-ss-footer"[^>]*>\s*<button class="btn" data-flyover-close>Close<\/button>\s*<button class="btn" data-flyover-save[^>]*>Save<\/button>/.test(setup),
-    'and Close / Save sit in a pinned footer at the bottom');
+  // "The cancel and save buttons on the top and bottom of the flyover screen should be
+  // consistent" (2026-10-22): the footer pair is the header pair's wide twin, same colours.
+  assert(/<div class="tfo-ss-footer"[^>]*>\s*<button class="tripsy-close-x tripsy-close-x--wide" data-flyover-close><span class="tripsy-close-x-glyph">✕<\/span>Close<\/button>\s*<button class="tripsy-close-x tripsy-save-check tripsy-close-x--wide" data-flyover-save><span class="tripsy-close-x-glyph">✓<\/span>Save<\/button>/.test(setup),
+    'and ✕ Close / ✓ Save sit in a pinned footer at the bottom, as the same red/green boxes as the top');
+  assert(/\.tripsy-close-x\.tripsy-close-x--wide \{ width: auto;/.test(html), 'the wide variant keeps the box style and just makes room for the word');
+  for (const [dlg, cancel] of [['tripsyFlyoverEditDestinationsDialog', 'data-fe-cancel'], ['tripsyFlyoverSlideshowDialog', 'data-ss-cancel']]) {
+    const fn = extractFn(dlg);
+    assert(new RegExp(`<button class="tripsy-close-x tripsy-close-x--wide" ${cancel}><span class="tripsy-close-x-glyph">✕</span>Cancel</button>`).test(fn)
+      && /tripsy-close-x tripsy-save-check tripsy-close-x--wide" data-(fe|ss)-save><span class="tripsy-close-x-glyph">✓<\/span>Save/.test(fn),
+      `${dlg}'s footer is ✕ Cancel / ✓ Save in the same boxes`);
+  }
   assert(/querySelectorAll\('\[data-flyover-save\]'\)\.forEach\(b => b\.onclick = async/.test(setup) && /a\.blur\(\)/.test(setup)
     && /const ok = await save\(\);\s*if \(!ok\) throw/.test(setup) && /toast\('Fly-over saved\.'\);\s*close\(\);/.test(setup),
     'Save commits a name still being typed, waits for Drive, says so, then closes; a failed save keeps the page open');
@@ -968,13 +977,22 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     { id: 'c', label: 'Chiang Rai', lat: 19.9, lng: 99.8, via: [{ label: 'Bangkok', lat: 13.69, lng: 100.75 }] },
     { id: 'd', label: 'Hoi An', lat: 15.9, lng: 108.3, via: [{ label: 'Bangkok', lat: 13.91, lng: 100.6 }] },
     { id: 's', label: 'Singapore', lat: 1.29, lng: 103.85 },
-    { id: 'f', label: 'Fukuoka', lat: 33.59, lng: 130.4, via: [{ label: 'Changi', lat: 1.36, lng: 103.99 }] },
+    { id: 'f', label: 'Fukuoka', lat: 33.59, lng: 130.4, via: [{ label: 'Singapore', lat: 1.36, lng: 103.99 }] },
   ] });
   assert(twice[2].via[0].lat === twice[1].via[0].lat && twice[2].via[0].lng === twice[1].via[0].lng,
     'a layover city flown through on two legs (Bangkok, BKK then DMK) uses the first visit\'s point');
   assert(twice[4].via[0].lat === twice[3].lat && twice[4].via[0].lng === twice[3].lng,
-    'a layover close to a city already shown (Changi, near the Singapore stay) shares its point');
+    'a layover in a city already shown (the Singapore airport, named for its city, near the Singapore stay) shares its point');
   assert(twice[3].lat === 1.29 && twice[1].lat === 19.9, 'distinct cities keep their own points');
+  // Three towns 25-35 km apart are three places ("How come nakatsu, hita, and beppu all have
+  // the same location," 2026-10-22 -- distance alone joined them); only a point a couple of
+  // km away is the same place whatever it is called.
+  const towns = tripsyFlyoverPlayableStops({ stops: [
+    { id: 'n', label: 'Nakatsu', lat: 33.5158, lng: 131.2025 }, { id: 'h', label: 'Hita', lat: 33.3126, lng: 130.9309 },
+    { id: 'b', label: 'Beppu', lat: 33.3163, lng: 131.4744 }, { id: 'x', label: 'Marugamiya', lat: 33.3201, lng: 131.4790 },
+  ] });
+  assert(towns[1].lat === 33.3126 && towns[2].lat === 33.3163, 'nearby towns with different names keep their own dots');
+  assert(towns[3].lat === towns[2].lat && towns[3].lng === towns[2].lng, 'a point within a couple of km is the same place even under another name');
   const round = tripsyFlyoverPlayableStops({ stops: [
     { id: 'o', label: 'Los Angeles', lat: 33.94, lng: -118.41 },
     { id: 's', label: 'Singapore', lat: 1.29, lng: 103.85 },
@@ -992,7 +1010,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(/const via = b\.mode === 'plane' \? \(b\.via \|\| \[\]\) : \[\];/.test(play), 'only a flight leg is drawn through its layovers');
   assert(/L\.latLngBounds\(\[\[a\.lat, a\.lng\], \.\.\.via\.map/.test(play), 'the leg is framed WITH its layovers (no zoom into them)');
   const loop = play.slice(play.indexOf('for (const v of via)'), play.indexOf('from = v;'));
-  assert(/animateLeg\(r, from, v, 'plane'\)/.test(loop) && !/tfo-via-label/.test(loop) && !/flyTo|showPage|showCard|arrive\(/.test(loop),
+  assert(/animateLeg\(r, from, v, 'plane', carry\)/.test(loop) && !/tfo-via-label/.test(loop) && !/flyTo|showPage|showCard|arrive\(/.test(loop),
     'at a layover: fly there and pause -- no zoom, no card, no photos (its name is already up)');
   assert(/const showLayovers = via => via\.map\(v => \{\s*ensureDot\(v\);[\s\S]*?tfo-via-label tfo-dest-label[\s\S]*?viaLabels\.push\(m\);/.test(play)
     && /const viaMarks1 = showLayovers\(via1\);/.test(play) && /ensureDot\(b\);\s*const viaMarks = showLayovers\(via\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(legBounds/.test(play),
@@ -1222,4 +1240,17 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   const photo = html3.match(/#tripsy-flyover-player \.tfo-photo img \{[^}]*border: (\d+)px solid #fff/);
   if (m && photo && m[1] === photo[1]) console.log('ok   the burst ring stops at the photos\' own border thickness');
   else { console.log('FAIL the burst ring stops at the photos\' own border thickness'); process.exitCode = 1; }
+}
+
+// The plane stays on the map through a stopover ("When the plane on a flyover does a
+// stopover, do not make the plane disappear from the map," 2026-10-22): one marker is
+// carried across the journey's legs, removed only after the last.
+{
+  const pf = html.slice(html.indexOf('const animateLeg = (r, a, b, legMode, carry = null)'), html.indexOf('const stopSub = (s, i) =>'));
+  assert(/let marker = carry && carry\.marker;\s*if \(marker\) marker\.setLatLng\(path\[0\]\);/.test(pf), 'a carried plane is moved to the next leg\'s start, not recreated');
+  assert(/if \(carry && carry\.keep\) \{ carry\.marker = marker; carry\.heading = heading; \}\s*else \{ marker\.remove\(\);/.test(pf), 'a leg ending at a layover leaves the plane on the map');
+  assert(/if \(carry\) layers\.push\(marker\);/.test(pf), 'a carried plane is cleared by Replay with the other layers');
+  const loop = html.slice(html.indexOf('const carry = via.length ?'), html.indexOf('const carry = via.length ?') + 500);
+  assert(/animateLeg\(r, from, v, 'plane', carry\)[\s\S]*if \(carry\) carry\.keep = false;[\s\S]*animateLeg\(r, from, b, via\.length \? 'plane' : '', carry\)/.test(loop),
+    'every layover leg keeps the plane, and the final leg removes it');
 }

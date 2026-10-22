@@ -147,3 +147,34 @@ assert(signInSrc.indexOf('repairDriveDataDuplicates') < signInSrc.indexOf('drive
   assert(m.tripsyParseProposals.length === 0, 'stranded mid-copy proposals are not resurrected (their emails were re-reviewed in the newest copy)');
   assert(!('__concurrencyTest' in m) && m.tripsyPendingChanges.length === 0, 'junk keys are dropped and the vestigial queue stays empty');
 }
+
+// ---- 2026-10-22: the offline stand-in created a stray copy, and no daily-use device repaired it ----
+// Found live: a 6 KB flight-log-data.json (empty invoices/reservations, the insurance doc list,
+// a weather cache) created 04:41 UTC while the owner was on a trip -- the offline/preview
+// stand-in's minimal driveData, written by the weather cache's persist with no file id, which
+// CREATED a file. And the sign-in repair never saw it: a device whose cached id verifies skips
+// the name search that finds duplicates.
+{
+  const persist = html.slice(html.indexOf('async function persistDriveData('), html.indexOf('async function persistDriveData(') + 900);
+  assert(!/driveFileId = await createDriveDataFile\(driveData\)/.test(persist) && /if \(!driveFileId\) \{\s*console\.warn\(/.test(persist),
+    'persistDriveData never creates a data file -- with no file open it keeps the write in memory');
+  assert((html.match(/createDriveDataFile\(driveData\)/g) || []).length === 1 && /creating a new data file in Drive[\s\S]{0,300}createDriveDataFile\(driveData\)/.test(html),
+    'the only data-file create left is completeSignIn\'s double-checked owner path');
+  const wx = extractFn('tripsyLoadWeather');
+  assert(/if \(appOfflineMode \|\| !driveFileId\) return;\s*try \{ await persistDriveData\(\); \}/.test(wx), 'the weather cache does not try to persist offline / before sign-in');
+  // The merge: an empty list in the newest copy is not a deletion.
+  const m2 = tripsyMergeDataCopies([
+    { invoices: [{ id: 1 }], reservations: [{ reservationNumber: 'R1' }], tripsyWardrobe: [{ id: 'g1' }], tripsyWeatherCache: { a: 1 } },
+    { invoices: [], reservations: [], syncTimestamps: {}, tripsyWeatherCache: { b: 2 } },
+  ]);
+  assert(m2.reservations.length === 1 && m2.tripsyWardrobe.length === 1 && m2.invoices.length === 1 && m2.tripsyWeatherCache.a === 1 && m2.tripsyWeatherCache.b === 2,
+    'a shell copy\'s empty lists never erase the base\'s; its caches still merge in');
+  // The mid-session sweep.
+  const sweep = extractFn('sweepDriveDataDuplicates');
+  assert(!!sweep && /if \(!isOwner \|\| !driveFileId \|\| appOfflineMode\) return/.test(sweep), 'the sweep is owner-only, after sign-in, never offline');
+  assert(/if \(files\[0\]\.id !== driveFileId\) \{[\s\S]{0,300}localStorage\.removeItem\(DRIVE_DATA_FILE_ID_KEY\)/.test(sweep),
+    'on a newer copy it forgets the cached id so the next sign-in\'s search runs the full repair');
+  assert(/driveData = tripsyMergeDataCopies\(\[driveData, \.\.\.copies\]\);\s*await persistDriveData\(\);/.test(sweep) && /trashed: true/.test(sweep),
+    'on the oldest it merges the strays into the live data through the guarded write, then trashes them');
+  assert(/sweepDriveDataDuplicates\(\)/.test(extractFn('runBackgroundSyncs')), 'the sweep runs on every owner start-up');
+}

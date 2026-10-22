@@ -1317,6 +1317,11 @@
   /* The ✕'s green twin: a ✓ Save box in the same shape, beside it (the fly-over page
      dialog's top Save, 2026-10-21: "a green check box in the same style as the cancel"). */
   .tripsy-close-x.tripsy-save-check { border-color: #3AA76D; color: #3AA76D; }
+  /* The footer twin of the header boxes ("The cancel and save buttons on the top and bottom
+     of the flyover screen should be consistent," 2026-10-22): the same red ✕ / green ✓ box,
+     widened to carry its word, so both rows read as the same two controls. */
+  .tripsy-close-x.tripsy-close-x--wide { width: auto; height: 36px; padding: 0 14px; gap: 6px; font-size: 15px; }
+  .tripsy-close-x.tripsy-close-x--wide .tripsy-close-x-glyph { font-size: 19px; line-height: 1; }
   /* ---- Trip Fly-over player (playTripsyFlyover) ----
      Full-screen, above the setup page and every modal tier, below tripsyConfirmDialog. */
   #tripsy-flyover-player { position: fixed; inset: 0; z-index: 2147483090; background: #0b1020; }
@@ -2309,6 +2314,40 @@ async function findDriveDataFile() {
   return files[0].id;
 }
 let _driveDataDuplicateFiles = [];
+// The sign-in repair above only runs when the NAME SEARCH runs -- and a device whose cached
+// file id verifies never searches, so a stray copy born after that id was cached (the
+// 2026-10-22 one) was invisible to every daily-use device. This owner-only sweep (from
+// runBackgroundSyncs, once per session) lists same-named files and, when this session is on
+// the OLDEST, merges the strays into the live data (tripsyMergeDataCopies, same rules) through
+// the ordinary guarded write and trashes them; on a NEWER copy it forgets the cached id so
+// the next sign-in's search runs the full repair instead. Best-effort, never throws.
+async function sweepDriveDataDuplicates() {
+  if (!isOwner || !driveFileId || appOfflineMode) return { found: 0 };
+  const q = encodeURIComponent(`name='${DRIVE_DATA_FILENAME}' and trashed=false`);
+  const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime)&spaces=drive`);
+  const json = await res.json();
+  const files = (json.files || []).slice().sort((a, b) => (String(a.createdTime || '') < String(b.createdTime || '') ? -1 : 1));
+  if (files.length < 2) return { found: files.length };
+  if (files[0].id !== driveFileId) {
+    console.warn(`This session is on a NEWER ${DRIVE_DATA_FILENAME} than the oldest copy; forgetting the cached id so the next sign-in repairs.`);
+    try { localStorage.removeItem(DRIVE_DATA_FILE_ID_KEY); } catch (e) { /* ignore */ }
+    return { found: files.length, deferred: true };
+  }
+  const strays = files.slice(1);
+  const copies = [];
+  for (const f of strays) {
+    try { const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`); copies.push(JSON.parse(await r.text())); }
+    catch (e) { console.error('Duplicate sweep: could not read copy', f.id, e); copies.push({}); }
+  }
+  driveData = tripsyMergeDataCopies([driveData, ...copies]);
+  await persistDriveData();
+  for (const f of strays) {
+    try { await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) }); }
+    catch (e) { console.error('Duplicate sweep: could not trash copy', f.id, e); }
+  }
+  console.warn(`Merged and trashed ${strays.length} stray ${DRIVE_DATA_FILENAME} cop${strays.length === 1 ? 'y' : 'ies'}.`);
+  return { found: files.length, merged: strays.length };
+}
 
 // Merges the parsed contents of every same-named data-file copy (oldest first)
 // into one document -- the recovery for the 2026-08→09 duplicate incident, kept
@@ -2338,6 +2377,10 @@ function tripsyMergeDataCopies(copies) {
     if (o && n && typeof o === 'object' && typeof n === 'object' && !Array.isArray(o) && !Array.isArray(n)) {
       merged[k] = { ...o, ...n };
     }
+    // An EMPTY list in the newest copy is no information, never a deletion: a copy born as
+    // the offline stand-in's shell (2026-10-22) has `reservations: []` because it never
+    // synced, not because the reservations went away.
+    if (Array.isArray(o) && Array.isArray(n) && !n.length && o.length) merged[k] = o;
   }
   if (!(newest.invoices || []).length && (oldest.invoices || []).length) {
     merged.invoices = oldest.invoices;
@@ -3320,9 +3363,12 @@ function pruneDriveDataInMemory(trips) {
 }
 
 async function persistDriveData(opts = {}) {
+  // No file id means no sign-in yet: the offline / splash-preview stand-in runs on a minimal
+  // in-memory driveData, and a write from it (the weather cache, 2026-10-22) used to CREATE a
+  // brand-new flight-log-data.json -- the "stray duplicate" the sign-in repair then has to
+  // merge away. The ONLY place a data file is created is completeSignIn's owner path.
   if (!driveFileId) {
-    driveFileId = await createDriveDataFile(driveData);
-    driveDataRevision = await fetchDriveHeadRevision(driveFileId);
+    console.warn('persistDriveData skipped: no data file is open (offline or pre-sign-in) -- kept in memory only.');
     return;
   }
   // Optimistic concurrency: if the file's head revision changed since we loaded
@@ -6110,6 +6156,9 @@ async function runBackgroundSyncs() {
   // One-time: tidy existing place/transportation photos into the "Photos" subfolder.
   try { await migrateTripsyPlacePhotosToSubfolder(); }
   catch (e) { console.error('Place-photo folder migration failed (will retry next load):', e); }
+  // A stray same-named data file (see sweepDriveDataDuplicates) is folded in and trashed.
+  try { const sw = await sweepDriveDataDuplicates(); if (sw.merged) toast(`Merged ${sw.merged} stray data-file cop${sw.merged === 1 ? 'y' : 'ies'} back into the main file.`); }
+  catch (e) { console.error('Duplicate data-file sweep failed (will retry next load):', e); }
 
   // Recompress any oversized pasted photo left from before the 📋 paste
   // path resized (see tripsyRecompressPastedPhotos).
@@ -17712,6 +17761,11 @@ const TRIPSY_FLYOVER_SECONDS_OPTIONS = [1.5, 2, 2.5, 3, 3.2, 4, 5, 6, 8, 10, 12,
 const TRIPSY_FLYOVER_MERGE_KM = 12;
 // Two visits to one city this close share a single dot on the map (an airport and a hotel).
 const TRIPSY_FLYOVER_SHARED_DOT_KM = 40;
+// Two points this close are the same PLACE whatever they are called (the same hotel revisited,
+// geocoded a street apart) -- never two towns ("How come nakatsu, hita, and beppu all have the
+// same location," 2026-10-22: 25-35 km apart, they were joined by the 40 km rule above, which
+// is only for an airport and a hotel of ONE city, so it now also needs the names to match).
+const TRIPSY_FLYOVER_SAME_POINT_KM = 2;
 
 // The leg's mode from a transportation event's raw record: Tripsy's category first, the
 // title shape ("Flight from …", "Train from …") as a fallback.
@@ -18596,14 +18650,17 @@ function tripsyFlyoverPlayableStops(record) {
   // legs, or a layover in a city that is also a stay -- gets ONE point, so every leg uses
   // the same dot ("When a flight goes through the same city twice on a trip make sure to use
   // the same dot on all legs," 2026-10-22). Each later visit takes the first visit's
-  // coordinates when the names match or it lies within TRIPSY_FLYOVER_SHARED_DOT_KM (an
-  // airport vs. a downtown hotel). Points on another copy of the world (unwrapped 360°
-  // away) are never joined.
+  // coordinates when the names MATCH and it lies within TRIPSY_FLYOVER_SHARED_DOT_KM (an
+  // airport vs. a downtown hotel of the same city -- "Bangkok" at BKK and at DMK), or when it
+  // is within TRIPSY_FLYOVER_SAME_POINT_KM whatever it is called. Distance alone at 40 km
+  // joined Nakatsu, Hita and Beppu -- three towns -- onto one dot (2026-10-22). Points on
+  // another copy of the world (unwrapped 360° away) are never joined.
   const seen = [];
   const share = pt => {
     const name = String(pt.label || '').trim().toLowerCase();
     const hit = seen.find(q => Math.abs(q.lng - pt.lng) < 180 && (
-      (name && q.name === name) || tripsyFlyoverDistanceKm(q, pt) < TRIPSY_FLYOVER_SHARED_DOT_KM));
+      (name && q.name === name && tripsyFlyoverDistanceKm(q, pt) < TRIPSY_FLYOVER_SHARED_DOT_KM)
+      || tripsyFlyoverDistanceKm(q, pt) < TRIPSY_FLYOVER_SAME_POINT_KM));
     if (hit) { pt.lat = hit.lat; pt.lng = hit.lng; }
     else seen.push({ lat: pt.lat, lng: pt.lng, name });
   };
@@ -18673,6 +18730,159 @@ function tripsyFlyoverStopVisited(stop, todayKey) {
 }
 
 // ---- Setup page ------------------------------------------------------------------
+// ---- Edit destinations ----
+// "instead of just an option to rebuild the destinations, make the button 'edit destinations'
+// and then display a list of destinations that the user can edit. Also give an option to
+// 'Rebuild Destinations' which would cause the app to automatically re-generate the list of
+// destinations, but again allow the user to fully edit before confirming" (2026-10-22).
+// The setup page's old Rebuild button rebuilt and SAVED in one go; now it opens this dialog
+// on a DRAFT copy: rename, re-place (📍), change the transport, reorder (↑ ↓), remove or
+// restore, add a destination by name, and ↻ Rebuild -- which re-derives the list from the
+// trip into the draft (keeping photos, names, removals and added destinations, exactly as a
+// rebuild always has) and leaves it on screen to edit. Nothing touches the record until Save.
+// Pure helpers first, so the list rules are testable.
+function tripsyFlyoverMoveStop(stops, from, to) {
+  const list = (stops || []).slice();
+  if (from < 0 || from >= list.length || to < 0 || to >= list.length || from === to) return list;
+  const [s] = list.splice(from, 1);
+  list.splice(to, 0, s);
+  return list;
+}
+// A destination the owner typed in: a stay with no dates (it plays where it sits in the
+// list), placed by hand (never renamed by a lookup), reached by car until told otherwise
+// (so the setup page asks how, like any leg nothing on the trip explains).
+function tripsyFlyoverManualStop(place, afterId) {
+  return { id: 'manual-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), kind: 'stay', manual: true,
+    label: place.label, autoLabel: place.label, labelEdited: true, labelLang: 'en', manualPlace: place.query,
+    lat: place.lat, lng: place.lng, mode: 'car', modeGuessed: true, names: [], start: '', end: '', photos: [], afterId: afterId || null };
+}
+// A rebuild re-derives the trip's own destinations; the ones the owner ADDED are not in the
+// trip, so they are put back where they were -- after the destination they followed (by id),
+// else at their old index -- never lost.
+function tripsyFlyoverKeepManualStops(rebuiltStops, prevStops) {
+  const out = (rebuiltStops || []).slice();
+  const prev = prevStops || [];
+  prev.forEach((s, idx) => {
+    if (!s.manual || out.some(x => x.id === s.id)) return;
+    const after = s.afterId ? out.findIndex(x => x.id === s.afterId) : -1;
+    const at = after >= 0 ? after + 1 : Math.min(idx, out.length);
+    out.splice(at, 0, { ...s });
+  });
+  return out;
+}
+function tripsyFlyoverEditDestinationsDialog(trip, record, opts = {}) {
+  return new Promise(resolve => {
+    let draft = { ...record, stops: (record.stops || []).map(s => ({ ...s })) };
+    let ov = document.getElementById('tripsy-flyover-edit-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-edit-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    // Above the setup page; below the place / mode dialogs it opens (2147483070+).
+    ov.style.zIndex = '2147483060';
+    const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; resolve(v); };
+    const render = () => {
+      const stops = draft.stops;
+      ov.innerHTML = `
+        <div class="tw-modal-paper tw-wide" style="max-width:720px; max-height:88vh; max-height:88dvh; padding-bottom:0; display:flex; flex-direction:column;">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+            <h2 style="margin:0; font-size:17px; flex:1; min-width:0;">✏️ Edit destinations</h2>
+            <button class="tripsy-close-x tripsy-save-check" data-fe-save title="Save" aria-label="Save">✓</button>
+            <button class="tripsy-close-x" data-fe-cancel title="Cancel" aria-label="Cancel">✕</button>
+          </div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">In the order they play. Rename, move, remove or add destinations, or rebuild the list from the trip — nothing changes until you press Save.</div>
+          <div data-fe-status style="font-size:12px; color:var(--muted); min-height:16px; margin-bottom:6px;"></div>
+          <div style="flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;">
+            ${stops.length ? stops.map((s, i) => `
+            <div data-fe-stop="${esc(s.id)}" style="border:1px solid var(--line); border-radius:10px; padding:8px 10px; margin-bottom:8px; ${s.removed ? 'opacity:0.5;' : ''}">
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <span style="font-family:var(--mono); font-size:12px; color:var(--muted); min-width:18px;">${i + 1}</span>
+                ${i === 0 && !s.mode ? `<span style="font-size:18px;" title="Where the trip starts">📍</span>`
+                  : `<select class="field-input" data-fe-mode title="How you got here" aria-label="How you got here" style="width:auto; padding:3px 6px; font-size:13px;">${TRIPSY_FLYOVER_MODES.map(m => `<option value="${m}"${m === (s.mode || 'car') ? ' selected' : ''}>${TRIPSY_FLYOVER_MODE_GLYPH[m]} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}</select>`}
+                ${s.removed
+                  ? `<s style="flex:1; min-width:120px; color:var(--muted);">${esc(s.label || 'Location')}</s>`
+                  : `<input class="field-input" data-fe-label value="${esc(s.label || '')}" placeholder="Location" style="flex:1; min-width:120px; font-weight:700;">`}
+                <span style="font-size:12px; color:var(--muted);">${esc(tripsyFlyoverDatesLabel(s))}</span>
+                <button class="btn" data-fe-up ${i === 0 ? 'disabled' : ''} title="Move up" style="font-size:12px; padding:3px 8px;">↑</button>
+                <button class="btn" data-fe-down ${i === stops.length - 1 ? 'disabled' : ''} title="Move down" style="font-size:12px; padding:3px 8px;">↓</button>
+                ${s.removed ? `<button class="btn" data-fe-restore style="font-size:12px;">Restore</button>` : `<button class="btn" data-fe-remove style="font-size:12px;" title="Leave this destination out of the fly-over">Remove</button>`}
+              </div>
+              ${(s.via || []).length && s.mode === 'plane' ? `<div style="font-size:12px; color:var(--muted); margin-top:4px;">via ${esc(s.via.map(v => v.label).join(', '))}</div>` : ''}
+              ${(s.names || []).length ? `<div style="font-size:12px; color:var(--muted); margin-top:4px;">${esc(s.names.join(' · '))}</div>` : ''}
+              ${s.lat == null && !s.removed ? `<div style="font-size:12px; color:#E0A33A; margin-top:4px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">⚠️ Not on the map yet — it will be skipped. <button class="btn" data-fe-place style="font-size:12px;">📍 Set location</button></div>`
+                : (!s.removed ? `<div style="margin-top:4px;"><button class="btn" data-fe-place style="font-size:11px; padding:2px 8px;">📍 Change location</button></div>` : '')}
+            </div>`).join('') : `<div style="padding:14px 0; color:var(--muted);">No destinations yet.</div>`}
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin:4px 0 12px;">
+              <button class="btn" data-fe-add style="font-size:12px;">＋ Add destination</button>
+              <button class="btn" data-fe-rebuild style="font-size:12px;" title="Work the destinations out again from the trip's lodging and flights">↻ Rebuild destinations</button>
+            </div>
+          </div>
+          <div class="tfo-ss-footer" style="justify-content:flex-end;">
+            <button class="tripsy-close-x tripsy-close-x--wide" data-fe-cancel><span class="tripsy-close-x-glyph">✕</span>Cancel</button>
+            <button class="tripsy-close-x tripsy-save-check tripsy-close-x--wide" data-fe-save><span class="tripsy-close-x-glyph">✓</span>Save</button>
+          </div>
+        </div>`;
+      const status = ov.querySelector('[data-fe-status]');
+      ov.querySelectorAll('[data-fe-cancel]').forEach(b => b.onclick = () => done(null));
+      ov.querySelectorAll('[data-fe-save]').forEach(b => b.onclick = () => {
+        const a = document.activeElement;
+        if (a && ov.contains(a) && typeof a.blur === 'function') a.blur();
+        done(draft);
+      });
+      const update = (id, fields) => { draft = { ...draft, stops: draft.stops.map(s => s.id === id ? { ...s, ...fields } : s) }; };
+      ov.querySelectorAll('[data-fe-stop]').forEach((card, i) => {
+        const id = card.getAttribute('data-fe-stop');
+        const stop = () => draft.stops.find(s => s.id === id);
+        const label = card.querySelector('[data-fe-label]');
+        if (label) label.onchange = () => {
+          const v = label.value.trim();
+          if (!v || v === stop().label) { label.value = stop().label || ''; return; }
+          update(id, { label: v, labelEdited: true });
+        };
+        const mode = card.querySelector('[data-fe-mode]');
+        if (mode) mode.onchange = () => { if (TRIPSY_FLYOVER_MODE_GLYPH[mode.value]) { update(id, { mode: mode.value, modeManual: true, modeGuessed: false }); render(); } };
+        const up = card.querySelector('[data-fe-up]');
+        if (up) up.onclick = () => { draft = { ...draft, stops: tripsyFlyoverMoveStop(draft.stops, i, i - 1) }; render(); };
+        const down = card.querySelector('[data-fe-down]');
+        if (down) down.onclick = () => { draft = { ...draft, stops: tripsyFlyoverMoveStop(draft.stops, i, i + 1) }; render(); };
+        const rm = card.querySelector('[data-fe-remove]');
+        if (rm) rm.onclick = () => { update(id, { removed: true }); render(); };
+        const rs = card.querySelector('[data-fe-restore]');
+        if (rs) rs.onclick = () => { update(id, { removed: false }); render(); };
+        const place = card.querySelector('[data-fe-place]');
+        if (place) place.onclick = async () => {
+          const r = await tripsyFlyoverAskPlace(trip, stop());
+          if (r) { update(id, { lat: r.lat, lng: r.lng, label: r.label, labelEdited: true, manualPlace: r.query, needsPlace: false }); render(); }
+        };
+      });
+      ov.querySelector('[data-fe-add]').onclick = async () => {
+        const r = await tripsyFlyoverAskPlace(trip, { id: 'new', kind: 'stay', label: '', needsPlace: true });
+        if (!r) return;
+        const last = draft.stops[draft.stops.length - 1];
+        // Goes before the flight home when the list ends with one, else at the end.
+        const at = last && last.kind === 'return' ? draft.stops.length - 1 : draft.stops.length;
+        const afterId = at > 0 ? draft.stops[at - 1].id : null;
+        const stops = draft.stops.slice(); stops.splice(at, 0, tripsyFlyoverManualStop(r, afterId));
+        draft = { ...draft, stops }; render();
+      };
+      ov.querySelector('[data-fe-rebuild]').onclick = async () => {
+        if (!opts.rebuild) return;
+        ov.querySelectorAll('button').forEach(b => { b.disabled = true; });
+        status.textContent = 'Working the destinations out again from the trip…';
+        try {
+          const rebuilt = await opts.rebuild(draft);
+          if (rebuilt) draft = { ...rebuilt, stops: tripsyFlyoverKeepManualStops(rebuilt.stops, draft.stops) };
+          render();
+          ov.querySelector('[data-fe-status]').textContent = rebuilt ? 'Rebuilt — check the list, then Save.' : 'Couldn’t rebuild the destinations.';
+        } catch (e) {
+          console.error('fly-over rebuild failed:', e);
+          render();
+          ov.querySelector('[data-fe-status]').textContent = 'Couldn’t rebuild: ' + String(e && e.message || e).slice(0, 160);
+        }
+      };
+    };
+    render();
+    ov.style.display = 'flex';
+    ov.onclick = e => { if (e.target === ov) done(null); };
+  });
+}
 async function showTripsyFlyover(tripKey) {
   const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
   if (!trip) return;
@@ -18689,8 +18899,8 @@ async function showTripsyFlyover(tripKey) {
       <div data-flyover-status style="font-size:12px; color:var(--muted); min-height:16px; margin-bottom:8px;"></div>
       <div data-flyover-body><div style="padding:24px 0; color:var(--muted);">Loading…</div></div>
       ${isOwner ? `<div class="tfo-ss-footer" style="justify-content:flex-end;">
-        <button class="btn" data-flyover-close>Close</button>
-        <button class="btn" data-flyover-save style="font-weight:700;">Save</button>
+        <button class="tripsy-close-x tripsy-close-x--wide" data-flyover-close><span class="tripsy-close-x-glyph">✕</span>Close</button>
+        <button class="tripsy-close-x tripsy-save-check tripsy-close-x--wide" data-flyover-save><span class="tripsy-close-x-glyph">✓</span>Save</button>
       </div>` : '<div style="height:20px;"></div>'}
     </div>`;
   ov.style.display = 'flex';
@@ -18850,7 +19060,7 @@ async function showTripsyFlyover(tripKey) {
     body.innerHTML = `
       <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">
         ${playable} destination${playable === 1 ? '' : 's'} on the map.${isOwner ? ' Add photos to each one — they play as a slideshow when the trip arrives there.' : ''}
-        ${isOwner ? `<button class="btn" data-flyover-rebuild style="font-size:12px; margin-left:6px;">↻ Rebuild destinations</button>` : ''}
+        ${isOwner ? `<button class="btn" data-flyover-edit-dests style="font-size:12px; margin-left:6px;" title="Rename, reorder, add, remove or rebuild the destinations">✏️ Edit destinations</button>` : ''}
         ${completeHtml}
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; font-size:13px;">
@@ -18925,8 +19135,23 @@ async function showTripsyFlyover(tripKey) {
       record = { ...record, music: m };
       save(); render();
     };
-    const rebuildBtn = body.querySelector('[data-flyover-rebuild]');
-    if (rebuildBtn) rebuildBtn.onclick = async () => { rebuildBtn.disabled = true; await build(); if (!closed) { render(); askMissingModes(); } };
+    // Edit destinations: a draft list to rename / move / add / remove / rebuild, applied on
+    // its Save only (the old Rebuild button rebuilt and saved in one go).
+    const editBtn = body.querySelector('[data-flyover-edit-dests]');
+    if (editBtn) editBtn.onclick = async () => {
+      const r = await tripsyFlyoverEditDestinationsDialog(trip, record, {
+        // The rebuild inside the dialog never asks for places (the list is right there to
+        // fix); an unplaced destination shows its ⚠️ and Set location.
+        rebuild: async draft => tripsyFlyoverBuild(trip, draft, {}),
+      });
+      if (!r || closed) return;
+      record = r;
+      record = tripsyFlyoverSeedItineraryPhotos(record, trip, tripsyTodayDayKey(), driveData.tripsyPlacePhotoCache).record;
+      await save();
+      if (closed) return;
+      render(); askMissingModes();
+      renderTripsyEventsList();
+    };
     body.querySelectorAll('[data-flyover-stop]').forEach(card => {
       const id = card.getAttribute('data-flyover-stop');
       const stop = () => record.stops.find(s => s.id === id);
@@ -19434,7 +19659,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
           <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
             <h2 style="margin:0; font-size:17px; flex:1;">🎞 ${esc(stop.label || 'Photos')} — page ${cur + 1} of ${pages.length}</h2>
             <button class="tripsy-close-x tripsy-save-check" data-ss-save data-ss-save-top title="Save" aria-label="Save">✓</button>
-            <button class="tripsy-close-x" data-ss-cancel aria-label="Close">✕</button>
+            <button class="tripsy-close-x" data-ss-cancel title="Cancel" aria-label="Cancel">✕</button>
           </div>
           ${intro ? `<div style="font-size:13px; color:var(--muted); margin-bottom:10px;">${esc(intro)}</div>` : ''}
           <div data-ss-strip style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:${pages.length > 1 ? 4 : 12}px;">
@@ -19499,8 +19724,8 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
               ${playPreview ? `<button class="btn" data-ss-preview>▶ Preview</button>` : ''}
-              <button class="btn" data-ss-cancel>Cancel</button>
-              <button class="btn" data-ss-save style="font-weight:700;">Save</button>
+              <button class="tripsy-close-x tripsy-close-x--wide" data-ss-cancel><span class="tripsy-close-x-glyph">✕</span>Cancel</button>
+              <button class="tripsy-close-x tripsy-save-check tripsy-close-x--wide" data-ss-save><span class="tripsy-close-x-glyph">✓</span>Save</button>
             </div>
           </div>
         </div>`;
@@ -20389,14 +20614,24 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   const layers = [];
   const vehicleIcon = mode => L.divIcon({ className: 'tfo-vehicle', html: `<span>${TRIPSY_FLYOVER_MODE_GLYPH[mode] || '🚗'}</span>`, iconSize: [40, 40], iconAnchor: [20, 20] });
 
-  const animateLeg = (r, a, b, legMode) => new Promise(resolve => {
+  // `carry` keeps ONE vehicle across a journey's legs: a flight through a layover used to
+  // remove its plane at the end of each leg and add a new one for the next, so the plane
+  // vanished during the stopover ("When the plane on a flyover does a stopover, do not make
+  // the plane disappear from the map," 2026-10-22). With carry.keep the marker (and its
+  // heading) stays on the map for the next leg to pick up; the last leg removes it.
+  const animateLeg = (r, a, b, legMode, carry = null) => new Promise(resolve => {
     const mode = legMode || b.mode || 'car';
     const path = mode === 'plane' ? tripsyFlyoverGreatCircle(a, b, 72) : tripsyFlyoverStraight(a, b, 40);
     const trail = L.polyline([path[0]], { color: '#E04B3A', weight: 3, opacity: 0.9, dashArray: mode === 'plane' ? '7 9' : mode === 'hike' ? '2 7' : null }).addTo(map);
     layers.push(trail);
-    const marker = L.marker(path[0], { icon: vehicleIcon(mode), interactive: false, zIndexOffset: 1000 }).addTo(map);
+    let marker = carry && carry.marker;
+    if (marker) marker.setLatLng(path[0]);
+    else {
+      marker = L.marker(path[0], { icon: vehicleIcon(mode), interactive: false, zIndexOffset: 1000 }).addTo(map);
+      if (carry) layers.push(marker); // so Replay clears a vehicle left waiting at a layover
+    }
     const total = tripsyFlyoverLegMs(mode, tripsyFlyoverDistanceKm(a, b));
-    let elapsed = 0, last = performance.now(), heading = null;
+    let elapsed = 0, last = performance.now(), heading = carry && carry.heading != null ? carry.heading : null;
     const frame = () => {
       if (r.cancelled) { marker.remove(); return resolve(false); }
       const now = performance.now();
@@ -20436,7 +20671,12 @@ async function playTripsyFlyover(trip, record, opts = {}) {
           }
         }
       }
-      if (p >= 1) { marker.remove(); trail.setLatLngs(path); return resolve(true); }
+      if (p >= 1) {
+        trail.setLatLngs(path);
+        if (carry && carry.keep) { carry.marker = marker; carry.heading = heading; }
+        else { marker.remove(); if (carry) carry.marker = null; }
+        return resolve(true);
+      }
       requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);
@@ -20737,12 +20977,15 @@ async function playTripsyFlyover(trip, record, opts = {}) {
         keepLabelsInView([fromLabel, destLabel, ...viaMarks], [a, ...via, b]);
       }
       let from = a;
+      // The plane stays on the map through each stopover (one marker for the whole journey).
+      const carry = via.length ? { keep: true, marker: null, heading: null } : null;
       for (const v of via) {
-        if (!(await animateLeg(r, from, v, 'plane'))) return;
+        if (!(await animateLeg(r, from, v, 'plane', carry))) return;
         if (!(await wait(r, 900))) return;
         from = v;
       }
-      if (!(await animateLeg(r, from, b, via.length ? 'plane' : ''))) return;
+      if (carry) carry.keep = false;
+      if (!(await animateLeg(r, from, b, via.length ? 'plane' : '', carry))) return;
       if (!(await arrive(r, b, stayNo(b), !(closeWithPhotos && b === last)))) return;
     }
     clearDestLabel();
@@ -26076,6 +26319,8 @@ async function tripsyLoadWeather(targets) {
     for (const { c, keys } of typicalByCoord.values()) jobs.push(tripsyWeatherFetchTypical(c.lat, c.lon, [...keys]));
     if (!jobs.length) return;
     await Promise.all(jobs);
+    // Offline / splash preview: the cache lives in memory for this page only.
+    if (appOfflineMode || !driveFileId) return;
     try { await persistDriveData(); } catch (e) { console.error('weather cache persist failed', e); }
   } catch (e) { console.error('tripsyLoadWeather failed', e); }
 }
