@@ -29,7 +29,7 @@ function isTripsyEventEffectivelyHidden(ev) { return !!ev.hidden; }
 eval([
   (html.match(/const TV_STRIP_LOC = new Set\(\[[\s\S]*?\]\);/) || [''])[0],
   html.slice(sliceStart, extractorEnd),
-  constLine('TRIPSY_FLYOVER_MODE_RANK'), constLine('TRIPSY_FLYOVER_MERGE_KM'),
+  constLine('TRIPSY_FLYOVER_MODE_RANK'), constLine('TRIPSY_FLYOVER_MERGE_KM'), constLine('TRIPSY_FLYOVER_SHARED_DOT_KM'),
   ...['tripsyFlyoverModeOf', 'tripsyFlyoverAirportQuery', 'tripsyFlyoverDeriveStops', 'tripsyFlyoverDistanceKm',
     'tripsyFlyoverMergeNearby', 'tripsyFlyoverCarryOver', 'tripsyFlyoverGreatCircle', 'tripsyFlyoverStraight',
     'tripsyFlyoverUnwrap', 'tripsyFlyoverPlayableStops', 'tripsyFlyoverLegMs'].map(extractFn),
@@ -962,6 +962,30 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(p[0].via.length === 0, 'the first stop shown has no leg in, so no layover');
   assert(p[1].via.length === 1 && p[1].via[0].label === 'Tokyo' && p[1].via[0].lng < -180 && p[1].lng < -180,
     'a layover is unwrapped in sequence (LAX → Tokyo → Singapore across the Pacific); one with no place is skipped');
+  // the same city on two legs shares ONE point (and so one dot)
+  const twice = tripsyFlyoverPlayableStops({ stops: [
+    { id: 'o', label: 'Los Angeles', lat: 33.94, lng: -118.41 },
+    { id: 'c', label: 'Chiang Rai', lat: 19.9, lng: 99.8, via: [{ label: 'Bangkok', lat: 13.69, lng: 100.75 }] },
+    { id: 'd', label: 'Hoi An', lat: 15.9, lng: 108.3, via: [{ label: 'Bangkok', lat: 13.91, lng: 100.6 }] },
+    { id: 's', label: 'Singapore', lat: 1.29, lng: 103.85 },
+    { id: 'f', label: 'Fukuoka', lat: 33.59, lng: 130.4, via: [{ label: 'Changi', lat: 1.36, lng: 103.99 }] },
+  ] });
+  assert(twice[2].via[0].lat === twice[1].via[0].lat && twice[2].via[0].lng === twice[1].via[0].lng,
+    'a layover city flown through on two legs (Bangkok, BKK then DMK) uses the first visit\'s point');
+  assert(twice[4].via[0].lat === twice[3].lat && twice[4].via[0].lng === twice[3].lng,
+    'a layover close to a city already shown (Changi, near the Singapore stay) shares its point');
+  assert(twice[3].lat === 1.29 && twice[1].lat === 19.9, 'distinct cities keep their own points');
+  const round = tripsyFlyoverPlayableStops({ stops: [
+    { id: 'o', label: 'Los Angeles', lat: 33.94, lng: -118.41 },
+    { id: 's', label: 'Singapore', lat: 1.29, lng: 103.85 },
+    { id: 'r', label: 'Los Angeles', lat: 33.94, lng: -118.41 },
+  ] });
+  assert(round[2].lat === round[0].lat && round[2].lng === round[0].lng, 'flying home to where the trip started lands on the origin\'s own dot');
+  const far = tripsyFlyoverPlayableStops({ stops: [
+    { id: 'a', label: 'Here', lat: 0, lng: 170 }, { id: 'b', label: 'B', lat: 0, lng: -100 }, { id: 'c', label: 'C', lat: 0, lng: 0 },
+    { id: 'd', label: 'D', lat: 0, lng: 100 }, { id: 'e', label: 'Here', lat: 0, lng: 170 },
+  ] });
+  assert(Math.abs(far[4].lng - far[0].lng) >= 180, 'a point a whole world away after unwrapping is never joined to the first copy');
 }
 {
   const play = extractFn('playTripsyFlyover');
@@ -973,6 +997,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(/const showLayovers = via => via\.map\(v => \{\s*ensureDot\(v\);[\s\S]*?tfo-via-label tfo-dest-label[\s\S]*?viaLabels\.push\(m\);/.test(play)
     && /const viaMarks1 = showLayovers\(via1\);/.test(play) && /ensureDot\(b\);\s*const viaMarks = showLayovers\(via\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(legBounds/.test(play),
     'a leg\'s layover dots and names go up WITH the destination\'s, as the leg begins (first leg included)');
+  assert(/const key = `\$\{\(\+s\.lat\)\.toFixed\(5\)\},\$\{\(\+s\.lng\)\.toFixed\(5\)\}`;\s*if \(dotted\.has\(key\)\) return;/.test(play),
+    'dots are keyed by position, so a city visited twice gets one dot');
   assert(/tripsyFlyoverGeocodeVias\(stops\)/.test(extractFn('tripsyFlyoverBuild')) && /layoversAt/.test(extractFn('tripsyFlyoverBuild')), 'a build places the layovers');
   assert(/tripsyFlyoverAddLayovers\(record, trip\)/.test(extractFn('showTripsyFlyover')), 'an older fly-over picks layovers up on the setup page');
   assert(/opts\.layovers/.test(play) && /tripsyFlyoverAddLayovers\(record, trip\)/.test(html.slice(html.indexOf('[data-tripsy-flyover]'), html.indexOf('[data-tripsy-flyover]') + 2000)),
@@ -1080,7 +1106,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/\.tfo-via-label span \{[^}]*font: 700 20px/.test(html) && !/\.tfo-dest-label span \{[^}]*font-size/.test(html) && sc[1] === '1' && sc[2] === '1' && new RegExp(`scale\\(${sc[1]}\\)`).test(css) && new RegExp(`scale\\(${sc[2]}\\)`).test(grownCss),
       'every name on the map (origin, destination, layover) is one 20px size that never grows, and the centring constants match the CSS');
     assert(/TRIPSY_FLYOVER_DEST_LABEL_SCALE\.start \* TRIPSY_FLYOVER_DEST_LABEL_SCALE\.grown/.test(play), 'the arrival zoom frames the GROWN name');
-    assert(/ensureDot = s => \{ if \(dotted\.has\(s\)\) return;/.test(play) && /ensureDot\(s\);\s*showDestLabel\(s\)/.test(arr)
+    assert(/const ensureDot = s => \{[\s\S]{0,120}if \(dotted\.has\(key\)\) return;/.test(play) && /ensureDot\(s\);\s*showDestLabel\(s\)/.test(arr)
       && /dotted = new Set\(\);/.test(play.slice(play.indexOf('const play = async'))), 'one dot per stop, never a second on arrival, reset on Replay');
   }
   const arriveSrc = play.slice(play.indexOf('const arrive = async'), play.indexOf('const play = async'));

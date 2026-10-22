@@ -17701,6 +17701,8 @@ const TRIPSY_FLYOVER_SECONDS_MAX = 15;
 const TRIPSY_FLYOVER_SECONDS_OPTIONS = [1.5, 2, 2.5, 3, 3.2, 4, 5, 6, 8, 10, 12, 15];
 // Two stops this close together (km) are one destination on a map at city zoom.
 const TRIPSY_FLYOVER_MERGE_KM = 12;
+// Two visits to one city this close share a single dot on the map (an airport and a hotel).
+const TRIPSY_FLYOVER_SHARED_DOT_KM = 40;
 
 // The leg's mode from a transportation event's raw record: Tripsy's category first, the
 // title shape ("Flight from …", "Train from …") as a fallback.
@@ -17772,6 +17774,16 @@ const TRIPSY_AIRPORT_CITIES = {
   SYD: "Sydney", MEL: "Melbourne", BNE: "Brisbane", PER: "Perth", ADL: "Adelaide", CNS: "Cairns", OOL: "Gold Coast", AKL: "Auckland", ZQN: "Queenstown", CHC: "Christchurch", WLG: "Wellington", NAN: "Nadi", PPT: "Tahiti", BOB: "Bora Bora",
 };
 // The airport's city, or '' when there is nothing to go on. Pure.
+// The IATA code an endpoint description carries: a bare "ICN", "Seoul (ICN)", or
+// "ICN Incheon, KR - ...". '' when it names no code.
+function tripsyAirportCodeOf(desc) {
+  const d = String(desc || '').trim();
+  if (/^[A-Z]{3}$/.test(d)) return d;
+  const paren = d.match(/\(([A-Z]{3})\)\s*$/);
+  if (paren) return paren[1];
+  const lead = d.match(/^([A-Z]{3})\s+(?=\S)/);
+  return lead ? lead[1] : '';
+}
 function tripsyFlyoverAirportCity(desc) {
   const d = String(desc || '').trim();
   if (!d) return '';
@@ -18566,11 +18578,28 @@ function tripsyFlyoverPlayableStops(record) {
     prev = lng;
     return lng;
   };
-  return stops.map((s, k) => {
+  const out = stops.map((s, k) => {
     // Layovers sit on the leg INTO the stop, so the first stop shown has none.
     const via = k === 0 ? [] : (s.via || []).filter(v => v && v.lat != null && v.lng != null).map(v => ({ ...v, lng: wrap(v.lng) }));
     return { ...s, via, lng: wrap(s.lng) };
   });
+  // A city the route passes through more than once -- a layover city flown through on two
+  // legs, or a layover in a city that is also a stay -- gets ONE point, so every leg uses
+  // the same dot ("When a flight goes through the same city twice on a trip make sure to use
+  // the same dot on all legs," 2026-10-22). Each later visit takes the first visit's
+  // coordinates when the names match or it lies within TRIPSY_FLYOVER_SHARED_DOT_KM (an
+  // airport vs. a downtown hotel). Points on another copy of the world (unwrapped 360°
+  // away) are never joined.
+  const seen = [];
+  const share = pt => {
+    const name = String(pt.label || '').trim().toLowerCase();
+    const hit = seen.find(q => Math.abs(q.lng - pt.lng) < 180 && (
+      (name && q.name === name) || tripsyFlyoverDistanceKm(q, pt) < TRIPSY_FLYOVER_SHARED_DOT_KM));
+    if (hit) { pt.lat = hit.lat; pt.lng = hit.lng; }
+    else seen.push({ lat: pt.lat, lng: pt.lng, name });
+  };
+  for (const s of out) { for (const v of s.via) share(v); share(s); }
+  return out;
 }
 // How long the vehicle takes on a leg: long enough to read a long-haul flight as long,
 // short enough that a twenty-stop trip doesn't drag.
@@ -20339,8 +20368,15 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   // One dot per stop, added the first time it is needed: a destination's dot goes up with its
   // name as the leg TO it begins ("the destination orange dot should appear on the map when the
   // map first appears," 2026-10-21), so arriving there must not add a second one.
+  // Keyed by POSITION, not by stop: a city visited twice shares one point
+  // (tripsyFlyoverPlayableStops), so it shares one dot too.
   let dotted = new Set();
-  const ensureDot = s => { if (dotted.has(s)) return; dotted.add(s); layers.push(dot(s)); };
+  const ensureDot = s => {
+    const key = `${(+s.lat).toFixed(5)},${(+s.lng).toFixed(5)}`;
+    if (dotted.has(key)) return;
+    dotted.add(key);
+    layers.push(dot(s));
+  };
   const layers = [];
   const vehicleIcon = mode => L.divIcon({ className: 'tfo-vehicle', html: `<span>${TRIPSY_FLYOVER_MODE_GLYPH[mode] || '🚗'}</span>`, iconSize: [40, 40], iconAnchor: [20, 20] });
 
@@ -21741,6 +21777,12 @@ function tripsyLodgingCityLower(ev) {
 // Airport" for "london"). Conservative: needs a >=3-char city and a real match.
 function tripsyDescMatchesCity(desc, city) {
   if (!desc || !city || city.length < 3) return false;
+  // An airport CODE names its city too ("Why is check in at the hotel in Seoul before the
+  // plane lands in Seoul," 2026-10-22 -- a flight's endpoint reads just "ICN", which no
+  // text test can tie to a hotel whose address says Seoul, so the 3:00 PM nominal check-in
+  // stayed above the 5:20 PM landing).
+  const code = tripsyAirportCodeOf(desc);
+  if (code && TRIPSY_AIRPORT_CITIES[code] && TRIPSY_AIRPORT_CITIES[code].toLowerCase() === city) return true;
   if (tripsyPrimaryCityFromAddress(desc).toLowerCase() === city) return true;
   return new RegExp('\\b' + city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b')
     .test(String(desc).toLowerCase());
@@ -21999,9 +22041,15 @@ function placeTripsyLodgingNextToTransfers(events) {
     // The Check-out half ('end') pairs with the transport LEAVING; every other
     // lodging row pairs with the one arriving.
     const want = lodge._splitHalf === 'end' ? 'departing' : 'arriving';
-    const transport = out.find(e => e !== lodge && !e._layover && !e._flightArrival
+    const candidates = out.filter(e => e !== lodge && !e._layover && !e._flightArrival
       && tripsyDayKey(e.start) === day
       && tripsyTransferSideForLodging(e, lodge) === want);
+    // A transfer that NAMES the lodging beats one that merely reaches its city: the flight
+    // into Chiang Rai (CEI) and the car on to the lodge both "arrive", and the Check-in
+    // belongs after the car. Airport codes count as their city since 2026-10-22, so a
+    // city-only flight match is now common.
+    const side = e => want === 'arriving' ? e.tripsyRaw.arrivalDescription : e.tripsyRaw.departureDescription;
+    const transport = candidates.find(e => tripsyDescMatchesLodgingName(side(e), lodge)) || candidates[0];
     if (!transport) continue;
     out = out.filter(e => e !== lodge);
     let idx = out.indexOf(transport);

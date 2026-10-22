@@ -80,7 +80,8 @@ assert(/const saveBlob = blob\.size > 400000 \? await tripsyResizeImageBlob\(blo
     .replace(/^function tripsyPrimaryCityFromAddress/m, 'var tripsyPrimaryCityFromAddress = function'));
   eval((html.match(/const TRIPSY_VAN_TRANSFER_PHOTO_SUBJECT = .*;/) || [''])[0].replace(/^const /, 'var '));
   eval((html.match(/const TRIPSY_HOTEL_TRANSFER_PHOTO_SUBJECT = .*;/) || [''])[0].replace(/^const /, 'var '));
-  for (const n of ['tripsyLodgingCityLower', 'tripsyDescMatchesCity', 'tripsyDescMatchesLodgingName',
+  eval((html.match(/const TRIPSY_AIRPORT_CITIES = \{[\s\S]*?\n\};/) || [''])[0].replace(/^const /, 'var '));
+  for (const n of ['tripsyAirportCodeOf', 'tripsyLodgingCityLower', 'tripsyDescMatchesCity', 'tripsyDescMatchesLodgingName',
     'tripsyTransferSideForLodging', 'tripsyVanTransferPhotoSubject']) {
     const src = extractFn(n);
     if (!src) { assert(false, `could not extract ${n}`); continue; }

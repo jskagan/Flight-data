@@ -1072,6 +1072,16 @@ step 4; git history has it if ever needed.
   FIRST arriving match wins, so a dinner-return car naming the hotel can't drag the Check-in to
   the end of the evening; layover glue is respected. `insertTripsyFlightArrivals` remains
   timeline-only. `lodgingorder_test.js`.
+  **An airport CODE counts as its city** ("On October 30, why is check in at the hotel in Seoul
+  before the plane lands in Seoul," 2026-10-22 — the FUK→ICN flight's endpoints read just
+  "FUK"/"ICN", no text test could tie "ICN" to a hotel whose address says Seoul, and with no
+  airport car on the trip the 3:00 PM nominal Check-in stayed above the 5:20 PM landing):
+  `tripsyDescMatchesCity` also resolves a bare `ICN`, `Seoul (ICN)` or `ICN Incheon …` through
+  `tripsyAirportCodeOf` + the fly-over's `TRIPSY_AIRPORT_CITIES` table. Because a flight into
+  the city now "arrives" too, `placeTripsyLodgingNextToTransfers` prefers a candidate that
+  NAMES the lodging over a city-only one, so Oct 12's Check-in still follows the car to the
+  lodge, not the CEI flight before it. Checked against the Singapore GP data: Oct 30 reads
+  flight → Andaz Check-in, Oct 23 SIN→FUK → Ritz-Carlton Check-in.
 - **A day spent entirely in the air renders as "✈️ In-flight" with the leg's details, not "No
   events scheduled"** ("When there is a day spent entirely in the air flying, on the itinerary
   page display that day as 'In-flight' and show the origin, destination, and flight number,"
@@ -3833,6 +3843,15 @@ WebView's support for recording is unproven.
     first destination's dots, and each later leg adds its destination's dot as the leg begins —
     one per stop through `ensureDot` (a `dotted` set, reset on Replay), so arriving never adds a
     second.
+    **A city the route passes through twice has ONE dot** ("When a flight goes through the same
+    city twice on a trip make sure to use the same dot on all legs," same day — the Singapore
+    GP connects through Bangkok on two legs, once via BKK and once via DMK, ~30 km apart, so two
+    dots). `tripsyFlyoverPlayableStops` walks every point in play order (each leg's layovers,
+    then its stop) and gives a later point the FIRST visit's coordinates when the names match
+    or it lies within `TRIPSY_FLYOVER_SHARED_DOT_KM` (40 — an airport vs. a downtown hotel);
+    points unwrapped onto another copy of the world (≥180° of longitude apart) are never
+    joined. `ensureDot` is keyed by POSITION (lat/lng to 5 places), not by the stop object, so
+    a shared point gets one marker, and the route lines meet at it.
   - **Google Map Tiles come FIRST when available** ("Add Google Map Tiles with the Places
     key," 2026-10-21 — the keyless sources have no @2x tiles, so the map looked pixelated on
     the iPad). `tripsyFlyoverGoogleTileSource` creates a Map Tiles API session (`roadmap`,

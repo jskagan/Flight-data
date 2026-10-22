@@ -54,8 +54,9 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
   eval((html.match(/const TV_STRIP_LOC = new Set\(\[[\s\S]*?\]\);/) || [''])[0].replace(/^const /, 'var '));
   eval(html.slice(sliceStart, html.indexOf(cityFnSrc) + cityFnSrc.length)
     .replace(/^function tripsyPrimaryCityFromAddress/m, 'var tripsyPrimaryCityFromAddress = function'));
+  eval((html.match(/const TRIPSY_AIRPORT_CITIES = \{[\s\S]*?\n\};/) || [''])[0].replace(/^const /, 'var '));
   const names = ['parseTripLocalParts', 'tripsyDayKey', 'tripsyIsFlightEvent', 'expandMultiDayTripsyEvents',
-    'tripsyLodgingCityLower', 'tripsyDescMatchesCity',
+    'tripsyAirportCodeOf', 'tripsyLodgingCityLower', 'tripsyDescMatchesCity',
     'tripsyLodgingTransportOrder', 'tripsyMultiDayEventOrder', 'tripsyTimelineSortComparator',
     'tripsyDescMatchesLodgingName', 'tripsyTransferSideForLodging', 'placeTripsyLodgingNextToTransfers'];
   for (const n of names) {
@@ -105,8 +106,34 @@ const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) pro
   const sortedNoCar = placeTripsyLodgingNextToTransfers(
     insertTripsyLayovers(expandMultiDayTripsyEvents(noCar).sort(tripsyTimelineSortComparator)));
   const day12NoCar = sortedNoCar.filter(e => tripsyDayKey(e.start) === '2026-10-12').map(e => e.id);
-  assert(day12NoCar.join(',') === 'hosting-1-checkout,transportation-2,hosting-3-checkin,transportation-4',
-    'with no evidence tying a transport to the lodging, time order is kept unchanged');
+  assert(day12NoCar.join(',') === 'hosting-1-checkout,transportation-2,transportation-4,hosting-3-checkin',
+    'with no transfer car, the flight landing at the lodging city\'s airport code (CEI = Chiang Rai) still comes before the Check-in');
+  // Nothing at all ties a transport to the lodging: time order is kept unchanged.
+  const unrelated = [
+    { id: 'hosting-9', type: 'hotel', summary: 'Hilltop Inn', start: '2026-11-02T15:00:00', end: '2026-11-04T11:00:00',
+      tripsyRaw: { resource: 'hosting', id: 9, name: 'Hilltop Inn', address: '5 Main St, Queenstown, New Zealand' } },
+    trans(10, 'XX1', 'SYD', 'MEL', '2026-11-02T16:00:00', '2026-11-02T17:30:00'),
+  ];
+  const un = placeTripsyLodgingNextToTransfers(expandMultiDayTripsyEvents(unrelated).sort(tripsyTimelineSortComparator))
+    .filter(e => tripsyDayKey(e.start) === '2026-11-02').map(e => e.id);
+  assert(un.join(',') === 'hosting-9-checkin,transportation-10', 'with no evidence tying a transport to the lodging, time order is kept unchanged');
+  // The Seoul report: a hotel whose 3:00 PM nominal check-in sat above the 5:20 PM landing at "ICN".
+  const seoul = [
+    { id: 'hosting-20', type: 'hotel', summary: 'Gangnam Grand', start: '2026-10-30T15:00:00', end: '2026-11-02T11:00:00',
+      tripsyRaw: { resource: 'hosting', id: 20, name: 'Gangnam Grand', address: '1, Teheran-ro, Gangnam-gu Seoul South Korea, 06000' } },
+    trans(21, 'OZ1', 'FUK', 'ICN', '2026-10-30T15:50:00', '2026-10-30T17:20:00'),
+  ];
+  const se = placeTripsyLodgingNextToTransfers(expandMultiDayTripsyEvents(seoul).sort(tripsyTimelineSortComparator))
+    .filter(e => tripsyDayKey(e.start) === '2026-10-30').map(e => e.id);
+  assert(se.join(',') === 'transportation-21,hosting-20-checkin', `the flight landing at ICN comes before the Seoul hotel's Check-in (got: ${se.join(',')})`);
+  const seOut = [
+    { id: 'hosting-22', type: 'hotel', summary: 'Gangnam Grand', start: '2026-10-28T15:00:00', end: '2026-10-30T11:00:00',
+      tripsyRaw: { resource: 'hosting', id: 22, name: 'Gangnam Grand', address: '1, Teheran-ro, Gangnam-gu Seoul South Korea, 06000' } },
+    trans(23, 'OZ2', 'Seoul (GMP)', 'Tokyo (HND)', '2026-10-30T09:00:00', '2026-10-30T11:10:00'),
+  ];
+  const so = placeTripsyLodgingNextToTransfers(expandMultiDayTripsyEvents(seOut).sort(tripsyTimelineSortComparator))
+    .filter(e => tripsyDayKey(e.start) === '2026-10-30').map(e => e.id);
+  assert(so.join(',') === 'hosting-22-checkout,transportation-23', `checking out comes before the flight leaving Seoul (got: ${so.join(',')})`);
 
   // The FIRST matching transfer wins: a later "back to the lodge" return car
   // (dinner run) must not drag the Check-in to the end of the evening.
