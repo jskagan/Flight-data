@@ -182,6 +182,34 @@ assert(/update\(fromId, \{ label: v, labelEdited: true \}\)/.test(feDlg) && /upd
 assert(/data-mode-select/.test(html) && /<select[^>]*data-mode-select/.test(html), 'the mode question is a drop-down');
 assert(/b\.kind === 'transit'\) \{ if \(!\(await wait\(r, 900\)\)\) return; continue; \}/.test(html), 'the player passes through a transfer like a layover (no arrival, no photos)');
 assert(/\(dx > 0\) !== facesRight/.test(html), 'the taxi picture faces right, so it flips the other way round');
+// ---- photos show at once, upload in the background (2026-10-22) ----
+// "There is a massive delay from the time I select photos for the flyover until they appear
+// in the flyover pages. Can we reduce that delay?"
+eval([extractFn('tripsyFlyoverResolvePendingIds'), extractFn('tripsyFlyoverDropLostPending')].join('\n'));
+{
+  const rec = { tripKey: 'T', stops: [{ id: 's1', photos: [{ driveFileId: 'pending-a' }, { driveFileId: 'real1' }], pages: [{ ids: ['pending-a', 'real1'], count: 2 }] }, { id: 's2', photos: [{ driveFileId: 'pending-b' }] }] };
+  const map = new Map([['pending-a', 'drive-A']]);
+  const out = tripsyFlyoverResolvePendingIds(rec, map);
+  assert(out !== rec && out.stops[0].photos[0].driveFileId === 'drive-A' && out.stops[0].pages[0].ids.join(',') === 'drive-A,real1',
+    'an uploaded photo\'s pending id is swapped for its Drive id in the stop\'s photos AND its pages');
+  assert(out.stops[1].photos[0].driveFileId === 'pending-b' && rec.stops[0].photos[0].driveFileId === 'pending-a', 'a still-pending id is left; the input is not mutated');
+  assert(tripsyFlyoverResolvePendingIds(rec, new Map()) === rec, 'nothing uploaded -> the same record back');
+  const lost = tripsyFlyoverDropLostPending(rec, id => id === 'pending-a');
+  assert(lost.dropped === 1 && lost.record.stops[1].photos.length === 0 && lost.record.stops[0].photos.length === 2 && lost.record.stops[0].pages[0].ids.length === 2,
+    'a pending photo whose bytes are gone is dropped (from its pages too); one still held stays');
+  assert(tripsyFlyoverDropLostPending(rec, () => true).dropped === 0, 'nothing lost -> nothing dropped');
+}
+assert(/const _driveFolderIdMemo = new Map\(\)/.test(html) && /if \(_driveFolderIdMemo\.has\(folderName\)\) return _driveFolderIdMemo\.get\(folderName\)/.test(html),
+  'the Drive folder id is looked up once per session, not once per photo');
+assert(/const TRIPSY_FLYOVER_UPLOAD_PARALLEL = 3/.test(html) && /tripsyFlyoverQueueUpload\(trip\.key, pendingId\)/.test(html) && /if \(queued\) \{ save\(\); if \(!closed\) render\(\); \}/.test(html),
+  'picked photos are staged with pending ids, rendered at once, and uploaded three at a time in the background');
+assert(/driveFileId\.startsWith\('pending-'\)\) \{\s*if \(tripsyFlyoverUploadedIds\.has\(driveFileId\)\) return tripsyPlacePhotoDisplayUrl/.test(html),
+  'tripsyPlacePhotoDisplayUrl paints a pending photo from its local bytes (and follows an uploaded one to its Drive id)');
+assert(/document\.addEventListener\('tripsy-flyover-upload', onUpload\)/.test(html) && /document\.removeEventListener\('tripsy-flyover-upload', onUpload\)/.test(html),
+  'the setup page repaints when an upload lands and unhooks on close');
+assert(/const lost = tripsyFlyoverDropLostPending\(record\)/.test(html) && /data-flyover-retry-upload/.test(html),
+  'a reload mid-upload drops the lost photos with a message; a failed upload offers Retry');
+
 // ---- play a part of the journey (2026-10-22) ----
 // "present him with a numbered list of the cities visited and ask whether he wants to view
 // the entire journey or allow him to select a starting and ending city. If he selects a
@@ -591,7 +619,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/slideshow: \{ \.\.\.p\.slideshow \}/.test(extractFn('tripsyFlyoverCarryOver')) && /pages: p\.pages\.map/.test(extractFn('tripsyFlyoverCarryOver')),
     'rebuilding the destinations keeps each one\'s pages and settings');
   const setup = extractFn('showTripsyFlyover');
-  assert(/if \(!closed\) \{ render\(\); openSlideshowOptions\(id, `\$\{done\} item/.test(setup), 'THE ASK: adding your own photos opens the options box straight away');
+  assert(/if \(!closed\) \{ render\(\); openSlideshowOptions\(id, `\$\{total\} item/.test(setup), 'THE ASK: adding your own photos opens the options box straight away');
   assert(/added => \{\s*if \(added && !closed\) openSlideshowOptions\(id,/.test(setup), 'and so does closing the suggested photos after picking some');
   assert(/close = \(\) => \{[^}]*if \(onClosed\) onClosed\(added\);/.test(extractFn('tripsyFlyoverSuggestedPhotos')), 'the suggestions grid reports how many it added');
 }
@@ -876,14 +904,49 @@ eval([extractFn('tripsyFlyoverPhotosInPageOrder')].join('\n'));
   assert(o.map(x => x.photo.driveFileId + x.page).join(',') === 'c1,a2,d2,b3',
     'THE ASK: photos come back in the order their pages play, each with its page; one on no page plays last');
   const setup = extractFn('showTripsyFlyover');
-  assert(/const ordered = tripsyFlyoverPhotosInPageOrder\(s\);/.test(setup) && /ordered\.map\(\(\{ photo: p, page \}\)/.test(setup) && />Page \$\{page\}<\/span>/.test(setup)
-    && /<div class="btn" style="padding:3px; position:relative; cursor:default;">\s*\$\{tripsyFlyoverThumbHtml\(p, 84, 64, 'border-radius:5px;'\)\}/.test(setup),
+  assert(/const ordered = tripsyFlyoverPhotosInPageOrder\(s\);/.test(setup) && /ordered\.map\(\(\{ photo: p, page \}, k\)/.test(setup) && />Page \$\{page\}<\/span>/.test(setup)
+    && /<div class="btn" data-flyover-thumb="\$\{k\}" data-flyover-thumb-page="\$\{page\}" style="padding:3px; position:relative; cursor:[^\n]*>\s*\$\{tripsyFlyoverThumbHtml\(p, 84, 64, 'border-radius:5px;'\)\}/.test(setup),
     'the setup page lists each destination\'s photos in play order, drawn like the page dialog\'s grid (framed, "Page N" badge)');
   assert(/data-flyover-photo-remove="\$\{esc\(p\.driveFileId\)\}"/.test(setup) && /ph\.driveFileId !== fid/.test(setup),
     'removing a photo goes by its id, not its position (the order on screen is no longer the stored order)');
   assert(/photos: tripsyFlyoverPhotosInPageOrder\(\{ \.\.\.st, pages: r\.pages, photos: r\.photos \}\)\.map\(x => x\.photo\)/.test(setup),
     'Save stores the photos in the new page order');
   assert(/const photos = tripsyFlyoverPhotosInPageOrder\(stop\)\.map/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the page dialog\'s grid opens in play order too');
+}
+
+// ---- reordering pages from the fly-over page itself, and the wider panels ("Make the pages
+// for creating and editing the flyover view much wider. Also, allow the user to edit the order
+// of pages from the flyover page by selecting pages and re-ordering them in the same way he
+// can from the slideshow edit page," 2026-10-22) ----
+eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverMoveThumbPage')].join('\n'));
+{
+  const ph = id => ({ driveFileId: id });
+  const st = { photos: ['A', 'B', 'C', 'D'].map(ph), pages: [{ ids: ['A'], count: 1, seconds: 3 }, { ids: ['B', 'C'], count: 2, seconds: 3 }, { ids: ['D'], count: 1, seconds: 3 }] };
+  // Thumbnails in play order: A(1) B(2) C(2) D(3). Dragging A onto D moves page 1 to third.
+  let r = tripsyFlyoverMoveThumbPage(st, 0, 3);
+  assert(r && r.pages.map(p => p.ids.join('')).join('|') === 'BC|D|A' && r.photos.map(p => p.driveFileId).join('') === 'BCDA',
+    'THE ASK: dragging a thumbnail onto another moves its PAGE there, and the stored photos follow the new play order');
+  r = tripsyFlyoverMoveThumbPage(st, 3, 1);
+  assert(r && r.pages.map(p => p.ids.join('')).join('|') === 'A|D|BC', 'dragging back moves the page before the target\'s page');
+  assert(tripsyFlyoverMoveThumbPage(st, 1, 2) === null && tripsyFlyoverMoveThumbPage(st, 0, 9) === null, 'two thumbnails of one page, or a missing one, change nothing');
+  assert(st.pages[0].ids.join('') === 'A' && st.photos.length === 4, 'the input is not changed');
+  // A stop with no saved pages: its derived pages become the saved ones.
+  const st2 = { photos: ['A', 'B', 'C'].map(ph), slideshow: { layout: 'single' } };
+  r = tripsyFlyoverMoveThumbPage(st2, 2, 0);
+  assert(r && r.pages.length === 3 && r.pages[0].ids.join('') === 'C' && r.pages.every(p => !('photos' in p) && !('auto' in p)),
+    'a stop whose pages were only derived gets them saved, in the new order, without the derived-only fields');
+  const setup = extractFn('showTripsyFlyover');
+  assert(/tripsyFlyoverWireDrag\(\[\.\.\.card\.querySelectorAll\('\[data-flyover-thumb\]'\)\], \(from, to\) => \{\s*const r = tripsyFlyoverMoveThumbPage\(stop\(\), from, to\);\s*if \(!r\) return;\s*updateStop\(id, r\);\s*save\(\);\s*\}, \{ holdMs: 280, state: dragState, afterDrop: \(\) => \{ if \(!closed\) render\(\); \} \}\);/.test(setup),
+    'the setup page\'s thumbnails drag through the shared mechanism with a press-and-hold, saving the move at once');
+  assert(/if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;[^\n]*\n\s*const fid = b\.getAttribute\('data-flyover-photo-remove'\)/.test(setup),
+    'the release that ended a drag never removes a photo');
+  assert(/Drag a photo onto another to move its page there\./.test(setup), 'the card says its photos can be dragged');
+  const wd = extractFn('tripsyFlyoverWireDrag');
+  assert(/if \(e\.button \|\| \(btn && btn !== el\)\) return;/.test(wd), 'a tap on the ✕ inside a thumbnail is never the start of a drag (a chip that IS a button still drags)');
+  assert(/<div class="tw-modal-paper tw-wide" style="max-width:1240px;/.test(setup)
+    && /<div class="tw-modal-paper tw-wide" style="max-width:1140px;/.test(extractFn('tripsyFlyoverSlideshowDialog'))
+    && /<div class="tw-modal-paper tw-wide" style="max-width:1140px;/.test(extractFn('tripsyFlyoverEditDestinationsDialog')),
+    'the fly-over page and its two editing dialogs are much wider than the 820/660/720 px they were');
 }
 
 // ---- Save buttons on the fly-over page ("There should be save buttons on the flyover page,"
@@ -926,9 +989,14 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverNearestRect')]
   assert(tripsyFlyoverNearestRect(rects, 90, 10) === 1 && tripsyFlyoverNearestRect(rects, 20, 100) === 2 && tripsyFlyoverNearestRect([], 0, 0) === null,
     'the drop spot is the page nearest the finger, on any row of the strip');
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
-  assert(/el\.onpointerdown/.test(dlg) && /el\.onpointermove/.test(dlg) && /el\.onpointerup = \(\) => end\(false\)/.test(dlg) && /holdMs \? 'manipulation' : 'none'/.test(dlg),
+  // The drag mechanism is the shared tripsyFlyoverWireDrag since 2026-10-22 (the setup page's
+  // thumbnails use it too).
+  const wd = extractFn('tripsyFlyoverWireDrag');
+  assert(/el\.onpointerdown/.test(wd) && /el\.onpointermove/.test(wd) && /el\.onpointerup = \(\) => end\(false\)/.test(wd) && /holdMs \? 'manipulation' : 'none'/.test(wd),
     'drag runs on pointer events (a finger on iPad works like a mouse) and the page strip doesn\'t scroll while dragging');
-  assert(/tripsyFlyoverMovePage\(pages, from, to, cur\)/.test(dlg) && /suppressTapUntil = Date\.now\(\) \+ 400/.test(dlg),
+  assert(/tripsyFlyoverMovePage\(pages, from, to, cur\)/.test(dlg) && /st\.suppressTapUntil = Date\.now\(\) \+ 400/.test(wd)
+    && /const wireDrag = \(items, onDrop, opts = \{\}\) => tripsyFlyoverWireDrag\(items, onDrop, \{ \.\.\.opts, state: dragState, afterDrop: render \}\);/.test(dlg)
+    && /if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;[^\n]*\n\s*cur = Number\(b\.getAttribute\('data-ss-goto'\)\)/.test(dlg),
     'letting go reorders the pages, and the release doesn\'t also count as a tap on a page');
   assert(/tfo-ss-page/.test(dlg) && /tripsyFlyoverThumbHtml\(first, 44, 33/.test(dlg) && /Drag a page to change the order/.test(dlg),
     'each page in the strip shows its first photo, with a hint that pages can be dragged');
@@ -952,8 +1020,9 @@ eval(extractFn('tripsyFlyoverSwapPhotos'));
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
   assert(/wireDrag\(gridItems, \(from, to, side\) => \{[\s\S]*tripsyFlyoverSwapPhotos\(pages, photos, a, b, isVideo\)[\s\S]*\}, \{ holdMs: 280, zones: true \}\);/.test(dlg) && /<div data-ss-grid/.test(dlg),
     'the grid\'s photos are draggable, with a short press-and-hold for a finger so a swipe still scrolls');
-  assert(/if \(drag && drag\.el === el && drag\.held\) e\.preventDefault\(\);/.test(dlg) && /\{ passive: false \}/.test(dlg), 'once held, the finger drags instead of scrolling');
-  assert(/data-ss-photo\]'\)\.forEach\(b => b\.onclick = \(\) => \{\s*if \(Date\.now\(\) < suppressTapUntil\) return;/.test(dlg), 'the release that ends a drag is not also a tap');
+  const wd = extractFn('tripsyFlyoverWireDrag');
+  assert(/if \(st\.drag && st\.drag\.el === el && st\.drag\.held\) e\.preventDefault\(\);/.test(wd) && /\{ passive: false \}/.test(wd), 'once held, the finger drags instead of scrolling');
+  assert(/data-ss-photo\]'\)\.forEach\(b => b\.onclick = \(\) => \{\s*if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;/.test(dlg), 'the release that ends a drag is not also a tap');
   assert(/Drag a photo onto another to swap them/.test(dlg), 'the grid says it can be dragged');
 }
 
@@ -983,7 +1052,7 @@ eval([extractFn('tripsyFlyoverDropSide'), extractFn('tripsyFlyoverInsertPhotoPag
   assert(!tripsyFlyoverInsertPhotoPage(P(), photos, 'a', 'x', 'before', 0).ok, 'dropping beside a photo on no page does nothing');
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
   assert(/if \(side !== 'swap'\) \{[\s\S]*tripsyFlyoverInsertPhotoPage\(pages, photos, a, b, side, cur\)/.test(dlg) && /\{ holdMs: 280, zones: true \}/.test(dlg)
-    && /tfo-ss-ins-before/.test(dlg), 'the grid drops in between at an edge, shown as a green bar, and swaps in the middle');
+    && /tfo-ss-ins-before/.test(extractFn('tripsyFlyoverWireDrag')), 'the grid drops in between at an edge, shown as a green bar, and swaps in the middle');
 }
 
 // ---- an in-between move shows ONLY a vertical dashed line ("just show a vertical dashed line
@@ -991,7 +1060,7 @@ eval([extractFn('tripsyFlyoverDropSide'), extractFn('tripsyFlyoverInsertPhotoPag
 {
   assert(/\.tfo-ss-ins-before::before, \.tfo-ss-ins-after::after \{[^}]*border-left: 3px dashed #3AA76D/.test(html) && !/\.tfo-ss-ins-before::before[^}]*background:/.test(html),
     'THE ASK: the in-between marker is a vertical dashed line in the gap, nothing else');
-  const dlg = extractFn('tripsyFlyoverSlideshowDialog');
+  const dlg = extractFn('tripsyFlyoverWireDrag'); // the shared drag mechanism (2026-10-22)
   assert(/\(drag\.to > drag\.from \? 'after' : 'before'\)/.test(dlg) && /c\.classList\.toggle\('tfo-ss-drop', hit && drag\.side === 'swap'\)/.test(dlg),
     'the page strip (which always moves) shows the same line on the side the page will land; only a swap outlines the target');
 }
@@ -1207,7 +1276,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
 {
   // Slideshow options take effect at once; bookend photos; sharp tiles (2026-10-21).
   const setup = extractFn('showTripsyFlyover');
-  assert(/const save = \(\) => \{\s*Store\.stageTripsyFlyover\(record\);/.test(setup)
+  assert(/const save = \(\) => \{[\s\S]{0,400}?record = tripsyFlyoverResolvePendingIds\(record\);\s*Store\.stageTripsyFlyover\(record\);/.test(setup)
     && /Store\.persistTripsyFlyovers\(\)/.test(setup),
     'a fly-over change is staged in memory before its Drive write queues, so View plays it immediately');
   const dd = { tripsyFlyovers: [{ tripKey: 'a', v: 1 }, { tripKey: 'b', v: 1 }] };
@@ -1294,11 +1363,14 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'View no longer writes the copy taken at the tap back over later changes');
 }
 {
-  // Every photo in the same 4:3 frame, cropped to fill (2026-10-21).
+  // Every photo in the same 4:3 frame (2026-10-21), showing the WHOLE picture letterboxed
+  // rather than cropped to fill ("The full pictures are not showing up," 2026-10-22).
   const css = (html.match(/@supports \(width: 1cqw\) \{[\s\S]*?\n  \}\n/) || [''])[0];
   assert(/\.tfo-group \{ container-type: size; \}/.test(css)
-    && /\[data-layout="collage"\] img \{ aspect-ratio: 4 \/ 3;[^}]*object-fit: cover;/.test(css),
-    'every photo layout shares one 4:3, cropped-to-fill frame shape');
+    && /\[data-layout="collage"\] img \{ aspect-ratio: 4 \/ 3;[^}]*object-fit: contain; background: #000;/.test(css),
+    'every photo layout shares one 4:3 frame shape with the whole picture letterboxed inside it');
+  assert(!/#tripsy-flyover-player \.tfo-group\[data-layout="[a-z]+"\] img \{[^}]*object-fit: cover/.test(html),
+    'no photo layout crops a picture to fill its frame');
   assert(['single', 'pair', 'grid', 'collage'].every(l => new RegExp(`\\[data-layout="${l}"\\] img \\{ width: min\\(`).test(css)),
     'each layout sizes its frames from the page box, never from the photo\'s own shape');
   assert(!/video/.test(css.replace(/Videos keep\s+their own shape/, '')), 'videos are left at their own shape');

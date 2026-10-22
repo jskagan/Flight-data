@@ -4101,6 +4101,14 @@ WebView's support for recording is unproven.
       the page box (single, pair, 2×2 grid, collage; portrait variants); the older per-shape
       rules stay above it as the fallback. Videos keep their own shape. Measured in Chromium
       at 1180×820 and 820×1180 with mixed tall/wide photos: equal frames on every layout.
+      **The WHOLE picture shows inside that frame now, letterboxed on black** ("The full
+      pictures are not showing up in the flyover pages," 2026-10-22 — the owner's own phone
+      photos are portrait, and the 4:3 cover crop cut their top and bottom off): every layout's
+      `object-fit` is `contain` with a black `background` on the `img` (the @supports block AND
+      the fallback grid/collage rules), so a tall photo stands in the middle of its landscape
+      frame with black bands either side and a wide one gets bands above and below. The frames
+      themselves are unchanged — still one 4:3 size per page, the white border round the frame.
+      Verified in Chromium at 1180×820 (single and pair pages, tall + wide fixtures).
     - **Transitions** (`TRIPSY_FLYOVER_TRANSITIONS`): fade, slide, zoom in, slow pan & zoom
       (a Ken Burns keyframe sized to the page's time), and cut.
     - **Pages go DIRECTLY from one to the next — the map never shows between pictures**
@@ -4287,6 +4295,29 @@ WebView's support for recording is unproven.
   same word as its footer twin in its title. Every change still saves as it is made; Save blurs a name
   still being typed (its `change` saves it), waits for the save chain (`save()` now resolves
   Drive's ok), toasts "Fly-over saved." and closes — a failed save keeps the page open.
+- **The setup page and both editing dialogs are WIDE, and pages reorder by dragging the
+  thumbnails on the setup page itself** ("Make the pages for creating and editing the flyover
+  view much wider. Also, allow the user to edit the order of pages from the flyover page by
+  selecting pages and re-ordering them in the same way he can from the slideshow edit page,"
+  2026-10-22). Widths: the setup page `max-width:1240px` (was 820), the Slideshow options and
+  Edit destinations dialogs 1140px (were 660 / 720) — still `width:100%` under that, so a
+  phone is unchanged. Dragging: the Slideshow options dialog's inline `wireDrag` is now the
+  top-level **`tripsyFlyoverWireDrag(items, onDrop, {holdMs, zones, state, afterDrop})`**
+  (same pointer-event mechanism, same `.tfo-ss-*` classes; the dialog keeps a one-line
+  `wireDrag` wrapper passing its `dragState` + `render`, and its tap handlers read
+  `dragState.suppressTapUntil`). The setup card's thumbnails (`data-flyover-thumb="<index in
+  play order>"`, `data-flyover-thumb-page`) are wired through it with `holdMs: 280` (the page
+  scrolls, so a finger presses and holds first; a mouse drags at once) and the pure
+  **`tripsyFlyoverMoveThumbPage(stop, from, to)`**: the dragged thumbnail's PAGE moves to the
+  target thumbnail's page position via the strip's own `tripsyFlyoverMovePage` (forward →
+  after, back → before); two thumbnails of one page → null, nothing happens. It works over
+  `tripsyFlyoverPages(stop)` — every page, derived ones included — and returns `{pages,
+  photos}` (photos re-listed in play order, as the dialog's Save does), so a stop whose pages
+  were only derived gets them SAVED in the new order; `updateStop` + `save()` at once, then a
+  re-render repaints the "Page N" badges. A pointerdown on a button inside a tile (the ✕) is
+  never a drag start — capturing the pointer there redirected the click to the tile — and the
+  ✕ ignores the release that ended a drag. Verified in Chromium at 1366px: mouse drag A→D and
+  a hold-then-drag touch back, same-page drop a no-op, ✕ still removes. `flyover_test.js`.
 - **Music: one soundtrack per fly-over, chosen by genre** ("try to find different music that
   could be used of different genres and offer that to the user," same day).
   - **Data:** `record.music` is `{source:'archive', url, title, artist, license, page}` or
@@ -4353,6 +4384,33 @@ WebView's support for recording is unproven.
     redundant step before the iOS sheet that already offers both ("This is inefficient,"
     2026-10-21) — the garment photo button's lesson; don't re-add it. Not verified on a device
     from here: if Shared Albums ever don't show, saving the items to the library first works.
+  - **Photos show the moment they are picked and upload in the BACKGROUND** ("There is a
+    massive delay from the time I select photos for the flyover until they appear in the
+    flyover pages. Can we reduce that delay? If not, we need to freeze those pages and just
+    display a message that photos are being loaded and allow the user to use other parts of
+    the app," 2026-10-22). The delay had three parts: every photo ran `findOrCreateDriveFolder`
+    (a Drive search) before its own multipart upload, the photos went one after another, and
+    the card showed nothing until the whole batch had finished. Now **(1)** the folder id is
+    memoized per session (`_driveFolderIdMemo`); **(2)** each picked photo is staged under a
+    `pending-…` id (`tripsyFlyoverStagePendingPhoto`, bytes in `tripsyFlyoverPendingBlobs`),
+    put on the stop's `photos` and rendered AT ONCE — `tripsyPlacePhotoDisplayUrl` resolves a
+    pending id from those bytes (and follows an uploaded one through `tripsyFlyoverUploadedIds`
+    to its Drive id), so thumbnails, the Slideshow options grid and the player all show it —
+    and the options dialog opens immediately; **(3)** `tripsyFlyoverQueueUpload` resizes and
+    uploads three at a time (`TRIPSY_FLYOVER_UPLOAD_PARALLEL`) behind the page: on success the
+    Drive id replaces the pending id in the SAVED record (`tripsyFlyoverResolvePendingIds`,
+    pure — photos AND page ids — applied to `Store.getTripsyFlyover` as it is then, and by the
+    page's own `save()` on every save, so a dialog draft or page copy still holding the old id
+    converges), and a `tripsy-flyover-upload` event repaints an open page (card badge ⬆️ while
+    uploading, a "⬆️ Uploading N photos in the background — you can use the rest of the app"
+    note). The owner may close the page or leave the fly-over entirely — the queue is global.
+    A failed upload keeps its ⚠️ badge with a **Retry** (`data-flyover-retry-upload`, the bytes
+    are still held); a reload mid-upload loses the bytes, so the next setup open runs
+    `tripsyFlyoverDropLostPending` (pure) to drop those photos (and their page slots) and
+    toasts "N photos were still uploading when the app closed — please add them again";
+    `tripsyFlyoverPages` likewise leaves out a pending photo with no bytes, so the player never
+    shows a broken frame. Videos keep their foreground upload (progress, the sound question).
+    `flyover_test.js`.
   - **A video is a stop "photo" record** `{driveFileId, kind:'video', mime, posterId,
     duration, width, height}`, so pages, carry-over and preloading need nothing new.
     `tripsyFlyoverUploadVideo` refuses files over `TRIPSY_FLYOVER_VIDEO_MAX_BYTES` (250 MB,
