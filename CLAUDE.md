@@ -1529,6 +1529,23 @@ step 4; git history has it if ever needed.
   reopened form on failure, since its overlay is gone — the toast still shows and the gap is
   still listed). Verify uses them: Cancel reopens at once, Save reopens once the write has
   landed, both from `tripsyDecryptedTrips`' current copy. `verifyreopen_test.js`.
+  **A missing row opens its Add form PREFILLED from the itinerary** ("allow the user to click
+  the item in trip details and open to an event that's is pre-filled with the possible
+  information from the trip itinerary (i.e., date, origin, destination, city, etc.)," same day).
+  Each move from `tripsyTransportationGaps` carries a `prefill` (category Car): both ends as the
+  lodging NAME + its town ("Marugamiya, Beppu" -- the name stays first, since the lodging
+  ordering pass ties a leg to a stay by name) or the airport label ("Fukuoka airport (FUK)");
+  times the itinerary implies -- leave at check-out (when that is on the day and before the
+  airport time, else 1h before it), reach the airport 2h before the flight, leave the airport
+  when the flight lands (`tripsyVerifyClockIso` shifts the wall-clock digits); and a note naming
+  the flight it serves ("To catch flight Asiana Airlines OZ133 departing 3:50 PM to Seoul airport
+  (ICN)."). A time nothing implies stays blank. A missing NIGHT gets `tripsyVerifyLodgingPrefill`:
+  check-in 3 PM, check-out 11 AM after the run of consecutive gap nights, and the likely city in
+  the address (where that day's flight lands, else the stay checked out of that day, else the next
+  stay); that city also goes on the panel as `data-tripsy-place-hint`, which the name lookup
+  (`tripsyWireNameLookupAutofill`) uses as its search hint and replaces outright with the real
+  address instead of raising the conflict dialog. The dialog finds a row's move by `data-tvv-idx`
+  into its own `missingMoves`. `verifygaps_test.js`.
 - **The "Update" comparison (tour-operator PDF vs. Tripsy) is saved, not ephemeral**: the owner can
   upload a PDF from a trip's **⚙️ Trip → Compare to PDF** menu ("Resume Comparison" while one is
   outstanding). Both moved there 2026-08-29 from the 🧭 Itinerary menu: it reconciles trip EVENTS

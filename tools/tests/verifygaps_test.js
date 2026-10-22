@@ -94,3 +94,55 @@ const dlg = extractFn('showTripsyVerifyTravelDialog');
 assert(/\$\{esc\(m\.fromLabel \|\| m\.from\)\}[\s\S]{0,80}\$\{esc\(m\.toLabel \|\| m\.to\)\}/.test(dlg)
   && /data-tvv-from="\$\{esc\(m\.from \|\| ''\)\}"/.test(dlg),
   'rows display the city labels while the Add form is still prefilled with the raw names');
+
+// A missing item opens a form PREFILLED from the itinerary ("allow the user to click the item
+// in trip details and open to an event that's is pre-filled with the possible information from
+// the trip itinerary," 2026-10-22).
+const fukToIcnNamed = leg(3, 'airplane', 'FUK', 'ICN', '2030-10-30T15:50:00', '2030-10-30T17:20:00');
+fukToIcnNamed.tripsyRaw.company = 'Korean Air'; fukToIcnNamed.tripsyRaw.transportNumber = 'KE788';
+const r5 = run(trip([beppu, seoul, fukToIcnNamed]), []);
+const p5 = (r5.allMoves.find(m => m.kind === 'stay' && m.day === '2030-10-30') || {}).prefill || {};
+assert(p5.departureDescription === 'Hilltop Ryokan, Beppu' && p5.arrivalDescription === 'Fukuoka airport (FUK)',
+  `the drive to the airport starts at the ryokan (with its town) and ends at the named airport (got ${p5.departureDescription} -> ${p5.arrivalDescription})`);
+assert(p5.departureAt === '2030-10-30T09:00:00', `it leaves at check-out time (got ${p5.departureAt})`);
+assert(p5.arrivalAt === '2030-10-30T13:50:00', `it reaches the airport 2h before the flight (got ${p5.arrivalAt})`);
+assert(/Korean Air KE788/.test(p5.notes || '') && /3:50/.test(p5.notes || '') && /Seoul airport \(ICN\)/.test(p5.notes || ''),
+  `the note names the flight it serves (got ${p5.notes})`);
+const a5 = (r5.allMoves.find(m => m.kind === 'transfer' && m.to === 'Gangnam Grand') || {}).prefill || {};
+assert(a5.departureDescription === 'Seoul airport (ICN)' && a5.departureAt === '2030-10-30T17:20:00'
+  && a5.arrivalDescription === 'Gangnam Grand, Seoul' && !a5.arrivalAt,
+  'the arrival transfer leaves the airport when the flight lands, bound for the hotel (arrival time left blank)');
+// Check-out AFTER the latest sensible departure: leave 1h before reaching the airport instead.
+const lateOut = lodge(1, 'Hilltop Ryokan', '4 Kumi, Kanzawa, Beppu, Oita 874-0045', '2030-10-29T16:00:00', '2030-10-30T14:00:00');
+const p6 = (run(trip([lateOut, seoul, fukToIcn]), []).allMoves.find(m => m.kind === 'stay') || {}).prefill || {};
+assert(p6.departureAt === '2030-10-30T12:50:00', `a check-out too late for the flight is not used as the departure (got ${p6.departureAt})`);
+// Stay to stay by ground: leave at check-out, arrival unknown.
+const paris = lodge(7, 'Le Petit', '1 Rue de Rivoli, 75001 Paris, France', '2030-05-01T15:00:00', '2030-05-03T11:00:00');
+const lyon = lodge(8, 'Maison Bellecour', '2 Place Bellecour, 69002 Lyon, France', '2030-05-03T16:00:00', '2030-05-05T11:00:00');
+const p7 = (run(trip([paris, lyon]), []).allMoves.find(m => m.kind === 'stay') || {}).prefill || {};
+assert(p7.departureDescription === 'Le Petit, Paris' && p7.arrivalDescription === 'Maison Bellecour, Lyon'
+  && p7.departureAt === '2030-05-03T11:00:00' && !p7.arrivalAt, 'a move between stays leaves at check-out and names both towns');
+
+// Missing nights: dates span the run of gap nights, and the address holds the likely city.
+let lsrc = '', lfns = ['tripsyVerifyLodgingPrefill'], lrun = null;
+const tLodge = trip([paris, lyon, leg(9, 'airplane', 'LYS', 'BCN', '2030-05-05T13:00:00', '2030-05-05T14:30:00'),
+  lodge(10, 'Casa Mar', 'Carrer de Mallorca 1, 08008 Barcelona, Spain', '2030-05-08T15:00:00', '2030-05-10T11:00:00')]);
+for (let k = 0; k < 60 && !lrun; k++) {
+  try { (0, eval)(lsrc + lfns.map(extractFn).join('\n') + ';globalThis.L = tripsyVerifyLodgingPrefill;'); L(tLodge, ['2030-05-05'], '2030-05-05'); lrun = L; }
+  catch (e) { const m = String(e.message).match(/(\w+) is not defined/); if (!m) throw e; if (extractFn(m[1])) lfns.push(m[1]); else lsrc += constDecl(m[1]) + '\n'; }
+}
+const lp = lrun(tLodge, ['2030-05-05', '2030-05-06', '2030-05-07'], '2030-05-05');
+assert(lp.startsAt === '2030-05-05T15:00:00' && lp.endsAt === '2030-05-08T11:00:00', `a run of gap nights is one stay (got ${lp.startsAt} - ${lp.endsAt})`);
+assert(lp.address === 'Barcelona' && lp.cityHint === 'Barcelona', `the city is where that day's flight lands (got ${lp.address})`);
+const lp2 = lrun(trip([paris, lyon]), ['2030-05-05'], '2030-05-05');
+assert(lp2.address === 'Lyon', `with no flight, the city of the stay checked out that day (got ${lp2.address})`);
+
+// Wiring: the dialog hands the move's prefill to the form, and the name lookup treats the
+// prefilled city as a search hint it may replace.
+assert(/data-tvv-idx="\$\{missingMoves\.indexOf\(m\)\}"/.test(dlg) && /tripsyVerifyLodgingPrefill\(trip, lodging\.gaps, day\)/.test(dlg)
+  && /move && move\.prefill/.test(dlg), 'tapping a missing row passes its itinerary prefill');
+const og = extractFn('openTripsyVerifyGapEdit');
+assert(/\.\.\.extra \}/.test(og) && /tripsyPlaceHint = gap\.prefill\.cityHint/.test(og), 'the form merges the prefill over the defaults and passes the city hint');
+const nl = extractFn('tripsyWireNameLookupAutofill');
+assert(/placeHint \|\| \(trip && trip\.location\)/.test(nl) && /t\.key === 'address' && placeHint && same\(current, placeHint\)/.test(nl),
+  'the name lookup searches near the hinted city and replaces the placeholder city with the real address');

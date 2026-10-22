@@ -23103,7 +23103,10 @@ function tripsyWireNameLookupAutofill(panel, raw, tripKey) {
     const mine = ++token;
     status.textContent = 'Looking up details…';
     const trip = (tripsyDecryptedTrips || []).find(t => t.key === tripKey);
-    const hint = (trip && trip.location) || '';
+    // A form opened from Verify Travel Details knows the likely city (panel hint) --
+    // a better search hint than the trip's overall location.
+    const placeHint = (panel.dataset && panel.dataset.tripsyPlaceHint) || '';
+    const hint = placeHint || (trip && trip.location) || '';
     const found = await tripsyLookupPlaceContactDetails(hint ? `${name}, ${hint}` : name);
     if (mine !== token) return; // a newer name is already in flight
     if (!found) { status.textContent = ''; return; }
@@ -23121,7 +23124,8 @@ function tripsyWireNameLookupAutofill(panel, raw, tripKey) {
     const conflicts = [];
     for (const t of targets) {
       const current = t.input.value.trim();
-      if (!current) { if (setValue(t.input, t.found)) filled.push(t.label.toLowerCase()); continue; }
+      // The prefilled city in the address is a placeholder for the real address, not a disagreement.
+      if (!current || (t.key === 'address' && placeHint && same(current, placeHint))) { if (setValue(t.input, t.found)) filled.push(t.label.toLowerCase()); continue; }
       if (!same(current, t.found)) conflicts.push({ ...t, current });
     }
     if (conflicts.length) {
@@ -24900,6 +24904,36 @@ function tripsyLodgingGaps(trip, pendingChanges) {
   return { nights, gaps };
 }
 
+// What a missing night's Add Lodging form starts with: check-in 3 PM that night, check-out
+// 11 AM the morning after the run of consecutive gap nights it begins, and the likely CITY
+// in the address field -- where that day's flight lands, else the stay you checked out of
+// that day, else the next stay. The city also steers the name lookup (tripsyWireNameLookupAutofill
+// takes it as its search hint and replaces it outright with the real address).
+function tripsyVerifyLodgingPrefill(trip, gapDays, day) {
+  if (!day) return { startsAt: null };
+  const gaps = new Set(gapDays || []);
+  const nextDay = k => { const [y, m, d] = k.split('-').map(Number); const dt = new Date(Date.UTC(y, m - 1, d + 1));
+    return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`; };
+  let last = day;
+  while (gaps.has(nextDay(last))) last = nextDay(last);
+  const events = trip.events || [];
+  const raw = e => e.tripsyRaw || {};
+  const landing = events.filter(e => raw(e).resource === 'transportation' && raw(e).category === 'airplane' && tripsyDayKey(e.end) === day)
+    .sort((a, b) => String(b.end).localeCompare(String(a.end)))[0];
+  let city = '';
+  if (landing) {
+    const desc = raw(landing).arrivalDescription || '';
+    city = tripsyFlyoverAirportCity(desc) || (/^[A-Z]{3}$/.test(desc.trim()) ? '' : desc.trim());
+  }
+  const stays = events.filter(e => raw(e).resource === 'hosting');
+  if (!city) { const prev = stays.find(e => tripsyDayKey(e.end) === day); if (prev) city = tripsyVerifyLodgingCity(raw(prev).address); }
+  if (!city) {
+    const next = stays.filter(e => tripsyDayKey(e.start) > last).sort((a, b) => String(a.start).localeCompare(String(b.start)))[0];
+    if (next) city = tripsyVerifyLodgingCity(raw(next).address);
+  }
+  return { startsAt: `${day}T15:00:00`, endsAt: `${nextDay(last)}T11:00:00`, address: city || null, cityHint: city || '' };
+}
+
 // Advisory dialog for the per-trip lodging check.
 function showTripsyLodgingCheckDialog(trip, result) {
   const { nights, gaps } = result;
@@ -24987,6 +25021,16 @@ function tripsyVerifyLodgingCity(address) {
   if (!prev || /\d/.test(prev) || /-(ku|gun|cho|machi|mura)$/i.test(prev) || prev.split(/\s+/).length > 2) return city;
   return prev.replace(/[- ]shi$/i, '');
 }
+// A wall-clock ISO ("2030-10-30T15:50:00", local digits, no real offset) moved by N
+// minutes, or null when it carries no time. Used to estimate the prefilled times of a
+// missing leg (be at the airport ~2h before the flight).
+function tripsyVerifyClockIso(iso, minutes) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const dt = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5] + (minutes || 0)));
+  const p = n => String(n).padStart(2, '0');
+  return `${dt.getUTCFullYear()}-${p(dt.getUTCMonth() + 1)}-${p(dt.getUTCDate())}T${p(dt.getUTCHours())}:${p(dt.getUTCMinutes())}:00`;
+}
 function tripsyTransportationGaps(trip, pendingChanges) {
   const events = trip.events || [];
   const lodgings = [];
@@ -24996,19 +25040,20 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     const ci = tripsyDayKey(ciIso);
     if (!ci) return; // needs a date to place it in the chain
     lodgings.push({ name: name || 'Lodging', ci, co: tripsyDayKey(coIso) || ci,
-      city: tripsyVerifyLodgingCity(address) });
+      city: tripsyVerifyLodgingCity(address), coIso: tripsyVerifyClockIso(coIso) });
   };
   const addTransport = (depIso, arrIso, category) => {
     const dep = tripsyDayKey(depIso) || tripsyDayKey(arrIso);
     if (dep) transports.push({ dep, arr: tripsyDayKey(arrIso) || dep, depIso: depIso || arrIso || '', category: category || null });
   };
-  const addFlight = (depIso, arrIso, depDesc, arrDesc) => {
+  const addFlight = (depIso, arrIso, depDesc, arrDesc, company, number) => {
     const depDay = tripsyDayKey(depIso), arrDay = tripsyDayKey(arrIso);
     if (!depDay && !arrDay) return;
     flights.push({
       depIso: depIso || arrIso || '', arrIso: arrIso || depIso || '',
       depDay: depDay || arrDay, arrDay: arrDay || depDay,
       depDesc: depDesc || '', arrDesc: arrDesc || '',
+      label: [company, number].filter(Boolean).join(' '),
     });
   };
   events.forEach(e => {
@@ -25017,7 +25062,7 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     if (r.resource === 'hosting') addLodging(r.name || e.summary, e.start, e.end, r.address);
     else if (r.resource === 'transportation') {
       addTransport(e.start, e.end, r.category);
-      if (r.category === 'airplane') addFlight(e.start, e.end, r.departureDescription, r.arrivalDescription);
+      if (r.category === 'airplane') addFlight(e.start, e.end, r.departureDescription, r.arrivalDescription, r.company, r.transportNumber);
     }
   });
   (pendingChanges || []).forEach(c => {
@@ -25025,7 +25070,7 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     if (c.tripsyResource === 'hosting') addLodging(c.fields.name, c.fields.startsAt, c.fields.endsAt, c.fields.address);
     else if (c.tripsyResource === 'transportation') {
       addTransport(c.fields.departureAt, c.fields.arrivalAt, c.fields.category);
-      if (c.fields.category === 'airplane') addFlight(c.fields.departureAt, c.fields.arrivalAt, c.fields.departureDescription, c.fields.arrivalDescription);
+      if (c.fields.category === 'airplane') addFlight(c.fields.departureAt, c.fields.arrivalAt, c.fields.departureDescription, c.fields.arrivalDescription, c.fields.company, c.fields.transportNumber);
     }
   });
   // Human label for a transportation leg's method (Flight/Train/Ferry/etc).
@@ -25046,6 +25091,30 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     const city = /^[A-Z]{3}$/.test(d) ? tripsyFlyoverAirportCity(d) : '';
     return city ? `${city} airport (${d})` : (d || 'Airport');
   };
+  // What a missing move's Add form starts with ("open to an event that's pre-filled with
+  // the possible information from the trip itinerary," 2026-10-22): category Car, the two
+  // ends written the way the timeline matches them (the lodging's NAME, so the lodging
+  // ordering pass still ties the leg to it, plus its city), and the times the itinerary
+  // implies -- leave at check-out, be at the airport 2h before a flight, leave the airport
+  // when the flight lands. A time nothing implies is left blank, never invented.
+  const placeText = l => l.city && !l.name.toLowerCase().includes(l.city.toLowerCase()) ? `${l.name}, ${l.city}` : l.name;
+  const clock = iso => (iso && formatTripTime(iso)) || '';
+  const flightNote = (f, verb) => {
+    const t = clock(verb === 'catch' ? f.depIso : f.arrIso);
+    const what = f.label ? `flight ${f.label}` : 'flight';
+    return verb === 'catch'
+      ? `To catch ${what}${t ? ` departing ${t}` : ''}${f.arrDesc ? ` to ${airportPlaceLabel(f.arrDesc)}` : ''}.`
+      : `From ${what}${t ? ` landing ${t}` : ''}${f.depDesc ? ` from ${airportPlaceLabel(f.depDesc)}` : ''}.`;
+  };
+  const toFlightPrefill = (l, f) => {
+    const atAirport = tripsyVerifyClockIso(f.depIso, -120);
+    const leave = l.coIso && tripsyDayKey(l.coIso) === f.depDay && (!atAirport || l.coIso < atAirport) ? l.coIso
+      : (atAirport ? tripsyVerifyClockIso(atAirport, -60) : null);
+    return { departureDescription: placeText(l), departureAt: leave, arrivalDescription: airportPlaceLabel(f.depDesc),
+      arrivalAt: atAirport, notes: flightNote(f, 'catch') };
+  };
+  const fromFlightPrefill = (f, l) => ({ departureDescription: airportPlaceLabel(f.arrDesc),
+    departureAt: tripsyVerifyClockIso(f.arrIso), arrivalDescription: placeText(l), arrivalAt: null, notes: flightNote(f, 'land') });
 
   // (1) Stay-to-stay moves.
   for (let i = 0; i + 1 < lodgings.length; i++) {
@@ -25067,10 +25136,13 @@ function tripsyTransportationGaps(trip, pendingChanges) {
       && !tripsyDescMatchesCity(firstFlight.depDesc, A.city.toLowerCase()));
     if (leavesElsewhere && !covering.some(t => t.category !== 'airplane' && t.depIso <= firstFlight.depIso)) {
       const to = firstFlight.depDesc || 'Airport';
-      allMoves.push({ from: A.name, to, fromLabel: stayLabel(A), toLabel: airportPlaceLabel(to), day: firstFlight.depDay, covered: false, method: '', kind: 'stay' });
+      allMoves.push({ from: A.name, to, fromLabel: stayLabel(A), toLabel: airportPlaceLabel(to), day: firstFlight.depDay, covered: false, method: '', kind: 'stay',
+        prefill: toFlightPrefill(A, firstFlight) });
       continue;
     }
-    allMoves.push({ from: A.name, to: B.name, fromLabel: stayLabel(A), toLabel: stayLabel(B), day: windowStart, covered: covering.length > 0, method: dedupMethods(covering), kind: 'stay' });
+    allMoves.push({ from: A.name, to: B.name, fromLabel: stayLabel(A), toLabel: stayLabel(B), day: windowStart, covered: covering.length > 0, method: dedupMethods(covering), kind: 'stay',
+      prefill: { departureDescription: placeText(A), departureAt: A.coIso && tripsyDayKey(A.coIso) === windowStart ? A.coIso : null,
+        arrivalDescription: placeText(B), arrivalAt: null } });
   }
 
   // (2) Airport transfers (hotel <-> airport, on a same-day flight).
@@ -25081,19 +25153,19 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
   };
   const seen = new Set();
-  const addTransfer = (from, to, day, key, fromLabel, toLabel) => {
+  const addTransfer = (from, to, day, key, fromLabel, toLabel, prefill) => {
     if (!day || seen.has(key)) return;
     seen.add(key);
     // The same drive already reported as a missing stay move (above) is not listed twice.
     if (allMoves.some(m => m.kind === 'stay' && !m.covered && m.day === day && m.from === from && m.to === to)) return;
     const covering = ground.filter(t => t.dep <= day && t.arr >= day); // ground transport that day
-    allMoves.push({ from, to, fromLabel, toLabel, day, covered: covering.length > 0, method: dedupMethods(covering), kind: 'transfer' });
+    allMoves.push({ from, to, fromLabel, toLabel, day, covered: covering.length > 0, method: dedupMethods(covering), kind: 'transfer', prefill });
   };
   lodgings.forEach(l => {
     const arrFlights = flights.filter(f => f.arrDay === l.ci); // land the day you check in
     if (arrFlights.length) {
       const f = arrFlights.reduce((a, b) => (b.arrIso > a.arrIso ? b : a)); // last to land
-      addTransfer(airportLabel(f.arrDesc), l.name, l.ci, `arr:${l.ci}:${l.name}`, airportPlaceLabel(f.arrDesc), stayLabel(l));
+      addTransfer(airportLabel(f.arrDesc), l.name, l.ci, `arr:${l.ci}:${l.name}`, airportPlaceLabel(f.arrDesc), stayLabel(l), fromFlightPrefill(f, l));
     }
     // The day you'd fly out AFTER this stay: the real check-out day if it has
     // one, else check-in + 1 (a stay with no logged check-out has co defaulted
@@ -25106,7 +25178,7 @@ function tripsyTransportationGaps(trip, pendingChanges) {
     const depFlights = flights.filter(f => f.depDay === departDay); // leave the morning after your last night
     if (depFlights.length) {
       const f = depFlights.reduce((a, b) => (b.depIso < a.depIso ? b : a)); // first to leave
-      addTransfer(l.name, airportLabel(f.depDesc), departDay, `dep:${departDay}:${l.name}`, stayLabel(l), airportPlaceLabel(f.depDesc));
+      addTransfer(l.name, airportLabel(f.depDesc), departDay, `dep:${departDay}:${l.name}`, stayLabel(l), airportPlaceLabel(f.depDesc), toFlightPrefill(l, f));
     }
   });
 
@@ -25202,8 +25274,10 @@ async function showTripsyVerifyTravelDialog(trip) {
   // Three-column row (transportation move): date | origin -> destination |
   // third column (a "?" when transportation is missing, else the method). A
   // missing move (isWarning) carries kind/from/to for the prefilled Add form.
+  const missingMoves = transport.allMoves.filter(m => !m.covered);
+  const coveredMoves = transport.allMoves.filter(m => m.covered);
   const moveRow = (m, third, thirdColor, isWarning) => `
-    <button class="tvv-gap" data-tvv-day="${esc(m.day || '')}"${isWarning ? ` data-tvv-kind="transport" data-tvv-from="${esc(m.from || '')}" data-tvv-to="${esc(m.to || '')}"` : ''} style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
+    <button class="tvv-gap" data-tvv-day="${esc(m.day || '')}"${isWarning ? ` data-tvv-kind="transport" data-tvv-idx="${missingMoves.indexOf(m)}" data-tvv-from="${esc(m.from || '')}" data-tvv-to="${esc(m.to || '')}"` : ''} style="display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-bottom:6px; cursor:pointer; color:var(--text);">
       <span style="font-family:var(--mono); font-size:12px; font-weight:700; color:var(--amber); flex-shrink:0; min-width:104px;">${esc(m.day ? tripsyDayHeaderLabel(m.day) : '')}</span>
       <span style="font-size:13px; flex:1;">${esc(m.fromLabel || m.from)} <span style="color:var(--muted);">→</span> ${esc(m.toLabel || m.to)}</span>
       <span style="font-size:12px; font-weight:700; color:${thirdColor}; flex-shrink:0; text-align:right; min-width:44px;">${esc(third)}</span>
@@ -25220,8 +25294,7 @@ async function showTripsyVerifyTravelDialog(trip) {
   // transportation first (third column a "?"), then moves that have it (third
   // column shows the method). Both groups' rows jump to the date in My Trips
   // when tapped.
-  const missingMoves = transport.allMoves.filter(m => !m.covered);
-  const coveredMoves = transport.allMoves.filter(m => m.covered);
+
   const transportBody = !transport.allMoves.length
     ? muted('Not enough dated lodgings or flights to check transportation.')
     : `
@@ -25257,7 +25330,12 @@ async function showTripsyVerifyTravelDialog(trip) {
     overlay.remove();
     // A warning row (kind set) opens the prefilled Add form to clear it; a
     // satisfied row just jumps to that date in My Trips.
-    if (kind) openTripsyVerifyGapEdit(trip, kind, { day, from: btn.dataset.tvvFrom, to: btn.dataset.tvvTo });
+    // The form is prefilled from the itinerary: a missing move carries its own prefill
+    // (times, both ends with their cities, the flight it serves); a missing night gets
+    // its dates and likely city from tripsyVerifyLodgingPrefill.
+    const move = kind === 'transport' ? missingMoves[Number(btn.dataset.tvvIdx)] : null;
+    const prefill = kind === 'lodging' ? tripsyVerifyLodgingPrefill(trip, lodging.gaps, day) : (move && move.prefill) || null;
+    if (kind) openTripsyVerifyGapEdit(trip, kind, { day, from: btn.dataset.tvvFrom, to: btn.dataset.tvvTo, prefill });
     else if (day) tripsyGoToTripDay(trip.key, day);
   }));
   document.body.appendChild(overlay);
@@ -25279,11 +25357,16 @@ function openTripsyVerifyGapEdit(trip, kind, gap) {
   overlay.innerHTML = `<div style="background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; max-width:660px; width:100%; box-shadow:0 16px 48px rgba(0,0,0,0.55);"><div data-tvv-edit-panel></div></div>`;
   const panel = overlay.querySelector('[data-tvv-edit-panel]');
   let prefill, label;
+  // gap.prefill (from the itinerary) wins over the bare defaults; a blank in it keeps the
+  // default, so a leg with no known time still lands on its day.
+  const extra = {};
+  Object.entries(gap.prefill || {}).forEach(([k, v]) => { if (v && k !== 'cityHint') extra[k] = v; });
   if (kind === 'lodging') {
-    prefill = { ...tripsyBlankRaw('hosting', null), startsAt: gap.day ? `${gap.day}T15:00:00` : null };
+    prefill = { ...tripsyBlankRaw('hosting', null), startsAt: gap.day ? `${gap.day}T15:00:00` : null, ...extra };
     label = 'Lodging';
+    if (gap.prefill && gap.prefill.cityHint) panel.dataset.tripsyPlaceHint = gap.prefill.cityHint;
   } else {
-    prefill = { ...tripsyBlankRaw('transportation', 'car'), departureAt: gap.day ? `${gap.day}T09:00:00` : null, departureDescription: gap.from || null, arrivalDescription: gap.to || null };
+    prefill = { ...tripsyBlankRaw('transportation', 'car'), departureAt: gap.day ? `${gap.day}T09:00:00` : null, departureDescription: gap.from || null, arrivalDescription: gap.to || null, ...extra };
     label = 'Transportation';
   }
   // The report reopens from the trip as it NOW stands ("When does the trip details list
