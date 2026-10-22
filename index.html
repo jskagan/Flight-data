@@ -17555,8 +17555,8 @@ const TRIPSY_FLYOVER_TILE_SOURCES = [
 const TRIPSY_FLYOVER_TILE_FAIL_LIMIT = 4;
 // The origin/destination name's scale as it appears and once grown on arrival -- mirrors the
 // .tfo-dest-label CSS, so arrivalCenter can frame the grown name before it has grown.
-// How long the dot takes to grow into the full screen (its own black), from the start of the arrival
-// zoom (1.4 s) -- one linear rate the whole way.
+// How long the arrival zoom into a destination with photos takes -- the map and its dot zoom
+// together over it until the screen is black.
 const TRIPSY_FLYOVER_BURST_MS = 2400;
 // The burst's white ring grows with the dot only until it is as thick as the white border
 // round the slideshow photos (.tfo-photo img's 4px), then stays that thick.
@@ -20454,30 +20454,26 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     el.style.opacity = '0';
     setTimeout(() => el.remove(), 500);
   };
-  // The dot grows into the orange screen at ONE constant rate, starting the moment the arrival
-  // zoom starts ("I want the orange dot to expand at a constant rate, starting when the map
-  // zooms," 2026-10-22 -- it used to ride the zoom at dot size, then grow on an ease-in
-  // transition afterwards, which read as two different speeds). Driven per frame rather than
-  // by a CSS transition so it can follow the dot's screen point while the map is still moving,
-  // and so pause freezes it; its diameter grows linearly from the dot's 14 px until its white
-  // ring is past the farthest screen corner, over TRIPSY_FLYOVER_BURST_MS.
-  const startBurst = (r, s) => {
+  // The dot grows into the black screen WITH the map, never on its own clock ("Don't zoom the
+  // destination dots separately from the map. Zoom everything together until the entire screen
+  // is black," 2026-10-22 -- a linear, time-driven growth read as the dot zooming apart from
+  // the map). The arrival zoom is centred on the dot itself and runs deep enough that the dot,
+  // scaled exactly as the map is (14 px x 2^(zoom levels gained)), covers the screen; each
+  // frame reads the map's LIVE zoom, so dot and map can never disagree. If the map's max zoom
+  // stops short, settle() finishes the last of the growth quickly once the zoom has ended.
+  const startBurst = (r, s, z0) => {
     clearBurst();
     const el = document.createElement('div');
     el.className = 'tfo-burst';
     ov.appendChild(el);
     burstEl = el;
+    let settledAt = 0, settledD = 0, lastD = 14;
     const done = new Promise(resolve => {
-      let elapsed = 0, last = performance.now();
       const frame = () => {
         if (r.cancelled || burstEl !== el) return resolve(false);
-        const now = performance.now();
-        if (!r.paused) elapsed += now - last;
-        last = now;
         const pt = map.latLngToContainerPoint([s.lat, s.lng]);
         const w = ov.clientWidth, h = ov.clientHeight;
         const far = Math.max(Math.hypot(pt.x, pt.y), Math.hypot(w - pt.x, pt.y), Math.hypot(pt.x, h - pt.y), Math.hypot(w - pt.x, h - pt.y));
-        const p = Math.min(1, elapsed / TRIPSY_FLYOVER_BURST_MS);
         // Drawn at its REAL size each frame, never a scaled-up 14 px element, so the black disc
         // and its white ring stay sharp the whole way ("put a white border around them that will
         // grow with them and will keep high resolution until the border disappears when the
@@ -20488,18 +20484,29 @@ async function playTripsyFlyover(trip, record, opts = {}) {
         // screen exactly as the screen is all black.
         const ring = TRIPSY_FLYOVER_BURST_RING_MAX;
         const endD = 2 * (far + 2 + ring);
-        const d = 14 + (endD - 14) * p;
+        let d = Math.min(endD, 14 * Math.pow(2, Math.max(0, map.getZoom() - z0)));
+        if (settledAt) d = Math.max(d, settledD + (endD - settledD) * Math.min(1, (performance.now() - settledAt) / 400));
+        lastD = d;
         el.style.left = `${pt.x}px`;
         el.style.top = `${pt.y}px`;
         el.style.width = el.style.height = `${d}px`;
         el.style.margin = `${-d / 2}px 0 0 ${-d / 2}px`;
         el.style.borderWidth = `${Math.min(d / 7, ring)}px`;
-        if (p >= 1) return resolve(true);
+        if (d >= endD) return resolve(true);
         requestAnimationFrame(frame);
       };
       frame();
     });
-    return { done };
+    const settle = () => { if (!settledAt) { settledAt = performance.now(); settledD = lastD; } };
+    return { done, settle };
+  };
+  // How deep the arrival zoom must go for the dot, scaled with the map, to cover the screen.
+  const burstZoomFor = (s, z0) => {
+    const pt = map.latLngToContainerPoint([s.lat, s.lng]);
+    const w = ov.clientWidth, h = ov.clientHeight;
+    const far = Math.max(Math.hypot(w / 2, h / 2), Math.hypot(pt.x, pt.y), Math.hypot(w - pt.x, h - pt.y));
+    const endD = 2 * (far + 2 + TRIPSY_FLYOVER_BURST_RING_MAX);
+    return Math.min(Math.ceil(z0 + Math.log2(endD / 14)), map.getMaxZoom());
   };
   // Waits (briefly, at most maxMs) for the tiles at the new view to finish loading.
   const untilTilesLoaded = (r, maxMs) => new Promise(resolve => {
@@ -20543,17 +20550,22 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     ensureDot(s);
     showDestLabel(s);
     growDestLabel();
-    const zoom = s.kind === 'stay' ? 10 : 9;
-    const center = arrivalCenter(s, zoom);
     const burstWanted = withPhotos && tripsyFlyoverPages(s).length > 0;
+    // With photos the zoom goes straight into the dot, deep enough to turn the screen black;
+    // without, it lands on the city with the dot and its name in view.
+    const z0 = map.getZoom();
+    const zoom = burstWanted ? burstZoomFor(s, z0) : (s.kind === 'stay' ? 10 : 9);
+    const center = burstWanted ? L.latLng(s.lat, s.lng) : arrivalCenter(s, zoom);
+    const duration = burstWanted ? TRIPSY_FLYOVER_BURST_MS / 1000 : 1.4;
     // The pictures were all asked for at the start; this is normally instant.
     const pagesReady = burstWanted ? firstPageLoads(r, s) : null;
-    const burst = burstWanted ? startBurst(r, s) : null;
-    if (!(await untilMoveEnd(r, () => map.flyTo(center, zoom, { duration: 1.4 }), 2600))) return false;
+    const burst = burstWanted ? startBurst(r, s, z0) : null;
+    if (!(await untilMoveEnd(r, () => map.flyTo(center, zoom, { duration }), duration * 1000 + 1200))) return false;
     // A slow device can still be mid-flight here (a stray early moveend, or the time cap):
     // finish the zoom outright, so the burst and the photos never start over a map that is
     // still zoomed out.
     if (Math.abs(map.getZoom() - zoom) > 0.01) { try { map.stop(); } catch (e) {} map.setView(center, zoom, { animate: false }); }
+    if (burst) burst.settle();
     showCard(s.label, stopSub(s, i));
     if (!burst) {
       if (!(await untilTilesLoaded(r, 1500))) return false;

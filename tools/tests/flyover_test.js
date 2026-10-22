@@ -1150,16 +1150,22 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'each later leg names the city being left as well as the destination');
   assert(/showDestLabel\(b\);\s*ensureDot\(a\);\s*ensureDot\(b\);\s*const viaMarks = showLayovers\(via\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(legBounds/.test(play),
     'both ends of every leg have their dot (and name) before the zoomed-out leg view appears');
-  assert(/growDestLabel\(\);[\s\S]*?const center = arrivalCenter\(s, zoom\);[\s\S]*?const burst = burstWanted \? startBurst\(r, s\) : null;\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom/.test(play),
-    'the zoom-in frames the dot and its growing label together, and the orange starts growing as the zoom starts');
+  assert(/const zoom = burstWanted \? burstZoomFor\(s, z0\) : \(s\.kind === 'stay' \? 10 : 9\);\s*const center = burstWanted \? L\.latLng\(s\.lat, s\.lng\) : arrivalCenter\(s, zoom\);/.test(play)
+    && /const burst = burstWanted \? startBurst\(r, s, z0\) : null;\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyTo\(center, zoom, \{ duration \}\)/.test(play)
+    && /const duration = burstWanted \? TRIPSY_FLYOVER_BURST_MS \/ 1000 : 1\.4;/.test(play),
+    'with photos, the arrival zoom goes straight into the dot, deep enough to turn the screen black; without, it frames the dot and its name');
+  assert(/return Math\.min\(Math\.ceil\(z0 \+ Math\.log2\(endD \/ 14\)\), map\.getMaxZoom\(\)\);/.test(play)
+    && /if \(burst\) burst\.settle\(\);/.test(play),
+    'the zoom goes deep enough for a 14 px dot scaled with the map to cover the screen, and a max-zoom shortfall is finished once the zoom ends');
   assert(/if \(!grown \|\| r\.cancelled\) return false;[\s\S]*?return slideshow\(r, s\);/.test(play)
     && (play.match(/if \(prev\) prev\.remove\(\);\s*clearBurst\(\);/g) || []).length === 2,
     'a destination with photos swells its dot to fill the screen, and the first page (photo or video) comes straight in over it');
   assert(/\.tfo-burst \{[^}]*background: #111/.test(html) && !/\.tfo-burst \{[^}]*transition/.test(html) && !/@keyframes tfo-burst/.test(html)
-    && /const p = Math\.min\(1, elapsed \/ TRIPSY_FLYOVER_BURST_MS\);[\s\S]*?const ring = TRIPSY_FLYOVER_BURST_RING_MAX;\s*const endD = 2 \* \(far \+ 2 \+ ring\);\s*const d = 14 \+ \(endD - 14\) \* p;[\s\S]*?el\.style\.width = el\.style\.height = `\$\{d\}px`;[\s\S]*?el\.style\.borderWidth = `\$\{Math\.min\(d \/ 7, ring\)\}px`;/.test(play)
+    && /const ring = TRIPSY_FLYOVER_BURST_RING_MAX;\s*const endD = 2 \* \(far \+ 2 \+ ring\);\s*let d = Math\.min\(endD, 14 \* Math\.pow\(2, Math\.max\(0, map\.getZoom\(\) - z0\)\)\);[\s\S]*?el\.style\.width = el\.style\.height = `\$\{d\}px`;[\s\S]*?el\.style\.borderWidth = `\$\{Math\.min\(d \/ 7, ring\)\}px`;/.test(play)
     && !/el\.style\.transform = `scale/.test(play.slice(play.indexOf('const startBurst'))) && /\.tfo-burst \{[^}]*border: 2px solid #fff/.test(html)
-    && /if \(!r\.paused\) elapsed \+= now - last;[\s\S]*?const pt = map\.latLngToContainerPoint\(\[s\.lat, s\.lng\]\);/.test(play.slice(play.indexOf('const startBurst'))),
-    'the burst is the dot\'s own colour, its ring stops growing at the photos\' border thickness, grown per frame at ONE linear rate (no transition or easing), following the dot and honoring pause');
+    && !/elapsed/.test(play.slice(play.indexOf('const startBurst'), play.indexOf('const burstZoomFor')))
+    && /const pt = map\.latLngToContainerPoint\(\[s\.lat, s\.lng\]\);/.test(play.slice(play.indexOf('const startBurst'))),
+    'the burst is the dot\'s own colour, its ring stops growing at the photos\' border thickness, and it grows with the map\'s LIVE zoom (no clock of its own), following the dot');
   assert(/if \(Math\.abs\(map\.getZoom\(\) - zoom\) > 0\.01\) \{[\s\S]{0,120}map\.setView\(center, zoom, \{ animate: false \}\)/.test(play)
     && /map\.fitBounds\(legBounds, \{ padding: \[80, 80\], maxZoom: 9, animate: false \}\)/.test(play),
     'the map is always at its final view before the burst, and before a vehicle starts moving');

@@ -3723,6 +3723,16 @@ WebView's support for recording is unproven.
     `.tfo-burst` (it would smooth the per-frame steps into a second rate). `firstPageLoads`
     runs alongside; if no photo loads, the orange fades back to the map. Measured in Chromium:
     ~55 px per 80 ms from first zoom frame to full cover.
+    **Superseded again, same day** ("Don't zoom the destination dots separately from the map.
+    Zoom everything together until the entire screen is black"): the burst has NO clock of its
+    own. An arrival WITH photos flies straight to the dot (`L.latLng(s.lat, s.lng)`, not
+    `arrivalCenter`) over `TRIPSY_FLYOVER_BURST_MS`, to `burstZoomFor(s, z0)` = enough whole
+    levels past the starting zoom that a 14 px dot scaled with the map covers the screen
+    (capped at the map's max zoom). Each frame `startBurst(r, s, z0)` sets the disc to
+    `14 × 2^(liveZoom − z0)` (capped at full cover), so dot and map are one zoom; if max zoom
+    falls short, `settle()` (called once the zoom ends) finishes the remainder over 0.4 s.
+    Arrivals without photos keep the old 1.4 s zoom to level 10/9 framing dot + name. Measured
+    in Chromium: disc width ÷ map scale held at 0.033 ± 0.001 on every frame until black.
     **Two device fixes, same day** ("The flyover does not transition from a full orange screen
     to the first photo page - it instead shows a zoomed-out map first … sometimes when the
     plane glyph flies between 2 destinations it oscillates left and right"): **(1)** the
