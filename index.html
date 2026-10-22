@@ -1425,6 +1425,7 @@
   /* The arrival burst: the destination dot swelling to fill the screen before its photos. */
   #tripsy-flyover-player .tfo-burst { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; box-sizing: border-box; border: 2px solid #fff; border-radius: 50%; background: #111; z-index: 998; pointer-events: none; }
   .tfo-vehicle span { display: block; font-size: 32px; line-height: 40px; text-align: center; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5)); }
+  .tfo-vehicle span img { display: block; width: 36px; height: 36px; margin: 2px auto; }
   /* ---- Wardrobe (Phase 1: garment library + per-trip selection) ---- */
   .tw-group { margin-bottom: 22px; }
   .tw-group-title { font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
@@ -17728,13 +17729,28 @@ function tripsyFlyoverAddTiles(L, map, i = 0, sources = TRIPSY_FLYOVER_TILE_SOUR
 // leg, drawn as a dotted trail with a walker (🚶 — there is no hiker-with-a-stick emoji; the
 // one person-with-a-stick emoji is the white cane). Like the ground glyphs it faces left,
 // so it flips when heading right.
-const TRIPSY_FLYOVER_MODE_GLYPH = { plane: '✈️', train: '🚆', boat: '⛴️', car: '🚗', hike: '🚶' };
-const TRIPSY_FLYOVER_MODE_LABEL = { plane: 'Flight', train: 'Train', boat: 'Ferry', car: 'Drive', hike: 'Hike' };
+// `taxi` ("On the edit destinations drop-downs there is no taxi option appearing," 2026-10-22):
+// the Verify page's taxi leg type, drawn with the same checker-cab picture (the glyph is the
+// TRIPSY_TAXI_ICON_MARKER sentinel, which the player and every menu render through
+// tripsyFlyoverModeGlyphHtml as the cab image; the cab faces RIGHT, unlike the emoji).
+const TRIPSY_FLYOVER_MODE_GLYPH = { plane: '✈️', train: '🚆', boat: '⛴️', car: '🚗', taxi: '__tripsy_taxi_icon__', hike: '🚶' };
+const TRIPSY_FLYOVER_MODE_LABEL = { plane: 'Flight', train: 'Train', boat: 'Ferry', car: 'Drive', taxi: 'Taxi', hike: 'Hike' };
 // The transports the owner can pick for a leg, in menu order.
-const TRIPSY_FLYOVER_MODES = ['plane', 'train', 'car', 'boat', 'hike'];
+const TRIPSY_FLYOVER_MODES = ['plane', 'train', 'car', 'taxi', 'boat', 'hike'];
 // When a leg mixes modes (a car to the airport, a flight, a car to the hotel) the leg is
 // drawn as the most significant one.
-const TRIPSY_FLYOVER_MODE_RANK = { plane: 4, boat: 3, train: 2, car: 1, hike: 0.5 };
+const TRIPSY_FLYOVER_MODE_RANK = { plane: 4, boat: 3, train: 2, car: 1, taxi: 1, hike: 0.5 };
+// A mode's glyph as HTML: the taxi is a picture, everything else an emoji.
+function tripsyFlyoverModeGlyphHtml(mode, px) {
+  const g = TRIPSY_FLYOVER_MODE_GLYPH[mode] || '';
+  if (g === TRIPSY_TAXI_ICON_MARKER) return `<img src="${TRIPSY_TAXI_GLYPH_URL}" alt="Taxi" style="width:${px || 18}px; height:${px || 18}px; vertical-align:-3px;">`;
+  return g;
+}
+// The glyph as plain TEXT (an <option> can hold no image): 🚕 for the taxi.
+function tripsyFlyoverModeGlyphText(mode) {
+  const g = TRIPSY_FLYOVER_MODE_GLYPH[mode] || '';
+  return g === TRIPSY_TAXI_ICON_MARKER ? '🚕' : g;
+}
 const TRIPSY_FLYOVER_PHOTO_MS = 3200;
 // Per-destination slideshow settings ("Allow the user to select different ways to play the
 // slideshow at each location … multiple pictures on the screen at the same time and
@@ -17778,7 +17794,8 @@ function tripsyFlyoverModeOf(raw, summary) {
   if (/boat|ferry|cruise|ship|sail/.test(cat)) return 'boat';
   if (/train|rail/.test(cat)) return 'train';
   if (/hike|hiking|trek|walk/.test(cat)) return 'hike';
-  if (/car|road|taxi|bus|drive|transfer|shuttle|limo/.test(cat)) return 'car';
+  if (/taxi|cab/.test(cat)) return 'taxi';
+  if (/car|road|bus|drive|transfer|shuttle|limo/.test(cat)) return 'car';
   const text = `${cat} ${String(summary || (raw && raw.name) || '').toLowerCase()}`;
   if (/airplane|plane|flight/.test(text)) return 'plane';
   if (/boat|ferry|cruise|ship|sail/.test(text)) return 'boat';
@@ -17871,7 +17888,7 @@ function tripsyFlyoverAirportDesc(x) {
 }
 // Stops that ARE airports: the departure, the trip home, and (no lodging) each flight's arrival.
 function tripsyFlyoverIsAirportStop(s) {
-  return !!s && (s.kind === 'origin' || s.kind === 'return' || String(s.id || '').startsWith('arrive-'));
+  return !!s && (s.kind === 'origin' || s.kind === 'return' || s.kind === 'transit' || String(s.id || '').startsWith('arrive-'));
 }
 // Names every airport stop and layover by its airport's city. Idempotent; a name the owner
 // typed or a place they set by hand is never replaced. Pure -> {record, changed}.
@@ -17932,7 +17949,7 @@ function tripsyFlyoverDeriveStops(trip) {
       continue;
     }
     stops.push({ id: `hosting-${raw.id != null ? raw.id : ev.id}`, kind: 'stay', label, query: [name, address].filter(Boolean).join(', '),
-      names: name ? [name] : [], start: ev.start, end: ev.end || ev.start, mode: '' });
+      names: name ? [name] : [], start: ev.start, end: ev.end || ev.start, mode: '', city: tripsyVerifyLodgingCity(address) || '' });
   }
   // No lodging at all (a day trip, a camping trip, a trip of only flights): each flight's
   // arrival is a destination -- except the last flight's, which is the trip home -- and
@@ -17981,14 +17998,16 @@ function tripsyFlyoverDeriveStops(trip) {
   // significant mode among them (a car to the airport doesn't make a flight a drive).
   const modes = stops.map(() => '');
   const flightsTo = stops.map(() => []);
-  for (const l of legs) {
+  const legTo = legs.map(() => -1);
+  legs.forEach((l, li) => {
     let i = stops.findIndex((s, k) => k > 0 && s.kind !== 'return' && dayOf(s.start) >= l.day);
     if (i < 0) i = stops[stops.length - 1].kind === 'return' ? stops.length - 1 : -1;
-    if (i < 1) continue;
+    if (i < 1) return;
+    legTo[li] = i;
     const m = tripsyFlyoverModeOf(l.raw, l.ev.summary);
     if (m === 'plane') flightsTo[i].push(l);
     if (!modes[i] || TRIPSY_FLYOVER_MODE_RANK[m] > TRIPSY_FLYOVER_MODE_RANK[modes[i]]) modes[i] = m;
-  }
+  });
   // LAYOVERS ("where there is a layover on a flight, show the flight to the layover cities,
   // but do not zoom the map, or show photos. Just display the name of the city," 2026-10-21):
   // when several flights get you to one stop, every flight's arrival but the last is a
@@ -18012,7 +18031,67 @@ function tripsyFlyoverDeriveStops(trip) {
     stops[i].mode = modes[i] || 'car';
     if (!modes[i]) stops[i].modeGuessed = true;
   }
-  return stops;
+  // AIRPORT TRANSFERS ("The app should automatically add transportation legs where there is a
+  // need … there is a walk to beppu followed by a flight from Fukuoka to Seoul. The user must
+  // get from beppu to Fukuoka on that day," 2026-10-22): a flight into a stop is drawn from the
+  // stop before it, but it really leaves from an AIRPORT -- and when that airport's city is
+  // not the city you were in, the leg to the airport is a journey of its own. So a `transit`
+  // stop (the airport, named for its city, no photos, played like a layover) goes in before
+  // the flight stop, reached by whatever ground leg on the trip precedes the flight that day,
+  // else by a GUESSED drive the setup page asks about (the same dialog as any unexplained
+  // leg). The arrival side is symmetric: a flight landing in a city other than the stay's
+  // (Da Nang for a hotel in Hoi An) lands at a transit stop, and the stay is reached by the
+  // ground leg after the flight, or a guessed one. A city that can't be told (an unknown bare
+  // code, a stay with no city in its address) never plants a transfer, and an airport that
+  // names the stay's own city (FUK for a hotel in Fukuoka) needs none.
+  const cityOf = s => s.city || (s.airport ? tripsyFlyoverAirportCity(s.airport) : '') || '';
+  // Lenient on purpose: unknown on either side, or the airport's city named anywhere in the
+  // stop's own name/address (a hotel whose address parses to its state), is "the same city".
+  const sameCity = (airportDesc, s) => {
+    const ac = tripsyFlyoverAirportCity(airportDesc), city = cityOf(s);
+    if (!ac || !city) return true;
+    if (ac.toLowerCase() === city.toLowerCase() || tripsyDescMatchesCity(airportDesc, city.toLowerCase())) return true;
+    return new RegExp('\\b' + ac.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(String(s.query || ''));
+  };
+  const groundOf = l => (l ? tripsyFlyoverModeOf(l.raw, l.ev.summary) : '');
+  const out = [];
+  for (let i = 0; i < stops.length; i++) {
+    const s = stops[i];
+    const fl = flightsTo[i] || [];
+    if (!fl.length || i === 0) { out.push(s); continue; }
+    const first = fl[0], last = fl[fl.length - 1];
+    const prevStop = stops[i - 1];
+    const dep = String(first.raw.departureDescription || '').trim();
+    const arr = String(last.raw.arrivalDescription || '').trim();
+    const legsHere = legs.filter((l, li) => legTo[li] === i);
+    // A transfer is planted only when NO flight into the stop touches the right city -- a
+    // stray extra leg on a moving day (old data) must not invent one.
+    const leavesCity = fl.some(f => sameCity(String(f.raw.departureDescription || '').trim(), prevStop));
+    // A "flight in" that lands back in the ORIGIN's city is the flight home, mis-filed onto
+    // a stay dated after it (old records), not a landing that needs a ride.
+    const landsCity = fl.some(f => sameCity(String(f.raw.arrivalDescription || '').trim(), s))
+      || (stops[0].kind === 'origin' && sameCity(arr, stops[0]) && cityOf(stops[0]) !== '');
+    // Departure side: the ride to the airport.
+    if (dep && !leavesCity) {
+      const ground = legsHere.find(l => l.t < first.t && groundOf(l) !== 'plane');
+      out.push({ id: `transit-dep-${first.raw.id != null ? first.raw.id : first.ev.id}`, kind: 'transit', label: tripsyFlyoverAirportCity(dep) || dep,
+        query: tripsyFlyoverAirportQuery(dep), airport: dep, names: [], start: first.at, end: first.at, photos: [],
+        mode: ground ? groundOf(ground) : 'car', ...(ground ? {} : { modeGuessed: true }) });
+    }
+    // Arrival side: the ride from the airport. The flight (and its layovers) then lands at
+    // the transit stop, and the stay's own leg is the ground one after it.
+    if (s.kind === 'stay' && !s.airport && s.id !== 'location' && arr && !landsCity) {
+      const ground = legsHere.find(l => l.t > last.t && groundOf(l) !== 'plane');
+      const at = last.raw.arrivalAt || last.ev.end || last.at;
+      out.push({ id: `transit-arr-${last.raw.id != null ? last.raw.id : last.ev.id}`, kind: 'transit', label: tripsyFlyoverAirportCity(arr) || arr,
+        query: tripsyFlyoverAirportQuery(arr), airport: arr, names: [], start: at, end: at, photos: [], mode: 'plane', ...(s.via ? { via: s.via } : {}) });
+      const { via: _v, ...rest } = s;
+      out.push({ ...rest, mode: ground ? groundOf(ground) : 'car', ...(ground ? { modeGuessed: false } : { modeGuessed: true }) });
+      continue;
+    }
+    out.push(s);
+  }
+  return out;
 }
 // The stops whose leg IN has no transport on the trip and that the owner hasn't answered
 // for yet ("Where there is no form of transportation specified between two points, bring up
@@ -18524,7 +18603,7 @@ async function tripsyFlyoverBuild(trip, prevRecord, opts = {}) {
   }
   await tripsyFlyoverGeocodeVias(stops);
   const merged = tripsyFlyoverMergeNearby(stops);
-  const rec = { tripKey: trip.key, stops: tripsyFlyoverCarryOver(merged, prevRecord && prevRecord.stops), builtAt: new Date().toISOString(), layoversAt: new Date().toISOString(), layoversV: TRIPSY_FLYOVER_LAYOVERS_V };
+  const rec = { tripKey: trip.key, stops: tripsyFlyoverCarryOver(merged, prevRecord && prevRecord.stops), builtAt: new Date().toISOString(), layoversAt: new Date().toISOString(), layoversV: TRIPSY_FLYOVER_LAYOVERS_V, transitV: TRIPSY_FLYOVER_TRANSIT_V };
   // Rebuilding a completed fly-over (Edit -> Rebuild) leaves it completed.
   if (prevRecord && prevRecord.completedAt) rec.completedAt = prevRecord.completedAt;
   if (prevRecord && prevRecord.music) rec.music = prevRecord.music;
@@ -18569,6 +18648,53 @@ async function tripsyFlyoverAddLayovers(record, trip) {
     return rest;
   });
   return { record: tripsyFlyoverApplyAirportCities({ ...record, stops, layoversAt: new Date().toISOString(), layoversV: TRIPSY_FLYOVER_LAYOVERS_V }).record, changed: true };
+}
+
+// AIRPORT TRANSFERS for a fly-over saved before they were derived (2026-10-22): the pure
+// half puts each `transit` stop a fresh derivation found into the record directly before the
+// stop that FOLLOWS it there (matched by id; a transit already present, or one whose
+// following stop is not in the record, is skipped), and gives that following stop the
+// derivation's mode and layovers when the owner hasn't set its transport by hand (an arrival
+// transfer takes the flight off the stay, which is now reached by the ride). The async half
+// geocodes the new stops and stamps `transitV`. Resolves {record, changed}; the caller saves,
+// then asks the mode question for any guessed ride.
+const TRIPSY_FLYOVER_TRANSIT_V = 1;
+function tripsyFlyoverTransitCurrent(record) { return !!record && record.transitV === TRIPSY_FLYOVER_TRANSIT_V; }
+function tripsyFlyoverInsertTransitStops(recordStops, derivedStops) {
+  const out = (recordStops || []).slice();
+  const d = derivedStops || [];
+  let changed = false;
+  for (let k = 0; k < d.length - 1; k++) {
+    const t = d[k];
+    if (t.kind !== 'transit' || out.some(s => s.id === t.id)) continue;
+    const next = d[k + 1];
+    const at = out.findIndex(s => s.id === next.id);
+    if (at < 0) continue;
+    out.splice(at, 0, { ...t, photos: [] });
+    const f = out[at + 1];
+    if (!f.modeManual) {
+      const { via: _v, ...rest } = f;
+      out[at + 1] = { ...rest, mode: next.mode, modeGuessed: !!next.modeGuessed, ...(next.via ? { via: next.via } : {}) };
+    }
+    changed = true;
+  }
+  return { stops: out, changed };
+}
+async function tripsyFlyoverAddTransitStops(record, trip) {
+  if (!record || !Array.isArray(record.stops) || tripsyFlyoverTransitCurrent(record) || !trip) return { record, changed: false };
+  let derived;
+  try { derived = tripsyFlyoverDeriveStops(trip); } catch (e) { return { record, changed: false }; }
+  const { stops, changed } = tripsyFlyoverInsertTransitStops(record.stops, derived);
+  const fresh = stops.filter(s => s.kind === 'transit' && s.lat == null);
+  await Promise.all(fresh.map(async s => {
+    let g = null;
+    try { g = await tripsyFlyoverGeocode(s.query, ''); } catch (e) { g = null; }
+    if (g) { s.lat = g.lat; s.lng = g.lng; if (g.city && !tripsyFlyoverNameIsNonLatin(g.city)) s.label = g.city; }
+    else { s.lat = null; s.lng = null; }
+    s.labelLang = 'en';
+  }));
+  const rec = tripsyFlyoverApplyAirportCities({ ...record, stops, transitV: TRIPSY_FLYOVER_TRANSIT_V }).record;
+  return { record: rec, changed: true };
 }
 
 // A fly-over saved before names were asked for in English gets its destinations re-named
@@ -18787,7 +18913,7 @@ function tripsyFlyoverEditDestinationsDialog(trip, record, opts = {}) {
             <button class="tripsy-close-x tripsy-save-check" data-fe-save title="Save" aria-label="Save">✓</button>
             <button class="tripsy-close-x" data-fe-cancel title="Cancel" aria-label="Cancel">✕</button>
           </div>
-          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">In the order they play. Rename, move, remove or add destinations, or rebuild the list from the trip — nothing changes until you press Save.</div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">In the order they play. Rename, move, remove or add destinations (＋ on a row adds one right after it), or rebuild the list from the trip — nothing changes until you press Save. You’ll be asked how you travelled to any new destination.</div>
           <div data-fe-status style="font-size:12px; color:var(--muted); min-height:16px; margin-bottom:6px;"></div>
           <div style="flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;">
             ${stops.length ? stops.map((s, i) => `
@@ -18795,13 +18921,15 @@ function tripsyFlyoverEditDestinationsDialog(trip, record, opts = {}) {
               <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                 <span style="font-family:var(--mono); font-size:12px; color:var(--muted); min-width:18px;">${i + 1}</span>
                 ${i === 0 && !s.mode ? `<span style="font-size:18px;" title="Where the trip starts">📍</span>`
-                  : `<select class="field-input" data-fe-mode title="How you got here" aria-label="How you got here" style="width:auto; padding:3px 6px; font-size:13px;">${TRIPSY_FLYOVER_MODES.map(m => `<option value="${m}"${m === (s.mode || 'car') ? ' selected' : ''}>${TRIPSY_FLYOVER_MODE_GLYPH[m]} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}</select>`}
+                  : `<select class="field-input" data-fe-mode title="How you got here" aria-label="How you got here" style="width:auto; padding:3px 6px; font-size:13px;">${TRIPSY_FLYOVER_MODES.map(m => `<option value="${m}"${m === (s.mode || 'car') ? ' selected' : ''}>${tripsyFlyoverModeGlyphText(m)} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}</select>`}
                 ${s.removed
                   ? `<s style="flex:1; min-width:120px; color:var(--muted);">${esc(s.label || 'Location')}</s>`
                   : `<input class="field-input" data-fe-label value="${esc(s.label || '')}" placeholder="Location" style="flex:1; min-width:120px; font-weight:700;">`}
+                ${s.kind === 'transit' ? `<span style="font-size:12px; color:var(--muted);">airport transfer</span>` : ''}
                 <span style="font-size:12px; color:var(--muted);">${esc(tripsyFlyoverDatesLabel(s))}</span>
                 <button class="btn" data-fe-up ${i === 0 ? 'disabled' : ''} title="Move up" style="font-size:12px; padding:3px 8px;">↑</button>
                 <button class="btn" data-fe-down ${i === stops.length - 1 ? 'disabled' : ''} title="Move down" style="font-size:12px; padding:3px 8px;">↓</button>
+                <button class="btn" data-fe-add-after title="Add a destination after this one" style="font-size:12px; padding:3px 8px;">＋</button>
                 ${s.removed ? `<button class="btn" data-fe-restore style="font-size:12px;">Restore</button>` : `<button class="btn" data-fe-remove style="font-size:12px;" title="Leave this destination out of the fly-over">Remove</button>`}
               </div>
               ${(s.via || []).length && s.mode === 'plane' ? `<div style="font-size:12px; color:var(--muted); margin-top:4px;">via ${esc(s.via.map(v => v.label).join(', '))}</div>` : ''}
@@ -18827,6 +18955,18 @@ function tripsyFlyoverEditDestinationsDialog(trip, record, opts = {}) {
         done(draft);
       });
       const update = (id, fields) => { draft = { ...draft, stops: draft.stops.map(s => s.id === id ? { ...s, ...fields } : s) }; };
+      // Asks for a place and puts the new destination at index `at` (the stop before it is
+      // remembered, so a rebuild puts it back after that one). It is reached by a GUESSED
+      // drive, so the setup page asks how after Save -- the same question an unexplained
+      // leg gets, with the transport drop-down.
+      const addDestination = async at => {
+        const r = await tripsyFlyoverAskPlace(trip, { id: 'new', kind: 'stay', label: '', needsPlace: true });
+        if (!r) return;
+        const idx = Math.max(0, Math.min(at, draft.stops.length));
+        const afterId = idx > 0 ? draft.stops[idx - 1].id : null;
+        const stops = draft.stops.slice(); stops.splice(idx, 0, tripsyFlyoverManualStop(r, afterId));
+        draft = { ...draft, stops }; render();
+      };
       ov.querySelectorAll('[data-fe-stop]').forEach((card, i) => {
         const id = card.getAttribute('data-fe-stop');
         const stop = () => draft.stops.find(s => s.id === id);
@@ -18846,21 +18986,20 @@ function tripsyFlyoverEditDestinationsDialog(trip, record, opts = {}) {
         if (rm) rm.onclick = () => { update(id, { removed: true }); render(); };
         const rs = card.querySelector('[data-fe-restore]');
         if (rs) rs.onclick = () => { update(id, { removed: false }); render(); };
+        // A destination BETWEEN existing ones ("give the user an option to add destinations
+        // between existing ones," 2026-10-22): goes in right after this row.
+        const addAfter = card.querySelector('[data-fe-add-after]');
+        if (addAfter) addAfter.onclick = () => addDestination(i + 1);
         const place = card.querySelector('[data-fe-place]');
         if (place) place.onclick = async () => {
           const r = await tripsyFlyoverAskPlace(trip, stop());
           if (r) { update(id, { lat: r.lat, lng: r.lng, label: r.label, labelEdited: true, manualPlace: r.query, needsPlace: false }); render(); }
         };
       });
-      ov.querySelector('[data-fe-add]').onclick = async () => {
-        const r = await tripsyFlyoverAskPlace(trip, { id: 'new', kind: 'stay', label: '', needsPlace: true });
-        if (!r) return;
+      ov.querySelector('[data-fe-add]').onclick = () => {
         const last = draft.stops[draft.stops.length - 1];
         // Goes before the flight home when the list ends with one, else at the end.
-        const at = last && last.kind === 'return' ? draft.stops.length - 1 : draft.stops.length;
-        const afterId = at > 0 ? draft.stops[at - 1].id : null;
-        const stops = draft.stops.slice(); stops.splice(at, 0, tripsyFlyoverManualStop(r, afterId));
-        draft = { ...draft, stops }; render();
+        addDestination(last && last.kind === 'return' ? draft.stops.length - 1 : draft.stops.length);
       };
       ov.querySelector('[data-fe-rebuild]').onclick = async () => {
         if (!opts.rebuild) return;
@@ -19002,6 +19141,18 @@ async function showTripsyFlyover(tripKey) {
         save(); render();
       }).catch(e => console.error('fly-over layovers failed:', e));
     }
+    // A fly-over saved before airport transfers were derived gets them once, behind the
+    // page, then is asked how any new ride was made. Merged onto the record AS IT IS THEN
+    // (the geocoded answer re-runs the pure insert), never over a changed stop.
+    if (!tripsyFlyoverTransitCurrent(record)) {
+      tripsyFlyoverAddTransitStops(record, trip).then(r => {
+        if (closed) return;
+        const ins = tripsyFlyoverInsertTransitStops(record.stops, r.record.stops);
+        record = { ...record, stops: ins.stops, transitV: r.record.transitV };
+        save();
+        if (ins.changed) { render(); askMissingModes(); }
+      }).catch(e => console.error('fly-over transfers failed:', e));
+    }
   }
 
   // The options box opens by itself right after photos are added, and from each
@@ -19076,9 +19227,24 @@ async function showTripsyFlyover(tripKey) {
         const legHtml = !s.mode ? `<span style="font-size:18px;">📍</span>`
           // A drop-down to change how the trip got here ("Allow the user to change the mode of
           // transportation with a drop down menu," 2026-10-21); ❓ while it is still a guess.
-          : isOwner ? `<span style="display:inline-flex; align-items:center; gap:3px;">${needsMode ? '<span title="Nothing on the trip says how you got here — choose it" style="font-size:13px;">❓</span>' : ''}<select class="field-input" data-flyover-mode-select title="How you got here" aria-label="How you got here" style="width:auto; padding:3px 6px; font-size:13px;">${TRIPSY_FLYOVER_MODES.map(m => `<option value="${m}"${m === s.mode ? ' selected' : ''}>${TRIPSY_FLYOVER_MODE_GLYPH[m]} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}</select></span>`
-          : `<span title="${esc(TRIPSY_FLYOVER_MODE_LABEL[s.mode] || '')}" style="font-size:18px;">${TRIPSY_FLYOVER_MODE_GLYPH[s.mode] || ''}</span>`;
+          : isOwner ? `<span style="display:inline-flex; align-items:center; gap:3px;">${needsMode ? '<span title="Nothing on the trip says how you got here — choose it" style="font-size:13px;">❓</span>' : ''}<select class="field-input" data-flyover-mode-select title="How you got here" aria-label="How you got here" style="width:auto; padding:3px 6px; font-size:13px;">${TRIPSY_FLYOVER_MODES.map(m => `<option value="${m}"${m === s.mode ? ' selected' : ''}>${tripsyFlyoverModeGlyphText(m)} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}</select></span>`
+          : `<span title="${esc(TRIPSY_FLYOVER_MODE_LABEL[s.mode] || '')}" style="font-size:18px;">${tripsyFlyoverModeGlyphHtml(s.mode, 18)}</span>`;
         const noPlace = s.lat == null;
+        // An airport transfer stop is passed through (no photos, no slideshow) -- the card
+        // just says so, with the leg's drop-down above it.
+        if (s.kind === 'transit') return `
+        <div data-flyover-stop="${esc(s.id)}" style="border:1px dashed var(--line); border-radius:10px; padding:8px 12px; margin-bottom:10px; ${s.removed ? 'opacity:0.5;' : ''}">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            ${legHtml}${s.mode === 'plane' && (s.via || []).length ? `<span style="font-size:12px; color:var(--muted);" title="Layovers: the flight is shown through these cities">via ${esc(s.via.map(v => v.label).join(', '))}</span>` : ''}
+            <span style="font-family:var(--mono); font-size:12px; color:var(--muted);">${i + 1}</span>
+            <strong style="flex:1; min-width:140px;">${esc(s.label || 'Airport')}</strong>
+            <span style="font-size:12px; color:var(--muted);">airport transfer — passed through, no photos</span>
+            ${isOwner ? (s.removed
+              ? `<button class="btn" data-flyover-restore style="font-size:12px;">Restore</button>`
+              : `<button class="btn" data-flyover-remove style="font-size:12px;" title="Leave this transfer out of the fly-over">Remove</button>`) : ''}
+          </div>
+          ${noPlace && !s.removed ? `<div style="font-size:12px; color:#E0A33A; margin-top:4px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">⚠️ Not on the map yet — it will be skipped.${isOwner ? ` <button class="btn" data-flyover-set-place style="font-size:12px;">📍 Set location</button>` : ''}</div>` : ''}
+        </div>`;
         return `
         <div data-flyover-stop="${esc(s.id)}" style="border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:10px; ${s.removed ? 'opacity:0.5;' : ''}">
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
@@ -19257,8 +19423,76 @@ async function showTripsyFlyover(tripKey) {
     // Which map to play on ("present a user dialog asking if he wants to use the free mapping
     // service or the service that uses credits," 2026-10-22). Playback starts inside the
     // choice's own tap, so the music can still start on iOS.
-    tripsyFlyoverMapChoiceDialog(mapService => playTripsyFlyover(trip, record, { mapService }));
+    // Whole journey, or a start and end city ("present him with a numbered list of the cities
+    // visited and ask whether he wants to view the entire journey or allow him to select a
+    // starting and ending city," 2026-10-22) -- then which map. The range dialog's own Play
+    // tap opens the map choice, whose pick starts playback synchronously (the iOS music rule).
+    tripsyFlyoverRangeDialog(record, range => {
+      tripsyFlyoverMapChoiceDialog(mapService => playTripsyFlyover(trip, record, { mapService, ...(range ? { range } : {}) }));
+    });
   };
+}
+
+// The playable stops from the one with id `fromId` through the one with id `toId`, in play
+// order. An unknown or missing end falls back to that end of the journey; a reversed pair is
+// swapped. Pure (tested). The player's layovers ride on the leg INTO a stop, so the first stop
+// of a cut keeps none (tripsyFlyoverPlayableStops already drops them from a first stop, and
+// the player reads `via` only for legs after the first).
+function tripsyFlyoverRangeStops(stops, fromId, toId) {
+  const list = stops || [];
+  let a = list.findIndex(s => s.id === fromId), b = list.findIndex(s => s.id === toId);
+  if (a < 0) a = 0;
+  if (b < 0) b = list.length - 1;
+  if (a > b) [a, b] = [b, a];
+  return list.slice(a, b + 1);
+}
+// The numbered city list with "Entire journey" or a start/end pick. onPick(null) plays the
+// whole journey, onPick({fromId, toId}) the cut; Cancel or a tap outside plays nothing.
+// onPick runs synchronously inside the Play button's click, so the map-choice dialog it opens
+// is still inside a user tap.
+function tripsyFlyoverRangeDialog(record, onPick) {
+  const stops = tripsyFlyoverPlayableStops(record);
+  let ov = document.getElementById('tripsy-flyover-range-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-range-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483100';
+  const kindNote = s => s.kind === 'origin' ? ' — departure' : s.kind === 'return' ? ' — home' : s.kind === 'transit' ? ' — airport transfer' : '';
+  const optionsHtml = sel => stops.map((s, i) => `<option value="${esc(s.id)}"${s.id === sel ? ' selected' : ''}>${i + 1}. ${esc(s.label || 'Location')}</option>`).join('');
+  ov.innerHTML = `
+    <div class="tw-modal-paper" style="max-width:460px; max-height:88vh; max-height:88dvh; display:flex; flex-direction:column;">
+      <h2 style="margin:0 0 6px; font-size:19px; text-align:center;">Play the fly-over</h2>
+      <div style="font-size:13px; color:var(--muted); text-align:center; margin-bottom:10px;">The cities in the order they play.</div>
+      <ol style="margin:0 0 12px; padding-left:28px; font-size:14px; line-height:1.7; overflow-y:auto; -webkit-overflow-scrolling:touch; max-height:34vh;">
+        ${stops.map(s => `<li><strong>${esc(s.label || 'Location')}</strong><span style="color:var(--muted); font-size:12px;">${esc(kindNote(s))}${tripsyFlyoverDatesLabel(s) ? ' · ' + esc(tripsyFlyoverDatesLabel(s)) : ''}</span></li>`).join('')}
+      </ol>
+      <button class="btn primary" data-range-all style="display:block; width:100%; padding:10px 14px; font-weight:700; font-size:15px; margin-bottom:12px;">▶ Entire journey</button>
+      <div style="border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:12px;">
+        <div style="font-weight:700; font-size:14px; margin-bottom:8px;">Or just part of it</div>
+        <div style="display:grid; grid-template-columns:auto 1fr; gap:8px 10px; align-items:center; font-size:13px;">
+          <label for="tripsy-flyover-range-from">From</label><select id="tripsy-flyover-range-from" class="field-input" data-range-from style="padding:6px 8px;">${optionsHtml(stops[0] && stops[0].id)}</select>
+          <label for="tripsy-flyover-range-to">To</label><select id="tripsy-flyover-range-to" class="field-input" data-range-to style="padding:6px 8px;">${optionsHtml(stops[stops.length - 1] && stops[stops.length - 1].id)}</select>
+        </div>
+        <div data-range-note style="font-size:12px; color:var(--muted); min-height:16px; margin-top:6px;"></div>
+        <button class="btn" data-range-part style="display:block; width:100%; padding:8px 12px; font-weight:700; margin-top:8px;">▶ Play this part</button>
+      </div>
+      <div style="text-align:center;"><button class="btn" data-range-cancel>Cancel</button></div>
+    </div>`;
+  ov.style.display = 'flex';
+  const close = () => { ov.style.display = 'none'; };
+  const from = ov.querySelector('[data-range-from]'), to = ov.querySelector('[data-range-to]'), note = ov.querySelector('[data-range-note]');
+  const cut = () => tripsyFlyoverRangeStops(stops, from.value, to.value);
+  const describe = () => {
+    const c = cut();
+    note.textContent = c.length < 2 ? 'Pick two different cities to play the legs between them.' : `${c.length} cities, ${c.length - 1} leg${c.length === 2 ? '' : 's'}: ${c[0].label} → ${c[c.length - 1].label}.`;
+  };
+  from.onchange = describe; to.onchange = describe; describe();
+  ov.querySelector('[data-range-all]').onclick = () => { close(); onPick(null); };
+  ov.querySelector('[data-range-part]').onclick = () => {
+    const c = cut();
+    if (c.length < 2) { describe(); return; }
+    close(); onPick({ fromId: c[0].id, toId: c[c.length - 1].id });
+  };
+  ov.querySelector('[data-range-cancel]').onclick = close;
+  ov.onclick = e => { if (e.target === ov) close(); };
 }
 
 // The setup page's Play asks which map service to use: the free keyless tiles (Esri, then
@@ -19304,14 +19538,23 @@ function tripsyFlyoverAskMode(fromStop, toStop, { current = '', step = '' } = {}
       <div class="tw-modal-paper" style="max-width:440px;">
         <h2 style="margin:0 0 8px; font-size:17px;">How did you get there?${step ? ` <span style="font-size:12px; color:var(--muted); font-weight:400;">${esc(step)}</span>` : ''}</h2>
         <div style="font-size:13px; color:var(--muted); margin-bottom:14px;">Nothing on the trip says how you travelled from <strong>${esc((fromStop && fromStop.label) || 'the last stop')}</strong> to <strong>${esc((toStop && toStop.label) || 'this stop')}</strong>${dates ? ` (${esc(dates)})` : ''}. The fly-over will show that leg this way.</div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
-          ${TRIPSY_FLYOVER_MODES.map(m => `<button class="btn" data-mode-pick="${m}" style="padding:12px 8px; font-size:15px; ${m === current ? 'outline:2px solid #3AA76D; outline-offset:1px;' : ''}">${TRIPSY_FLYOVER_MODE_GLYPH[m]} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</button>`).join('')}
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+          <label for="tripsy-flyover-mode-pick" style="font-size:13px;">Transport</label>
+          <select id="tripsy-flyover-mode-pick" class="field-input" data-mode-select style="flex:1; min-width:160px; padding:8px 10px; font-size:15px;">
+            ${TRIPSY_FLYOVER_MODES.map(m => `<option value="${m}"${m === (current || 'car') ? ' selected' : ''}>${tripsyFlyoverModeGlyphText(m)} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}
+          </select>
         </div>
-        <div style="display:flex; justify-content:flex-end;"><button class="btn" data-mode-later style="font-size:12px;">Not now</button></div>
+        <div style="display:flex; justify-content:flex-end; gap:8px;">
+          <button class="btn" data-mode-later style="font-size:12px;">Not now</button>
+          <button class="btn" data-mode-pick style="font-weight:700;">Use this</button>
+        </div>
       </div>`;
     ov.style.display = 'flex';
     const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
-    ov.querySelectorAll('[data-mode-pick]').forEach(b => b.onclick = () => done(b.getAttribute('data-mode-pick')));
+    // A drop-down and an OK ("present the user with a dialog box and drop down menu to
+    // determine the mode of transportation," 2026-10-22; it was a grid of buttons).
+    const sel = ov.querySelector('[data-mode-select]');
+    ov.querySelector('[data-mode-pick]').onclick = () => done(TRIPSY_FLYOVER_MODE_GLYPH[sel.value] ? sel.value : null);
     ov.querySelector('[data-mode-later]').onclick = () => done(null);
     ov.onclick = e => { if (e.target === ov) done(null); };
   });
@@ -20278,9 +20521,15 @@ function tripsyFlyoverMergeLookups(looked, stopFields, topFields = []) {
 }
 async function playTripsyFlyover(trip, record, opts = {}) {
   record = tripsyFlyoverApplyAirportCities(record).record;
-  let stops = tripsyFlyoverPlayableStops(record);
+  // opts.range {fromId, toId} plays just that part of the journey (the setup page's Play
+  // asks); opts.previewStopId one destination.
+  const cutStops = all => {
+    if (preview) return all.filter(s => s.id === opts.previewStopId);
+    if (opts.range) return tripsyFlyoverRangeStops(all, opts.range.fromId, opts.range.toId);
+    return all;
+  };
   const preview = !!opts.previewStopId;
-  if (preview) stops = stops.filter(s => s.id === opts.previewStopId);
+  let stops = cutStops(tripsyFlyoverPlayableStops(record));
   if (!stops.length) return;
   // Music starts HERE, before the first await: iOS only lets audio begin inside the tap
   // that started playback. Music that still can't start (a song of the owner's not yet
@@ -20333,8 +20582,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   if (opts.layovers) {
     const r = await Promise.race([opts.layovers.catch(() => null), new Promise(res => setTimeout(() => res(null), 5000))]);
     if (r && r.changed) {
-      stops = tripsyFlyoverPlayableStops(r.record);
-      if (preview) stops = stops.filter(s => s.id === opts.previewStopId);
+      stops = cutStops(tripsyFlyoverPlayableStops(r.record));
       if (!stops.length) { stopMusic(); return; }
     }
   }
@@ -20612,7 +20860,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     layers.push(dot(s));
   };
   const layers = [];
-  const vehicleIcon = mode => L.divIcon({ className: 'tfo-vehicle', html: `<span>${TRIPSY_FLYOVER_MODE_GLYPH[mode] || '🚗'}</span>`, iconSize: [40, 40], iconAnchor: [20, 20] });
+  const vehicleIcon = mode => L.divIcon({ className: 'tfo-vehicle', html: `<span>${tripsyFlyoverModeGlyphHtml(mode, 36) || '🚗'}</span>`, iconSize: [40, 40], iconAnchor: [20, 20] });
 
   // `carry` keeps ONE vehicle across a journey's legs: a flight through a layover used to
   // remove its plane at the end of each leg and add a new one for the next, so the plane
@@ -20666,8 +20914,10 @@ async function playTripsyFlyover(trip, record, opts = {}) {
             el.style.transform = `rotate(${heading}deg)`;
           } else if (Math.abs(dx) > 3) {
             // The ground glyphs face left, so they flip when heading right -- only on a
-            // clear sideways move, so a north-south leg can't flicker between the two.
-            el.style.transform = dx > 0 ? 'scaleX(-1)' : 'none';
+            // clear sideways move, so a north-south leg can't flicker between the two. The
+            // taxi picture faces RIGHT, so it flips the other way.
+            const facesRight = mode === 'taxi';
+            el.style.transform = (dx > 0) !== facesRight ? 'scaleX(-1)' : 'none';
           }
         }
       }
@@ -20683,8 +20933,10 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   });
 
   const stopSub = (s, i) => {
-    const n = stops.length;
-    return [tripsyFlyoverDatesLabel(s), preview ? '' : s.kind === 'origin' ? 'Departure' : s.kind === 'return' ? 'Home' : `Stop ${i} of ${n - (stops[0].kind === 'origin' ? 1 : 0) - (stops[n - 1].kind === 'return' ? 1 : 0)}`].filter(Boolean).join(' · ');
+    // "of N" counts the stays, as `stayNo` numbers them: never the airports (origin, home,
+    // an airport transfer passed through).
+    const n = stops.filter(x => x.kind === 'stay').length;
+    return [tripsyFlyoverDatesLabel(s), preview ? '' : s.kind === 'origin' ? 'Departure' : s.kind === 'return' ? 'Home' : `Stop ${i} of ${n}`].filter(Boolean).join(' · ');
   };
   // A destination's photo pages, then back to the map.
   const slideshow = async (r, s) => {
@@ -20953,7 +21205,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     if (stops.length === 1 && !(await arrive(r, first, stayNo(first), !openWithPhotos))) return;
     for (let k = 1; k < stops.length; k++) {
       const a = stops[k - 1], b = stops[k];
-      showCard(`${TRIPSY_FLYOVER_MODE_GLYPH[b.mode] || ''} ${a.label} → ${b.label}`, TRIPSY_FLYOVER_MODE_LABEL[b.mode] || '');
+      showCard(`${tripsyFlyoverModeGlyphText(b.mode) || ''} ${a.label} → ${b.label}`, TRIPSY_FLYOVER_MODE_LABEL[b.mode] || '');
       // Layovers: the flight is drawn through each connecting city, framed with the whole
       // leg -- no zoom, no photos, just the city's name on the map.
       const via = b.mode === 'plane' ? (b.via || []) : [];
@@ -20986,6 +21238,10 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       }
       if (carry) carry.keep = false;
       if (!(await animateLeg(r, from, b, via.length ? 'plane' : '', carry))) return;
+      // An airport TRANSFER stop (the ride to / from an airport in another city, 2026-10-22)
+      // is passed through like a layover: no zoom, no card, no photos -- just its name, a
+      // short pause, and the next leg.
+      if (b.kind === 'transit') { if (!(await wait(r, 900))) return; continue; }
       if (!(await arrive(r, b, stayNo(b), !(closeWithPhotos && b === last)))) return;
     }
     clearDestLabel();

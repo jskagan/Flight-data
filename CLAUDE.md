@@ -4007,7 +4007,24 @@ WebView's support for recording is unproven.
     restrictions, if any, must allow it); free tier 100k tile requests/month. Verified in
     Chromium with Google stubbed (session granted → Google tiles + copyright; 403 → Esri);
     the live API is unreachable from the sandbox.
-  - **The setup page's ▶ Play asks WHICH map first** ("When the user selects play fly-over
+  - **The setup page's ▶ Play asks WHOLE JOURNEY OR A PART first** ("When the user selects
+    play from the flyover page, present him with a numbered list of the cities visited and
+    ask whether he wants to view the entire journey or allow him to select a starting and
+    ending city. If he selects a start and end, only show the portion of the flyover that
+    relates to those cities," 2026-10-22): `tripsyFlyoverRangeDialog(record, onPick)` lists
+    the playable stops numbered in play order (departure / home / airport transfer noted,
+    with dates), with **▶ Entire journey** (`onPick(null)`) or From/To drop-downs + **▶ Play
+    this part** (`onPick({fromId, toId})`; a note names the cut — "3 cities, 2 legs: Beppu →
+    Seoul"; the same city at both ends is refused in place). `onPick` runs synchronously in
+    the button's click and opens the map-choice dialog below, whose own pick starts the
+    player inside that tap (the iOS music rule still holds). The player takes `opts.range`
+    through ONE `cutStops` helper, applied in both places it computes its stops (the initial
+    list and the post-layover-lookup refresh): `tripsyFlyoverRangeStops(stops, fromId,
+    toId)` (pure) slices inclusively, swaps a reversed pair, and lets an unknown end fall
+    back to that end of the journey. A cut plays exactly like a whole journey from its first
+    stop (opening slideshow, legs, closing map); "Stop N of M" counts the cut's stays.
+    `flyover_test.js`.
+  - **…then WHICH map** ("When the user selects play fly-over
     from the trip fly-over page, present a user dialog asking if he wants to use the free
     mapping service or the service that uses credits," 2026-10-22):
     `tripsyFlyoverMapChoiceDialog(onPick)` offers **Free map** (Esri / OpenStreetMap) or
@@ -4197,6 +4214,60 @@ WebView's support for recording is unproven.
   rebuild (stubbed), rename, Save returns the draft with the source record untouched, Cancel
   returns null. `flyovereditdests_test.js` (its scaffold skips the parameter list before
   counting braces — an `opts = {}` default otherwise ends the extraction at once).
+  **Every row has a ＋ that adds a destination right after it** ("give the user an option to
+  add destinations between existing ones," 2026-10-22): `data-fe-add-after` → the dialog's
+  one `addDestination(at)` (the bottom ＋ Add destination button uses it too, at the end /
+  before a trailing return). The new stop is a `tripsyFlyoverManualStop` (guessed drive), so
+  after Save the page's `askMissingModes` asks how it was reached.
+- **🚕 Taxi is a fly-over transport, and AIRPORT TRANSFERS are derived as stops of their own**
+  ("On the edit destinations drop-downs there is no taxi option appearing. Also … the app
+  should automatically add transportation legs where there is a need, and it should present
+  the user with a dialog box and drop down menu to determine the mode of transportation. For
+  example, there is a walk to beppu followed by a flight from Fukuoka to Seoul. The user must
+  get from beppu to Fukuoka on that day," 2026-10-22). **Taxi**: `taxi` is in
+  `TRIPSY_FLYOVER_MODES` (after Drive), ranked with the car, labelled "Taxi"; its glyph entry
+  is the `TRIPSY_TAXI_ICON_MARKER` sentinel, so every place a mode glyph is drawn goes through
+  `tripsyFlyoverModeGlyphHtml` (the checker-cab `<img>`; the player's vehicle at 36px) or
+  `tripsyFlyoverModeGlyphText` (🚕 — an `<option>` or the card label can hold no image). The
+  cab faces RIGHT, unlike the emoji, so the vehicle's flip rule is inverted for it
+  (`(dx > 0) !== facesRight`). A `taxi`/`cab` category derives as `taxi`
+  (`tripsyFlyoverModeOf`, before the car rule). **Transfers**: `tripsyFlyoverDeriveStops`
+  stamps each stay with `city` (`tripsyVerifyLodgingCity` — the Verify page's town rule,
+  so Beppu, not Oita) and, for every stop reached by flights, compares the FIRST flight's
+  departure airport city (`tripsyFlyoverAirportCity`) with the previous stop's city, and the
+  LAST flight's arrival city with the stay's own. A mismatch plants a `kind: 'transit'` stop
+  — the airport, named for its city, `photos: []`, id `transit-dep-<flightId>` /
+  `transit-arr-<flightId>` — before the flight stop: on the departure side it is reached by
+  the ground leg on the trip before that flight (its real mode, no question), else by a
+  guessed drive (`modeGuessed`, so `askMissingModes` asks "How did you get there? … from
+  Beppu to Fukuoka"); on the arrival side the flight (and its `via` layovers) lands at the
+  transit stop and the STAY is reached by the ground leg after the flight, else a guessed
+  one. **Lenient by design** (`sameCity`): an unknown bare code or a stay with no city never
+  plants one; an airport city named anywhere in the stay's name/address counts as the same
+  city (a hotel whose address parses to "OR"); only when NO flight into the stop touches the
+  right city is a transfer planted (a stray same-day leg in old data must not invent one);
+  a "flight in" landing back in the ORIGIN's city is the mis-filed flight home, never a
+  transfer; the `location` placeholder gets none. Checked on the live data: Beppu →
+  [Fukuoka] → Seoul appears, with the ride asked; FUK for the Ritz-Carlton Fukuoka, ICN for
+  the Andaz Seoul, and DAD for a Da Nang-addressed hotel need none; Telluride gets Montrose
+  both ways. The player passes a transit stop through like a layover (leg drawn in its mode,
+  0.9 s pause, no card, no photos, not counted in "Stop N of M" — `stopSub` counts stays);
+  the setup page shows it as a dashed "airport transfer — passed through, no photos" card
+  with the leg drop-down, Remove and Set location; Edit destinations lists it with an
+  "airport transfer" tag; `tripsyFlyoverIsAirportStop` includes it, so it is named by city;
+  carry-over/merge need nothing (matched by id, never merged into a stay). **The mode
+  question is a drop-down now** (`tripsyFlyoverAskMode`: a `<select data-mode-select>` over
+  `TRIPSY_FLYOVER_MODES` + "Use this" / "Not now"; it was a grid of buttons). **A saved
+  fly-over gets its transfers once** (`transitV`, `TRIPSY_FLYOVER_TRANSIT_V` = 1, stamped by
+  every build): `tripsyFlyoverAddTransitStops` (behind the setup page, like the layover
+  retrofit) runs the pure `tripsyFlyoverInsertTransitStops(recordStops, derivedStops)` — each
+  derived transit goes in directly before the record stop whose id FOLLOWS it in the
+  derivation (unknown following id → skipped), that stop takes the derived mode/layovers
+  unless `modeManual`, the new stops are geocoded, and the result is merged onto the record as
+  it is THEN by re-running the insert (never over a changed stop); then `askMissingModes`.
+  Verified in Chromium: both questions asked with the drop-down, the ＋ on a row inserts
+  after it, the cab drives Beppu → Fukuoka facing the way it moves, the transfer shows no
+  stop card. `flyover_test.js`.
 - **The setup page has explicit Save buttons** ("There should be save buttons on the flyover
   page," 2026-10-21): a green ✓ beside the ✕ at the top and Close / Save in a pinned
   `.tfo-ss-footer` (owner-only). **The footer pair LOOKS like the header pair** ("The cancel and save

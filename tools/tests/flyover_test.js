@@ -21,6 +21,19 @@ function extractFn(name) {
   }
 }
 const constLine = name => (html.match(new RegExp(`const ${name} = [^\\n]*;`)) || [''])[0];
+// A const whose literal spans lines (the airport-city table, the prefecture Set).
+const constBlock = name => {
+  const i = html.indexOf(`const ${name} =`);
+  if (i < 0) return '';
+  let depth = 0;
+  for (let k = i; k < html.length; k++) {
+    const c = html[k];
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (c === ';' && depth === 0) return html.slice(i, k + 1);
+  }
+  return '';
+};
 const sliceStart = Math.min(...['TRIPSY_CITY_STATES','TRIPSY_STATE_CITIES','TRIPSY_COUNTRY_NAMES','TRIPSY_COUNTRY_ALIASES','TRIPSY_STREET_SUFFI']
   .map(n => html.indexOf('const ' + n + ' =')).filter(i => i >= 0));
 const extractorEnd = html.indexOf(extractFn('tripsyPrimaryCityFromAddress')) + extractFn('tripsyPrimaryCityFromAddress').length;
@@ -30,6 +43,9 @@ eval([
   (html.match(/const TV_STRIP_LOC = new Set\(\[[\s\S]*?\]\);/) || [''])[0],
   html.slice(sliceStart, extractorEnd),
   constLine('TRIPSY_FLYOVER_MODE_RANK'), constLine('TRIPSY_FLYOVER_MERGE_KM'), constLine('TRIPSY_FLYOVER_SHARED_DOT_KM'), constLine('TRIPSY_FLYOVER_SAME_POINT_KM'),
+  constLine('TRIPSY_TAXI_ICON_MARKER'), constLine('TRIPSY_FLYOVER_MODES'), constBlock('TRIPSY_AIRPORT_CITIES'), constBlock('TRIPSY_JP_PREFECTURES'),
+  // The airport-transfer rule (2026-10-22) compares an airport's city with the stay's.
+  ...['tripsyFlyoverAirportCity', 'tripsyFlyoverNameIsNonLatin', 'tripsyVerifyLodgingCity', 'tripsyDescMatchesCity', 'tripsyAirportCodeOf'].map(extractFn),
   ...['tripsyFlyoverModeOf', 'tripsyFlyoverAirportQuery', 'tripsyFlyoverDeriveStops', 'tripsyFlyoverDistanceKm',
     'tripsyFlyoverMergeNearby', 'tripsyFlyoverCarryOver', 'tripsyFlyoverGreatCircle', 'tripsyFlyoverStraight',
     'tripsyFlyoverUnwrap', 'tripsyFlyoverPlayableStops', 'tripsyFlyoverLegMs'].map(extractFn),
@@ -81,8 +97,108 @@ const ski = { key: 'T3', events: [
   leg(3, 'airplane', 'Flight from MTJ to LAX', 'Montrose (MTJ)', 'Los Angeles (LAX)', '2030-03-15T14:00:00', '2030-03-15T16:00:00'),
 ] };
 const sk = tripsyFlyoverDeriveStops(ski);
-assert(sk.map(s => s.kind).join(',') === 'origin,stay,return' && sk[1].mode === 'plane',
-  'a date-only stay still gets its origin, one stay for duplicate records, and a flight in -> ' + sk.map(s => s.kind + ':' + s.label + ':' + s.mode).join(' | '));
+// Since the airport-transfer rule (2026-10-22) Montrose, the airport for a lodge in
+// Telluride, is a transit stop on both sides: the flight lands there and a (guessed) ride
+// reaches the lodge; the trip home starts with a ride back to it.
+assert(sk.map(s => s.kind).join(',') === 'origin,transit,stay,transit,return' && sk[1].mode === 'plane' && sk[2].mode === 'car' && sk[2].modeGuessed === true,
+  'a date-only stay still gets its origin, one stay for duplicate records, and a flight in -- via the Montrose airport transfer -> ' + sk.map(s => s.kind + ':' + s.label + ':' + s.mode).join(' | '));
+assert(sk[1].label === 'Montrose' && sk[3].label === 'Montrose' && sk[3].modeGuessed === true && sk[4].mode === 'plane',
+  'both transfers are named for the airport\'s city; the ride back to it is a guess the page asks about; the flight home leaves from it');
+assert(sk.filter(s => s.kind === 'stay').length === 1, 'transfers are not stays (no photos, not numbered)');
+
+// ---- airport transfers (2026-10-22) ----
+// "there is a walk to beppu followed by a flight from Fukuoka to Seoul. The user must get
+// from beppu to Fukuoka on that day": the flight into Seoul really leaves from Fukuoka, so a
+// transit stop goes in before Seoul, reached by a guessed ride (nothing on the trip says how).
+const jp = { key: 'T7', events: [
+  leg(1, 'airplane', 'Flight from LAX to FUK', 'LAX', 'FUK', '2030-10-01T10:00:00', '2030-10-02T16:00:00'),
+  stay(1, 'The Ritz-Carlton Fukuoka', '2-6-50 Daimyo, Chuo-ku, Chuo-ku Fukuoka Japan, 810-0041', '2030-10-02T15:00:00', '2030-10-04T11:00:00'),
+  stay(2, 'Marugamiya', '4 Kumi, Miyuki Kanzawa, Beppu, Oita 874-0045, Japan', '2030-10-04T16:00:00', '2030-10-05T11:00:00'),
+  leg(2, 'airplane', 'Flight from FUK to ICN', 'FUK', 'ICN', '2030-10-05T15:50:00', '2030-10-05T17:20:00'),
+  stay(3, 'Andaz Seoul Gangnam', '854 Nonhyeon-ro, Gangnam-gu, Seoul, South Korea', '2030-10-05T15:00:00', '2030-10-08T11:00:00'),
+  leg(3, 'airplane', 'Flight from ICN to LAX', 'ICN', 'LAX', '2030-10-08T19:40:00', '2030-10-08T14:00:00'),
+] };
+const jps = tripsyFlyoverDeriveStops(jp);
+const jpk = jps.map(s => s.kind + ':' + s.label + ':' + s.mode + (s.modeGuessed ? '?' : '')).join(' | ');
+assert(jps.map(s => s.kind).join(',') === 'origin,stay,stay,transit,stay,return', 'THE ASK: Beppu -> [Fukuoka airport] -> Seoul -> ' + jpk);
+assert(jps[3].kind === 'transit' && jps[3].label === 'Fukuoka' && jps[3].mode === 'car' && jps[3].modeGuessed === true && jps[3].id === 'transit-dep-2',
+  'the ride to the airport is a guessed drive the setup page asks about, named for the airport\'s city, keyed to the flight');
+assert(jps[4].mode === 'plane' && !jps[4].modeGuessed, 'Seoul is then reached by the flight, from the airport');
+assert(jps[1].mode === 'plane' && jps.filter(s => s.kind === 'transit').length === 1, 'FUK for a hotel in Fukuoka needs no transfer, nor ICN for a hotel in Seoul, nor the flight home from Seoul');
+assert(jps[2].city === 'Beppu' && jps[1].city === 'Fukuoka', 'stays carry the town their address names (the Verify page\'s own city rule)');
+// A ground leg on the trip before the flight IS the ride: its mode, no question.
+const jp2 = { key: 'T8', events: [...jp.events, leg(9, 'taxi', 'Taxi from Marugamiya to Fukuoka Airport', 'Marugamiya, Beppu', 'Fukuoka airport (FUK)', '2030-10-05T12:00:00', '2030-10-05T13:40:00')] };
+const jp2s = tripsyFlyoverDeriveStops(jp2);
+assert(jp2s[3].kind === 'transit' && jp2s[3].mode === 'taxi' && !jp2s[3].modeGuessed, 'a taxi leg to the airport on the trip gives the transfer its mode (taxi) with no question -> ' + jp2s[3].mode);
+assert(tripsyFlyoverModeOf({ category: 'taxi' }, '') === 'taxi' && tripsyFlyoverModeOf({ category: 'car' }, '') === 'car', 'a taxi leg is a taxi, a car a car');
+// Arrival side: a flight landing in another city than the stay's lands at a transfer, and
+// the stay is reached by the ground leg after it (or a guessed drive).
+const vn = { key: 'T9', events: [
+  leg(1, 'airplane', 'Flight from SIN to DAD', 'SIN', 'DAD', '2030-10-01T10:00:00', '2030-10-01T12:00:00'),
+  leg(2, 'car', 'Car from Da Nang airport to Nam Hai', 'Da Nang International Airport (DAD)', 'Four Seasons The Nam Hai', '2030-10-01T12:30:00', '2030-10-01T13:15:00'),
+  stay(1, 'Four Seasons The Nam Hai', 'Block Ha My Dong B, Dien Duong, Hoi An, Vietnam', '2030-10-01T15:00:00', '2030-10-04T11:00:00'),
+  leg(3, 'airplane', 'Flight from DAD to SIN', 'DAD', 'SIN', '2030-10-04T15:00:00', '2030-10-04T17:00:00'),
+] };
+const vns = tripsyFlyoverDeriveStops(vn);
+assert(vns.map(s => s.kind + ':' + s.label + ':' + s.mode).join(' | ') === 'origin:SIN: | transit:Da Nang:plane | stay:Hoi An:car | transit:Da Nang:car | return:SIN:plane',
+  'a flight into Da Nang for a hotel in Hoi An lands at a transfer; the car on the trip reaches the hotel -> ' + vns.map(s => s.kind + ':' + s.label + ':' + s.mode).join(' | '));
+assert(!vns[2].modeGuessed && vns[3].modeGuessed === true, 'the car in is on the trip (no question); nothing says how you got back to the airport (asked)');
+// Lenient where a city can't be told: an unknown bare code, or an airport's city named in
+// the stay's own address (a hotel whose address parses to its state) -- no transfer invented.
+const or = { key: 'T10', events: [
+  leg(1, 'airplane', 'Flight from DFW to PDX', 'DFW', 'PDX', '2030-09-19T13:10:00', '2030-09-19T15:00:00'),
+  stay(1, 'RIVERPLACE', '1510 HARBOR WAY, Portland, OR, 97201', '2030-09-19T17:05:00', '2030-09-21T11:00:00'),
+  leg(2, 'airplane', 'Flight from PDX to DFW', 'PDX', 'DFW', '2030-09-21T12:25:00', '2030-09-21T18:00:00'),
+] };
+assert(tripsyFlyoverDeriveStops(or).every(s => s.kind !== 'transit'), 'Portland named in the address: no transfer for a hotel whose address parses to "OR"');
+const zz = { key: 'T11', events: [
+  leg(1, 'airplane', 'Flight from LAX to ZZZ', 'LAX', 'ZZZ', '2030-09-19T13:10:00', '2030-09-19T15:00:00'),
+  stay(1, 'Somewhere Inn', '1 Road, Faraway, Nowhere', '2030-09-19T17:05:00', '2030-09-21T11:00:00'),
+] };
+assert(tripsyFlyoverDeriveStops(zz).every(s => s.kind !== 'transit'), 'an airport code the table does not know never plants a transfer');
+// A stay dated after the flight home (old records) takes that flight too; landing back in
+// the ORIGIN's city is the trip home, not a transfer.
+const old = { key: 'T12', events: [
+  leg(1, 'airplane', 'Flight from LAX to SJC', 'LAX', 'SJC', '2011-12-07T12:10:00', '2011-12-07T13:15:00'),
+  stay(1, 'Four Seasons Silicon Valley', '2050 University Ave, East Palo Alto, U.S.A', '2011-12-08T15:00:00', '2011-12-08T18:00:00'),
+  leg(2, 'airplane', 'Flight from SJC to LAX', 'SJC', 'LAX', '2011-12-08T21:20:00', '2011-12-08T22:45:00'),
+] };
+assert(tripsyFlyoverDeriveStops(old).every(s => s.kind !== 'transit-arr' && !String(s.id).startsWith('transit-arr')), 'a mis-filed flight home plants no arrival transfer');
+// Taxi is a pickable mode with its own picture, ranked with the car.
+// (the consts eval'd above live in that eval's own scope, so these are source checks)
+assert(/const TRIPSY_FLYOVER_MODES = \[[^\]]*'taxi'/.test(html) && /const TRIPSY_FLYOVER_MODE_RANK = \{[^}]*car: 1, taxi: 1/.test(html) && /taxi: 'Taxi'/.test(html),
+  'taxi is in the mode list ("there is no taxi option appearing"), labelled, and ranks as a drive');
+assert(/data-fe-add-after/.test(html) && /addDestination\(i \+ 1\)/.test(html), 'Edit destinations: a + on every row adds a destination right after it');
+assert(/data-mode-select/.test(html) && /<select[^>]*data-mode-select/.test(html), 'the mode question is a drop-down');
+assert(/b\.kind === 'transit'\) \{ if \(!\(await wait\(r, 900\)\)\) return; continue; \}/.test(html), 'the player passes through a transfer like a layover (no arrival, no photos)');
+assert(/\(dx > 0\) !== facesRight/.test(html), 'the taxi picture faces right, so it flips the other way round');
+// ---- play a part of the journey (2026-10-22) ----
+// "present him with a numbered list of the cities visited and ask whether he wants to view
+// the entire journey or allow him to select a starting and ending city. If he selects a
+// start and end, only show the portion of the flyover that relates to those cities"
+eval(extractFn('tripsyFlyoverRangeStops'));
+const route = ['o', 'a', 'b', 'c', 'r'].map(id => ({ id, label: id.toUpperCase() }));
+assert(tripsyFlyoverRangeStops(route, 'a', 'c').map(s => s.id).join('') === 'abc', 'from A to C plays A, B, C');
+assert(tripsyFlyoverRangeStops(route, 'c', 'a').map(s => s.id).join('') === 'abc', 'a reversed pair is swapped');
+assert(tripsyFlyoverRangeStops(route, 'zzz', 'b').map(s => s.id).join('') === 'oab', 'an unknown start falls back to the departure');
+assert(tripsyFlyoverRangeStops(route, 'b', undefined).map(s => s.id).join('') === 'bcr', 'no end plays through to the home airport');
+assert(tripsyFlyoverRangeStops(route, 'b', 'b').length === 1, 'the same city twice is one stop (the dialog refuses it; the player would just land there)');
+assert(/tripsyFlyoverRangeDialog\(record, range =>/.test(html) && /tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, \.\.\.\(range \? \{ range \} : \{\}\) \}\)\)/.test(html),
+  'the setup page\'s Play asks whole-or-part first, then which map, and passes the range to the player');
+assert(/data-range-all/.test(html) && /data-range-from/.test(html) && /data-range-to/.test(html) && /data-range-part/.test(html) && /<ol/.test(extractFn('tripsyFlyoverRangeDialog')),
+  'the dialog lists the cities numbered, with Entire journey and From/To + Play this part');
+assert(/if \(opts\.range\) return tripsyFlyoverRangeStops\(all, opts\.range\.fromId, opts\.range\.toId\)/.test(html) && !/if \(preview\) stops = stops\.filter/.test(html),
+  'the player cuts its stops to the range in BOTH places it computes them (one cutStops helper)');
+// Retrofit of a saved fly-over: each derived transfer goes in before the stop that follows
+// it; that stop takes the derived mode/layovers unless its transport was set by hand.
+eval(extractFn('tripsyFlyoverInsertTransitStops'));
+const saved = [{ id: 'origin', label: 'LAX' }, { id: 'hosting-1', label: 'Fukuoka', mode: 'plane' }, { id: 'hosting-2', label: 'Beppu', mode: 'hike', modeManual: true }, { id: 'hosting-3', label: 'Seoul', mode: 'plane', via: [{ label: 'X' }] }, { id: 'return', label: 'LAX', mode: 'plane' }];
+const ins = tripsyFlyoverInsertTransitStops(saved, jps);
+assert(ins.changed && ins.stops.map(s => s.id).join(',') === 'origin,hosting-1,hosting-2,transit-dep-2,hosting-3,return', 'the transfer is inserted before Seoul -> ' + ins.stops.map(s => s.id).join(','));
+assert(ins.stops[3].photos.length === 0 && ins.stops[4].mode === 'plane' && ins.stops[4].via === undefined && ins.stops[2].mode === 'hike', 'no photos on the transfer; Seoul takes the derived leg (its stale layover dropped); the hand-set hike is kept');
+assert(!tripsyFlyoverInsertTransitStops(ins.stops, jps).changed, 'idempotent');
+const vnIns = tripsyFlyoverInsertTransitStops([{ id: 'origin' }, { id: 'hosting-1', mode: 'plane', modeManual: true }, { id: 'return', mode: 'plane' }], vns);
+assert(vnIns.stops.map(s => s.id).join(',') === 'origin,transit-arr-1,hosting-1,transit-dep-3,return' && vnIns.stops[2].mode === 'plane', 'both transfers inserted; a hand-set mode on the stay is never replaced');
 // A leg departing AFTER the next hotel's nominal check-in hour, on the moving day, still
 // arrives at that hotel (the flight to Seoul left after the Seoul hotel's 15:00).
 const late = { key: 'T4', events: [
@@ -208,6 +324,7 @@ assert(bs[1].mode === 'plane', 'and is still reached by plane');
   global.tripsyFlyoverGeocodeVias = async st => st;
   global.tripsyFlyoverApplyAirportCities = r => ({ record: r, changed: false });
   global.TRIPSY_FLYOVER_LAYOVERS_V = 2;
+  global.TRIPSY_FLYOVER_TRANSIT_V = 1;
   const geo = { 'BUR airport': { lat: 34.2, lng: -118.36, city: 'Burbank' } };
   global.tripsyFlyoverGeocode = async q => geo[q] || null;
   let asked = [];
@@ -335,7 +452,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/const ms = Math\.round\(page\.seconds \* 1000\);[\s\S]*return wait\(r, Math\.max\(0, ms - tMs\)\);/.test(player), 'each page holds for its own seconds, pause-aware');
   assert(/g\.dataset\.layout = layout;\s*g\.dataset\.tr = enterTr;/.test(player), 'the page\'s layout and entering transition drive its CSS');
   assert(/ov\.classList\.toggle\('tfo-paused', run\.paused\)/.test(player) && /\.tfo-paused \* \{ animation-play-state: paused !important; \}/.test(html), 'pause also freezes the pan-and-zoom animation');
-  assert(/if \(preview\) stops = stops\.filter\(s => s\.id === opts\.previewStopId\);/.test(player), 'Preview plays just that destination');
+  assert(/if \(preview\) return all\.filter\(s => s\.id === opts\.previewStopId\);/.test(player), 'Preview plays just that destination');
   for (const k of ['slide', 'zoom', 'none']) assert(html.includes(`.tfo-group[data-tr="${k}"]`), `the ${k} transition has its CSS`);
   for (const k of ['pair', 'grid', 'collage']) assert(html.includes(`.tfo-group[data-layout="${k}"]`), `the ${k} layout has its CSS`);
   const setup = extractFn('showTripsyFlyover');
@@ -1229,8 +1346,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   ok(/b\.onclick = \(\) => \{ close\(\); onPick\(b\.dataset\.mapChoice\); \};/.test(dlg) && !/await/.test(dlg),
     'a choice starts playback synchronously inside its own tap (no await), so iOS music can still start');
   ok(/data-map-choice-cancel\]'\)\.onclick = close;/.test(dlg), 'Cancel plays nothing');
-  ok(/\[data-flyover-play\]'\)\.onclick = \(\) => \{[\s\S]*?tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService \}\)\);/.test(html2),
-    'the setup page\'s Play asks which map before playing');
+  ok(/\[data-flyover-play\]'\)\.onclick = \(\) => \{[\s\S]*?tripsyFlyoverRangeDialog\(record, range => \{\s*tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, /.test(html2),
+    'the setup page\'s Play asks whole-or-part, then which map, before playing');
   ok(/const googleTilesP = opts\.mapService === 'free' \? Promise\.resolve\(null\) : Promise\.race\(\[/.test(html2),
     'the free map never asks Google for a tile session');
 }
