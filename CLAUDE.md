@@ -3797,6 +3797,18 @@ WebView's support for recording is unproven.
     (`.tfo-grow` scales 1, `TRIPSY_FLYOVER_DEST_LABEL_SCALE` is `{start: 1, grown: 1}` — the
     grow wiring stays, inert, so `arrivalCenter` needs no change). Earlier notes in this section
     that say "orange dot", "20 → 30px" or "1 → 1.5" describe the behaviour before this.
+    **Layover names match too** ("The label for Bangkok on the return flight … is not in the
+    same format as other labels," same day): a layover's name tag now carries
+    `tfo-dest-label` like every other, so it sits to the RIGHT of its dot instead of centred
+    above it. **And a layover's DOT is the same 14 px as every stop's** ("Make dots the same
+    size," same day — it was 10 px, `dotIcon(10)`).
+    **The burst keeps the dot's white ring and stays SHARP** ("put a white border around them
+    that will grow with them and will keep high resolution until the border disappears when
+    the screen becomes completely black," same day): `startBurst` no longer CSS-scales a 14 px
+    element (which blurred its edge) — each frame sets the real `width`/`height`/`margin` and a
+    `border-width` of d/7 (the dot's own 2-of-14 ring), so the disc and ring are rendered at
+    full resolution. The end size `(far + 4) × 14/5` puts the ring's INNER edge past the
+    farthest corner, so the ring leaves the screen exactly as it goes all black.
     **A destination's dot goes up with its name** ("the destination orange dot should appear on
     the map when the map first appears," same day): the opening map shows the origin's AND the
     first destination's dots, and each later leg adds its destination's dot as the leg begins —

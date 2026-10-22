@@ -1068,7 +1068,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/ensureDot\(first\);\s*ensureDot\(stops\[1\]\);/.test(play), 'the opening map shows the first destination\'s dot as well as the origin\'s');
     assert(/showDestLabel\(b\);\s*ensureDot\(a\);\s*ensureDot\(b\);/.test(play), 'each later destination\'s dot goes up with its name as its leg begins');
     assert(!/L\.circleMarker/.test(play) && /const dot = s => L\.marker\(\[s\.lat, s\.lng\], \{ icon: dotIcon\(14\)/.test(play)
-      && /layers\.push\(L\.marker\(\[v\.lat, v\.lng\], \{ icon: dotIcon\(10\)/.test(play),
+      && /layers\.push\(L\.marker\(\[v\.lat, v\.lng\], \{ icon: dotIcon\(14\)/.test(play),
       'destination and layover dots are divIcon markers (repositioned every zoom frame like the labels), never SVG circles');
     // "make the labels with the origin and destination larger when they appear on the map"
     const css = (html.match(/\.tfo-dest-label span \{[^}]*\}/) || [''])[0];
@@ -1097,6 +1097,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     && /clearDestLabel\(\);\s*clearViaLabels\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(all/.test(play),
     'the destination name is taken away before the map pulls back out (next leg, and the closing map)');
   assert(/\.tfo-dot \{ background: #111;/.test(html), 'location dots are black');
+  assert(/viaLabels\.push\(L\.marker\(\[v\.lat, v\.lng\], \{ icon: L\.divIcon\(\{ className: 'tfo-via-label tfo-dest-label'/.test(play),
+    'a layover name is drawn exactly like every other name, to the right of its dot');
 }
 {
   eval(extractFn('tripsyFlyoverMergeLookupFields'));
@@ -1151,7 +1153,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     && (play.match(/if \(prev\) prev\.remove\(\);\s*clearBurst\(\);/g) || []).length === 2,
     'a destination with photos swells its dot to fill the screen, and the first page (photo or video) comes straight in over it');
   assert(/\.tfo-burst \{[^}]*background: #111/.test(html) && !/\.tfo-burst \{[^}]*transition/.test(html) && !/@keyframes tfo-burst/.test(html)
-    && /const p = Math\.min\(1, elapsed \/ TRIPSY_FLYOVER_BURST_MS\);\s*const scale = 1 \+ \(\(far \* 2 \+ 28\) \/ 14 - 1\) \* p;/.test(play)
+    && /const p = Math\.min\(1, elapsed \/ TRIPSY_FLYOVER_BURST_MS\);[\s\S]*?const endD = \(far \+ 4\) \* 14 \/ 5;\s*const d = 14 \+ \(endD - 14\) \* p;[\s\S]*?el\.style\.width = el\.style\.height = `\$\{d\}px`;[\s\S]*?el\.style\.borderWidth = `\$\{d \/ 7\}px`;/.test(play)
+    && !/el\.style\.transform = `scale/.test(play.slice(play.indexOf('const startBurst'))) && /\.tfo-burst \{[^}]*border: 2px solid #fff/.test(html)
     && /if \(!r\.paused\) elapsed \+= now - last;[\s\S]*?const pt = map\.latLngToContainerPoint\(\[s\.lat, s\.lng\]\);/.test(play.slice(play.indexOf('const startBurst'))),
     'the burst is the dot\'s own colour, grown per frame at ONE linear rate (no transition or easing), following the dot and honoring pause');
   assert(/if \(Math\.abs\(map\.getZoom\(\) - zoom\) > 0\.01\) \{[\s\S]{0,120}map\.setView\(center, zoom, \{ animate: false \}\)/.test(play)
