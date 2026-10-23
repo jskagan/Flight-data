@@ -4191,6 +4191,22 @@ WebView's support for recording is unproven.
       last existing page on the edit slideshow page," same day, moved it) — and it runs `addPageAtEnd()` (factored out of Next ▶'s past-the-last
       branch: a blank page at the END, seeded with the next photo on no page, opened at once).
       It carries no `data-ss-goto`, so the strip's drag ignores it.
+      **And the box has its own "＋ Add photos"** ("Add an add photo button to the edit
+      slideshow page," 2026-10-23): `data-ss-add-photos`, beside the grid's "Choose the
+      pictures" label, rendered only when the caller passes `addMedia` (the setup page does,
+      owner-only). It opens `tripsyFlyoverPickMedia` SYNCHRONOUSLY in the tap (the iOS
+      file-input rule), and the pick runs the setup page's `addMediaToStop(id, files,
+      setStatus)` — the card's "＋ Photos & videos" handler, factored out so there is ONE add
+      path (photos staged + background upload, videos foreground with the sound question; a
+      status line `data-ss-status` inside the box shows progress, since the page's own status
+      sits behind it). The records it returns join the draft and
+      `tripsyFlyoverPlaceAddedPhotos(pages, cur, ids, blank, isVideo)` (pure) places them:
+      they fill the page being EDITED up to its count (never a video page; a video never
+      joins it), and the rest each get a new page at the end, in pick order; the box stays
+      on the current page. One deliberate exception to "nothing changes until Save": the
+      photos themselves go on the destination as they are picked (exactly as the card's
+      button does — they are uploaded and saved regardless), so Cancel keeps the photos and
+      discards only the page edits; the status line says so.
       - **Triggers:** an own-photos upload batch, and closing the Suggested grid after
         picking some (`tripsyFlyoverSuggestedPhotos`' third arg `onClosed(added)`).
       - **One page at a time:** "Page N of M" with a page strip to jump between pages; "How

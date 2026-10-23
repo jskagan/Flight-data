@@ -19378,8 +19378,63 @@ async function showTripsyFlyover(tripKey) {
     }
   }
 
+  // Picked files onto ONE stop -- the one add path, shared by the card's "＋ Photos & videos"
+  // and the slideshow editor's own "＋ Add photos" ("Add an add photo button to the edit
+  // slideshow page," 2026-10-23). PHOTOS go on the stop at once, uploaded behind the page
+  // (see tripsyFlyoverQueueUpload); videos keep their foreground upload (progress, the
+  // sound question). Saves as it goes, like every change on this page. Resolves
+  // {added, done, queued, problems}: `added` is the new photo records, in pick order.
+  const addMediaToStop = async (id, files, setStatusFn) => {
+    const status = typeof setStatusFn === 'function' ? setStatusFn : setStatus;
+    const stopNow = () => record.stops.find(s => s.id === id) || {};
+    let done = 0, queued = 0;
+    const added = [];
+    const problems = [];
+    const n = files.length;
+    for (const file of files) {
+      if (tripsyFlyoverFileIsVideo(file)) continue;
+      const pendingId = tripsyFlyoverStagePendingPhoto(file);
+      const rec = { driveFileId: pendingId, addedAt: new Date().toISOString() };
+      updateStop(id, { photos: [...(stopNow().photos || []), rec] });
+      added.push(rec);
+      tripsyFlyoverQueueUpload(trip.key, pendingId);
+      queued++;
+    }
+    if (queued) { save(); if (!closed) render(); }
+    for (let k = 0; k < n; k++) {
+      const file = files[k];
+      if (!tripsyFlyoverFileIsVideo(file)) continue;
+      const what = `video${n > 1 ? ` ${k + 1} of ${n}` : ''}`;
+      status(`Uploading ${what}…`);
+      try {
+        // Too big: the upload refuses it with its message before anything is asked.
+        if (file.size > TRIPSY_FLYOVER_VIDEO_MAX_BYTES) await tripsyFlyoverUploadVideo(file);
+        // Ask before uploading: its own sound, or the fly-over's music?
+        const localUrl = URL.createObjectURL(file);
+        status(`Choose the sound for ${what}…`);
+        const audio = await tripsyFlyoverVideoAudioDialog(localUrl, { name: file.name || '', hasMusic: !!record.music });
+        URL.revokeObjectURL(localUrl);
+        if (closed) break;
+        status(`Uploading ${what}…`);
+        const rec = await tripsyFlyoverUploadVideo(file, f => { if (!closed) status(`Uploading ${what}… ${Math.round(f * 100)}%`); });
+        rec.audio = audio === 'music' ? 'music' : 'video';
+        updateStop(id, { photos: [...(stopNow().photos || []), rec] });
+        added.push(rec);
+        done++;
+      } catch (e) {
+        console.error('fly-over media upload failed:', e);
+        problems.push(e && e.userFacing ? e.message : `A video couldn’t be uploaded.`);
+      }
+    }
+    status(problems.join(' '));
+    if (problems.some(m => m.includes('the limit is'))) toast(problems.find(m => m.includes('the limit is')), 'error');
+    if (done || queued) { save(); if (!closed) render(); }
+    return { added, done, queued, problems };
+  };
   // The options box opens by itself right after photos are added, and from each
-  // destination's "Slideshow options" button. Nothing changes until Save.
+  // destination's "Slideshow options" button. Nothing changes until Save -- except photos
+  // added from INSIDE the box, which go on the destination as they are picked (the card's
+  // own button does the same), so Cancel keeps them and discards only the page edits.
   const openSlideshowOptions = async (id, intro, page) => {
     const st = record.stops.find(x => x.id === id);
     if (!st) return;
@@ -19387,6 +19442,7 @@ async function showTripsyFlyover(tripKey) {
       intro,
       page,
       hasMusic: !!record.music,
+      addMedia: isOwner ? (files, setStatusFn) => addMediaToStop(id, files, setStatusFn) : null,
       playPreview: draft => {
         if (draft.lat == null) { toast('Set this destination\'s location first.', 'error'); return; }
         playTripsyFlyover(trip, { ...record, stops: record.stops.map(x => x.id === id ? draft : x) }, { previewStopId: id });
@@ -19617,53 +19673,10 @@ async function showTripsyFlyover(tripKey) {
       });
       const own = card.querySelector('[data-flyover-add-own]');
       if (own) own.onclick = () => tripsyFlyoverPickMedia(async files => {
-        let done = 0, queued = 0;
-        const problems = [];
-        const n = files.length;
-        // PHOTOS: on the card at once, uploaded behind the page (see tripsyFlyoverQueueUpload).
-        // Videos keep their foreground upload (progress, the sound question).
-        for (const file of files) {
-          if (tripsyFlyoverFileIsVideo(file)) continue;
-          const pendingId = tripsyFlyoverStagePendingPhoto(file);
-          updateStop(id, { photos: [...(stop().photos || []), { driveFileId: pendingId, addedAt: new Date().toISOString() }] });
-          tripsyFlyoverQueueUpload(trip.key, pendingId);
-          queued++;
-        }
-        if (queued) { save(); if (!closed) render(); }
-        for (let k = 0; k < n; k++) {
-          const file = files[k];
-          const isVid = tripsyFlyoverFileIsVideo(file);
-          if (!isVid) continue;
-          const what = `video${n > 1 ? ` ${k + 1} of ${n}` : ''}`;
-          setStatus(`Uploading ${what}…`);
-          try {
-            let rec;
-            if (isVid) {
-              // Too big: the upload refuses it with its message before anything is asked.
-              if (file.size > TRIPSY_FLYOVER_VIDEO_MAX_BYTES) await tripsyFlyoverUploadVideo(file);
-              // Ask before uploading: its own sound, or the fly-over's music?
-              const localUrl = URL.createObjectURL(file);
-              setStatus(`Choose the sound for ${what}…`);
-              const audio = await tripsyFlyoverVideoAudioDialog(localUrl, { name: file.name || '', hasMusic: !!record.music });
-              URL.revokeObjectURL(localUrl);
-              if (closed) return;
-              setStatus(`Uploading ${what}…`);
-              rec = await tripsyFlyoverUploadVideo(file, f => { if (!closed) setStatus(`Uploading ${what}… ${Math.round(f * 100)}%`); });
-              rec.audio = audio === 'music' ? 'music' : 'video';
-            }
-            updateStop(id, { photos: [...(stop().photos || []), rec] });
-            done++;
-          } catch (e) {
-            console.error('fly-over media upload failed:', e);
-            problems.push(e && e.userFacing ? e.message : `A video couldn’t be uploaded.`);
-          }
-        }
-        setStatus(problems.join(' '));
-        if (problems.some(m => m.includes('the limit is'))) toast(problems.find(m => m.includes('the limit is')), 'error');
-        if (done || queued) {
-          save();
-          const total = done + queued;
-          if (!closed) { render(); openSlideshowOptions(id, `${total} item${total === 1 ? '' : 's'} added. Choose how this place’s photos and videos play.${queued ? ' Photos are uploading in the background — you can keep working or use the rest of the app.' : ''}`); }
+        const r = await addMediaToStop(id, files, setStatus);
+        if (r.done || r.queued) {
+          const total = r.done + r.queued;
+          if (!closed) openSlideshowOptions(id, `${total} item${total === 1 ? '' : 's'} added. Choose how this place’s photos and videos play.${r.queued ? ' Photos are uploading in the background — you can keep working or use the rest of the app.' : ''}`);
         }
       });
       // A failed background upload: Retry re-queues it from the bytes still held.
@@ -20248,6 +20261,28 @@ function tripsyFlyoverDialogPages(stop) {
     .filter(pg => saved ? !pg.auto : true)
     .map(tripsyFlyoverPageRecord);
 }
+// Photos just added from INSIDE the slideshow editor ("Add an add photo button to the edit
+// slideshow page," 2026-10-23) are placed where the owner is looking: they fill the page
+// being edited up to its count (never a video page, and a video never joins it), and the
+// rest each get a new page of their own at the end, in pick order -- a video always on its
+// own page. Returns {pages} without touching its input; `cur` stays the page being edited. Pure.
+function tripsyFlyoverPlaceAddedPhotos(pages, cur, ids, blank, isVideo = () => false) {
+  const out = pages.map(pg => ({ ...pg, ids: [...pg.ids] }));
+  const page = out[cur];
+  const rest = [];
+  for (const id of ids) {
+    const vid = isVideo(id);
+    if (page && !vid && !page.ids.some(isVideo) && page.ids.length < Math.max(1, page.count || 1)) { page.ids.push(id); continue; }
+    rest.push(id);
+  }
+  for (const id of rest) {
+    const pg = blank();
+    pg.ids = [id];
+    pg.count = 1;
+    out.push(pg);
+  }
+  return { pages: out };
+}
 // Taps a photo on the page being edited: on this page -> off it; elsewhere -> moved here,
 // when the page has room. Returns {pages, full} without touching its input. Pure.
 // A video goes only onto an EMPTY page (which it then fills), and nothing joins a page
@@ -20270,7 +20305,7 @@ function tripsyFlyoverTogglePagePhoto(pages, cur, id, isVideo = () => false) {
 // and ask about the transition to the next page," 2026-10-20). Resolves {pages, photos} on
 // Save, null on Cancel; nothing changes until Save. Photos left on no page play after the
 // pages, one per page. `playPreview(stopDraft)` plays the draft without saving it.
-function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, hasMusic = true, page = null } = {}) {
+function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, hasMusic = true, page = null, addMedia = null } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-slideshow-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-slideshow-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -20297,6 +20332,12 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
     // Opened from a page tile on the setup page: start on that page.
     if (page != null && pages[page]) cur = page;
     const dragState = { drag: null, suppressTapUntil: 0 };
+    // Photos picked from the box's own "＋ Add photos" go on the destination as picked (the
+    // caller's addMedia, the card button's one path) and are placed on this page, the rest on
+    // new pages at the end ("Add an add photo button to the edit slideshow page," 2026-10-23).
+    let status = '';
+    let adding = false;
+    const setStatus = t => { status = t || ''; const el = ov.querySelector('[data-ss-status]'); if (el) el.textContent = status; };
     const cleaned = () => pages.filter(pg => pg.ids.length).map(pg => ({ ...pg, ids: [...pg.ids], count: Math.max(pg.ids.length, 1) }));
     const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
     const draft = () => ({ ...stop, photos, pages: cleaned() });
@@ -20352,8 +20393,12 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
               ${(page.count > 4 ? ['collage'] : ['grid', 'collage']).map(st => `<button class="btn tfo-ss-choice${tripsyFlyoverPageLayout(page.count, page.style) === st ? ' tfo-ss-on' : ''}" data-ss-style="${st}">${tripsyFlyoverLayoutIconHtml(st)}<span>${st === 'grid' ? 'Grid' : 'Collage'}</span></button>`).join('')}
             </div>` : ''}
-          <div class="tfo-ss-label">${videoPage ? 'The video on this page' : `Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)`}</div>
-          <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here. Drag a photo onto another to swap them, or to the edge of one to move its page in between (a dashed line shows where).${videoIds.size ? ' A video goes on an empty page of its own.' : ''}</div>
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <div class="tfo-ss-label" style="flex:1; margin-bottom:0;">${videoPage ? 'The video on this page' : `Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)`}</div>
+            ${addMedia ? `<button class="btn" data-ss-add-photos${adding ? ' disabled' : ''} title="Add photos or videos from your library to this destination">＋ Add photos</button>` : ''}
+          </div>
+          <div style="font-size:12px; color:var(--muted); margin:6px 0 8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here. Drag a photo onto another to swap them, or to the edge of one to move its page in between (a dashed line shows where).${videoIds.size ? ' A video goes on an empty page of its own.' : ''}${addMedia ? ' ＋ Add photos puts new photos on this page, and the rest on new pages at the end.' : ''}</div>
+          ${addMedia ? `<div data-ss-status style="font-size:12px; color:var(--muted); margin-bottom:${status ? 8 : 0}px; min-height:${status ? 'auto' : '0'};">${esc(status)}</div>` : ''}
           <div data-ss-grid style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start; margin-bottom:14px;">
             ${(() => {
               // Photos are listed in play order, so one page's photos sit side by side; a page
@@ -20500,6 +20545,28 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
       };
       const addChip = ov.querySelector('[data-ss-add-page]');
       if (addChip) addChip.onclick = () => { if (Date.now() < dragState.suppressTapUntil) return; addPageAtEnd(); };
+      // The picker must open inside the tap (iOS refuses a file input after an await), so the
+      // pick is synchronous and the adding happens in its callback.
+      const addBtn = ov.querySelector('[data-ss-add-photos]');
+      if (addBtn) addBtn.onclick = () => { if (adding) return; tripsyFlyoverPickMedia(async files => {
+        adding = true;
+        setStatus(`Adding ${files.length} item${files.length === 1 ? '' : 's'}…`);
+        try {
+          const r = await addMedia(files, setStatus);
+          const recs = (r && r.added) || [];
+          if (ov.style.display === 'none') return; // the box was closed meanwhile
+          for (const rec of recs) { photos.push({ ...rec }); if (tripsyFlyoverIsVideo(rec)) videoIds.add(rec.driveFileId); }
+          if (recs.length) pages = tripsyFlyoverPlaceAddedPhotos(pages, cur, recs.map(x => x.driveFileId), blank, isVideo).pages;
+          const extra = (r && r.problems && r.problems.length) ? ' ' + r.problems.join(' ') : '';
+          setStatus(recs.length ? `${recs.length} item${recs.length === 1 ? '' : 's'} added — ${r.queued ? 'photos are uploading in the background; ' : ''}they stay on this destination even if you cancel.${extra}` : (extra.trim() || 'Nothing was added.'));
+        } catch (e) {
+          console.error('slideshow editor add failed:', e);
+          setStatus('Couldn’t add those — try again.');
+        } finally {
+          adding = false;
+          if (ov.style.display !== 'none') render();
+        }
+      }); };
       const del = ov.querySelector('[data-ss-delete]');
       if (del) del.onclick = () => { pages = pages.filter((_, k) => k !== cur); cur = Math.max(0, cur - 1); render(); };
       ov.querySelectorAll('[data-ss-cancel]').forEach(b => b.onclick = () => done(null));

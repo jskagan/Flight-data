@@ -673,7 +673,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/slideshow: \{ \.\.\.p\.slideshow \}/.test(extractFn('tripsyFlyoverCarryOver')) && /pages: p\.pages\.map/.test(extractFn('tripsyFlyoverCarryOver')),
     'rebuilding the destinations keeps each one\'s pages and settings');
   const setup = extractFn('showTripsyFlyover');
-  assert(/if \(!closed\) \{ render\(\); openSlideshowOptions\(id, `\$\{total\} item/.test(setup), 'THE ASK: adding your own photos opens the options box straight away');
+  assert(/const r = await addMediaToStop\(id, files, setStatus\);\s*if \(r\.done \|\| r\.queued\) \{\s*const total = r\.done \+ r\.queued;\s*if \(!closed\) openSlideshowOptions\(id, `\$\{total\} item/.test(setup), 'THE ASK: adding your own photos opens the options box straight away');
   assert(/added => \{\s*if \(added && !closed\) openSlideshowOptions\(id,/.test(setup), 'and so does closing the suggested photos after picking some');
   assert(/close = \(\) => \{[^}]*if \(onClosed\) onClosed\(added\);/.test(extractFn('tripsyFlyoverSuggestedPhotos')), 'the suggestions grid reports how many it added');
 }
@@ -1574,4 +1574,35 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'the dialog shows a Destination drop-down and Play this slideshow only when some destination has pictures');
   assert(/if \(onePlay\) onePlay\.onclick = \(\) => \{\s*const id = ov\.querySelector\('\[data-range-one\]'\)\.value;\s*if \(!slideshowStops\.some\(s => s\.id === id\)\) return;\s*close\(\); onPick\(\{ previewStopId: id \}\);/.test(dlg),
     'Play this slideshow hands the picked destination to onPick as previewStopId, synchronously in its tap');
+}
+
+// The slideshow editor has its own "＋ Add photos" ("Add an add photo button to the edit
+// slideshow page," 2026-10-23): one shared add path with the card's button, and new photos
+// placed on the page being edited, the rest on new pages at the end.
+{
+  eval(extractFn('tripsyFlyoverPlaceAddedPhotos'));
+  const blank = () => ({ ids: [], count: 1, style: 'grid', transition: 'fade', seconds: 4 });
+  const isV = id => id.startsWith('v');
+  const base = [{ ids: ['a'], count: 3 }, { ids: ['b'], count: 1 }];
+  const r = tripsyFlyoverPlaceAddedPhotos(base, 0, ['n1', 'n2', 'n3', 'v1', 'n4'], blank, isV);
+  assert(r.pages.map(p => p.ids.join()).join('|') === 'a,n1,n2|b|n3|v1|n4',
+    'THE ASK: added photos fill the page being edited up to its count; the rest each get a new page at the end, a video on its own -> ' + r.pages.map(p => p.ids.join()).join('|'));
+  assert(base[0].ids.join() === 'a' && base.length === 2, 'pure: the input pages are untouched');
+  assert(r.pages.slice(2).every(p => p.count === 1), 'each new page holds one');
+  const v = tripsyFlyoverPlaceAddedPhotos([{ ids: ['v9'], count: 1 }], 0, ['n1'], blank, isV);
+  assert(v.pages.map(p => p.ids.join()).join('|') === 'v9|n1', 'nothing joins a video page');
+  const dlg = extractFn('tripsyFlyoverSlideshowDialog');
+  assert(/page = null, addMedia = null \} = \{\}\) \{/.test(dlg), 'the dialog takes an addMedia callback');
+  assert(/\$\{addMedia \? `<button class="btn" data-ss-add-photos[^`]*>＋ Add photos<\/button>` : ''\}/.test(dlg),
+    'an ＋ Add photos button renders beside the grid\'s label (owner-only: the caller passes addMedia only to the owner)');
+  assert(/if \(addBtn\) addBtn\.onclick = \(\) => \{ if \(adding\) return; tripsyFlyoverPickMedia\(async files => \{/.test(dlg),
+    'the pick opens synchronously inside the tap (iOS), the adding happens in its callback');
+  assert(/const r = await addMedia\(files, setStatus\);[\s\S]*photos\.push\(\{ \.\.\.rec \}\);[\s\S]*pages = tripsyFlyoverPlaceAddedPhotos\(pages, cur, recs\.map\(x => x\.driveFileId\), blank, isVideo\)\.pages;/.test(dlg),
+    'added records join the draft and are placed on the page being edited');
+  const setup = extractFn('showTripsyFlyover');
+  assert(/const addMediaToStop = async \(id, files, setStatusFn\) => \{/.test(setup)
+    && /if \(own\) own\.onclick = \(\) => tripsyFlyoverPickMedia\(async files => \{\s*const r = await addMediaToStop\(id, files, setStatus\);/.test(setup)
+    && /addMedia: isOwner \? \(files, setStatusFn\) => addMediaToStop\(id, files, setStatusFn\) : null,/.test(setup),
+    'ONE add path: the card\'s button and the editor\'s button both run addMediaToStop (stage + background upload for photos, foreground for videos)');
+  assert(/return \{ added, done, queued, problems \};/.test(setup), 'addMediaToStop reports the records it added');
 }
