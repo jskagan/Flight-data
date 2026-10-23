@@ -514,8 +514,8 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   // of each page with a plus sign in it. If the user selects that, create a new page at the
   // end of the slideshow" (same day).
   const dlgAdd = extractFn('tripsyFlyoverSlideshowDialog');
-  assert(/const addChip = k === pages\.length - 1 \? `<button class="btn tfo-ss-chip tfo-ss-page" data-ss-add-page [^`]*><span class="tfo-ss-page-empty"[^`]*>＋<\/span><span>New page<\/span><\/button>` : '';\s*return `\$\{addChip\}<button class="btn tfo-ss-chip tfo-ss-page/.test(dlgAdd),
-    'a ＋ chip in the page chips\' own size sits to the left of the last page chip');
+  assert(/const addChip = k === pages\.length - 1 \? `<button class="btn tfo-ss-chip tfo-ss-page" data-ss-add-page [^`]*><span class="tfo-ss-page-empty"[^`]*>＋<\/span><span>New page<\/span><\/button>` : '';\s*return `<button class="btn tfo-ss-chip tfo-ss-page[^`]*<\/button>\$\{addChip\}`;/.test(dlgAdd),
+    'a ＋ chip in the page chips\' own size sits AFTER the last page chip ("always go after the last existing page," 2026-10-22)');
   assert(/const addPageAtEnd = \(\) => \{[\s\S]*pages = \[\.\.\.pages, pg\];\s*cur = pages\.length - 1;\s*render\(\);\s*\};/.test(dlgAdd)
     && /if \(cur < pages\.length - 1\) \{ cur\+\+; render\(\); return; \}\s*addPageAtEnd\(\);/.test(dlgAdd)
     && /if \(addChip\) addChip\.onclick = \(\) => \{ if \(Date\.now\(\) < dragState\.suppressTapUntil\) return; addPageAtEnd\(\); \};/.test(dlgAdd),

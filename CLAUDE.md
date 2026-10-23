@@ -4186,8 +4186,9 @@ WebView's support for recording is unproven.
       button that is the same size as the images of each page with a plus sign in it. If the
       user selects that, create a new page at the end of the slideshow," same day):
       `data-ss-add-page`, a page chip's own shape (the 44×33 `tfo-ss-page-empty` box holding
-      ＋, labelled "New page"), rendered immediately BEFORE the last page's chip — literally to
-      its left, as asked — and it runs `addPageAtEnd()` (factored out of Next ▶'s past-the-last
+      ＋, labelled "New page"), rendered immediately AFTER the last page's chip (it was first
+      placed to its left, as literally asked; "The new page button should always go after the
+      last existing page on the edit slideshow page," same day, moved it) — and it runs `addPageAtEnd()` (factored out of Next ▶'s past-the-last
       branch: a blank page at the END, seeded with the next photo on no page, opened at once).
       It carries no `data-ss-goto`, so the strip's drag ignores it.
       - **Triggers:** an own-photos upload batch, and closing the Suggested grid after
