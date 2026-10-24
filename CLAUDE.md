@@ -4481,6 +4481,42 @@ WebView's support for recording is unproven.
     102 chips, Asia unfolds and stays open after a pick, the Japanese folk search carries the
     ANDed words. `flyover_test.js` pins the pairs, the families, and balanced parentheses
     in every `terms` string.
+  - **Music per DESTINATION, crossfaded** ("Add the ability to change music at different
+    parts of the journey. At each destination have an option to change the music. Try to have
+    music options available for each destination on the journey - for example, music from
+    Singapore. When you change the music, have the music fade in and out so there is no
+    disruption in the music," 2026-10-24). A stop may carry its own `music` (the same shape
+    as `record.music`); it plays from the moment the fly-over ARRIVES there until a later
+    destination with music of its own, and `record.music` is the opening track (and the whole
+    soundtrack when no stop has one). `tripsyFlyoverMusicAtStop(record, stops, i)` (pure;
+    transfers and removed stops never change it) is the one rule; the player judges it over
+    the FULL play order (`musicFor`), so a cut that starts mid-journey opens with the music
+    in force there. **Setup page**: every destination card has a 🎵 row ("The fly-over music
+    plays here" / "The music carries on from the stop before" / "From here: <track>") and an
+    owner-only **🎵 Music from here** button (`data-flyover-stop-music`) opening the SAME
+    `tripsyFlyoverMusicPicker` with `{place, suggested, stopMode}`: the heading reads "Music
+    from Singapore onward", a **Suggested for Singapore** row of genre chips comes first
+    (`tripsyFlyoverMusicSuggest(stop)`: `TRIPSY_FLYOVER_MUSIC_PLACE_HINTS`, a name table over
+    the stop's label/query/airport/hotel names — countries and cities incl. the live trips'
+    Beppu/Fukuoka/Seoul — else `tripsyFlyoverMusicFamilyAt(lat, lng)`'s rough world boxes →
+    `TRIPSY_FLYOVER_MUSIC_FAMILY_DEFAULTS`; the first suggestion's family starts unfolded),
+    and the clear button reads **Use the fly-over music** (resolves null → the override is
+    removed). `tripsyFlyoverCarryOver` keeps a stop's music across a rebuild; the setup page
+    prefetches every track (`tripsyFlyoverMusicTracks`, opening first) on open. **Player**:
+    `audio`/`fader` are `let` — the CURRENT track's element and fader, rebound by
+    `switchMusic(m)` (fire-and-forget at each arrival, after a transfer is passed through and
+    before the last stop's landing): the new track starts on a SECOND element at volume 0
+    and ramps up over `TRIPSY_FLYOVER_MUSIC_CROSSFADE_MS` (3 s) while the old ramps down,
+    then the old is paused (tracked in `retiring`, stopped on close) — an overlap, never a
+    gap. Where volume can't be ramped (iOS, the fader's 'pause' mode) or a second element's
+    `play()` is refused outside a tap, the ONE element switches source instead; while the
+    music is muted, paused or ducked under a video, the new track is loaded and plays when the
+    music next resumes; the same track already in force changes nothing. Replay →
+    `resetMusic()` (the opening track from its start); the top-bar 🔊 shows when ANY stop has
+    music (`musicPlan.any`), even with no opening track. Sampled in Chromium with a fake
+    Audio: opening 0.70→0 while Fukuoka's 0→0.70 over ~3 s as the plane lands, a music-less
+    stop changes nothing, the next override crossfades the same way, Replay returns to the
+    opening track. `flyover_test.js`.
   - **Spoken word is never offered** ("Exclude lessons about learning a language," same day —
     a regional search turned up language courses). The search query adds `AND NOT subject:(…)
     AND NOT title:(…)` over `TRIPSY_FLYOVER_MUSIC_SPOKEN_WORDS` (lesson, language, learn,

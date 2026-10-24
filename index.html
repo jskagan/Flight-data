@@ -18539,6 +18539,8 @@ function tripsyFlyoverCarryOver(stops, prevStops) {
       // A transport the owner chose for this leg survives a rebuild.
       ...(p.modeManual ? { mode: p.mode, modeManual: true, modeGuessed: false } : {}),
       ...(p.slideshow ? { slideshow: { ...p.slideshow } } : {}),
+      // Music chosen for this destination (2026-10-24) survives a rebuild like its photos.
+      ...(p.music ? { music: { ...p.music } } : {}),
       ...(Array.isArray(p.pages) ? { pages: p.pages.map(pg => ({ ...pg, ids: [...(pg.ids || [])] })) } : {}) };
   });
 }
@@ -19455,7 +19457,7 @@ async function showTripsyFlyover(tripKey) {
     updateStop(id, { pages: r.pages, photos: tripsyFlyoverPhotosInPageOrder({ ...st, pages: r.pages, photos: r.photos }).map(x => x.photo) });
     save(); render();
   };
-  if (record && record.music) tripsyFlyoverPrefetchMusic(record.music);
+  if (record) for (const m of tripsyFlyoverMusicTracks(record, record.stops)) tripsyFlyoverPrefetchMusic(m);
   // Legs a fresh derivation finds no transport for -- covers a fly-over saved before stops
   // carried the flag.
   let guessedModeIds = new Set();
@@ -19544,6 +19546,10 @@ async function showTripsyFlyover(tripKey) {
           ${(s.names || []).length ? `<div style="font-size:12px; color:var(--muted); margin-top:4px;">${esc(s.names.join(' · '))}</div>` : ''}
           ${noPlace && !s.removed ? `<div style="font-size:12px; color:#E0A33A; margin-top:4px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">⚠️ Not on the map yet — it will be skipped.${isOwner ? ` <button class="btn" data-flyover-set-place style="font-size:12px;">📍 Set location</button>` : ''}</div>` : ''}
           ${s.removed ? '' : `
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:12px; color:var(--muted);">
+            <span>🎵 ${s.music ? `From here: <strong style="color:var(--text);">${esc(tripsyFlyoverMusicLabel(s.music))}</strong>${s.music.license ? ` <span style="font-size:11px;">${esc(tripsyFlyoverLicenseLabel(s.music.license))}</span>` : ''}` : (i === 0 ? 'The fly-over music plays here.' : 'The music carries on from the stop before.')}</span>
+            ${isOwner ? `<button class="btn" data-flyover-stop-music style="font-size:12px;" title="Music for this destination onward, with suggestions from this part of the world">${s.music ? 'Change music here' : '🎵 Music from here'}</button>` : ''}
+          </div>
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center;">
             ${pageTiles.map((pg, k) => `
               <div class="btn" data-flyover-thumb="${k}" data-flyover-thumb-page="${k + 1}" style="padding:3px; position:relative; cursor:${isOwner ? 'pointer' : 'default'}; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none;"${isOwner ? ` title="${pageTiles.length > 1 ? 'Tap to edit this page; press and hold, then drag onto another page to move it there' : 'Tap to edit this page'}"` : ''}>
@@ -19627,6 +19633,17 @@ async function showTripsyFlyover(tripKey) {
       if (previewBtn) previewBtn.onclick = () => {
         if (stop().lat == null) { toast('Set this destination\'s location first.', 'error'); return; }
         playTripsyFlyover(trip, record, { previewStopId: id });
+      };
+      // Music from this destination onward (2026-10-24): the same picker as the fly-over's own
+      // music, with genres suggested for this place; null (Use the fly-over music) clears it.
+      const stopMusicBtn = card.querySelector('[data-flyover-stop-music]');
+      if (stopMusicBtn) stopMusicBtn.onclick = async () => {
+        const st = stop();
+        const m = await tripsyFlyoverMusicPicker(st.music || null, { place: st.label || 'this destination', suggested: tripsyFlyoverMusicSuggest(st), stopMode: true });
+        if (m === undefined || closed) return;
+        if (m) { updateStop(id, { music: m }); tripsyFlyoverPrefetchMusic(m); }
+        else updateStop(id, { music: undefined });
+        save(); render();
       };
       const setPlace = card.querySelector('[data-flyover-set-place]');
       if (setPlace) setPlace.onclick = async () => {
@@ -20723,6 +20740,129 @@ const TRIPSY_FLYOVER_MUSIC_GROUPS = [
 ];
 // Any group but 'style' is a part of the world.
 function tripsyFlyoverMusicIsRegional(g) { return !!g && g.group !== 'style'; }
+// ---- Music per DESTINATION ("Add the ability to change music at different parts of the
+// journey. At each destination have an option to change the music. Try to have music options
+// available for each destination on the journey - for example, music from Singapore,"
+// 2026-10-24). A stop may carry its own `music` (same shape as record.music); it plays from
+// the moment the fly-over ARRIVES there until a later destination with music of its own.
+// record.music is the opening track (and the whole soundtrack when no stop has one).
+// tripsyFlyoverMusicAtStop(record, stops, i): the track in force at play-order index i. Pure.
+function tripsyFlyoverMusicAtStop(record, stops, i) {
+  for (let k = Math.min(i, stops.length - 1); k >= 0; k--) {
+    const s = stops[k];
+    if (s && s.music && !s.removed && s.kind !== 'transit') return s.music;
+  }
+  return (record && record.music) || null;
+}
+// Every distinct track the fly-over will play, opening track first (for prefetching). Pure.
+function tripsyFlyoverMusicTracks(record, stops) {
+  const out = [];
+  const seen = new Set();
+  const add = m => { if (!m) return; const k = m.driveFileId ? `d:${m.driveFileId}` : `u:${m.url || ''}`; if (seen.has(k)) return; seen.add(k); out.push(m); };
+  add(record && record.music);
+  for (const s of stops || []) if (!s.removed && s.kind !== 'transit') add(s.music);
+  return out;
+}
+// Which genres suit a PLACE ("music from Singapore"): a name table first (country and city
+// names in a stop's label / query / airport description / hotel names), then the part of the
+// world its coordinates fall in, so an unknown town still opens the right family. Pure.
+const TRIPSY_FLYOVER_MUSIC_PLACE_HINTS = [
+  // Asia
+  [/\b(singapore|changi)\b/, ['southeastasian', 'southeastasiantrad', 'southeastasianfolk']],
+  [/\b(japan|japanese|tokyo|narita|haneda|osaka|kyoto|fukuoka|beppu|oita|nakatsu|hita|taketa|yufuin|kyushu|hokkaido|sapporo|nagoya|hiroshima|okinawa|nara|kanazawa|hakone|nagasaki|kumamoto|kagoshima)\b/, ['japanese', 'japanesetrad', 'japanesefolk', 'enkajpop']],
+  [/\b(korea|korean|seoul|incheon|busan|jeju|gimpo)\b/, ['korean', 'koreantrad', 'koreanfolk', 'kpop']],
+  [/\b(china|chinese|beijing|shanghai|guangzhou|shenzhen|chengdu|xi'?an|hangzhou|suzhou|guilin|hong kong|macau|macao|taiwan|taipei)\b/, ['chinese', 'chinesetrad', 'chinesefolk', 'cpop']],
+  [/\b(thailand|thai|bangkok|phuket|chiang mai|chiang rai|chiangmai|chiangrai|krabi|koh samui|suvarnabhumi|don mueang|golden triangle)\b/, ['thai', 'southeastasian', 'southeastasiantrad', 'southeastasianfolk']],
+  [/\b(vietnam|vietnamese|hanoi|ho chi minh|saigon|da nang|danang|hoi an|hue|nha trang|phu quoc)\b/, ['vietnamese', 'southeastasian', 'southeastasiantrad', 'southeastasianfolk']],
+  [/\b(indonesia|indonesian|bali|balinese|jakarta|java|javanese|lombok|ubud|denpasar|yogyakarta)\b/, ['indonesian', 'southeastasian', 'southeastasiantrad', 'southeastasianfolk']],
+  [/\b(philippines|philippine|filipino|manila|cebu|boracay|palawan)\b/, ['filipino', 'southeastasian', 'southeastasianfolk']],
+  [/\b(cambodia|khmer|siem reap|phnom penh|angkor|laos|lao|luang prabang|vientiane|myanmar|burma|yangon|bagan|malaysia|kuala lumpur|penang|langkawi|brunei)\b/, ['southeastasian', 'southeastasiantrad', 'southeastasianfolk']],
+  [/\b(india|indian|delhi|mumbai|bombay|bangalore|bengaluru|chennai|kolkata|jaipur|udaipur|agra|goa|kerala|rajasthan|varanasi|hyderabad)\b/, ['indian', 'indianclassical', 'indianfolk', 'bollywood']],
+  [/\b(sri lanka|colombo|maldives|male|bhutan|nepal|kathmandu|tibet|lhasa|himalaya|ladakh)\b/, ['himalayan', 'indian', 'indianclassical']],
+  [/\b(mongolia|ulaanbaatar|kazakhstan|almaty|astana|uzbekistan|samarkand|bukhara|tashkent|kyrgyzstan|bishkek|tajikistan)\b/, ['centralasian']],
+  // Middle East
+  [/\b(dubai|abu dhabi|uae|emirates|qatar|doha|oman|muscat|bahrain|kuwait|saudi|riyadh|jeddah|jordan|amman|petra|lebanon|beirut|syria|iraq|baghdad)\b/, ['arabic', 'arabicclassical', 'arabicfolk', 'sufi']],
+  [/\b(egypt|egyptian|cairo|luxor|aswan|giza|sharm)\b/, ['egyptian', 'arabic', 'arabicclassical']],
+  [/\b(turkey|türkiye|turkish|istanbul|ankara|cappadocia|bodrum|antalya|izmir)\b/, ['turkish', 'turkishfolk', 'persianturkish', 'sufi']],
+  [/\b(iran|persia|persian|tehran|isfahan|shiraz)\b/, ['persian', 'persianturkish', 'sufi']],
+  [/\b(israel|israeli|tel aviv|jerusalem|haifa|eilat)\b/, ['hebrew', 'klezmer']],
+  [/\b(armenia|yerevan|georgia|tbilisi|azerbaijan|baku|kurd)/, ['kurdisharmenian']],
+  // Africa
+  [/\b(morocco|moroccan|marrakech|marrakesh|fez|fes|casablanca|tangier|algeria|algiers|tunisia|tunis|libya)\b/, ['northafrican', 'gnawaberber', 'arabic']],
+  [/\b(ethiopia|ethiopian|addis|eritrea|asmara)\b/, ['ethiopian', 'eastsouthafrican']],
+  [/\b(kenya|nairobi|mombasa|tanzania|zanzibar|arusha|serengeti|kilimanjaro|uganda|kampala|rwanda|kigali)\b/, ['eastsouthafrican']],
+  [/\b(south africa|johannesburg|cape town|durban|kruger|namibia|windhoek|botswana|zimbabwe|victoria falls|zambia|mozambique|madagascar|mauritius|seychelles)\b/, ['eastsouthafrican', 'southafricantrad']],
+  [/\b(congo|kinshasa|brazzaville)\b/, ['congolese', 'eastsouthafrican']],
+  [/\b(ghana|accra|nigeria|lagos|abuja|senegal|dakar|mali|bamako|ivory coast|côte d'ivoire|abidjan|guinea|sierra leone|liberia|benin|togo|burkina|gambia|cape verde)\b/, ['westafrican', 'westafricantrad', 'afrobeat']],
+  // Pacific & Oceania
+  [/\b(hawaii|hawaiian|honolulu|maui|kauai|oahu|kona|hilo|waikiki)\b/, ['pacific', 'hawaiiantrad']],
+  [/\b(tahiti|bora bora|moorea|fiji|nadi|samoa|tonga|new zealand|auckland|queenstown|wellington|christchurch|rarotonga|cook islands|maori)\b/, ['polynesian', 'pacific']],
+  [/\b(australia|australian|sydney|melbourne|brisbane|perth|cairns|uluru|gold coast|adelaide|hobart|darwin)\b/, ['australian']],
+  // Latin America & Caribbean
+  [/\b(brazil|brasil|brazilian|rio de janeiro|são paulo|sao paulo|salvador|bahia|manaus|iguazu|iguaçu|florianópolis)\b/, ['brazilian', 'bossasamba', 'brazilianfolk']],
+  [/\b(peru|peruvian|lima|cusco|cuzco|machu picchu|bolivia|la paz|ecuador|quito|galápagos|galapagos)\b/, ['andean', 'andeanfolk']],
+  [/\b(mexico|mexican|cancun|cancún|mexico city|cdmx|oaxaca|puerto vallarta|cabo|los cabos|guadalajara|tulum|playa del carmen|mérida|merida|san miguel de allende)\b/, ['mexican', 'mariachi', 'mexicanfolk']],
+  [/\b(cuba|cuban|havana|habana|varadero)\b/, ['cuban', 'cubantrad']],
+  [/\b(argentina|argentine|buenos aires|mendoza|patagonia|bariloche|ushuaia|uruguay|montevideo|chile|chilean|santiago|valparaíso|valparaiso|atacama)\b/, ['tango', 'argentinefolk']],
+  [/\b(colombia|colombian|bogotá|bogota|cartagena|medellín|medellin)\b/, ['colombian', 'cuban']],
+  [/\b(jamaica|jamaican|kingston|montego bay|negril|ocho rios)\b/, ['reggae', 'caribbean']],
+  [/\b(caribbean|bahamas|nassau|barbados|bermuda|aruba|curaçao|curacao|antigua|st\.? ?lucia|st\.? ?barth|st\.? ?maarten|st\.? ?martin|turks|cayman|puerto rico|san juan|dominican|punta cana|haiti|trinidad|grenada|virgin islands|anguilla|martinique|guadeloupe)\b/, ['caribbean', 'caribbeanfolk', 'reggae']],
+  [/\b(costa rica|san josé|san jose|panama|guatemala|belize|honduras|nicaragua|el salvador)\b/, ['cuban', 'colombian', 'mexicanfolk']],
+  // Europe
+  [/\b(spain|spanish|madrid|barcelona|seville|sevilla|malaga|málaga|granada|valencia|bilbao|mallorca|majorca|ibiza|san sebastián|san sebastian|andalusia|canary)\b/, ['spanish', 'spanishfolk']],
+  [/\b(portugal|portuguese|lisbon|lisboa|porto|oporto|algarve|madeira|azores|sintra)\b/, ['portuguese']],
+  [/\b(italy|italian|rome|roma|venice|venezia|florence|firenze|milan|milano|naples|napoli|amalfi|capri|sicily|sardinia|tuscany|lake como|verona|bologna|turin|torino|positano|sorrento|cinque terre)\b/, ['italian', 'italianfolk']],
+  [/\b(france|french|paris|nice|lyon|marseille|bordeaux|provence|cannes|monaco|st\.? ?tropez|saint-tropez|normandy|loire|burgundy|strasbourg|corsica|biarritz)\b/, ['french', 'chanson', 'frenchfolk']],
+  [/\b(greece|greek|athens|santorini|mykonos|crete|rhodes|corfu|thessaloniki|naxos|paros)\b/, ['greek', 'greekfolk']],
+  [/\b(croatia|dubrovnik|split|zagreb|hvar|montenegro|kotor|serbia|belgrade|bosnia|sarajevo|albania|tirana|north macedonia|skopje|bulgaria|sofia|romania|bucharest|transylvania|slovenia|ljubljana)\b/, ['balkan', 'balkanfolk', 'klezmer']],
+  [/\b(poland|polish|warsaw|krak[oó]w|gdansk|czech|prague|praha|slovakia|bratislava|hungary|hungarian|budapest|lithuania|vilnius|latvia|riga|estonia|tallinn)\b/, ['easteuropeanfolk', 'klezmer', 'balkan']],
+  [/\b(russia|russian|moscow|st\.? ?petersburg|saint petersburg|ukraine|ukrainian|kyiv|kiev|odessa|belarus|minsk)\b/, ['russian', 'russianfolk']],
+  [/\b(norway|norwegian|oslo|bergen|tromsø|tromso|lofoten|sweden|swedish|stockholm|gothenburg|denmark|danish|copenhagen|finland|finnish|helsinki|lapland|iceland|icelandic|reykjav[ií]k|faroe)\b/, ['nordic', 'nordicfolk']],
+  [/\b(ireland|irish|dublin|galway|cork|killarney|belfast)\b/, ['irishtrad', 'celtic']],
+  [/\b(scotland|scottish|edinburgh|glasgow|highlands|inverness|skye|st\.? ?andrews)\b/, ['scottish', 'celtic']],
+  [/\b(england|english|london|heathrow|gatwick|manchester|liverpool|oxford|cambridge|bath|cotswolds|cornwall|lake district|wales|welsh|cardiff|york|brighton|edinburgh)\b/, ['britishfolk', 'celtic']],
+  [/\b(germany|german|berlin|munich|münchen|frankfurt|hamburg|cologne|köln|dresden|bavaria|heidelberg|austria|austrian|vienna|wien|salzburg|innsbruck|switzerland|swiss|zurich|zürich|geneva|lucerne|zermatt|st\.? ?moritz|interlaken|alps|alpine|tyrol|tirol)\b/, ['alpine', 'classical']],
+  [/\b(netherlands|dutch|amsterdam|rotterdam|belgium|belgian|brussels|bruges|antwerp|luxembourg)\b/, ['frenchfolk', 'classical', 'jazz']],
+  // North America
+  [/\b(new orleans|louisiana|cajun|baton rouge)\b/, ['neworleans', 'americana', 'blues']],
+  [/\b(nashville|tennessee|memphis|kentucky|appalachia|austin|texas|dallas|houston|montana|wyoming|jackson hole|colorado|denver|aspen|vail|telluride|montrose|utah|idaho|sun valley)\b/, ['bluegrass', 'americana', 'blues']],
+  [/\b(chicago|detroit|mississippi|clarksdale)\b/, ['blues', 'gospelsoul', 'jazz']],
+  [/\b(canada|canadian|toronto|vancouver|montreal|montréal|quebec|québec|banff|whistler|calgary|ottawa|halifax|nova scotia|newfoundland)\b/, ['americanfolk', 'bluegrass']],
+  [/\b(santa fe|new mexico|arizona|sedona|navajo|alaska|anchorage)\b/, ['nativeamerican', 'americana']],
+  [/\b(los angeles|lax|california|san francisco|san diego|palm springs|santa barbara|napa|new york|nyc|jfk|manhattan|boston|washington|philadelphia|miami|orlando|las vegas|seattle|portland|hawaii|usa|united states)\b/, ['jazz', 'americana', 'upbeat']],
+];
+const TRIPSY_FLYOVER_MUSIC_FAMILY_DEFAULTS = {
+  africa: ['westafrican', 'eastsouthafrican', 'northafrican'], mideast: ['arabic', 'persianturkish', 'sufi'],
+  asia: ['southeastasian', 'chinese', 'japanese', 'indian'], oceania: ['pacific', 'polynesian', 'australian'],
+  latin: ['brazilian', 'andean', 'cuban', 'caribbean'], europe: ['classical', 'french', 'italian'], northam: ['americana', 'jazz', 'bluegrass'],
+};
+// The region family a point falls in, by rough boxes (a hint for the picker, never a verdict).
+function tripsyFlyoverMusicFamilyAt(lat, lng) {
+  if (!isFinite(lat) || !isFinite(lng)) return '';
+  if (lat >= 18 && lat <= 23 && lng >= -161 && lng <= -154) return 'oceania'; // Hawaii
+  if (lat >= 24 && lng >= -170 && lng <= -50 && (lat >= 30 || lng > -98)) return 'northam';
+  if (lat >= -56 && lat <= 33 && lng >= -120 && lng <= -34) return 'latin';
+  if (lat <= 0 && (lng >= 110 || lng <= -150)) return 'oceania';
+  if (lat >= 12 && lat <= 42 && ((lng >= 34 && lng <= 63) || (lat >= 36 && lng >= 26 && lng <= 45))) return 'mideast';
+  if (lat >= -35 && lat <= 37 && lng >= -18 && lng <= 52) return 'africa';
+  if (lat >= 35 && lat <= 72 && lng >= -25 && lng <= 60) return 'europe';
+  if (lat >= 50 && lng > 60) return 'europe'; // Siberia
+  if (lat >= -11 && lat <= 55 && lng >= 60 && lng <= 150) return 'asia';
+  return '';
+}
+// Suggested genre keys for a stop: name hints first (all that match, in table order), then
+// the family's defaults. Only keys that exist are returned, deduped. Pure.
+function tripsyFlyoverMusicSuggest(stop) {
+  if (!stop) return [];
+  const text = [stop.label, stop.autoLabel, stop.query, stop.airport, ...(stop.names || [])].filter(Boolean).join(' ').toLowerCase();
+  const keys = [];
+  for (const [re, ks] of TRIPSY_FLYOVER_MUSIC_PLACE_HINTS) if (re.test(text)) for (const k of ks) if (!keys.includes(k)) keys.push(k);
+  if (!keys.length) {
+    const fam = tripsyFlyoverMusicFamilyAt(Number(stop.lat), Number(stop.lng));
+    for (const k of (TRIPSY_FLYOVER_MUSIC_FAMILY_DEFAULTS[fam] || [])) if (!keys.includes(k)) keys.push(k);
+  }
+  return keys.filter(k => TRIPSY_FLYOVER_MUSIC_GENRES.some(g => g.key === k));
+}
 const TRIPSY_FLYOVER_MUSIC_MAX_BYTES = 25 * 1024 * 1024;
 // Spoken word is never offered ("Exclude lessons about learning a language," 2026-10-20 —
 // a regional search for "arabic" or "japanese" turned up language courses): the search
@@ -20814,6 +20954,8 @@ function tripsyFlyoverMusicLabel(music) {
 // in, never so late that the clip would run past the end; a short song plays from the top.
 // Pure (tested).
 const TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS = 30;
+// How long the old track fades down while a destination's own track fades up (2026-10-24).
+const TRIPSY_FLYOVER_MUSIC_CROSSFADE_MS = 3000;
 function tripsyFlyoverMusicPreviewStart(duration) {
   const d = Number(duration);
   if (!isFinite(d) || d <= TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS + 10) return 0;
@@ -20840,7 +20982,11 @@ async function tripsyFlyoverPrefetchMusic(music) {
   } catch (e) { console.error('fly-over music download failed:', e); return null; }
 }
 // Resolves the chosen music, null for "No music", or undefined when closed unchanged.
-function tripsyFlyoverMusicPicker(current) {
+// opts.place / opts.suggested / opts.stopMode: picking music for ONE destination (2026-10-24)
+// — the heading names the place, a "Suggested for <place>" row of genre chips comes first
+// (its family starts unfolded), and the clear button reads "Use the fly-over music" (resolves
+// null, i.e. no override) instead of "No music".
+function tripsyFlyoverMusicPicker(current, opts = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-music-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-music-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -20851,6 +20997,8 @@ function tripsyFlyoverMusicPicker(current) {
     let tracks = [];
     let state = 'idle'; // idle | loading | done | error
     const openFamilies = new Set(); // region families the owner has unfolded (render rebuilds the DOM)
+    const suggested = (opts.suggested || []).map(k => TRIPSY_FLYOVER_MUSIC_GENRES.find(g => g.key === k)).filter(Boolean);
+    if (suggested.length && suggested[0].group !== 'style') openFamilies.add(suggested[0].group);
     // Preview ("Add a preview button to the music so the user can hear it before
     // selecting," 2026-10-20): a TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS clip taken from a little
     // way into the song (an intro is rarely what it sounds like), with a countdown, ending
@@ -20896,13 +21044,18 @@ function tripsyFlyoverMusicPicker(current) {
       ov.innerHTML = `
         <div class="tw-modal-paper tw-wide" style="max-width:640px;">
           <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
-            <h2 style="margin:0; font-size:17px; flex:1;">🎵 Music for the fly-over</h2>
+            <h2 style="margin:0; font-size:17px; flex:1;">🎵 ${opts.place ? `Music from ${esc(opts.place)} onward` : 'Music for the fly-over'}</h2>
             <button class="tripsy-close-x" data-mu-close aria-label="Close">✕</button>
           </div>
           <div style="font-size:13px; color:var(--muted); margin-bottom:10px;">
             ${current ? `Now: <strong style="color:var(--text);">${esc(tripsyFlyoverMusicLabel(current))}</strong>
-              <button class="btn" data-mu-preview-current style="font-size:12px; padding:2px 8px; margin-left:4px;">${playingUrl && playingUrl === tripsyFlyoverMusicSrcNow(current) ? '■ Stop' : '▶ Preview'}</button>. ` : ''}Pick a genre to find free Creative Commons music from the Internet Archive. Press Preview to hear ${TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS} seconds of a song before you choose it, or use a song of your own.
+              <button class="btn" data-mu-preview-current style="font-size:12px; padding:2px 8px; margin-left:4px;">${playingUrl && playingUrl === tripsyFlyoverMusicSrcNow(current) ? '■ Stop' : '▶ Preview'}</button>. ` : ''}${opts.stopMode ? `The music changes to this when the fly-over arrives at ${esc(opts.place || 'this destination')}, fading from the track before it. ` : ''}Pick a genre to find free Creative Commons music from the Internet Archive. Press Preview to hear ${TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS} seconds of a song before you choose it, or use a song of your own.
           </div>
+          ${suggested.length ? `
+            <div class="tfo-ss-label" style="margin:0 0 4px;">🎵 Suggested for ${esc(opts.place || 'this destination')}</div>
+            <div data-mu-group="suggested" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px;">
+              ${suggested.map(g => `<button class="btn tfo-ss-chip${g.key === genre ? ' tfo-ss-on' : ''}" data-mu-genre="${g.key}">${esc(g.label)}</button>`).join('')}
+            </div>` : ''}
           ${TRIPSY_FLYOVER_MUSIC_GROUPS.map(gr => {
             // Styles are always in view; each region FAMILY folds (there are ~100 regional
             // options now), opening when tapped or while it holds the picked genre.
@@ -20933,7 +21086,7 @@ function tripsyFlyoverMusicPicker(current) {
             <span data-mu-status style="font-size:12px; color:var(--muted); flex:1;"></span>
             <input type="file" accept="audio/*" data-mu-file style="display:none;">
             <button class="btn" data-mu-own>＋ Use my own song</button>
-            ${current ? `<button class="btn" data-mu-none>No music</button>` : ''}
+            ${current ? `<button class="btn" data-mu-none>${opts.stopMode ? 'Use the fly-over music' : 'No music'}</button>` : ''}
           </div>
         </div>`;
       ov.querySelector('[data-mu-close]').onclick = () => done(undefined);
@@ -21096,9 +21249,19 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   // True while a video plays: the music is faded to nothing (or, where it can't fade,
   // paused) so the video's own sound is heard.
   let ducked = false;
-  const music = (record && record.music) || null;
-  const audio = music ? new Audio() : null;
-  const fader = audio ? tripsyFlyoverMusicFader(audio) : null;
+  // Music per DESTINATION (2026-10-24): the track in force at a stop is that stop's own music,
+  // else the latest earlier stop's, else the fly-over's (tripsyFlyoverMusicAtStop over the
+  // FULL play order, so a cut that starts mid-journey opens with the music in force there).
+  // `audio`/`fader` are the CURRENT track's element and fader -- rebound on a crossfade, and
+  // every reader below goes through them.
+  const musicFor = s => { const full = tripsyFlyoverPlayableStops(record); return tripsyFlyoverMusicAtStop(record, full, full.findIndex(x => x.id === s.id)); };
+  const musicPlan = { start: musicFor(stops[0]), any: tripsyFlyoverMusicTracks(record, record.stops).length > 0 };
+  const music = musicPlan.start;
+  let audio = musicPlan.any ? new Audio() : null;
+  let fader = audio ? tripsyFlyoverMusicFader(audio) : null;
+  let musicNow = null;      // the track loaded in `audio`
+  let retiring = [];        // elements fading out after a crossfade (stopped on close)
+  const sameTrack = (a, b) => !!a && !!b && (a.driveFileId ? a.driveFileId === b.driveFileId : a.url === b.url);
   const updateMusicBtn = () => {
     if (!musicBtnEl || !audio) return;
     musicBtnEl.textContent = (audio.paused || musicMuted) ? '🔇' : '🔊';
@@ -21114,13 +21277,67 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     if (p && p.catch) p.catch(() => updateMusicBtn());
     if (p && p.then) p.then(updateMusicBtn);
   };
-  if (audio) {
+  // Loads `m` into the current element (an own song not yet downloaded is fetched first).
+  const loadMusic = (m, fadeIn) => {
+    musicNow = m;
+    if (!audio || !m) return;
     audio.loop = true;
-    const src = tripsyFlyoverMusicSrcNow(music);
-    if (src) { audio.src = src; startMusic(true); }
-    else tripsyFlyoverPrefetchMusic(music).then(u => { if (u && !musicEnded) { audio.src = u; startMusic(true); } });
-  }
-  const stopMusic = () => { musicEnded = true; if (audio) { try { audio.pause(); } catch (e) {} audio.removeAttribute('src'); } };
+    const src = tripsyFlyoverMusicSrcNow(m);
+    if (src) { audio.src = src; startMusic(fadeIn); }
+    else tripsyFlyoverPrefetchMusic(m).then(u => { if (u && !musicEnded && musicNow === m) { audio.src = u; startMusic(fadeIn); } });
+  };
+  if (audio && musicPlan.start) loadMusic(musicPlan.start, true);
+  const stopRetiring = () => { for (const a of retiring) { try { a.pause(); } catch (e) {} a.removeAttribute('src'); } retiring = []; };
+  const stopMusic = () => { musicEnded = true; stopRetiring(); if (audio) { try { audio.pause(); } catch (e) {} audio.removeAttribute('src'); } };
+  // Changing the soundtrack at a destination ("have the music fade in and out so there is no
+  // disruption in the music"): the new track comes in on a SECOND element, fading up over
+  // TRIPSY_FLYOVER_MUSIC_CROSSFADE_MS while the old fades down, so the two overlap and there
+  // is never a gap. Where the volume can't be set (iOS) the one element switches source
+  // instead -- and so it does if a second element refuses to play outside a tap. Nothing
+  // starts while the music is muted, paused or ducked under a video: the new track is loaded
+  // and plays when the music next resumes. Fire-and-forget; never throws.
+  const switchMusic = async m => {
+    if (!audio || musicEnded || !m || sameTrack(m, musicNow)) return;
+    musicNow = m;
+    let src = tripsyFlyoverMusicSrcNow(m);
+    if (!src) { try { src = await tripsyFlyoverPrefetchMusic(m); } catch (e) { src = null; } }
+    if (!src || musicEnded || musicNow !== m) return;
+    const canPlayNow = !musicMuted && !ducked && !run.paused;
+    const prevAudio = audio, prevFader = fader;
+    const single = () => { try { prevAudio.pause(); } catch (e) {} prevAudio.src = src; prevAudio.loop = true; if (canPlayNow) startMusic(true); updateMusicBtn(); };
+    if (!canPlayNow || prevAudio.paused || !prevAudio.src || !prevFader.canFade) { single(); return; }
+    const next = new Audio();
+    next.loop = true;
+    next.src = src;
+    const nf = tripsyFlyoverMusicFader(next);
+    nf.set(0);
+    let ok = true;
+    try { await next.play(); } catch (e) { ok = false; }
+    if (musicEnded || musicNow !== m) { try { next.pause(); } catch (e) {} next.removeAttribute('src'); return; }
+    if (!ok) {
+      // The second element was refused: fade the old track out, then switch its source.
+      prevFader.to(0, TRIPSY_FLYOVER_MUSIC_CROSSFADE_MS).then(() => { if (!musicEnded && musicNow === m) single(); });
+      return;
+    }
+    audio = next; fader = nf;
+    retiring.push(prevAudio);
+    nf.to(1, TRIPSY_FLYOVER_MUSIC_CROSSFADE_MS);
+    prevFader.to(0, TRIPSY_FLYOVER_MUSIC_CROSSFADE_MS).then(() => {
+      try { prevAudio.pause(); } catch (e) {}
+      prevAudio.removeAttribute('src');
+      retiring = retiring.filter(a => a !== prevAudio);
+    });
+    updateMusicBtn();
+  };
+  // Replay: back to the opening track from its start.
+  const resetMusic = () => {
+    if (!audio) return;
+    stopRetiring();
+    if (sameTrack(musicPlan.start, musicNow)) { try { audio.currentTime = 0; } catch (e) {} startMusic(true); return; }
+    try { audio.pause(); } catch (e) {}
+    if (musicPlan.start) loadMusic(musicPlan.start, true);
+    else { audio.removeAttribute('src'); musicNow = null; updateMusicBtn(); }
+  };
   let L;
   // The Google tile session is asked for alongside Leaflet (after the music has started),
   // and waited for at most 2.5 s: slow or refused means the keyless tiles, as before.
@@ -21156,7 +21373,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     <div class="tfo-map"></div>
     <div class="tfo-top">
       <div class="tfo-title">${esc(trip.name || '')}</div>
-      ${music ? `<button class="tfo-btn" data-tfo-music aria-label="Music">🔊</button>` : ''}
+      ${musicPlan.any ? `<button class="tfo-btn" data-tfo-music aria-label="Music">🔊</button>` : ''}
       <button class="tfo-btn" data-tfo-pause aria-label="Pause">❚❚</button>
       <button class="tfo-btn" data-tfo-replay aria-label="Replay">↺</button>
       <button class="tfo-btn tfo-close" data-tfo-close aria-label="Close">✕</button>
@@ -21214,7 +21431,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     ov.classList.remove('tfo-paused');
     if (curVideo) { try { curVideo.pause(); } catch (e) {} curVideo = null; }
     ducked = false;
-    if (audio) { try { audio.currentTime = 0; } catch (e) {} startMusic(true); }
+    resetMusic();
     play(run);
   };
 
@@ -21832,6 +22049,9 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       // is passed through like a layover: no zoom, no card, no photos -- just its name, a
       // short pause, and the next leg.
       if (b.kind === 'transit') { if (!(await wait(r, 900))) return; continue; }
+      // Arriving: this destination's music (if it has its own) crossfades in alongside the
+      // landing -- fire-and-forget, so the arrival never waits on a download.
+      switchMusic(musicFor(b));
       // The LAST leg never zooms into its city: as the vehicle lands, the map zooms OUT to the
       // whole route instead ("On the flyover when the last flight arrives at its destination,
       // zoom the map out to show the full route," 2026-10-24). Its dot and name stay on the

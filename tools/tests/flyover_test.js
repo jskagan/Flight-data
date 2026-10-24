@@ -782,8 +782,56 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   assert(/f\.size > TRIPSY_FLYOVER_MUSIC_MAX_BYTES/.test(picker), 'an oversized song file is refused before upload');
   const player = extractFn('playTripsyFlyover');
   const firstAwait = player.indexOf('await ');
-  assert(player.indexOf('const audio = music ? new Audio() : null;') > 0 && player.indexOf('const audio = music ? new Audio() : null;') < firstAwait
-    && player.indexOf('startMusic(true);') > 0 && player.indexOf('startMusic(true);') < firstAwait, 'music starts before the first await, inside the Play tap (iOS only allows that)');
+  assert(player.indexOf('let audio = musicPlan.any ? new Audio() : null;') > 0 && player.indexOf('let audio = musicPlan.any ? new Audio() : null;') < firstAwait
+    && player.indexOf('if (audio && musicPlan.start) loadMusic(musicPlan.start, true);') > 0 && player.indexOf('if (audio && musicPlan.start) loadMusic(musicPlan.start, true);') < firstAwait,
+    'music starts before the first await, inside the Play tap (iOS only allows that)');
+  // ---- music per destination ("Add the ability to change music at different parts of the
+  // journey. At each destination have an option to change the music. Try to have music options
+  // available for each destination on the journey - for example, music from Singapore. When you
+  // change the music, have the music fade in and out so there is no disruption in the music,"
+  // 2026-10-24) ----
+  eval([extractFn('tripsyFlyoverMusicAtStop'), extractFn('tripsyFlyoverMusicTracks'), extractFn('tripsyFlyoverMusicFamilyAt'), extractFn('tripsyFlyoverMusicSuggest'),
+    (html.match(/const TRIPSY_FLYOVER_MUSIC_PLACE_HINTS = \[[\s\S]*?\n\];/) || [''])[0].replace(/^const /, 'var '),
+    (html.match(/const TRIPSY_FLYOVER_MUSIC_FAMILY_DEFAULTS = \{[\s\S]*?\n\};/) || [''])[0].replace(/^const /, 'var ')].join('\n'));
+  {
+    const rec = { music: { source: 'archive', url: 'u0' } };
+    const st = [{ id: 'o', kind: 'origin' }, { id: 's1', kind: 'stay', music: { source: 'archive', url: 'u1' } }, { id: 't', kind: 'transit', music: { url: 'uX' } },
+      { id: 's2', kind: 'stay' }, { id: 's3', kind: 'stay', removed: true, music: { url: 'uR' } }, { id: 's4', kind: 'stay', music: { source: 'drive', driveFileId: 'd4' } }];
+    assert(tripsyFlyoverMusicAtStop(rec, st, 0).url === 'u0' && tripsyFlyoverMusicAtStop(rec, st, 1).url === 'u1' && tripsyFlyoverMusicAtStop(rec, st, 3).url === 'u1'
+      && tripsyFlyoverMusicAtStop(rec, st, 4).url === 'u1' && tripsyFlyoverMusicAtStop(rec, st, 5).driveFileId === 'd4',
+      'THE ASK: a destination\'s music plays from its arrival until a later destination with music of its own; a transfer or removed stop never changes it');
+    assert(tripsyFlyoverMusicAtStop({}, st, 0) === null && tripsyFlyoverMusicAtStop({}, st, 3).url === 'u1', 'no fly-over music: silence until the first destination with music');
+    assert(tripsyFlyoverMusicTracks(rec, st).map(m => m.url || m.driveFileId).join(',') === 'u0,u1,d4', 'the distinct tracks, opening first, for prefetching');
+    const sg = tripsyFlyoverMusicSuggest({ label: 'Singapore', lat: 1.35, lng: 103.8 });
+    assert(sg[0] === 'southeastasian' && sg.includes('southeastasiantrad') && sg.includes('southeastasianfolk'), 'THE ASK: music from Singapore is suggested for a Singapore stop: ' + sg.join(','));
+    assert(tripsyFlyoverMusicSuggest({ label: 'Beppu', airport: 'FUK' })[0] === 'japanese' && tripsyFlyoverMusicSuggest({ label: 'Seoul', query: 'ICN airport' })[0] === 'korean'
+      && tripsyFlyoverMusicSuggest({ label: 'Los Angeles' }).length > 0, 'places on the live trips get their own region (and a known airport its city)');
+    assert(tripsyFlyoverMusicSuggest({ label: 'Nowhere Town', lat: 48.5, lng: 2.3 })[0] === 'classical' && tripsyFlyoverMusicSuggest({ label: 'Xyz', lat: 13.7, lng: 100.5 })[0] === 'southeastasian'
+      && tripsyFlyoverMusicSuggest({ label: 'Xyz', lat: 40.7, lng: -74 })[0] === 'americana', 'an unknown name falls back to the part of the world its coordinates are in');
+    assert(tripsyFlyoverMusicFamilyAt(21.3, -157.8) === 'oceania' && tripsyFlyoverMusicFamilyAt(-33.9, 151.2) === 'oceania' && tripsyFlyoverMusicFamilyAt(25.2, 55.3) === 'mideast'
+      && tripsyFlyoverMusicFamilyAt(-23.5, -46.6) === 'latin' && tripsyFlyoverMusicFamilyAt(-1.3, 36.8) === 'africa' && tripsyFlyoverMusicFamilyAt(NaN, 1) === '', 'the family boxes: Hawaii, Sydney, Dubai, São Paulo, Nairobi');
+    assert(tripsyFlyoverMusicSuggest({ label: 'Singapore' }).every(k => TRIPSY_FLYOVER_MUSIC_GENRES.some(g => g.key === k))
+      && TRIPSY_FLYOVER_MUSIC_PLACE_HINTS.every(([re, ks]) => ks.every(k => TRIPSY_FLYOVER_MUSIC_GENRES.some(g => g.key === k)))
+      && Object.values(TRIPSY_FLYOVER_MUSIC_FAMILY_DEFAULTS).every(ks => ks.every(k => TRIPSY_FLYOVER_MUSIC_GENRES.some(g => g.key === k))), 'every hinted key is a real genre');
+    assert(/Music from \$\{esc\(opts\.place\)\} onward/.test(picker) && /data-mu-group="suggested"/.test(picker) && /Use the fly-over music/.test(picker)
+      && /openFamilies\.add\(suggested\[0\]\.group\)/.test(picker), 'the picker names the place, leads with its suggested genres (family unfolded) and can hand back to the fly-over music');
+    const setup = extractFn('showTripsyFlyover');
+    assert(/data-flyover-stop-music/.test(setup) && /tripsyFlyoverMusicPicker\(st\.music \|\| null, \{ place: st\.label[^}]*suggested: tripsyFlyoverMusicSuggest\(st\), stopMode: true \}\)/.test(setup)
+      && /updateStop\(id, \{ music: m \}\)/.test(setup) && /updateStop\(id, \{ music: undefined \}\)/.test(setup), 'THE ASK: every destination card has a Music-from-here button; a pick is saved on that stop, Use the fly-over music clears it');
+    assert(/tripsyFlyoverMusicTracks\(record, record\.stops\)\) tripsyFlyoverPrefetchMusic\(m\)/.test(setup), 'every track of the journey is prefetched when the setup page opens');
+    assert(/music: \{ \.\.\.p\.music \}/.test(extractFn('tripsyFlyoverCarryOver')), 'a destination\'s music survives a rebuild');
+    assert(/switchMusic\(musicFor\(b\)\);/.test(player) && player.indexOf('switchMusic(musicFor(b));') > player.indexOf("if (b.kind === 'transit')") && player.indexOf('switchMusic(musicFor(b));') < player.indexOf('if (b === last)'),
+      'THE ASK: arriving at a destination switches to its music (after a transfer is passed through, before the last stop\'s landing)');
+    assert(/const next = new Audio\(\);/.test(player) && /nf\.to\(1, TRIPSY_FLYOVER_MUSIC_CROSSFADE_MS\);/.test(player) && /prevFader\.to\(0, TRIPSY_FLYOVER_MUSIC_CROSSFADE_MS\)/.test(player)
+      && /retiring\.push\(prevAudio\)/.test(player) && /const TRIPSY_FLYOVER_MUSIC_CROSSFADE_MS = 3000;/.test(html),
+      'THE ASK: the new track fades in on a second element while the old fades out -- an overlap, never a gap');
+    assert(/if \(!canPlayNow \|\| prevAudio\.paused \|\| !prevAudio\.src \|\| !prevFader\.canFade\) \{ single\(\); return; \}/.test(player) && /catch \(e\) \{ ok = false; \}/.test(player),
+      'where volume can\'t be ramped (iOS), or a second element is refused, the one element switches source instead');
+    assert(/sameTrack\(m, musicNow\)\) return;/.test(player), 'arriving where the same track is already in force changes nothing');
+    assert(/const resetMusic = \(\) => \{/.test(player) && /resetMusic\(\);\n\s*play\(run\);/.test(player), 'Replay returns to the opening track');
+    assert(/const stopMusic = \(\) => \{ musicEnded = true; stopRetiring\(\);/.test(player), 'closing stops a track still fading out too');
+    assert(/musicPlan\.any \? `<button class="tfo-btn" data-tfo-music/.test(player), 'the music button shows when any destination has music, even with no opening track');
+  }
   assert(/data-tfo-music/.test(player) && /musicMuted = true; audio\.pause\(\)/.test(player), 'a music button mutes, and plays when the browser blocked autoplay');
   assert(/if \(run\.paused\) audio\.pause\(\); else startMusic\(\);/.test(player) && /run\.cancelled = true;\s*stopMusic\(\);/.test(player), 'pause pauses the music; closing stops it');
   assert(/if \(prevRecord && prevRecord\.music\) rec\.music = prevRecord\.music;/.test(extractFn('tripsyFlyoverBuild')), 'a rebuild keeps the chosen music');
