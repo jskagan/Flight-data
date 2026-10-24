@@ -685,15 +685,42 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   constLine('TRIPSY_FLYOVER_MUSIC_PREVIEW_SECONDS').replace(/^const /, 'var '), extractFn('tripsyFlyoverMusicPreviewStart'),
   extractFn('tripsyFlyoverMusicLooksSpoken'),
   extractFn('tripsyFlyoverMusicSearchUrl'), extractFn('tripsyFlyoverParseLength'), extractFn('tripsyFlyoverPickArchiveTrack'),
-  extractFn('tripsyFlyoverLicenseLabel'), extractFn('tripsyFlyoverMusicLabel')].join('\n'));
+  extractFn('tripsyFlyoverLicenseLabel'), extractFn('tripsyFlyoverMusicLabel'),
+  (html.match(/const TRIPSY_FLYOVER_MUSIC_GROUPS = \[[\s\S]*?\];/) || [''])[0].replace(/^const /, 'var '), extractFn('tripsyFlyoverMusicIsRegional')].join('\n'));
 {
   assert(TRIPSY_FLYOVER_MUSIC_GENRES.length >= 6 && new Set(TRIPSY_FLYOVER_MUSIC_GENRES.map(g => g.key)).size === TRIPSY_FLYOVER_MUSIC_GENRES.length,
     'THE ASK: music is offered across several genres');
-  const regions = TRIPSY_FLYOVER_MUSIC_GENRES.filter(g => g.group === 'region').map(g => g.key);
+  const regions = TRIPSY_FLYOVER_MUSIC_GENRES.filter(g => tripsyFlyoverMusicIsRegional(g)).map(g => g.key);
   assert(['westafrican', 'northafrican', 'arabic', 'persianturkish', 'indian', 'chinese', 'japanese', 'korean', 'southeastasian',
     'brazilian', 'andean', 'mexican', 'cuban', 'tango', 'caribbean', 'spanish', 'greek', 'balkan', 'nordic', 'celtic'].every(k => regions.includes(k))
     && regions.length >= 25,
     'THE ASK: many regional options -- ' + regions.length + ': ' + regions.join(','));
+  // "Find more music options. For example, within Asian music there can be Japanese
+  // traditional, Japanese folk, Chinese traditional, Chinese folk, southeast Asian traditional,
+  // southeast Asian folk, etc." (2026-10-24): each place splits into traditional and folk
+  // (and a popular style where one exists), grouped under region FAMILIES.
+  {
+    const byKey = Object.fromEntries(TRIPSY_FLYOVER_MUSIC_GENRES.map(g => [g.key, g]));
+    const pairs = [['japanesetrad', 'japanesefolk'], ['chinesetrad', 'chinesefolk'], ['southeastasiantrad', 'southeastasianfolk'], ['koreantrad', 'koreanfolk'],
+      ['indianclassical', 'indianfolk'], ['arabicclassical', 'arabicfolk'], ['hawaiiantrad', 'polynesian'], ['cubantrad', 'brazilianfolk'], ['irishtrad', 'italianfolk']];
+    assert(pairs.every(([t, f]) => byKey[t] && byKey[f] && byKey[t].terms !== byKey[f].terms), 'THE ASK: traditional and folk are separate options with their own search words');
+    assert(/traditional/.test(byKey.japanesetrad.terms) && /folk/.test(byKey.japanesefolk.terms) && /traditional/.test(byKey.chinesetrad.terms) && /folk/.test(byKey.chinesefolk.terms)
+      && /traditional/.test(byKey.southeastasiantrad.terms) && /folk/.test(byKey.southeastasianfolk.terms), 'the Asian examples search for traditional vs folk');
+    assert(['japanesetrad', 'japanesefolk', 'chinesetrad', 'chinesefolk', 'southeastasiantrad', 'southeastasianfolk', 'enkajpop', 'kpop', 'thai', 'vietnamese', 'indonesian', 'filipino', 'centralasian', 'himalayan']
+      .every(k => byKey[k] && byKey[k].group === 'asia'), 'the Asian options sit in the Asia family');
+    assert(regions.length >= 90, 'many more regional options now: ' + regions.length);
+    const groupKeys = TRIPSY_FLYOVER_MUSIC_GROUPS.map(g => g.key);
+    assert(TRIPSY_FLYOVER_MUSIC_GENRES.every(g => groupKeys.includes(g.group)) && groupKeys.every(k => TRIPSY_FLYOVER_MUSIC_GENRES.some(g => g.group === k)),
+      'every option belongs to a listed row and no row is empty');
+    assert(['africa', 'mideast', 'asia', 'oceania', 'latin', 'europe', 'northam'].every(k => groupKeys.includes(k)) && groupKeys[0] === 'style', 'the rows are Styles then the seven region families');
+    for (const g of TRIPSY_FLYOVER_MUSIC_GENRES) {
+      let depth = 0, ok = true, inQuote = false;
+      for (const ch of g.terms) { if (ch === '"') inQuote = !inQuote; else if (!inQuote) { if (ch === '(') depth++; else if (ch === ')') { depth--; if (depth < 0) ok = false; } } }
+      assert(ok && depth === 0 && !inQuote, 'search words are balanced Lucene: ' + g.key);
+    }
+    assert(TRIPSY_FLYOVER_MUSIC_GENRES.filter(g => tripsyFlyoverMusicIsRegional(g)).every(g => g.label.trim().length > 2), 'every option is labelled');
+    assert(!tripsyFlyoverMusicIsRegional(byKey.jazz) && tripsyFlyoverMusicIsRegional(byKey.japanesefolk), 'a style is not regional; a place is');
+  }
   // ---- spoken word (language lessons) is never offered ----
   const sq = new URL(tripsyFlyoverMusicSearchUrl('arabic')).searchParams.get('q');
   assert(/AND NOT subject:\([^)]*\blesson\b[^)]*\blanguage\b/.test(sq) && /AND NOT title:\([^)]*\blearn\b/.test(sq),
@@ -713,7 +740,7 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   assert(tripsyFlyoverMusicPreviewStart(240) === 45 && tripsyFlyoverMusicPreviewStart(100) === 25 && tripsyFlyoverMusicPreviewStart(35) === 0
     && tripsyFlyoverMusicPreviewStart(NaN) === 0 && tripsyFlyoverMusicPreviewStart(60) + 30 <= 60,
     'a preview starts a little way into the song and never runs past its end');
-  assert(TRIPSY_FLYOVER_MUSIC_GENRES.every(g => g.group === 'style' || g.group === 'region'), 'every genre is a style or a region');
+  assert(TRIPSY_FLYOVER_MUSIC_GENRES.every(g => g.group === 'style' || tripsyFlyoverMusicIsRegional(g)), 'every genre is a style or a region');
   for (const k of regions) {
     const q = new URL(tripsyFlyoverMusicSearchUrl(k)).searchParams.get('q');
     const g = TRIPSY_FLYOVER_MUSIC_GENRES.find(x => x.key === k);
@@ -727,8 +754,10 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   assert(/if \(!audio\.paused && audio\.readyState >= 3\) elapsed \+=/.test(muPicker) && !/previewFrom/.test(muPicker),
     'the countdown counts time actually played, so a song that cannot be seeked still stops after the clip');
   assert(/TRIPSY_FLYOVER_MUSIC_GROUPS\.map/.test(muPicker) && /g\.group === gr\.key/.test(muPicker) && /data-mu-group/.test(muPicker),
-    'the picker shows Styles and Regions as two rows');
-  assert(/key: 'style'[^}]*Styles[\s\S]*key: 'region'[^}]*Regions/.test(html), 'the two rows are labelled Styles and Regions');
+    'the picker shows one row per group');
+  assert(/key: 'style'[^}]*Styles[\s\S]*key: 'asia'[^}]*Asia[\s\S]*key: 'europe'[^}]*Europe/.test(html), 'the rows are labelled Styles, Asia, Europe…');
+  assert(/<details data-mu-family="\$\{gr\.key\}"\$\{holdsPick \|\| openFamilies\.has\(gr\.key\) \? ' open' : ''\}/.test(muPicker) && /if \(gr\.key === 'style'\) return/.test(muPicker)
+    && /addEventListener\('toggle'/.test(muPicker), 'each region family folds; Styles stay in view; a family stays open while it holds the pick or was unfolded');
   const u = new URL(tripsyFlyoverMusicSearchUrl('jazz'));
   assert(u.host === 'archive.org' && /subject:\(jazz/.test(u.searchParams.get('q')) && /licenseurl:\*creativecommons\*/.test(u.searchParams.get('q'))
     && u.searchParams.getAll('fl[]').includes('identifier') && u.searchParams.get('output') === 'json',
@@ -1218,6 +1247,16 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   assert(tripsyFlyoverModeOf({ category: 'other' }, 'Hike to the summit') === 'hike' && tripsyFlyoverModeOf({ category: 'car' }, 'Car from A to B') === 'car'
     && tripsyFlyoverModeOf({ category: 'other' }, 'Walkabout tour') === 'car', 'a transport leg the trip names as a hike or walk draws as one (whole words only)');
   assert(/mode === 'hike' \? '2 7'/.test(extractFn('playTripsyFlyover')), 'a hike is drawn as a dotted trail');
+  // "The lines between locations on the flyover should always be dashed regardless of the mode
+  // of transportation" (2026-10-24): the ONE trail polyline carries a dash for every mode — the
+  // hike's finer dots, '7 9' for everything else — and never a solid (null) fallback.
+  {
+    const play = extractFn('playTripsyFlyover');
+    const trail = (play.match(/const trail = L\.polyline\([^\n]*\n/) || [''])[0];
+    assert(/dashArray: mode === 'hike' \? '2 7' : '7 9'/.test(trail) && !/dashArray:[^\n]*null/.test(trail),
+      'THE ASK: every leg\'s trail is dashed whatever the transport — no mode draws a solid line');
+    assert((play.match(/dashArray/g) || []).length === 1, 'there is one trail polyline, so no second drawing can bring a solid line back');
+  }
 }
 
 // ---- Layovers ("where there is a layover on a flight, show the flight to the layover cities,

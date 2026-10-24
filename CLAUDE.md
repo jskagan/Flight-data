@@ -4092,6 +4092,12 @@ WebView's support for recording is unproven.
     are UNWRAPPED both along the path and across stops (`tripsyFlyoverUnwrap`,
     `tripsyFlyoverPlayableStops`), so LAX→SIN crosses the Pacific instead of looping back
     across the whole map.
+    **Every trail is DASHED, whatever the transport** ("The lines between locations on the
+    flyover should always be dashed regardless of the mode of transportation," 2026-10-24 —
+    only a flight and a hike were dashed; a car, taxi, bus, train or boat drew a solid line).
+    `animateLeg`'s one trail polyline is `dashArray: mode === 'hike' ? '2 7' : '7 9'`, no
+    solid fallback; the hike keeps its finer dots. Sampled in Chromium over flight / drive /
+    train / hike legs: every stroked route path carried a dash. `flyover_test.js` pins it.
   - **Vehicle direction:** ✈️ is rotated along the heading (+45°, since the glyph points
     up-right); ground glyphs flip when heading right.
   - **Controls:** pause/resume (space) freezes both the vehicle clock and the slideshow
@@ -4456,6 +4462,25 @@ WebView's support for recording is unproven.
     Portuguese & Fado, Italian, French, Greek, Balkan & Eastern European, Russian, Nordic,
     Celtic, American Roots. A region is just its own set of archive subject words, so adding
     one is one array entry.
+    **Regions are now ~95 options under seven folding FAMILY rows, each place split into
+    its music as a whole, Traditional, Folk and (where one is well known) a popular style**
+    ("Find more music options. For example, within Asian music there can be Japanese
+    traditional, Japanese folk, Chinese traditional, Chinese folk, southeast Asian traditional,
+    southeast Asian folk, etc.," 2026-10-24). `TRIPSY_FLYOVER_MUSIC_GROUPS` is Styles, then
+    Africa, Middle East, Asia, Pacific & Oceania, Latin America & Caribbean, Europe, North
+    America; `tripsyFlyoverMusicIsRegional(g)` is "any group but style" (the old single
+    `region` group is gone — don't test for it). A split entry's `terms` AND the place words
+    with the kind words in Lucene (`((japanese OR japan) AND (folk OR "folk song"))`, plus
+    bare names that need no qualifier — minyo, gagaku, pinpeat), and the search URL wraps
+    them in `subject:(…)` unchanged; a narrow entry can come back empty, which the picker
+    already reports ("Nothing found — try another"). In the picker Styles stay in view and
+    each family is a `<details data-mu-family>` that opens on tap (`openFamilies`, kept across
+    the picker's whole-DOM re-renders via its `toggle` event) or while it holds the picked
+    genre — 100+ chips flat made the box twice the screen. Chip labels read
+    "🏯 Japanese · Folk". The old region keys all survive. Verified in Chromium: eight rows,
+    102 chips, Asia unfolds and stays open after a pick, the Japanese folk search carries the
+    ANDed words. `flyover_test.js` pins the pairs, the families, and balanced parentheses
+    in every `terms` string.
   - **Spoken word is never offered** ("Exclude lessons about learning a language," same day —
     a regional search turned up language courses). The search query adds `AND NOT subject:(…)
     AND NOT title:(…)` over `TRIPSY_FLYOVER_MUSIC_SPOKEN_WORDS` (lesson, language, learn,
