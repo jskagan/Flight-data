@@ -1370,9 +1370,13 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     && /arrive\(r, first, stayNo\(first\), !openWithPhotos\)/.test(play),
     'the first destination\'s pictures play before the map, and are not repeated when the map lands there');
   const iClose = play.indexOf('if (closeWithPhotos) {'), iEndMap = play.lastIndexOf('map.flyToBounds(all');
-  assert(iClose > iEndMap && /arrive\(r, b, stayNo\(b\), !\(closeWithPhotos && b === last\)\)/.test(play)
-    && play.indexOf("'The end'") > iClose,
+  assert(iClose > iEndMap && play.indexOf("'The end'") > iClose && /if \(closeWithPhotos\) \{[\s\S]*?slideshow\(r, last\)/.test(play),
     'the last destination\'s pictures play after the closing map, before "The end"');
+  // "On the flyover when the last flight arrives at its destination, zoom the map out to show
+  // the full route" (2026-10-24): the last leg lands with no zoom into its city.
+  assert(/if \(b === last\) \{ showCard\(b\.label, stopSub\(b, stayNo\(b\)\)\); break; \}\s*if \(!\(await arrive\(r, b, stayNo\(b\), true\)\)\) return;/.test(play)
+    && play.indexOf('if (b === last) {') < iEndMap && /if \(!last\) clearDestLabel\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(all/.test(play),
+    'the last leg skips arrive(): its card goes up and the map zooms straight out to the whole route, keeping its name');
   assert(!/detectRetina: true/.test(extractFn('tripsyFlyoverAddTiles')) && /zoomSnap: 1, zoomAnimation: false \}/.test(play),
     'tiles are fetched at the zoom shown (no retina offset, which left gaps) and only whole zoom levels are used');
   // "The entire screen does go to orange, but then the app immediately shows the zoomed out
@@ -1418,8 +1422,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'arriving names the destination beside its dot and lets the tiles land before photos cover the map');
   const iLeg = play.indexOf('const legBounds'), iClear = play.indexOf('clearDestLabel();', iLeg);
   assert(iClear > iLeg && iClear < play.indexOf('map.flyToBounds(legBounds', iLeg)
-    && /clearDestLabel\(\);\s*clearViaLabels\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(all/.test(play),
-    'the destination name is taken away before the map pulls back out (next leg, and the closing map)');
+    && /clearViaLabels\(\);\s*if \(!last\) clearDestLabel\(\);\s*if \(!\(await untilMoveEnd\(r, \(\) => map\.flyToBounds\(all/.test(play),
+    'the destination name is taken away before the next leg pulls back out; the closing map keeps the LAST destination\'s name (its arrival IS that zoom-out, 2026-10-24)');
   assert(/\.tfo-dot \{ background: #111;/.test(html), 'location dots are black');
   assert(/const m = L\.marker\(\[v\.lat, v\.lng\], \{ icon: L\.divIcon\(\{ className: 'tfo-via-label tfo-dest-label'/.test(play),
     'a layover name is drawn exactly like every other name, to the right of its dot');

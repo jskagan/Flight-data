@@ -4073,6 +4073,15 @@ WebView's support for recording is unproven.
     plays before the overview; the map later lands there with just its card. The last stop
     lands with just its card too, then the closing whole-route map, then its slideshow, then
     "The end". `arrive(r, s, i, withPhotos)` / `slideshow(r, s)`; preview is unchanged.
+    **The LAST leg never zooms into its city — landing IS the zoom-out** ("On the flyover
+    when the last flight arrives at its destination, zoom the map out to show the full
+    route," 2026-10-24): the leg loop `break`s at `b === last` with the stop's card up and
+    no `arrive()` (which would fly in to level 10/9 first); the closing `flyToBounds(all)`
+    that follows is the arrival, so `clearDestLabel` is skipped there (`if (!last)`) and the
+    destination's dot and name ride the pull-out; tiles are awaited, a 1.6 s hold, then the
+    last stop's slideshow (if any) and "The end". A one-destination trip keeps its old
+    landing. Sampled in Chromium: the leg before still lands at z 11; the final flight goes
+    from z 3 straight to the whole-route z 1 under the destination's card.
   - **Route geometry:** flights follow a great circle (`tripsyFlyoverGreatCircle`). Longitudes
     are UNWRAPPED both along the path and across stops (`tripsyFlyoverUnwrap`,
     `tripsyFlyoverPlayableStops`), so LAX→SIN crosses the Pacific instead of looping back
