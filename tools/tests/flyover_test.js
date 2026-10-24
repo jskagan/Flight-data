@@ -1205,6 +1205,13 @@ eval(extractFn('tripsyFlyoverVideoAudio'));
 eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join('\n').replace(/^const /gm, 'var '));
 {
   assert(TRIPSY_FLYOVER_MODES.includes('hike') && /hike: '🚶'/.test(html) && /hike: 'Hike'/.test(html), 'THE ASK: Hike is one of the transports, shown as 🚶 Hike');
+  // "Add bus as a form of transportation" (2026-10-24): a transport of its own in the fly-over,
+  // ranked with the car (a bus to the airport never outranks the flight), derived from a bus
+  // category, and drawn as 🚌 by the menus and the player.
+  assert(TRIPSY_FLYOVER_MODES.includes('bus') && /bus: '🚌'/.test(html) && /bus: 'Bus'/.test(html) && /const TRIPSY_FLYOVER_MODE_RANK = \{[^}]*bus: 1/.test(html),
+    'THE ASK: Bus is one of the transports, shown as 🚌 Bus, ranked with a drive');
+  assert(tripsyFlyoverModeOf({ category: 'bus' }) === 'bus' && tripsyFlyoverModeOf({ category: 'coach' }) === 'bus' && tripsyFlyoverModeOf({ category: 'car' }) === 'car'
+    && tripsyFlyoverModeOf({ category: 'airplane' }) === 'plane', 'a bus or coach category derives as a bus; a car is still a car');
   assert(/<select class="field-input" data-flyover-mode-select[^`]*\$\{TRIPSY_FLYOVER_MODES\.map/.test(extractFn('showTripsyFlyover')),
     'the leg drop-down offers it');
   assert(/TRIPSY_FLYOVER_MODES\.map/.test(extractFn('tripsyFlyoverAskMode')), 'and so does the "How did you get there?" question');

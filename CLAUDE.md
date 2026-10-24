@@ -3669,6 +3669,12 @@ WebView's support for recording is unproven.
   keeps it across Rebuild. Each card's leg is a DROP-DOWN (`data-flyover-mode-select`,
   owner-only; "Allow the user to change the mode of transportation with a drop down menu,"
   same day) to change the transport any time, with a ❓ beside it while still a guess.
+  **Bus is a transport too** ("Add bus as a form of transportation," 2026-10-24): `bus` (🚌 Bus,
+  after Taxi in `TRIPSY_FLYOVER_MODES`) is ranked with the car (a bus to the airport never
+  outranks the flight) and drawn like one; a `bus`/`coach` category derives as a bus in
+  `tripsyFlyoverModeOf` (it used to fold into the car). The itinerary's own 🚌 Bus event type
+  (`TRIPSY_TRANSPORTATION_TYPES`) already existed and is unchanged. Verified in Chromium: the
+  card drop-down and the question dialog list it, and the player drives the 🚌 along the leg.
   **Hike is a transport too** ("Add an option to hike between locations for the flyover,"
   same day): `hike` (🚶 Hike — the walker, chosen over 🧑‍🦯, which is the white-cane symbol, since no
   hiker-with-a-stick emoji exists) is in `TRIPSY_FLYOVER_MODES`, the one list both the drop-down and
