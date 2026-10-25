@@ -1444,6 +1444,19 @@
   .tfo-dest-label.tfo-grow span { transform: translate(12px, -50%) scale(1); }
   /* The arrival burst: the destination dot swelling to fill the screen before its photos. */
   #tripsy-flyover-player .tfo-burst { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; box-sizing: border-box; border: 2px solid #fff; border-radius: 50%; background: #111; z-index: 998; pointer-events: none; }
+  /* A storm plotted on the map (2026-10-25): its dated track as a dotted blue line, a slowly
+     spinning 🌀 at its position on the leg's date, and a name tag to the right, tinted so it
+     reads as weather rather than as a destination. The spin honours .tfo-paused like every
+     other animation in the player. */
+  .tfo-storm { background: none; border: none; }
+  .tfo-storm span { display: block; font-size: 30px; line-height: 36px; text-align: center; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.55)); animation: tfo-storm-spin 6s linear infinite; }
+  @keyframes tfo-storm-spin { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
+  .tfo-storm-label span { transform: translate(22px, -50%); background: rgba(31,78,140,0.88); font-size: 16px; }
+  .tfo-storm-label small { display: block; font-weight: 500; font-size: 12px; opacity: 0.9; }
+  /* The storm's tag pinned at the map's edge when the storm itself is off screen (a short hop
+     keeps its own frame): the same tag, with the distance and direction added. */
+  #tripsy-flyover-player .tfo-storm-edge { position: absolute; z-index: 950; pointer-events: none; transform: translate(-50%, -50%); white-space: nowrap; font: 700 16px/1.2 system-ui, sans-serif; color: #fff; background: rgba(31,78,140,0.88); padding: 4px 10px; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.4); }
+  #tripsy-flyover-player .tfo-storm-edge small { display: block; font-weight: 500; font-size: 12px; opacity: 0.9; }
   .tfo-vehicle span { display: block; font-size: 32px; line-height: 40px; text-align: center; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5)); }
   .tfo-vehicle span img { display: block; width: 36px; height: 36px; margin: 2px auto; }
   /* ---- Wardrobe (Phase 1: garment library + per-trip selection) ---- */
@@ -17834,6 +17847,122 @@ const TRIPSY_FLYOVER_SHARED_DOT_KM = 40;
 // is only for an airport and a hotel of ONE city, so it now also needs the names to match).
 const TRIPSY_FLYOVER_SAME_POINT_KM = 2;
 
+// ---- Storms plotted on the fly-over map ("for the portion of the trip that is in Japan, can
+// you find the location of the typhoon near Japan and plot that on the map?", 2026-10-25).
+// A storm is a DATED TRACK; the player draws it on any leg whose date falls inside the track's
+// span (plus a day either side) while the storm's position that day is within
+// TRIPSY_FLYOVER_STORM_NEAR_KM of the leg's origin or destination -- the whole track as a
+// dotted line, a spinning 🌀 at the storm's position on the leg's date (interpolated between
+// fixes), and a name tag with that date. The dates decide WHICH legs show it, so the same
+// trip's Singapore legs (early October) never see a storm that only formed on the 18th, and a
+// trip elsewhere in the same week is out of range. Positions are UTC fixes from the agency
+// bulletins named in `source`; `approx: true` marks a point read off a forecast or a prose
+// report rather than a numbered fix. Add a storm here when one crosses a trip; a session
+// cannot write the data file, and public weather is not personal data.
+const TRIPSY_FLYOVER_STORM_NEAR_KM = 1500;
+// A leg's frame widens to take the storm in only when that costs at most this many zoom
+// levels; a short hop (Fukuoka → Nakatsu, 70 km) with the storm 700 km out would otherwise
+// zoom out until the two towns' names sat on top of each other. Past that cost the leg keeps
+// its own frame and an EDGE tag names the storm with its distance and direction.
+const TRIPSY_FLYOVER_STORM_FRAME_LEVELS = 2;
+// Compass direction from one point to another, eight points. Pure.
+function tripsyFlyoverCompass(from, to) {
+  const rad = x => x * Math.PI / 180;
+  const dLng = rad(to.lng - from.lng);
+  const y = Math.sin(dLng) * Math.cos(rad(to.lat));
+  const x = Math.cos(rad(from.lat)) * Math.sin(rad(to.lat)) - Math.sin(rad(from.lat)) * Math.cos(rad(to.lat)) * Math.cos(dLng);
+  const deg = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  return ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8];
+}
+const TRIPSY_FLYOVER_STORMS = [
+  { id: 'champi-2026', name: 'Typhoon Champi', shortName: 'Champi', jmaNumber: 30,
+    source: 'JMA / JTWC advisories via Weathernews, NWS Guam, Japan Times, Wunderground (Oct 20–25, 2026); Oct 26–27 from the JMA/CWA forecast track',
+    track: [
+      { at: '2026-10-20T06:00Z', lat: 16.5, lng: 134.4, status: 'Super typhoon · 155 mph' },
+      { at: '2026-10-21T09:00Z', lat: 19.0, lng: 128.4, status: 'Super typhoon · 175 mph (peak)' },
+      { at: '2026-10-22T06:00Z', lat: 21.2, lng: 124.9, status: 'Typhoon · 100 kt' },
+      { at: '2026-10-23T03:00Z', lat: 23.2, lng: 123.6, status: 'Typhoon · 955 hPa · 80 kt' },
+      { at: '2026-10-23T18:00Z', lat: 24.7, lng: 122.5, status: 'Typhoon · near the Sakishima Islands' },
+      { at: '2026-10-24T06:00Z', lat: 26.3, lng: 123.2, status: 'Typhoon · north of the Sakishima Islands', approx: true },
+      { at: '2026-10-25T06:00Z', lat: 29.0, lng: 124.7, status: 'Tropical storm · 60 mph · becoming extratropical' },
+      { at: '2026-10-26T06:00Z', lat: 32.3, lng: 131.0, status: 'Extratropical low · approaching Kyushu (forecast)', approx: true },
+      { at: '2026-10-27T06:00Z', lat: 34.0, lng: 137.0, status: 'Extratropical low · south of Honshu (forecast)', approx: true },
+    ] },
+];
+// The storm's position at a moment (ms since epoch): interpolated between the two fixes around
+// it; up to a day before the first or after the last fix holds that end's position (a leg on
+// the day after the last forecast point still shows the storm where it was). Beyond that, null.
+function tripsyFlyoverStormPosition(storm, atMs) {
+  const pts = ((storm && storm.track) || []).map(p => ({ ...p, ms: Date.parse(p.at) })).filter(p => isFinite(p.ms) && isFinite(+p.lat) && isFinite(+p.lng)).sort((a, b) => a.ms - b.ms);
+  if (!pts.length || !isFinite(atMs)) return null;
+  const DAY = 86400000;
+  if (atMs < pts[0].ms - DAY || atMs > pts[pts.length - 1].ms + DAY) return null;
+  if (atMs <= pts[0].ms) return { lat: +pts[0].lat, lng: +pts[0].lng, status: pts[0].status || '', approx: !!pts[0].approx };
+  const lastP = pts[pts.length - 1];
+  if (atMs >= lastP.ms) return { lat: +lastP.lat, lng: +lastP.lng, status: lastP.status || '', approx: !!lastP.approx };
+  for (let i = 1; i < pts.length; i++) {
+    if (atMs > pts[i].ms) continue;
+    const a = pts[i - 1], b = pts[i], f = (atMs - a.ms) / (b.ms - a.ms);
+    // The strength is the LAST fix's: what the storm was known to be at that moment.
+    return { lat: +a.lat + (+b.lat - +a.lat) * f, lng: +a.lng + (+b.lng - +a.lng) * f, status: a.status || '', approx: !!(a.approx || b.approx) };
+  }
+  return null;
+}
+// The moment a leg is judged at: midday UTC on the DAY of the destination's arrival/check-in
+// (else the origin's departure). Stop times are the trip's local wall-clock digits with no
+// offset, so the day is all they can be trusted for; midday lands "Oct 25" between that day's
+// fixes rather than at its edge.
+function tripsyFlyoverLegMoment(a, b) {
+  const t = String((b && b.start) || (a && a.end) || '');
+  const day = /^\d{4}-\d{2}-\d{2}/.test(t) ? t.slice(0, 10) : '';
+  if (!day) return NaN;
+  const ms = Date.parse(day + 'T12:00:00Z');
+  return isFinite(ms) ? ms : NaN;
+}
+// Which storms a leg a -> b shows: the storm has a position on the leg's date, within
+// TRIPSY_FLYOVER_STORM_NEAR_KM of either end. Pure.
+function tripsyFlyoverLegStorms(storms, a, b) {
+  const atMs = tripsyFlyoverLegMoment(a, b);
+  if (!isFinite(atMs)) return [];
+  const out = [];
+  for (const storm of storms || []) {
+    const pos = tripsyFlyoverStormPosition(storm, atMs);
+    if (!pos) continue;
+    const near = [a, b].some(s => s && isFinite(+s.lat) && isFinite(+s.lng) && tripsyFlyoverDistanceKm(s, pos) <= TRIPSY_FLYOVER_STORM_NEAR_KM);
+    if (near) out.push({ storm, pos, atMs });
+  }
+  return out;
+}
+function tripsyFlyoverStormLabel(storm, atMs) {
+  const day = new Date(atMs).toISOString().slice(0, 10);
+  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][+day.slice(5, 7) - 1];
+  return `🌀 ${storm.name || 'Storm'} · ${mon} ${+day.slice(8, 10)}`;
+}
+// The setup page's one-line note: "🌀 Typhoon Champi is plotted on 3 legs (Singapore → Fukuoka,
+// Fukuoka → Nakatsu, …), Oct 23–26 — positions from JMA / JTWC …". Empty when nothing applies.
+function tripsyFlyoverStormsNoteText(entries) {
+  return (entries || []).map(({ storm, legs }) => {
+    const days = legs.map(l => l.atMs).sort((x, y) => x - y);
+    const d = ms => { const k = new Date(ms).toISOString().slice(0, 10); return `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][+k.slice(5, 7) - 1]} ${+k.slice(8, 10)}`; };
+    const span = days.length ? (d(days[0]) === d(days[days.length - 1]) ? d(days[0]) : `${d(days[0])}–${d(days[days.length - 1])}`) : '';
+    const names = legs.slice(0, 3).map(l => `${l.from} → ${l.to}`).join(', ') + (legs.length > 3 ? ', …' : '');
+    return `🌀 ${storm.name} is plotted on ${legs.length} leg${legs.length === 1 ? '' : 's'} (${names})${span ? `, ${span}` : ''}${storm.source ? ` — positions from ${storm.source}` : ''}.`;
+  }).join(' ');
+}
+// The storms any leg of a fly-over shows, for the setup page's note. Pure.
+function tripsyFlyoverRecordStorms(stops, storms = TRIPSY_FLYOVER_STORMS) {
+  const shown = (stops || []).filter(s => s && !s.removed && isFinite(+s.lat) && isFinite(+s.lng));
+  const seen = new Map();
+  for (let i = 1; i < shown.length; i++) {
+    for (const { storm, atMs } of tripsyFlyoverLegStorms(storms, shown[i - 1], shown[i])) {
+      const e = seen.get(storm.id) || { storm, legs: [] };
+      e.legs.push({ from: shown[i - 1].label || '', to: shown[i].label || '', atMs });
+      seen.set(storm.id, e);
+    }
+  }
+  return [...seen.values()];
+}
+
 // The leg's mode from a transportation event's raw record: Tripsy's category first, the
 // title shape ("Flight from …", "Train from …") as a fallback.
 function tripsyFlyoverModeOf(raw, summary) {
@@ -19246,6 +19375,7 @@ async function showTripsyFlyover(tripKey) {
       </div>
       <div data-flyover-status style="font-size:12px; color:var(--muted); min-height:16px; margin-bottom:4px;"></div>
       <div data-flyover-intake style="font-size:11px; color:var(--muted); min-height:14px; margin-bottom:8px;"></div>
+      <div data-flyover-storms style="font-size:12px; color:#8db4ef; margin-bottom:8px;"></div>
       <div data-flyover-body><div style="padding:24px 0; color:var(--muted);">Loading…</div></div>
       ${isOwner ? `<div class="tfo-ss-footer" style="justify-content:flex-end;">
         <button class="tripsy-close-x" data-flyover-close title="Close" aria-label="Close">✕</button>
@@ -19260,7 +19390,13 @@ async function showTripsyFlyover(tripKey) {
   // upload state -- so a stalled pick can be told apart: "Waiting for Photos" never
   // becoming "received" is iOS's export; "received" with nothing after is the page.
   const intakeEl = ov.querySelector('[data-flyover-intake]');
-  const paintIntake = () => { if (!intakeEl) return; intakeEl.textContent = tripsyFlyoverIntakeReceiptText(tripsyFlyoverIntakeLoad(), record); };
+  const paintIntake = () => {
+    if (intakeEl) intakeEl.textContent = tripsyFlyoverIntakeReceiptText(tripsyFlyoverIntakeLoad(), record);
+    // Which storms the player will plot, and on which legs (2026-10-25) -- so the owner knows
+    // before pressing Play, and knows where the positions came from.
+    const stormsEl = ov.querySelector('[data-flyover-storms]');
+    if (stormsEl) stormsEl.textContent = tripsyFlyoverStormsNoteText(tripsyFlyoverRecordStorms(record && record.stops));
+  };
   let closed = false;
   const dragState = { drag: null, suppressTapUntil: 0 };
   // A background photo upload landing (or failing) repaints the page: the record adopts the
@@ -19271,7 +19407,8 @@ async function showTripsyFlyover(tripKey) {
   let uploadFlush = null, uploadLanded = false;
   const onUpload = e => {
     if (closed || !e.detail || e.detail.tripKey !== trip.key) return;
-    if (!tripsyFlyoverFailedUploads.has(e.detail.pendingId)) uploadLanded = true;
+    // A video's progress tick only repaints its badge -- nothing has landed to save.
+    if (e.detail.progress == null && !tripsyFlyoverFailedUploads.has(e.detail.pendingId)) uploadLanded = true;
     if (uploadFlush) clearTimeout(uploadFlush);
     uploadFlush = setTimeout(() => {
       uploadFlush = null;
@@ -19476,26 +19613,33 @@ async function showTripsyFlyover(tripKey) {
       await new Promise(r => setTimeout(r, 0));
     }
     if (closed && queued) save();
+    // Videos go the same way as photos: STAGED at once and uploaded in the background
+    // ("can we just automatically route all videos through drive and do that in the
+    // background so I can still use the app?", 2026-10-25) -- the page used to hold a
+    // "Uploading video… 40%" status in the foreground for the whole resumable upload. Only
+    // the size check and the poster frame (a local decode, fail-soft) happen here; the video's
+    // own bytes go up through tripsyFlyoverQueueUpload like a photo's, with a progress badge
+    // on its tile, and the poster is a pending PHOTO of its own, resolved with the rest.
     for (let k = 0; k < n; k++) {
       const file = files[k];
       if (!tripsyFlyoverFileIsVideo(file)) continue;
       fps[k] = await tripsyFlyoverFileFingerprint(file);
       if (fps[k] && known.has(fps[k])) { skipped++; continue; }
       if (fps[k]) known.add(fps[k]);
-      const what = `video${n > 1 ? ` ${k + 1} of ${n}` : ''}`;
-      status(`Uploading ${what}…`);
       try {
+        const rec = await tripsyFlyoverStagePendingVideo(file);
         // Nothing is asked before the upload: a video plays under the fly-over music by
         // default, and the sound is switched from the player's own buttons (2026-10-25).
-        const rec = await tripsyFlyoverUploadVideo(file, f => { if (!closed) status(`Uploading ${what}… ${Math.round(f * 100)}%`); });
         rec.audio = 'music';
         if (fps[k]) rec.src = fps[k];
         updateStop(id, { photos: [...(stopNow().photos || []), rec] });
         added.push(rec);
-        done++;
+        if (rec.posterId) tripsyFlyoverQueueUpload(trip.key, rec.posterId);
+        tripsyFlyoverQueueUpload(trip.key, rec.driveFileId);
+        queued++;
       } catch (e) {
         console.error('fly-over media upload failed:', e);
-        problems.push(e && e.userFacing ? e.message : `A video couldn’t be uploaded.`);
+        problems.push(e && e.userFacing ? e.message : `A video couldn’t be added.`);
       }
     }
     if (skipped) problems.push(`${skipped} already on this fly-over — skipped.`);
@@ -20212,6 +20356,8 @@ function tripsyFlyoverPreparePending(pendingId) {
   if (have) return have;
   const file = tripsyFlyoverPendingBlobs.get(pendingId);
   if (!file) return Promise.reject(new Error('pending photo not available'));
+  // A VIDEO is never resized or decoded as an image: its bytes go up as they are.
+  if (tripsyFlyoverFileIsVideo(file)) { const v = Promise.resolve({ full: file, thumb: file }); tripsyFlyoverPendingPrepared.set(pendingId, v); return v; }
   const p = _tripsyFlyoverPrepChain.then(async () => {
     const out = await tripsyFlyoverPrepareImage(file, TRIPSY_FLYOVER_UPLOAD_PX, TRIPSY_FLYOVER_THUMB_PX);
     // The original bytes are no longer needed (the upload takes the prepared copy, a retry
@@ -20263,7 +20409,13 @@ function tripsyFlyoverResolvePendingIds(record, uploaded) {
   const fix = id => (map.has(id) ? map.get(id) : id);
   let changed = false;
   const stops = record.stops.map(s => {
-    const photos = (s.photos || []).map(p => (map.has(p.driveFileId) ? (changed = true, { ...p, driveFileId: map.get(p.driveFileId) }) : p));
+    // A video's poster frame is a pending photo of its own (background video uploads).
+    const photos = (s.photos || []).map(p => {
+      let q = p;
+      if (map.has(q.driveFileId)) { changed = true; q = { ...q, driveFileId: map.get(q.driveFileId) }; }
+      if (q.posterId && map.has(q.posterId)) { changed = true; q = { ...q, posterId: map.get(q.posterId) }; }
+      return q;
+    });
     const pages = Array.isArray(s.pages) ? s.pages.map(pg => {
       const ids = (pg.ids || []).map(fix);
       if (ids.some((v, i) => v !== (pg.ids || [])[i])) { changed = true; return { ...pg, ids }; }
@@ -20603,10 +20755,38 @@ function tripsyFlyoverPumpUploads() {
     tripsyFlyoverRunUpload(job).finally(() => { _tripsyFlyoverUploadsRunning--; tripsyFlyoverPumpUploads(); });
   }
 }
+// Upload progress of a pending VIDEO (0..1), for its tile's badge; photos are too quick to show one.
+const tripsyFlyoverUploadProgress = new Map();
 async function tripsyFlyoverRunUpload({ tripKey, pendingId }) {
   const file = tripsyFlyoverPendingBlobs.get(pendingId);
-  const notify = () => { try { document.dispatchEvent(new CustomEvent('tripsy-flyover-upload', { detail: { tripKey, pendingId } })); } catch (e) {} };
+  const notify = extra => { try { document.dispatchEvent(new CustomEvent('tripsy-flyover-upload', { detail: { tripKey, pendingId, ...(extra || {}) } })); } catch (e) {} };
   if (!file) return;
+  if (tripsyFlyoverFileIsVideo(file)) {
+    // A video: the resumable upload (8 MB pieces) with its progress on the tile, then the
+    // bytes are let go -- a 200 MB clip must not sit in memory all session. Its poster went
+    // up as a pending photo of its own.
+    try {
+      tripsyFlyoverUploadProgress.set(pendingId, 0);
+      let lastTick = 0;
+      const driveFileId = await uploadBlobToDriveResumable(file, `flyover-video-${Date.now()}`, file.type || 'video/mp4', f => {
+        tripsyFlyoverUploadProgress.set(pendingId, f);
+        const now = Date.now();
+        if (now - lastTick > 800) { lastTick = now; notify({ progress: f }); }
+      });
+      if (!driveFileId) throw new Error('Drive returned no file id');
+      tripsyPutCachedPhotoBlob(driveFileId, file);
+      tripsyFlyoverUploadedIds.set(pendingId, driveFileId);
+      tripsyFlyoverPendingBlobs.delete(pendingId);
+      tripsyFlyoverPendingPrepared.delete(pendingId);
+      tripsyFlyoverScheduleResolvedSave(tripKey);
+    } catch (e) {
+      console.error('fly-over background video upload failed:', e);
+      tripsyFlyoverFailedUploads.add(pendingId);
+    }
+    tripsyFlyoverUploadProgress.delete(pendingId);
+    notify();
+    return;
+  }
   try {
     // The prepared 1600px copy (one decode per photo, shared with the thumbnail).
     const { full: small } = await tripsyFlyoverPreparePending(pendingId);
@@ -20665,11 +20845,13 @@ function tripsyFlyoverThumbHtml(p, w = 84, h = 64, extra = '') {
   const vid = tripsyFlyoverIsVideo(p);
   const paintId = vid ? (p.posterId || '') : p.driveFileId;
   const len = vid ? tripsyFlyoverDurationLabel(p.duration) : '';
-  const pending = !vid && tripsyFlyoverPhotoIsPending(p.driveFileId);
+  const pending = tripsyFlyoverPhotoIsPending(p.driveFileId);
   const failed = pending && tripsyFlyoverFailedUploads.has(p.driveFileId);
-  const badge = !pending ? '' : `<span style="position:absolute; right:4px; bottom:3px; font-size:11px; font-weight:700; color:#fff; background:${failed ? 'rgba(180,40,30,0.85)' : 'rgba(0,0,0,0.65)'}; padding:1px 5px; border-radius:4px;" title="${failed ? 'Upload failed' : 'Uploading in the background'}">${failed ? '⚠️' : '⬆️'}</span>`;
+  // A video still uploading shows how far it has got (background video uploads, 2026-10-25).
+  const prog = vid && pending && !failed && tripsyFlyoverUploadProgress.has(p.driveFileId) ? ` ${Math.round(tripsyFlyoverUploadProgress.get(p.driveFileId) * 100)}%` : '';
+  const badge = !pending ? '' : `<span style="position:absolute; right:4px; bottom:3px; font-size:11px; font-weight:700; color:#fff; background:${failed ? 'rgba(180,40,30,0.85)' : 'rgba(0,0,0,0.65)'}; padding:1px 5px; border-radius:4px;" title="${failed ? 'Upload failed' : 'Uploading in the background'}">${failed ? '⚠️' : '⬆️' + prog}</span>`;
   return `<div style="position:relative; width:${w}px; height:${h}px; border-radius:6px; overflow:hidden; background:${vid ? '#111' : 'var(--panel-2)'} center/cover no-repeat; ${extra}"${paintId ? ` data-diary-img="${esc(paintId)}" data-diary-thumb` : ''}>${vid
-    ? `<span style="position:absolute; left:4px; bottom:3px; font-size:11px; font-weight:700; color:#fff; background:rgba(0,0,0,0.65); padding:1px 5px; border-radius:4px;" title="${tripsyFlyoverVideoAudio(p) === 'music' ? 'Plays under the fly-over music' : 'Plays with its own sound'}">🎬${len ? ` ${len}` : ''} ${tripsyFlyoverVideoAudio(p) === 'music' ? '🎵' : '🔊'}</span>`
+    ? `<span style="position:absolute; left:4px; bottom:3px; font-size:11px; font-weight:700; color:#fff; background:rgba(0,0,0,0.65); padding:1px 5px; border-radius:4px;" title="${tripsyFlyoverVideoAudio(p) === 'music' ? 'Plays under the fly-over music' : 'Plays with its own sound'}">🎬${len ? ` ${len}` : ''} ${tripsyFlyoverVideoAudio(p) === 'music' ? '🎵' : '🔊'}</span>${badge}`
     : badge}</div>`;
 }
 // ONE tile per PAGE on the setup page ("show each page as a single thumbnail. On a page where
@@ -20698,7 +20880,7 @@ function tripsyFlyoverPageThumbHtml(page, w = 84, h = 64, extra = '') {
 // iOS exports every item picked -- a HEIC becomes a JPEG, a video may be transcoded, and a
 // photo kept in iCloud is downloaded first -- which for 100+ items takes a minute or more,
 // with nothing a page can do but say so.
-const TRIPSY_FLYOVER_PICK_WAITING = 'Waiting for Photos to hand over your selection… iOS prepares every item first (a photo kept in iCloud is downloaded, a video converted), which can take a minute or more, or stall on a very large pick — if nothing arrives, try again with 30 or fewer at a time.';
+const TRIPSY_FLYOVER_PICK_WAITING = 'Waiting for Photos to hand over your selection… iOS prepares every item first (a photo kept in iCloud is downloaded, a video converted), which can take a minute or more, or stall on a very large pick — if nothing arrives, close the sheet and use 📁 Import from Drive folder for a big batch, or try again with 30 or fewer at a time.';
 // `kind`: 'all' (image/*,video/*; the one button, 2026-10-25 -- a big batch goes through the
 // Drive folder import instead), 'photos' or 'videos'.
 const TRIPSY_FLYOVER_PICK_ACCEPT = { photos: 'image/*', videos: 'video/*', all: 'image/*,video/*' };
@@ -20847,12 +21029,30 @@ function tripsyFlyoverVideoInfo(file) {
 }
 // Uploads one video (resumable) plus its poster frame, and returns the stop's record for
 // it. Too-big files are refused with a message the owner can act on.
+function tripsyFlyoverVideoTooBig(file) {
+  if (!(file.size > TRIPSY_FLYOVER_VIDEO_MAX_BYTES)) return null;
+  const e = new Error(`“${file.name || 'This video'}” is ${Math.round(file.size / 1048576)} MB — the limit is ${Math.round(TRIPSY_FLYOVER_VIDEO_MAX_BYTES / 1048576)} MB. Trim it in Photos first.`);
+  e.userFacing = true;
+  return e;
+}
+// A picked video staged for a BACKGROUND upload (2026-10-25): the record a stop keeps, with
+// the video's bytes under a pending id (tripsyFlyoverPendingBlobs, like a photo's) and its
+// poster frame -- grabbed here, a local decode -- staged as a pending PHOTO of its own, so
+// the ordinary photo queue uploads it and tripsyFlyoverResolvePendingIds swaps `posterId`
+// along with `driveFileId`. The size check is the one thing refused up front.
+async function tripsyFlyoverStagePendingVideo(file) {
+  const tooBig = tripsyFlyoverVideoTooBig(file);
+  if (tooBig) throw tooBig;
+  const info = await tripsyFlyoverVideoInfo(file);
+  const mime = file.type || 'video/mp4';
+  const pendingId = tripsyFlyoverStagePendingPhoto(file);
+  const posterId = info.poster ? tripsyFlyoverStagePendingPhoto(info.poster) : null;
+  return { driveFileId: pendingId, kind: 'video', mime, posterId, duration: info.duration, width: info.width, height: info.height, addedAt: new Date().toISOString() };
+}
+// The foreground upload (the Drive-import path and tests still use it).
 async function tripsyFlyoverUploadVideo(file, onProgress) {
-  if (file.size > TRIPSY_FLYOVER_VIDEO_MAX_BYTES) {
-    const e = new Error(`“${file.name || 'This video'}” is ${Math.round(file.size / 1048576)} MB — the limit is ${Math.round(TRIPSY_FLYOVER_VIDEO_MAX_BYTES / 1048576)} MB. Trim it in Photos first.`);
-    e.userFacing = true;
-    throw e;
-  }
+  const tooBig = tripsyFlyoverVideoTooBig(file);
+  if (tooBig) throw tooBig;
   const info = await tripsyFlyoverVideoInfo(file);
   const mime = file.type || 'video/mp4';
   const driveFileId = await uploadBlobToDriveResumable(file, `flyover-video-${Date.now()}`, mime, onProgress);
@@ -22439,6 +22639,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     layers.push(dot(s));
   };
   const layers = [];
+  let stormLayers = []; // the storm overlay of the current leg (showStorms / clearStorms below)
   const vehicleIcon = mode => L.divIcon({ className: 'tfo-vehicle', html: `<span>${tripsyFlyoverModeGlyphHtml(mode, 36) || '🚗'}</span>`, iconSize: [40, 40], iconAnchor: [20, 20] });
 
   // `carry` keeps ONE vehicle across a journey's legs: a flight through a layover used to
@@ -22658,9 +22859,10 @@ async function playTripsyFlyover(trip, record, opts = {}) {
   // frame of a zoom: the dot rides the map at its own size, and the route stays a thin line.
   const redrawPathsAtZoom = () => {
     const renderers = new Set();
-    for (const l of layers) if (l && l._renderer && l._map) renderers.add(l._renderer);
+    const paths = layers.concat(stormLayers); // a storm's track line rides the zoom too
+    for (const l of paths) if (l && l._renderer && l._map) renderers.add(l._renderer);
     for (const rd of renderers) { try { rd._update(); } catch (e) {} }
-    for (const l of layers) {
+    for (const l of paths) {
       if (!l || !l._renderer || !l._map) continue;
       try { l._project(); l._update(); } catch (e) {}
     }
@@ -22735,11 +22937,86 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     return m;
   });
 
+  // A storm on the leg's date (tripsyFlyoverLegStorms): the whole dated track as a dotted blue
+  // line, a spinning 🌀 where the storm was that day, and a tag naming it with the date and its
+  // strength ("can you find the location of the typhoon near Japan and plot that on the map?",
+  // 2026-10-25). Goes up with the leg's names and dots, before the leg is framed -- the
+  // framing includes the storm's position, so it is on screen -- and is cleared with them at
+  // the next leg. Returns {labels, points} for keepLabelsInView and the leg's bounds.
+  // Edge tags: when the storm is OFF the screen (the leg kept its own frame), its tag sits at
+  // the map's edge nearest to it, with the distance and direction from the destination;
+  // repositioned on every map move, hidden while the storm itself is in view.
+  const mapEl = map.getContainer();
+  let stormEdges = [];
+  const placeStormEdges = () => {
+    const w = mapEl.clientWidth, h = mapEl.clientHeight;
+    for (const e of stormEdges) {
+      const pt = map.latLngToContainerPoint([e.pos.lat, e.pos.lng]);
+      const inside = pt.x > 40 && pt.x < w - 40 && pt.y > 70 && pt.y < h - 40;
+      e.el.style.display = inside ? 'none' : '';
+      if (inside) continue;
+      const ew = e.el.offsetWidth / 2 + 8, eh = e.el.offsetHeight / 2 + 8;
+      const x = Math.max(ew, Math.min(w - ew, pt.x));
+      // Clear of the top bar, and of the leg card in the bottom-left corner.
+      const floor = x - ew < 340 ? h - 112 - eh : h - eh;
+      e.el.style.left = x + 'px';
+      e.el.style.top = Math.max(60 + eh, Math.min(floor, pt.y)) + 'px';
+    }
+  };
+  map.on('move zoom', placeStormEdges);
+  const clearStorms = () => {
+    for (const l of stormLayers) { try { l.remove(); } catch (e) {} }
+    stormLayers = [];
+    for (const e of stormEdges) { try { e.el.remove(); } catch (x) {} }
+    stormEdges = [];
+  };
+  // `bounds` is the leg's own frame: the storm joins it only when that costs at most
+  // TRIPSY_FLYOVER_STORM_FRAME_LEVELS zoom levels (see the constant); otherwise `points` stays
+  // empty and the storm gets an edge tag instead. The track and the 🌀 are drawn either way.
+  const showStorms = (a, b, bounds = null) => {
+    const hits = tripsyFlyoverLegStorms(TRIPSY_FLYOVER_STORMS, a, b);
+    const labels = [], points = [];
+    for (const { storm, pos: raw, atMs } of hits) {
+      // The stops' longitudes are UNWRAPPED along the route (tripsyFlyoverUnwrap: a Pacific
+      // crossing from Los Angeles puts Singapore near -256°), so the storm's real longitude
+      // is shifted by whole turns onto the destination's copy of the world.
+      const shift = Math.round((+b.lng - raw.lng) / 360) * 360;
+      const pos = { ...raw, lng: raw.lng + shift };
+      const track = (storm.track || []).map(p => [+p.lat, +p.lng + shift]).filter(p => isFinite(p[0]) && isFinite(p[1]));
+      if (track.length > 1) stormLayers.push(L.polyline(track, { color: '#5B8DEF', weight: 2, opacity: 0.75, dashArray: '2 7', interactive: false }).addTo(map));
+      stormLayers.push(L.marker([pos.lat, pos.lng], { icon: L.divIcon({ className: 'tfo-storm', html: '<span>🌀</span>', iconSize: [36, 36], iconAnchor: [18, 18] }), interactive: false, keyboard: false, zIndexOffset: 800 }).addTo(map));
+      const title = tripsyFlyoverStormLabel(storm, atMs);
+      const detail = `${pos.status || ''}${pos.status && pos.approx ? ' (approx.)' : ''}`;
+      const label = L.marker([pos.lat, pos.lng], { icon: L.divIcon({ className: 'tfo-via-label tfo-dest-label tfo-storm-label', html: `<span data-tfo-storm="${esc(storm.id || '')}">${esc(title)}${detail ? `<small>${esc(detail)}</small>` : ''}</span>`, iconSize: [0, 0] }), interactive: false, zIndexOffset: 900 }).addTo(map);
+      stormLayers.push(label);
+      labels.push(label);
+      let framed = true;
+      if (bounds) {
+        const own = map.getBoundsZoom(bounds, false, L.point(160, 160));
+        const withStorm = map.getBoundsZoom(L.latLngBounds(bounds.getSouthWest(), bounds.getNorthEast()).extend([pos.lat, pos.lng]), false, L.point(160, 160));
+        framed = own - withStorm <= TRIPSY_FLYOVER_STORM_FRAME_LEVELS;
+      }
+      if (framed) points.push(pos);
+      else {
+        const km = Math.round(tripsyFlyoverDistanceKm(b, pos) / 10) * 10;
+        const el = document.createElement('div');
+        el.className = 'tfo-storm-edge';
+        el.setAttribute('data-tfo-storm-edge', storm.id || '');
+        el.innerHTML = `${esc(title)}<small>${esc(`${km} km ${tripsyFlyoverCompass(b, pos)} of ${b.label || 'here'}${detail ? ' · ' + detail : ''}`)}</small>`;
+        mapEl.appendChild(el);
+        stormEdges.push({ el, pos });
+      }
+    }
+    placeStormEdges();
+    return { labels, points };
+  };
+
   const play = async r => {
     while (layers.length) { try { layers.pop().remove(); } catch (e) {} }
     dotted = new Set();
     clearDestLabel();
     clearViaLabels();
+    clearStorms();
     clearBurst();
     photoEl.innerHTML = '';
     shownEl = null;
@@ -22796,7 +23073,10 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       showDestLabel(stops[1]);
       const via1 = stops[1].mode === 'plane' ? (stops[1].via || []) : [];
       const viaMarks1 = showLayovers(via1);
-      keepLabelsInView([originLabel, destLabel, ...viaMarks1], [first, ...via1, stops[1]]);
+      const storms1 = showStorms(first, stops[1], all);
+      // A copy of the route's bounds: `all` itself frames the closing map, storm-free.
+      if (storms1.points.length) map.fitBounds(L.latLngBounds(all.getSouthWest(), all.getNorthEast()).extend(L.latLngBounds(storms1.points.map(p => [p.lat, p.lng]))), { padding: [70, 70], animate: false });
+      keepLabelsInView([originLabel, destLabel, ...viaMarks1, ...storms1.labels], [first, ...via1, stops[1], ...storms1.points]);
     }
     showCard(trip.name || 'Trip', formatTripDateRange(tripsyItineraryStartDayKey(trip), tripsyItineraryEndDayKey(trip)));
     if (!(await wait(r, 2200))) return;
@@ -22808,9 +23088,14 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       // leg -- no zoom, no photos, just the city's name on the map.
       const via = b.mode === 'plane' ? (b.via || []) : [];
       const legBounds = L.latLngBounds([[a.lat, a.lng], ...via.map(v => [v.lat, v.lng]), [b.lat, b.lng]]);
+      let stormMarks = { labels: [], points: [] };
       if (k > 1) {
         clearDestLabel();
         clearViaLabels();
+        clearStorms();
+        // A storm on this leg's date is framed WITH the leg, so it is on screen.
+        stormMarks = showStorms(a, b, legBounds);
+        for (const p of stormMarks.points) legBounds.extend([p.lat, p.lng]);
         // The destination's name and dot are on the map before the leg is even framed, and the
         // city being left keeps its name too, as on the first leg.
         viaLabels.push(L.marker([a.lat, a.lng], { icon: L.divIcon({ className: 'tfo-via-label tfo-dest-label', html: `<span>${esc(a.label || '')}</span>`, iconSize: [0, 0] }), interactive: false, zIndexOffset: 900 }).addTo(map));
@@ -22824,7 +23109,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
         // placed during a zoom animation jumps about).
         const want = Math.min(9, map.getBoundsZoom(legBounds, false, L.point(160, 160)));
         if (Math.abs(map.getZoom() - want) > 0.01) { try { map.stop(); } catch (e) {} map.fitBounds(legBounds, { padding: [80, 80], maxZoom: 9, animate: false }); }
-        keepLabelsInView([fromLabel, destLabel, ...viaMarks], [a, ...via, b]);
+        keepLabelsInView([fromLabel, destLabel, ...viaMarks, ...stormMarks.labels], [a, ...via, b, ...stormMarks.points]);
       }
       let from = a;
       // The plane stays on the map through each stopover (one marker for the whole journey).
@@ -22851,6 +23136,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       if (!(await arrive(r, b, stayNo(b), true))) return;
     }
     clearViaLabels();
+    clearStorms();
     if (!last) clearDestLabel();
     if (!(await untilMoveEnd(r, () => map.flyToBounds(all, { padding: [70, 70], duration: 1.6 }), 2800))) return;
     if (!(await untilTilesLoaded(r, 1500))) return;

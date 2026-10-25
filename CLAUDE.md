@@ -4799,6 +4799,24 @@ WebView's support for recording is unproven.
     **`uploadBlobToDriveResumable`** (8 MB pieces, `Content-Range`, 308 = continue, progress %
     in the status line; the multipart path base64s the whole file into one string), and the
     poster as an ordinary small JPEG. Thumbnails everywhere go through `tripsyFlyoverThumbHtml`.
+  - **A video uploads in the BACKGROUND too, like a photo** ("can we just automatically route
+    all videos through drive and do that in the background so I can still use the app?",
+    2026-10-25 — the page used to hold "Uploading video… 40%" in the foreground for the whole
+    resumable upload). `addMediaToStop` runs `tripsyFlyoverStagePendingVideo(file)` (the size
+    check up front via `tripsyFlyoverVideoTooBig`, the poster frame grabbed locally) and gets a
+    record with the video's bytes under a `pending-` id in `tripsyFlyoverPendingBlobs` and its
+    poster staged as a pending PHOTO of its own; both ids go through `tripsyFlyoverQueueUpload`.
+    `tripsyFlyoverRunUpload`'s video branch uploads resumably with progress
+    (`tripsyFlyoverUploadProgress`, a throttled `progress` event the page repaints the badge on
+    without saving), then DROPS the bytes from the pending map (a 200 MB clip must not sit in
+    memory all session); `tripsyFlyoverPreparePending` returns a video as-is (never resized as
+    a photo); `tripsyFlyoverResolvePendingIds` swaps `posterId` along with `driveFileId`; the
+    tile's ⬆️ badge carries the percentage. The iOS EXPORT that runs between the picker's check
+    mark and the hand-over is unchanged — no page can move that — so a big pick still goes
+    through the Drive folder import; the waiting status now says so. `tripsyFlyoverUploadVideo`
+    survives for the foreground path. Verified in Chromium: the add returns while the stubbed
+    upload runs, the tile reads ⬆️ N%, inputs stay usable, the record resolves to the Drive ids.
+    `flyover_test.js`.
   - **A video always plays on a page of its own**: `tripsyFlyoverPhotoGroups` and
     `tripsyFlyoverPages` split one out (in place) even from a saved page, as a `video:true`,
     `layout:'video'` page; the dialog's toggle (`tripsyFlyoverTogglePagePhoto`'s `isVideo`
@@ -4854,6 +4872,39 @@ WebView's support for recording is unproven.
   - Verified in Chromium with a generated test clip: fade-in 0→0.7 over 2 s, down to 0 before
     the video, video played unmuted to its end, music back to 0.7, next page crossfaded; the
     poster frame and the dialog's own-page rule work. `flyover_test.js`.
+- **🌀 Storms are plotted on the legs they overlap — Typhoon Champi on the Singapore GP's
+  Japan legs** ("On the flyover view for the Singapore GP trip, for the portion of the trip
+  that is in Japan, can you find the location of the typhoon near Japan and plot that on the
+  map?", 2026-10-25). The storm that week was Typhoon Champi (JMA's No. 30 of 2026, JTWC 29W):
+  past Guam Oct 18, peak 175 mph on Oct 21 east of Luzon, 955 hPa near the Sakishima Islands
+  Oct 23, a tropical storm at 29.0N 124.7E on Oct 25 becoming extratropical, forecast past
+  Kyushu Oct 26 and south of Honshu Oct 27. **Data**: `TRIPSY_FLYOVER_STORMS`, a constant in
+  the file — each storm a DATED TRACK of UTC fixes (`at`, `lat`, `lng`, `status`, `approx` for
+  a point read off a forecast or a prose report) with a `source` string; public weather is not
+  personal data, and a session cannot write the data file, so a new storm is one more entry.
+  **Rule** (pure, tested): a leg a → b is judged at midday UTC on b's day
+  (`tripsyFlyoverLegMoment` — stop times are offset-less wall-clock digits, so only the DAY is
+  trusted); `tripsyFlyoverStormPosition(storm, atMs)` interpolates between the fixes around it
+  (strength = the last fix's; up to a day outside the track holds that end, beyond that null);
+  `tripsyFlyoverLegStorms` keeps a storm within `TRIPSY_FLYOVER_STORM_NEAR_KM` (1500, haversine,
+  so route-unwrapped longitudes still match) of either end. So the Singapore legs (Oct 3–22)
+  and the flight home (Oct 30) show nothing; on the live record it is Da Nang → Fukuoka (Oct
+  23), Fukuoka → Nakatsu (25), Nakatsu → Hita (26) and Hita → Taketa (27). **Player**:
+  `showStorms(a, b, bounds)` goes up with the leg's names and dots — the whole track as a dotted
+  blue line (in `stormLayers`, which `redrawPathsAtZoom` includes so it rides the zoom), a
+  slowly spinning 🌀 (`.tfo-storm`, paused by `.tfo-paused`), and a blue tag "🌀 Typhoon Champi ·
+  Oct 25" with the strength; longitudes are shifted by whole turns onto the destination's
+  unwrapped copy of the world (the stops sit near -256° after the Pacific crossing). **The leg's
+  frame takes the storm in only when that costs ≤ `TRIPSY_FLYOVER_STORM_FRAME_LEVELS` (2) zoom
+  levels**: the first cut framed a 630 km-distant storm into the 70 km Fukuoka → Nakatsu hop
+  and the two names landed on top of each other. Otherwise the leg keeps its own frame and an
+  EDGE tag (`.tfo-storm-edge`, a DOM child of the map container, re-placed on `move zoom`,
+  hidden while the storm is in view, kept clear of the top bar and the leg card) reads "630 km
+  SW of Nakatsu · Tropical storm …" (`tripsyFlyoverCompass`). Cleared with the layover labels at
+  each leg start, before the closing map, and on Replay. The setup page shows a one-line note
+  (`data-flyover-storms`, `tripsyFlyoverStormsNoteText` over `tripsyFlyoverRecordStorms`) naming
+  the storm, the legs and the sources. Verified in Chromium: Singapore → Fukuoka frames the 🌀
+  with its track; Fukuoka → Nakatsu keeps its own frame with the edge tag. `flyover_test.js`.
 - **Testing:** verified in Chromium against a synthetic trip, with Leaflet served from npm
   because the sandbox can't reach cdnjs or the tile host. `flyover_test.js`.
 
