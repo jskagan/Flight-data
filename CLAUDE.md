@@ -4845,6 +4845,27 @@ WebView's support for recording is unproven.
     picker; Many → hand-off + Finish Upload; empty folder → the note; two files → both land on
     the card's destination, the folder is retired and the button disappears; a crashed last
     pick skips the question; "Use Photos instead" opens the picker.
+    **A pending hand-off is WATCHED, and a settled upload asks to import** ("Is there a way
+    the app can display a notification when the upload is complete to drive?", 2026-10-25).
+    Drive never signals "done", so the setup page infers it: while `record.inboxPendingAt` is
+    set and the page is open (owner only), `inboxWatchTick` lists the inbox every
+    `TRIPSY_FLYOVER_INBOX_POLL_MS` (15 s) — skipped while the page is hidden, and run AT ONCE
+    on `visibilitychange` → visible (iOS throttles a backgrounded page's timers, and coming
+    back from the Drive app is exactly the moment to look) — counts what is new
+    (`tripsyFlyoverDriveNewFiles`), repaints the Finish Upload button as "⬆️ Finish Upload ·
+    N new" (`tripsyFlyoverFinishUploadLabel`), and runs the pure
+    `tripsyFlyoverInboxWatchStep(state, count, nowMs)`: a count that is >0 and unchanged for
+    `TRIPSY_FLYOVER_INBOX_SETTLE_MS` (30 s) is announced ONCE (a later batch that grows the
+    count settles and is announced again; an empty folder never is) through a persistent
+    `tripsyConfirmDialog` ("Drive upload looks complete — N new files… Import now?", Finish
+    Upload / Later) whose yes runs `runFinishUpload`, the button's own handler. The watcher
+    starts on a hand-off and on opening a page with one pending, stops when an import starts,
+    restarts after an import that left the hand-off pending, and ends with the page's close
+    or the retire that clears the hand-off. The Drive hand-off dialog's step 2 also names
+    both upload routes (Drive app ＋ → Upload file, or Photos → Share → Drive), since the Drive
+    app's ＋ menu reads "Upload file" ("How do I select my photos from this menu," same day).
+    Verified in Chromium under Playwright's fake clock: polls, hidden/visible behaviour, the
+    one-time announcement, yes → import → folder retired → button gone, close → no polling.
   - **A video always plays on a page of its own**: `tripsyFlyoverPhotoGroups` and
     `tripsyFlyoverPages` split one out (in place) even from a saved page, as a `video:true`,
     `layout:'video'` page; the dialog's toggle (`tripsyFlyoverTogglePagePhoto`'s `isVideo`

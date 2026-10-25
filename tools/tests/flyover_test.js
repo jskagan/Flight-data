@@ -1955,7 +1955,39 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/if \(tripsyFlyoverLastPickCrashed\(tripsyFlyoverIntakeLoad\(\)\)\) \{[\s\S]*handOffToDrive\(dest, openPicker\);\s*return;/.test(setup), 'after a crashed pick the next one goes through Drive without asking');
     assert(/record = \{ \.\.\.record, inboxFolderId: folderId, inboxDest: dest \|\| 'auto', inboxPendingAt: new Date\(\)\.toISOString\(\) \};\s*save\(\); render\(\);/.test(setup) && /\$\{record\.inboxPendingAt \? `<button class="btn primary" data-flyover-finish-upload/.test(setup),
       'the hand-off remembers the destination and the page shows Finish Upload until the import clears it');
-    assert(/finishBtn\.onclick = async \(\) => \{[\s\S]*const fresh = tripsyFlyoverDriveNewFiles\(files, record\);[\s\S]*runDriveImport\(fresh, record\.inboxDest \|\| 'auto', folderId\);/.test(setup), 'Finish Upload imports everything new straight into the remembered destination');
+    assert(/runFinishUpload = async \(\) => \{[\s\S]*const fresh = tripsyFlyoverDriveNewFiles\(files, record\);[\s\S]*runDriveImport\(fresh, record\.inboxDest \|\| 'auto', folderId\);\s*\};\s*if \(finishBtn\) finishBtn\.onclick = runFinishUpload;/.test(setup), 'Finish Upload imports everything new straight into the remembered destination (its handler is shared with the watcher\'s Import now)');
+    // ---- The upload-complete notification ("Is there a way the app can display a notification
+    // when the upload is complete to drive?", 2026-10-25): Drive gives no signal, so the page
+    // watches the folder and infers completion from a count that has settled. ----
+    eval([constLine('TRIPSY_FLYOVER_INBOX_POLL_MS'), constLine('TRIPSY_FLYOVER_INBOX_SETTLE_MS')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverInboxWatchStep', 'tripsyFlyoverFinishUploadLabel'].map(extractFn)).join('\n'));
+    assert(TRIPSY_FLYOVER_INBOX_POLL_MS >= 5000 && TRIPSY_FLYOVER_INBOX_SETTLE_MS >= TRIPSY_FLYOVER_INBOX_POLL_MS, 'the folder is polled no more than every few seconds, and a settle window spans at least one poll');
+    let w = tripsyFlyoverInboxWatchStep(null, 0, 1000, 30000);
+    assert(!w.announce && w.state.count === 0, 'an empty folder announces nothing');
+    w = tripsyFlyoverInboxWatchStep(w.state, 0, 100000, 30000);
+    assert(!w.announce, 'an empty folder never settles into an announcement, however long it stays empty');
+    w = tripsyFlyoverInboxWatchStep(w.state, 5, 101000, 30000);
+    assert(!w.announce && w.state.since === 101000, 'files arriving reset the settle clock');
+    w = tripsyFlyoverInboxWatchStep(w.state, 8, 116000, 30000);
+    assert(!w.announce && w.state.since === 116000, 'a count still growing is not complete');
+    w = tripsyFlyoverInboxWatchStep(w.state, 8, 131000, 30000);
+    assert(!w.announce, 'the same count seen for less than the settle window is not yet announced');
+    w = tripsyFlyoverInboxWatchStep(w.state, 8, 146000, 30000);
+    assert(w.announce && w.state.announced === 8, 'the same count for the whole settle window is announced once');
+    w = tripsyFlyoverInboxWatchStep(w.state, 8, 400000, 30000);
+    assert(!w.announce, 'an announced count is not announced again');
+    w = tripsyFlyoverInboxWatchStep(w.state, 12, 401000, 30000);
+    w = tripsyFlyoverInboxWatchStep(w.state, 12, 431000, 30000);
+    assert(w.announce && w.state.announced === 12, 'a later batch that grows the count settles and is announced again');
+    assert(tripsyFlyoverFinishUploadLabel(0) === '⬆️ Finish Upload' && tripsyFlyoverFinishUploadLabel(7) === '⬆️ Finish Upload · 7 new', 'the Finish Upload button names the live new-file count');
+    assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const fresh = tripsyFlyoverDriveNewFiles\(files, record\)\.length;\s*const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\)\);[\s\S]*paintFinishUpload\(fresh\);\s*if \(r\.announce\) announceInboxReady\(fresh\);/.test(setup),
+      'each tick lists the inbox, counts what is new, repaints the button and announces a settled count');
+    assert(/inboxWatch\.timer = setTimeout\(inboxWatchTick, TRIPSY_FLYOVER_INBOX_POLL_MS\);/.test(setup) && /document\.visibilityState !== 'hidden'/.test(setup), 'the watcher polls on a timer and skips the list while the page is hidden');
+    assert(/const onInboxVisibility = \(\) => \{ if \(document\.visibilityState === 'visible' && inboxWatch && !inboxWatch\.busy\) inboxWatchTick\(\); \};\s*document\.addEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'returning to the app checks the folder at once');
+    assert(/const close = \(\) => \{ closed = true;[^\n]*stopInboxWatch\(\); document\.removeEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'closing the page stops the watcher and drops its listener');
+    assert(/tripsyConfirmDialog\(`Drive upload looks complete — \$\{n\} new file[\s\S]*\{ title: 'Drive upload complete', yes: 'Finish Upload', no: 'Later' \}\);\s*if \(ok && !closed && runFinishUpload && !driveImportRunning\) runFinishUpload\(\);/.test(setup), 'the notification is a persistent dialog whose yes runs Finish Upload');
+    assert(/save\(\); render\(\);\s*setStatus\(''\);\s*startInboxWatch\(\);/.test(setup) && /askMissingModes\(\);\s*startInboxWatch\(\);/.test(setup), 'the watcher starts on a hand-off and on opening a page with one pending');
+    assert(/driveImportRunning = true;\s*stopInboxWatch\(\);/.test(setup) && /inboxPendingAt: '' \};\s*save\(\);\s*stopInboxWatch\(\);/.test(setup), 'an import stops the watcher, and clearing the hand-off ends it');
+    assert(/if \(inboxWatch \|\| closed \|\| !isOwner \|\| !record \|\| !record\.inboxPendingAt \|\| !record\.inboxFolderId\) return;/.test(setup), 'only the owner, with a pending hand-off, watches — and never twice');
     assert(/if \(prevRecord && prevRecord\.inboxPendingAt\) \{ rec\.inboxPendingAt = prevRecord\.inboxPendingAt; rec\.inboxDest = prevRecord\.inboxDest \|\| 'auto'; \}/.test(html), 'a rebuild keeps a pending hand-off');
     const hand = extractFn('tripsyFlyoverDriveHandoffDialog');
     assert(/data-drive-open/.test(hand) && /Photos and Videos/.test(hand) && /Finish Upload/.test(hand) && /data-handoff-picker/.test(hand), 'the hand-off dialog links the folder, gives the Drive app steps, names Finish Upload, and offers the Photos picker instead');
