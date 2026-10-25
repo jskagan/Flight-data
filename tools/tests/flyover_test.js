@@ -524,12 +524,14 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   // one, show a large image with the buttons keep and delete" (2026-10-25).
   assert(!/data-flyover-add-suggested|Suggested photos<\/button>/.test(setup), 'THE ASK: the destination card has no Suggested photos button');
   assert(/\$\{photos\.length \? `<button class="btn" data-flyover-edit-photos [^`]*>✏️ Edit photos<\/button>/.test(setup)
-    && /editPhotos\.onclick = \(\) => tripsyFlyoverEditPhotosPage\(stop, \{\s*onDelete: photoId => removePhotoFromRecord\(id, photoId\),/.test(setup),
+    && /editPhotos\.onclick = \(\) => tripsyFlyoverEditPhotosPage\(stop, photoHooks\);/.test(setup) && /const photoHooks = \{\s*onDelete: photoId => removePhotoFromRecord\(id, photoId\),/.test(setup),
     'THE ASK: an Edit photos button (when the stop has photos) opens the photos page, and its Delete takes the photo off through the ordinary remove-and-save path');
   const ep = extractFn('tripsyFlyoverEditPhotosPage');
   assert(/tripsyFlyoverPhotosInPageOrder\(stop\)/.test(ep) && /data-ep-photo/.test(ep) && /tripsyFlyoverThumbHtml\(photo, 132, 100/.test(ep) && /tripsyDiaryPaintPhotos\(ov\)/.test(ep),
     'THE ASK: the page shows a thumbnail of every photo on the destination, in play order');
-  assert(/tripsyFlyoverPhotoReviewDialog\(url, \{ label: [\s\S]*?removeLabel: '🗑 Delete', isVideo, moveTargets: targets \}\)/.test(ep) && /if \(answer === 'remove' && onDelete\) \{ await onDelete\(id\); render\(\); \}/.test(ep),
+  const rsp = extractFn('tripsyFlyoverReviewStopPhoto');
+  assert(/tripsyFlyoverPhotoReviewDialog\(url, \{ label: [\s\S]*?removeLabel: '🗑 Delete', isVideo, moveTargets: targets, nav \}\)/.test(rsp) && /if \(answer === 'remove' && onDelete\) \{ await onDelete\(cur\); return 'deleted'; \}/.test(rsp)
+    && /const res = await tripsyFlyoverReviewStopPhoto\(getStop, b\.getAttribute\('data-ep-photo'\), b\.getAttribute\('data-ep-page'\), \{ onDelete, onMove, moveTargets \}\);\s*if \(res !== 'keep'\) render\(\);/.test(ep),
     'THE ASK: a tap shows it large with Keep and Delete; Delete removes it and the grid redraws from what is left');
   assert(/isVideo\s*\? `<video src="\$\{esc\(url\)\}" controls playsinline/.test(extractFn('tripsyFlyoverPhotoReviewDialog')), 'a video opens playable in the same large view');
   // "Change Music from here button to say 'Change Music'" (2026-10-25).
@@ -538,9 +540,9 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   // "When photos are Imported they should say 'No page'" (2026-10-25): the card, the Edit
   // photos page, and every add path.
   assert(/\$\{tripsyFlyoverUnplacedPhotos\(s\)\.map\(ph => `[\s\S]*data-flyover-nopage="\$\{esc\(ph\.driveFileId\)\}"[\s\S]*tripsyFlyoverThumbHtml\(ph, 84, 64,[\s\S]*>No page<\/span>[\s\S]*data-flyover-nopage-remove/.test(setup)
-    && /card\.querySelectorAll\('\[data-flyover-nopage\]'\)\.forEach\(t => t\.onclick = e => \{[\s\S]*openSlideshowOptions\(id,/.test(setup)
+    && /card\.querySelectorAll\('\[data-flyover-nopage\]'\)\.forEach\(t => t\.onclick = e => \{[\s\S]*?tripsyFlyoverReviewStopPhoto\(stop, t\.getAttribute\('data-flyover-nopage'\), 'No page', photoHooks\);/.test(setup)
     && /removePhotoFromRecord\(id, b\.getAttribute\('data-flyover-nopage-remove'\)\)/.test(setup),
-    'THE ASK: every photo on No page shows on the card as its own thumbnail badged "No page" ("Show each photo on the flyover page even they are not on a page," 2026-10-25); a tap opens the slideshow editor, ✕ removes it');
+    'THE ASK: every photo on No page shows on the card as its own thumbnail badged "No page" ("Show each photo on the flyover page even they are not on a page," 2026-10-25); a tap opens it large (Delete / Keep / Move), ✕ removes it');
   assert(/\{ \.\.\.s, \.\.\.tripsyFlyoverFreezePagesOnAdd\(s, fields\) \}/.test(setup) && (setup.match(/updateStop\((id|stopId), \{ photos: \[\.\.\.\(stopNow\(\)\.photos \|\| \[\]\), rec\] \}\)/g) || []).length === 3,
     'every add path (picker photos, picker videos, Drive import) goes through updateStop, which freezes a never-paged destination first');
   const ep2 = extractFn('tripsyFlyoverEditPhotosPage');
@@ -551,9 +553,21 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   const rv = extractFn('tripsyFlyoverPhotoReviewDialog');
   assert(/moveTargets && moveTargets\.length \?[\s\S]*data-review-move-select[\s\S]*moveTargets\.map\(t => `<option value="\$\{esc\(t\.id\)\}">\$\{esc\(t\.label\)\}<\/option>`\)[\s\S]*data-review-move-go[\s\S]*>↪ Move<\/button>/.test(rv)
     && /if \(to\) done\(\{ move: to \}\);/.test(rv), 'THE ASK: the large view has a Move button that shows a drop-down of the other destinations and resolves the one picked');
+  assert(rv.indexOf('data-review-keep style') < rv.indexOf('data-review-move-pick') && rv.indexOf('data-review-move-pick') < rv.indexOf('data-review-move style') && rv.indexOf('data-review-remove style') < rv.indexOf('data-review-keep style'),
+    'THE ASK: Move is the far-right button, after Delete and Keep ("Move the move button to the far right," 2026-10-25)');
+  // "show carat on the middle left and middle right of the photo to allow the user to navigate
+  // to the next photo or back to the last one. If the user selects a carat, treat that as a
+  // keep photo press and a move to the next photo or previous photo" (2026-10-25).
+  assert(/const caret = \(dir, on\) => on \? `<button data-review-\$\{dir\}[^`]*top:50%; \$\{dir === 'prev' \? 'left' : 'right'\}:12px; transform:translateY\(-50%\)/.test(rv) && /\$\{nav \? caret\('prev', nav\.hasPrev\) \+ caret\('next', nav\.hasNext\) : ''\}/.test(rv)
+    && /if \(prevBtn\) prevBtn\.onclick = e => \{ e\.stopPropagation\(\); done\('prev'\); \};/.test(rv) && /e\.key === 'ArrowRight' && nav\.hasNext/.test(rv),
+    'THE ASK: the large view has ‹ and › at the middle left and right (and the arrow keys), shown only where there is a photo to go to');
+  const rsp2 = extractFn('tripsyFlyoverReviewStopPhoto');
+  assert(/const seq = tripsyFlyoverPhotosInPageOrder\(stop\);/.test(rsp2) && /const nav = k >= 0 \? \{ hasPrev: k > 0, hasNext: k < seq\.length - 1 \} : null;/.test(rsp2)
+    && /if \(answer === 'prev' && k > 0\) \{ cur = seq\[k - 1\]\.photo\.driveFileId; continue; \}/.test(rsp2) && /if \(answer === 'next' && k >= 0 && k < seq\.length - 1\) \{ cur = seq\[k \+ 1\]\.photo\.driveFileId; continue; \}/.test(rsp2),
+    'THE ASK: a caret is a Keep plus a step to the next / previous photo of the destination, in play order — nothing changes until Delete or Move');
   assert(!/moveTargets/.test((html.match(/const ans = await tripsyFlyoverPhotoReviewDialog\(url, \{[^}]*\}\);/) || [''])[0]), 'the player\'s own Keep / Remove view gets no Move');
   const ep3 = extractFn('tripsyFlyoverEditPhotosPage');
-  assert(/moveTargets: targets \}\);/.test(ep3) && /else if \(answer && answer\.move && onMove\) \{[\s\S]*await onMove\(id, answer\.move\);[\s\S]*No page there/.test(ep3), 'Edit photos passes the targets and moves the photo, saying where it went');
+  assert(/moveTargets: targets, nav \}\);/.test(extractFn('tripsyFlyoverReviewStopPhoto')) && /if \(answer && answer\.move && onMove\) \{[\s\S]*await onMove\(cur, answer\.move\);[\s\S]*No page there/.test(extractFn('tripsyFlyoverReviewStopPhoto')) && /tripsyFlyoverReviewStopPhoto\(/.test(ep3), 'Edit photos passes the targets and moves the photo, saying where it went');
   assert(/onMove: \(photoId, toId\) => movePhotoInRecord\(id, photoId, toId\),\s*moveTargets: \(\) => photoMoveTargets\(id\),/.test(setup)
     && /filter\(s => s\.id !== fromId && !s\.removed && s\.kind !== 'transit'\)/.test(setup)
     && /updateStop\(toId, \{ photos: \[\.\.\.\(to\.photos \|\| \[\]\)\.filter\(p => p\.driveFileId !== photoId\), rec\] \}\);/.test(setup),
@@ -922,7 +936,7 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
       'THE ASK: Remove takes the photo off the destination and its pages (an emptied page goes); the source is untouched');
     const rec = tripsyFlyoverRemovePhoto({ stops: [stop, { id: 't', photos: [{ driveFileId: 'a' }] }] }, 's', 'b');
     assert(rec.stops[0].photos.length === 2 && rec.stops[0].pages[1].ids.join() === 'c' && rec.stops[1].photos.length === 1, 'only the named stop changes');
-    assert(/function tripsyFlyoverPhotoReviewDialog\(url, \{ label = '', removeLabel = '🗑 Remove', isVideo = false, moveTargets = null \} = \{\}\)/.test(html) && /data-review-remove/.test(html) && /data-review-keep/.test(html)
+    assert(/function tripsyFlyoverPhotoReviewDialog\(url, \{ label = '', removeLabel = '🗑 Remove', isVideo = false, moveTargets = null, nav = null \} = \{\}\)/.test(html) && /data-review-remove/.test(html) && /data-review-keep/.test(html)
       && /object-fit:contain/.test(extractFn('tripsyFlyoverPhotoReviewDialog')), 'THE ASK: the enlarged photo fills the screen with Keep and Remove');
     // .tfo-photo is pointer-events:none (the map takes drags), so the tappable image opts back in.
     assert(/\.tfo-photo \{[^}]*pointer-events: none/.test(html) && /img\.style\.pointerEvents = 'auto';\s*img\.setAttribute\('data-tfo-review'/.test(extractFn('playTripsyFlyover')),
@@ -1280,10 +1294,9 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), 
     'the setup page\'s page tiles drag through the shared mechanism with a press-and-hold, saving the move at once');
   assert(/if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;[^\n]*\n\s*const pg = tripsyFlyoverPages\(stop\(\)\)\[Number\(b\.getAttribute\('data-flyover-page-remove'\)\)\]/.test(setup),
     'the release that ended a drag never removes a page');
-  assert(/Tap a page to edit it\. Drag a page onto another to move it there\./.test(setup), 'the card says its pages can be tapped and dragged');
-  assert(/tiles\.forEach\(t => t\.onclick = e => \{\s*if \(!isOwner \|\| e\.target\.closest\('button'\)\) return;\s*if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;[^\n]*\n\s*openSlideshowOptions\(id, '', Number\(t\.getAttribute\('data-flyover-thumb'\)\)\);/.test(setup)
-    && /if \(page != null && pages\[page\]\) cur = page;/.test(extractFn('tripsyFlyoverSlideshowDialog')),
-    'tapping a page tile opens the Slideshow options page on that page');
+  assert(/Tap a photo to see it large\. Drag a page onto another to move it there\./.test(setup), 'the card says its photos can be tapped and its pages dragged');
+  assert(/tiles\.forEach\(t => t\.onclick = async e => \{\s*if \(!isOwner \|\| e\.target\.closest\('button'\)\) return;\s*if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;[^\n]*\n[\s\S]*?let hitIdx = strips\.findIndex\(n => \{ const r = n\.getBoundingClientRect\(\); return e\.clientX >= r\.left && e\.clientX < r\.right; \}\);[\s\S]*?await tripsyFlyoverReviewStopPhoto\(stop, pg\.photos\[idx\]\.driveFileId, `Page \$\{k \+ 1\}`, photoHooks\);/.test(setup),
+    'THE ASK: tapping a photo on a page tile opens THAT photo large, exactly as Edit photos does ("If a user selects a photo directly from the flyover page, treat it as if he had selected that photo from the edit photo page," 2026-10-25); the release that ended a drag is not a tap');
   const wd = extractFn('tripsyFlyoverWireDrag');
   assert(/if \(e\.button \|\| \(btn && btn !== el\)\) return;/.test(wd), 'a tap on the ✕ inside a thumbnail is never the start of a drag (a chip that IS a button still drags)');
   assert(/<div class="tw-modal-paper tw-wide" style="max-width:1240px;/.test(setup)

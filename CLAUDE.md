@@ -4222,14 +4222,36 @@ WebView's support for recording is unproven.
       **Edit photos' large view also MOVES a photo to another destination** ("When a user
       selects a photo from the edit photos page, add a button that says 'move' and when the user
       selects it present a drop down menu with other locations from the trip to move the photo
-      to," same day): `tripsyFlyoverPhotoReviewDialog`'s `moveTargets` [{id, label}] adds ↪ Move,
-      which reveals a drop-down + Move here and resolves `{move: id}` (the player passes none, so
+      to," same day): `tripsyFlyoverPhotoReviewDialog`'s `moveTargets` [{id, label}] adds ↪ Move —
+      the FAR-RIGHT button, after Delete and Keep ("Move the move button to the far right," same
+      day) — which reveals a drop-down + Move here and resolves `{move: id}` (the player passes none, so
       its Keep / Remove is unchanged). The setup page's `photoMoveTargets(fromId)` lists every
       OTHER shown, non-transit destination labelled with its dates (two Fukuoka / Los Angeles stops
       stay tellable apart); `movePhotoInRecord` takes the photo off the source and its page and
       appends the SAME record (Drive file, fingerprint, sound setting) to the target through
       `updateStop` — so it lands on the target's No page, a never-paged target's default photo
       keeping its page — then saves, toasts where it went, and redraws the grid.
+      **A tap on a photo ON THE BOX does what a tap in Edit photos does** ("If a user selects a
+      photo directly from the flyover page, treat it as if he had selected that photo from the
+      edit photo page," same day): one shared `tripsyFlyoverReviewStopPhoto(getStop, id, where,
+      hooks)` (load, the large view with Delete / Keep / Move, then the delete or move) serves
+      Edit photos, the box's page tiles and its No-page tiles, all through one `photoHooks`
+      object. On a page tile split into strips, the strip under the tap's X position picks the
+      photo — NOT `e.target`, because `tripsyFlyoverWireDrag` captures the pointer and the click
+      then lands on the tile itself. This REPLACES the 10-22 "tap a page tile → Slideshow
+      options on that page" (Edit slideshow edits pages); the release that ends a drag still
+      isn't a tap. Verified in Chromium: page 1 → its photo, page 2's second strip → the second
+      photo, a No-page tile → that photo, Move/Delete from the box, and a drag still reorders.
+      **‹ / › step through the destination's photos in the large view** ("show carat on the
+      middle left and middle right of the photo to allow the user to navigate to the next photo
+      or back to the last one. If the user selects a carat, treat that as a keep photo press and
+      a move to the next photo or previous photo," same day): `tripsyFlyoverPhotoReviewDialog`'s
+      `nav` {hasPrev, hasNext} draws them over the picture (and ← / → keys, ignored inside the
+      Move drop-down), resolving 'prev' / 'next'; `tripsyFlyoverReviewStopPhoto` loops over
+      `tripsyFlyoverPhotosInPageOrder` (play order, No-page last), re-reading the live stop each
+      step — a step is a Keep, so nothing is written until Delete or Move, which still end the
+      review. The label reads "Da Nang · Page 2 · 3 of 4". Carets only where there is a photo
+      to go to (no wrap). Works from Edit photos and from the box, which share the function.
       **A photo goes on a page only when the user puts it there; everything else is "No page"**
       ("Do not place photos on a page unless a user places it there. When photos are Imported
       they should say 'No page'," same day — Da Nang had 2 hand-made pages and 111 imported
