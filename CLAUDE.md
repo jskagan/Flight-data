@@ -4685,6 +4685,23 @@ WebView's support for recording is unproven.
     editor's ＋) pass `setStatus`, so the page reads "Waiting for Photos to hand over your
     selection…" until the files arrive. Picking in a few smaller batches is the practical
     answer when the library is iCloud-optimized. `flyover_test.js`.
+    **Photos and videos are picked SEPARATELY** ("I am still getting this screen after i
+    select photos, and then the photos do not load. After i hit the blue check box this screen
+    should disappear and the photos should start loading immediately in the background,"
+    same day, with the iOS sheet still up on 136 items incl. a 1:20 video). The sheet that
+    stays after the check mark IS iOS's export running; a web page gets no event until it
+    ends, and nothing in the page can hurry or interrupt it (there is no selection cap on a
+    file input, and `showOpenFilePicker` does not exist on iOS). What the page CAN do is make
+    the export lighter: a video in the batch is the expensive part (iOS converts it), so
+    `tripsyFlyoverPickMedia(onPick, {kind})` sets `accept` from `TRIPSY_FLYOVER_PICK_ACCEPT`
+    (`photos` = `image/*`, the default; `videos` = `video/*`; `all`), the card's one "＋ Photos
+    & videos" is now **＋ Photos** (`data-flyover-add-own`) and **🎬 Video**
+    (`data-flyover-add-video`, both through one `onPicked` → `addMediaToStop`), and 📷 Add trip
+    photos and the editor's ＋ Add photos are photos-only. The waiting status now says the
+    export can stall on a very large pick and to retry with 30 or fewer at a time, and the
+    button titles say the same. Verified in Chromium: the three photo buttons open the input
+    with `image/*`, the video button with `video/*`, each showing the waiting status.
+    Whether a 30-photo pick hands over on the owner's iPad is the device test that remains.
   - **A video is a stop "photo" record** `{driveFileId, kind:'video', mime, posterId,
     duration, width, height}`, so pages, carry-over and preloading need nothing new.
     `tripsyFlyoverUploadVideo` refuses files over `TRIPSY_FLYOVER_VIDEO_MAX_BYTES` (250 MB,

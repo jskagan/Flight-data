@@ -1081,8 +1081,9 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/startMusic\(true\)/.test(player) && /fader\.to\(0, 2500\)/.test(player), 'music fades in at the start and out at the end');
   assert(/if \(curVideo\) \{ try \{ if \(run\.paused\) curVideo\.pause\(\)/.test(player), 'pause reaches the playing video');
   const pick = extractFn('tripsyFlyoverPickMedia');
-  assert(/input\.accept = 'image\/\*,video\/\*'/.test(pick) && /input\.multiple = true/.test(pick) && !/capture/.test(pick.replace(/\/\/.*$/gm, '')),
-    'THE ASK: one input for photos and videos, with no capture, so iOS shows its own Photos Library / camera sheet');
+  assert(/input\.accept = TRIPSY_FLYOVER_PICK_ACCEPT\[kind\]/.test(pick) && /photos: 'image\/\*', videos: 'video\/\*', all: 'image\/\*,video\/\*'/.test(html)
+    && /input\.multiple = true/.test(pick) && !/capture/.test(pick.replace(/\/\/.*$/gm, '')),
+    'THE ASK: one input with no capture, so iOS shows its own Photos Library / camera sheet; photos and videos are picked separately (2026-10-25)');
   assert(/input\.click\(\);\s*\}$/.test(pick.trim()) && !/tw-modal|innerHTML/.test(pick),
     'THE ASK (2026-10-21, "this is inefficient"): no in-app menu in front of the system picker — the tap opens it directly');
   assert(/tripsyFlyoverPickMedia\(async files =>/.test(extractFn('showTripsyFlyover')) && /tripsyFlyoverUploadVideo\(file/.test(extractFn('showTripsyFlyover')),
@@ -1821,7 +1822,9 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'added records join the draft and are placed on the page being edited');
   const setup = extractFn('showTripsyFlyover');
   assert(/const addMediaToStop = async \(id, files, setStatusFn\) => \{/.test(setup)
-    && /if \(own\) own\.onclick = \(\) => tripsyFlyoverPickMedia\(async files => \{\s*setStatus\([^;]*\);\s*const r = await addMediaToStop\(id, files, setStatus\);/.test(setup)
+    && /const onPicked = async files => \{\s*setStatus\([^;]*\);\s*const r = await addMediaToStop\(id, files, setStatus\);/.test(setup)
+    && /if \(own\) own\.onclick = \(\) => tripsyFlyoverPickMedia\(onPicked, \{ kind: 'photos'/.test(setup)
+    && /if \(vid\) vid\.onclick = \(\) => tripsyFlyoverPickMedia\(onPicked, \{ kind: 'videos'/.test(setup)
     && /addMedia: isOwner \? \(files, setStatusFn\) => addMediaToStop\(id, files, setStatusFn\) : null,/.test(setup),
     'ONE add path: the card\'s button and the editor\'s button both run addMediaToStop (stage + background upload for photos, foreground for videos)');
   // ---- A big pick no longer freezes the page (2026-10-25): landings are coalesced, and the
@@ -1836,11 +1839,11 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/uploadFlush = setTimeout\(\(\) => \{[\s\S]*?record = tripsyFlyoverResolvePendingIds\(record\);[\s\S]*?if \(uploadLanded\) \{ uploadLanded = false; save\(\); \}[\s\S]*?render\(\);[\s\S]*?\}, 400\);/.test(setup),
       'the setup page repaints and saves ONCE per batch of landings, not per photo');
     const pick = extractFn('tripsyFlyoverPickMedia');
-    assert(/\{ onWaiting, onCancel \} = \{\}/.test(pick) && /onWaiting\(TRIPSY_FLYOVER_PICK_WAITING\)/.test(pick) && /input\.oncancel = /.test(pick),
+    assert(/\{ onWaiting, onCancel, kind = 'photos' \} = \{\}/.test(pick) && /onWaiting\(TRIPSY_FLYOVER_PICK_WAITING\)/.test(pick) && /input\.oncancel = /.test(pick),
       'the picker reports that it is waiting for Photos, and clears on cancel');
-    assert((setup.match(/\{ onWaiting: setStatus, onCancel: \(\) => setStatus\(''\) \}/g) || []).length === 2
+    assert((setup.match(/onWaiting: setStatus, onCancel: \(\) => setStatus\(''\) \}/g) || []).length === 3
       && /\{ onWaiting: setStatus, onCancel: \(\) => setStatus\(''\) \}/.test(extractFn('tripsyFlyoverSlideshowDialog')),
-      'all three picker buttons (card, trip photos, editor) show the waiting status');
+      'all four picker buttons (card photos, card video, trip photos, editor) show the waiting status');
   }
   assert(/return \{ added, done, queued, problems \};/.test(setup), 'addMediaToStop reports the records it added');
 }

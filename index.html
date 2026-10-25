@@ -19396,7 +19396,7 @@ async function showTripsyFlyover(tripKey) {
     }
   }
 
-  // Picked files onto ONE stop -- the one add path, shared by the card's "＋ Photos & videos"
+  // Picked files onto ONE stop -- the one add path, shared by the card's "＋ Photos" and "🎬 Video"
   // and the slideshow editor's own "＋ Add photos" ("Add an add photo button to the edit
   // slideshow page," 2026-10-23). PHOTOS go on the stop at once, uploaded behind the page
   // (see tripsyFlyoverQueueUpload); videos keep their foreground upload (progress, the
@@ -19600,7 +19600,8 @@ async function showTripsyFlyover(tripKey) {
               const failedIds = photos.filter(p => tripsyFlyoverPhotoIsPending(p.driveFileId) && tripsyFlyoverFailedUploads.has(p.driveFileId)).map(p => p.driveFileId);
               return `<span style="font-size:12px; color:${u.failed ? '#E0A33A' : 'var(--muted)'}; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">${u.uploading ? `⬆️ Uploading ${u.uploading} photo${u.uploading === 1 ? '' : 's'} in the background — you can use the rest of the app.` : ''}${u.failed ? ` ⚠️ ${u.failed} upload${u.failed === 1 ? '' : 's'} failed.${isOwner ? failedIds.map(fid => ` <button class="btn" data-flyover-retry-upload="${esc(fid)}" style="font-size:11px; padding:2px 8px;">Retry</button>`).join('') : ''}` : ''}</span>`; })()}
             ${isOwner ? `
-              <button class="btn" data-flyover-add-own style="font-size:12px;" title="Opens your Photos library (Albums → Shared Albums) or the camera">＋ Photos & videos</button>
+              <button class="btn" data-flyover-add-own style="font-size:12px;" title="Photos from your library (Albums → Shared Albums) or the camera — pick 30 or fewer at a time">＋ Photos</button>
+              <button class="btn" data-flyover-add-video style="font-size:12px;" title="A video from your library or the camera">🎬 Video</button>
               <button class="btn" data-flyover-add-suggested style="font-size:12px;">🔍 Suggested photos</button>` : ''}`}
           </div>
           ${isOwner && photos.length && tripsyFlyoverStopVisited(s, todayKey) ? `
@@ -19655,7 +19656,7 @@ async function showTripsyFlyover(tripKey) {
       const added = [...byStop.values()].reduce((n, g) => n + g.length, 0);
       const msg = added
         ? `Sorted ${added} photo${added === 1 ? '' : 's'} into ${byStop.size} destination${byStop.size === 1 ? '' : 's'}: ${parts.join(', ')}.${unmatched ? ` ${unmatched} didn’t fall in any destination’s dates and weren’t added — add those from their destination’s own button.` : ''}`
-        : `None of those photos fell in a destination’s dates${unmatched ? ` (${unmatched} checked)` : ''} — add them from a destination’s own ＋ Photos & videos button.`;
+        : `None of those photos fell in a destination’s dates${unmatched ? ` (${unmatched} checked)` : ''} — add them from a destination’s own ＋ Photos button.`;
       setStatus(msg);
       toast(msg, added ? undefined : 'error');
       render();
@@ -19757,15 +19758,20 @@ async function showTripsyFlyover(tripKey) {
           save(); render();
         };
       });
-      const own = card.querySelector('[data-flyover-add-own]');
-      if (own) own.onclick = () => tripsyFlyoverPickMedia(async files => {
+      // Photos and videos are picked separately (a video in the batch is the slow part of
+      // iOS's export); both land through the one addMediaToStop path.
+      const onPicked = async files => {
         setStatus(`Adding ${files.length} item${files.length === 1 ? '' : 's'}…`);
         const r = await addMediaToStop(id, files, setStatus);
         if (r.done || r.queued) {
           const total = r.done + r.queued;
           if (!closed) openSlideshowOptions(id, `${total} item${total === 1 ? '' : 's'} added. Choose how this place’s photos and videos play.${r.queued ? ' Photos are uploading in the background — you can keep working or use the rest of the app.' : ''}`);
         }
-      }, { onWaiting: setStatus, onCancel: () => setStatus('') });
+      };
+      const own = card.querySelector('[data-flyover-add-own]');
+      if (own) own.onclick = () => tripsyFlyoverPickMedia(onPicked, { kind: 'photos', onWaiting: setStatus, onCancel: () => setStatus('') });
+      const vid = card.querySelector('[data-flyover-add-video]');
+      if (vid) vid.onclick = () => tripsyFlyoverPickMedia(onPicked, { kind: 'videos', onWaiting: setStatus, onCancel: () => setStatus('') });
       // A failed background upload: Retry re-queues it from the bytes still held.
       card.querySelectorAll('[data-flyover-retry-upload]').forEach(b => b.onclick = () => {
         tripsyFlyoverQueueUpload(trip.key, b.getAttribute('data-flyover-retry-upload'));
@@ -20367,18 +20373,22 @@ function tripsyFlyoverPageThumbHtml(page, w = 84, h = 64, extra = '') {
 // iOS exports every item picked -- a HEIC becomes a JPEG, a video may be transcoded, and a
 // photo kept in iCloud is downloaded first -- which for 100+ items takes a minute or more,
 // with nothing a page can do but say so.
-const TRIPSY_FLYOVER_PICK_WAITING = 'Waiting for Photos to hand over your selection… a large selection, videos, or photos kept in iCloud can take a minute or more.';
-function tripsyFlyoverPickMedia(onPick, { onWaiting, onCancel } = {}) {
+const TRIPSY_FLYOVER_PICK_WAITING = 'Waiting for Photos to hand over your selection… iOS prepares every item first (a photo kept in iCloud is downloaded, a video converted), which can take a minute or more, or stall on a very large pick — if nothing arrives, try again with 30 or fewer at a time.';
+// `kind`: 'photos' (image/*), 'videos' (video/*) or 'all'. Photos and videos are picked
+// SEPARATELY by default (2026-10-25): a video in the batch is the expensive part of iOS's
+// export, so a photos-only pick hands over far sooner.
+const TRIPSY_FLYOVER_PICK_ACCEPT = { photos: 'image/*', videos: 'video/*', all: 'image/*,video/*' };
+function tripsyFlyoverPickMedia(onPick, { onWaiting, onCancel, kind = 'photos' } = {}) {
   let input = document.getElementById('tripsy-flyover-media-input');
   if (!input) {
     input = document.createElement('input');
     input.type = 'file';
     input.id = 'tripsy-flyover-media-input';
-    input.accept = 'image/*,video/*';
     input.multiple = true;
     input.style.display = 'none';
     document.body.appendChild(input);
   }
+  input.accept = TRIPSY_FLYOVER_PICK_ACCEPT[kind] || TRIPSY_FLYOVER_PICK_ACCEPT.photos;
   input.value = ''; // so re-picking the SAME file still fires change
   input.onchange = () => {
     const files = [...(input.files || [])];
@@ -20734,7 +20744,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
             </div>` : ''}
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <div class="tfo-ss-label" style="flex:1; margin-bottom:0;">${videoPage ? 'The video on this page' : `Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)`}</div>
-            ${addMedia ? `<button class="btn" data-ss-add-photos${adding ? ' disabled' : ''} title="Add photos or videos from your library to this destination">＋ Add photos</button>` : ''}
+            ${addMedia ? `<button class="btn" data-ss-add-photos${adding ? ' disabled' : ''} title="Add photos from your library to this destination — pick 30 or fewer at a time">＋ Add photos</button>` : ''}
           </div>
           <div style="font-size:12px; color:var(--muted); margin:6px 0 8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here. Drag a photo onto another to swap them, or to the edge of one to move its page in between (a dashed line shows where).${videoIds.size ? ' A video goes on an empty page of its own.' : ''}${addMedia ? ' ＋ Add photos puts new photos on this page, and the rest on new pages at the end.' : ''}</div>
           ${addMedia ? `<div data-ss-status style="font-size:12px; color:var(--muted); margin-bottom:${status ? 8 : 0}px; min-height:${status ? 'auto' : '0'};">${esc(status)}</div>` : ''}
