@@ -4219,6 +4219,17 @@ WebView's support for recording is unproven.
       superseding the 10-22 "left of the transport" placement). Owner-only and only once the
       destination is visited, like before; the two edit buttons need photos. The page thumbnails,
       upload status and the slideshow summary with ▶ Preview follow below it.
+      **Edit photos' large view also MOVES a photo to another destination** ("When a user
+      selects a photo from the edit photos page, add a button that says 'move' and when the user
+      selects it present a drop down menu with other locations from the trip to move the photo
+      to," same day): `tripsyFlyoverPhotoReviewDialog`'s `moveTargets` [{id, label}] adds ↪ Move,
+      which reveals a drop-down + Move here and resolves `{move: id}` (the player passes none, so
+      its Keep / Remove is unchanged). The setup page's `photoMoveTargets(fromId)` lists every
+      OTHER shown, non-transit destination labelled with its dates (two Fukuoka / Los Angeles stops
+      stay tellable apart); `movePhotoInRecord` takes the photo off the source and its page and
+      appends the SAME record (Drive file, fingerprint, sound setting) to the target through
+      `updateStop` — so it lands on the target's No page, a never-paged target's default photo
+      keeping its page — then saves, toasts where it went, and redraws the grid.
       **A photo goes on a page only when the user puts it there; everything else is "No page"**
       ("Do not place photos on a page unless a user places it there. When photos are Imported
       they should say 'No page'," same day — Da Nang had 2 hand-made pages and 111 imported

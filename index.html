@@ -19633,6 +19633,24 @@ async function showTripsyFlyover(tripKey) {
   // {added, done, queued, problems}: `added` is the new photo records, in pick order.
   // A photo removed from the player's Keep / Remove review (2026-10-25): off the destination
   // and its pages in the live record, saved, and the page repainted.
+  // Edit photos' Move (2026-10-25): the photo record leaves this destination (and its page)
+  // and joins the other one's photos on No page -- the same object, so its Drive file,
+  // fingerprint and sound setting go with it. updateStop freezes a never-paged target first.
+  const movePhotoInRecord = async (fromId, photoId, toId) => {
+    const from = record.stops.find(s => s.id === fromId), to = record.stops.find(s => s.id === toId);
+    const rec = from && (from.photos || []).find(p => p.driveFileId === photoId);
+    if (!rec || !to || fromId === toId) return;
+    const next = tripsyFlyoverRemovePhotoFromStop(from, photoId);
+    updateStop(fromId, { photos: next.photos, ...(next.pages !== undefined ? { pages: next.pages } : {}) });
+    updateStop(toId, { photos: [...(to.photos || []).filter(p => p.driveFileId !== photoId), rec] });
+    await save();
+    if (!closed) render();
+  };
+  // The destinations a photo on `fromId` can move to: every other shown, non-transit stop,
+  // named with its dates so two of the same city can be told apart. Pure over `record`.
+  const photoMoveTargets = fromId => record.stops
+    .filter(s => s.id !== fromId && !s.removed && s.kind !== 'transit')
+    .map(s => { const d = tripsyFlyoverDatesLabel(s); return { id: s.id, label: `${s.label || 'Destination'}${d ? ` (${d})` : ''}` }; });
   const removePhotoFromRecord = async (stopId, photoId) => {
     const st = record.stops.find(s => s.id === stopId);
     if (!st) return;
@@ -20212,6 +20230,8 @@ async function showTripsyFlyover(tripKey) {
       const editPhotos = card.querySelector('[data-flyover-edit-photos]');
       if (editPhotos) editPhotos.onclick = () => tripsyFlyoverEditPhotosPage(stop, {
         onDelete: photoId => removePhotoFromRecord(id, photoId),
+        onMove: (photoId, toId) => movePhotoInRecord(id, photoId, toId),
+        moveTargets: () => photoMoveTargets(id),
       });
     });
   };
@@ -22374,7 +22394,11 @@ function tripsyFlyoverMergeLookups(looked, stopFields, topFields = []) {
 // player, below tripsyConfirmDialog.
 // The setup page's Edit photos (2026-10-25) opens the same dialog with `removeLabel` "Delete"
 // and, for a video, `isVideo` (a playable <video> in place of the <img>).
-function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 Remove', isVideo = false } = {}) {
+// `moveTargets` [{id, label}] adds a ↪ Move button (Edit photos, "add a button that says
+// 'move' and when the user selects it present a drop down menu with other locations from the
+// trip to move the photo to," 2026-10-25): it reveals a drop-down of those destinations and a
+// Move here button, which resolves {move: <stop id>}.
+function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 Remove', isVideo = false, moveTargets = null } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-review-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-review-overlay'; document.body.appendChild(ov); }
@@ -22385,6 +22409,14 @@ function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 R
         : `<img src="${esc(url)}" alt="" style="flex:1; min-height:0; width:100%; object-fit:contain; background:#000;">`}
       <div style="flex:none; display:flex; align-items:center; gap:10px; padding:12px 16px; width:100%; box-sizing:border-box; background:rgba(0,0,0,0.85); color:#fff;">
         <span style="flex:1; min-width:0; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(label)}</span>
+        ${moveTargets && moveTargets.length ? `
+        <span data-review-move-pick style="display:none; align-items:center; gap:6px; flex-wrap:wrap;">
+          <select class="field-input" data-review-move-select aria-label="Move to which destination" style="width:auto; max-width:260px; padding:6px 8px; font-size:14px;">
+            ${moveTargets.map(t => `<option value="${esc(t.id)}">${esc(t.label)}</option>`).join('')}
+          </select>
+          <button class="btn primary" data-review-move-go style="font-size:15px; padding:8px 14px;">Move here</button>
+        </span>
+        <button class="btn" data-review-move style="font-size:15px; padding:8px 16px;">↪ Move</button>` : ''}
         <button class="btn" data-review-remove style="font-size:15px; padding:8px 16px; background:#B4281E; color:#fff; border-color:#B4281E;">${esc(removeLabel)}</button>
         <button class="btn primary" data-review-keep style="font-size:15px; padding:8px 18px;">✓ Keep</button>
       </div>`;
@@ -22393,6 +22425,17 @@ function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 R
     document.addEventListener('keydown', onKey, true);
     ov.querySelector('[data-review-keep]').onclick = e => { e.stopPropagation(); done('keep'); };
     ov.querySelector('[data-review-remove]').onclick = e => { e.stopPropagation(); done('remove'); };
+    const moveBtn = ov.querySelector('[data-review-move]');
+    if (moveBtn) moveBtn.onclick = e => {
+      e.stopPropagation();
+      const pick = ov.querySelector('[data-review-move-pick]');
+      const open = pick.style.display === 'none';
+      pick.style.display = open ? 'inline-flex' : 'none';
+      moveBtn.textContent = open ? 'Cancel move' : '↪ Move';
+      if (open) { const sel = ov.querySelector('[data-review-move-select]'); try { sel.focus(); if (typeof sel.showPicker === 'function') sel.showPicker(); } catch (err) {} }
+    };
+    const go = ov.querySelector('[data-review-move-go]');
+    if (go) go.onclick = e => { e.stopPropagation(); const to = ov.querySelector('[data-review-move-select]').value; if (to) done({ move: to }); };
     ov.onclick = e => { if (e.target === ov) done('keep'); };
   });
 }
@@ -22406,7 +22449,9 @@ function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 R
 // only takes the photo off the fly-over: its Drive file is left alone (an itinerary photo or
 // the built-in LAX picture is shared with other pages). Owner-only by its caller. Resolves when
 // the page closes. z 2147483094: above the setup page, below the review dialog.
-function tripsyFlyoverEditPhotosPage(getStop, { onDelete } = {}) {
+// `moveTargets()` lists the destinations a photo can move to and `onMove(photoId, toId)`
+// moves it (the setup page puts it on the target's No page, 2026-10-25).
+function tripsyFlyoverEditPhotosPage(getStop, { onDelete, onMove = null, moveTargets = null } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-photos-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-photos-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -22447,8 +22492,15 @@ function tripsyFlyoverEditPhotosPage(getStop, { onDelete } = {}) {
           try { url = await tripsyPlacePhotoDisplayUrl(id); } catch (e) { console.warn('photo load failed', id, e); }
           if (!url && isVideo && rec.posterId) { try { url = await tripsyPlacePhotoDisplayUrl(rec.posterId); } catch (e) {} }
           if (!url) { toast('Couldn’t load that photo — check the connection and try again.', 'error'); return; }
-          const answer = await tripsyFlyoverPhotoReviewDialog(url, { label: `${(getStop() || {}).label || ''} · ${b.getAttribute('data-ep-page')}`, removeLabel: '🗑 Delete', isVideo });
+          const targets = onMove && moveTargets ? moveTargets() : null;
+          const answer = await tripsyFlyoverPhotoReviewDialog(url, { label: `${(getStop() || {}).label || ''} · ${b.getAttribute('data-ep-page')}`, removeLabel: '🗑 Delete', isVideo, moveTargets: targets });
           if (answer === 'remove' && onDelete) { await onDelete(id); render(); }
+          else if (answer && answer.move && onMove) {
+            const t = (targets || []).find(x => x.id === answer.move);
+            await onMove(id, answer.move);
+            toast(`Moved to ${t ? t.label : 'the other destination'} — it’s on No page there.`);
+            render();
+          }
         } finally { busy = false; }
       });
       tripsyDiaryPaintPhotos(ov);
