@@ -1923,6 +1923,9 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(fresh.map(f => f.id).join() === 'p3,p2', 'only new photos / videos, oldest capture first; a PDF in the folder is ignored');
     assert(tripsyFlyoverDriveFolderUrl('abc 1') === 'https://drive.google.com/drive/folders/abc%201', 'the folder link opens in Drive');
     const setup = extractFn('showTripsyFlyover');
+    assert(/data-flyover-card-drive-import="\$\{esc\(s\.id\)\}"/.test(setup) && /if \(cardDrive\) cardDrive\.onclick = \(\) => openDriveImport\(id\);/.test(setup)
+      && /function tripsyFlyoverDriveImportDialog\(trip, record, folderId, defaultDest = 'auto'\)/.test(html) && /\$\{s\.id === defaultDest \? ' selected' : ''\}/.test(extractFn('tripsyFlyoverDriveImportDialog')),
+      'every destination card has its own From Drive folder button, opening the import with that destination preselected (2026-10-25)');
     assert(/data-flyover-drive-import/.test(html) && /const runDriveImport = async \(files, dest, folderId\) => \{/.test(setup)
       && /const src = tripsyFlyoverDriveSrc\(f\.id\);\s*if \(known\.has\(src\)\) continue;/.test(setup)
       && /dest === 'auto' \? tripsyFlyoverRoutePhoto\(record\.stops, tripsyFlyoverDriveMetaInfo\(f\)\) : dest/.test(setup)
@@ -1941,7 +1944,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(known2.has('h:1') && known2.has('drive:p9'), 'known sources include a Drive photo\'s content fingerprint AND its Drive id, so a re-uploaded copy is still one photo');
     assert(/if \(out\.full !== file && tripsyFlyoverPendingBlobs\.get\(pendingId\) === file\) tripsyFlyoverPendingBlobs\.set\(pendingId, out\.full\);/.test(html), 'a prepared photo releases its original bytes');
     const dlg = extractFn('tripsyFlyoverDriveImportDialog');
-    assert(/data-drive-open/.test(dlg) && /data-drive-refresh/.test(dlg) && /data-drive-go/.test(dlg) && /<option value="auto">/.test(dlg) && /Photos and Videos/.test(dlg), 'the dialog links the folder, explains the Drive app steps, counts what is new, and offers by-date or one destination');
+    assert(/data-drive-open/.test(dlg) && /data-drive-refresh/.test(dlg) && /data-drive-go/.test(dlg) && /<option value="auto"\$\{/.test(dlg) && /Photos and Videos/.test(dlg), 'the dialog links the folder, explains the Drive app steps, counts what is new, and offers by-date or one destination');
   }
 
   // ---- A storm plotted on the map ("for the portion of the trip that is in Japan, can you find

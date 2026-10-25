@@ -4817,6 +4817,17 @@ WebView's support for recording is unproven.
     survives for the foreground path. Verified in Chromium: the add returns while the stubbed
     upload runs, the tile reads ⬆️ N%, inputs stay usable, the record resolves to the Drive ids.
     `flyover_test.js`.
+    **Every destination card has its own "📁 From Drive folder" button** ("I am still getting
+    this page when I hit the blue check box, followed by a crash," 2026-10-25 — a 106-item pick
+    with two videos through the in-app picker; the crash is WebKit running out of memory while
+    iOS exports the selection, before the page gets a single file, so nothing in the page can
+    prevent it). `data-flyover-card-drive-import="<stop id>"`, beside ＋ Photos & videos, runs the
+    page's one `openDriveImport(defaultDest)` (the header button passes `'auto'`), and
+    `tripsyFlyoverDriveImportDialog`'s fourth arg preselects that destination in the "File each
+    photo under" list, so the big-batch route is one tap from where the picker is and lands in
+    the right place. The picker button's tooltip now says a big pick with videos stalls or
+    crashes the app. Verified in Chromium: the card button opens the dialog with Fukuoka
+    selected, the header button with "by date".
   - **A video always plays on a page of its own**: `tripsyFlyoverPhotoGroups` and
     `tripsyFlyoverPages` split one out (in place) even from a saved page, as a `video:true`,
     `layout:'video'` page; the dialog's toggle (`tripsyFlyoverTogglePagePhoto`'s `isVideo`

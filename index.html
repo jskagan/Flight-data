@@ -19788,7 +19788,8 @@ async function showTripsyFlyover(tripKey) {
               const failedIds = photos.filter(p => tripsyFlyoverPhotoIsPending(p.driveFileId) && tripsyFlyoverFailedUploads.has(p.driveFileId)).map(p => p.driveFileId);
               return `<span style="font-size:12px; color:${u.failed ? '#E0A33A' : 'var(--muted)'}; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">${u.uploading ? `⬆️ Uploading ${u.uploading} photo${u.uploading === 1 ? '' : 's'} in the background — you can use the rest of the app.` : ''}${u.failed ? ` ⚠️ ${u.failed} upload${u.failed === 1 ? '' : 's'} failed.${isOwner ? failedIds.map(fid => ` <button class="btn" data-flyover-retry-upload="${esc(fid)}" style="font-size:11px; padding:2px 8px;">Retry</button>`).join('') : ''}` : ''}</span>`; })()}
             ${isOwner ? `
-              <button class="btn" data-flyover-add-own style="font-size:12px;" title="Photos and videos from your library (Albums → Shared Albums) or the camera — for more than about 30 at once, use Import from Drive folder">＋ Photos & videos</button>
+              <button class="btn" data-flyover-add-own style="font-size:12px;" title="A FEW photos or videos from your library (Albums → Shared Albums) or the camera. iOS converts every picked item before the app gets any — a big pick with videos stalls or crashes the app, so for more than about 30 at once use From Drive folder">＋ Photos & videos</button>
+              <button class="btn" data-flyover-card-drive-import="${esc(s.id)}" style="font-size:12px;" title="Many photos and videos at once: upload them to a Drive folder with the Google Drive app, then import them straight into this destination">📁 From Drive folder</button>
               <button class="btn" data-flyover-add-suggested style="font-size:12px;">🔍 Suggested photos</button>` : ''}`}
           </div>
           ${isOwner && photos.length && tripsyFlyoverStopVisited(s, todayKey) ? `
@@ -19855,8 +19856,9 @@ async function showTripsyFlyover(tripKey) {
     // listing's own capture time / GPS routes each photo; each is downloaded, staged like a
     // picked photo and uploaded resized in the background. Resume-safe: every imported file is
     // stamped `src: 'drive:<id>'`, so a re-run takes only what is new.
-    const driveBtn = body.querySelector('[data-flyover-drive-import]');
-    if (driveBtn) driveBtn.onclick = async () => {
+    // Opened from the page header (files by date) or from a destination's own card
+    // (`defaultDest` = that stop, 2026-10-25 -- the big-batch route sits where the picker is).
+    const openDriveImport = async (defaultDest = 'auto') => {
       if (driveImportRunning) { toast('An import from Drive is already running — see the status line.'); return; }
       setStatus('Opening the Drive inbox folder…');
       let folderId;
@@ -19864,10 +19866,12 @@ async function showTripsyFlyover(tripKey) {
       if (closed) return;
       if (folderId !== record.inboxFolderId) { record = { ...record, inboxFolderId: folderId }; save(); }
       setStatus('');
-      const choice = await tripsyFlyoverDriveImportDialog(trip, record, folderId);
+      const choice = await tripsyFlyoverDriveImportDialog(trip, record, folderId, defaultDest);
       if (!choice || closed) return;
       runDriveImport(choice.files, choice.dest, folderId);
     };
+    const driveBtn = body.querySelector('[data-flyover-drive-import]');
+    if (driveBtn) driveBtn.onclick = () => openDriveImport('auto');
     const runDriveImport = async (files, dest, folderId) => {
       driveImportRunning = true;
       const total = files.length;
@@ -20053,6 +20057,8 @@ async function showTripsyFlyover(tripKey) {
       };
       const own = card.querySelector('[data-flyover-add-own]');
       if (own) own.onclick = () => tripsyFlyoverPickMedia(onPicked, { kind: 'all', onWaiting: setStatus, onCancel: () => setStatus('') });
+      const cardDrive = card.querySelector('[data-flyover-card-drive-import]');
+      if (cardDrive) cardDrive.onclick = () => openDriveImport(id);
       // A failed background upload: Retry re-queues it from the bytes still held.
       card.querySelectorAll('[data-flyover-retry-upload]').forEach(b => b.onclick = () => {
         tripsyFlyoverQueueUpload(trip.key, b.getAttribute('data-flyover-retry-upload'));
@@ -20637,7 +20643,7 @@ async function tripsyFlyoverRetireInbox(folderId, videoIds) {
 function tripsyFlyoverDriveFolderUrl(folderId) { return `https://drive.google.com/drive/folders/${encodeURIComponent(folderId)}`; }
 // The import dialog: the folder, how to fill it, what is in it, where to file it.
 // Resolves {files, dest} ('auto' = by each photo's own date / place) or null.
-function tripsyFlyoverDriveImportDialog(trip, record, folderId) {
+function tripsyFlyoverDriveImportDialog(trip, record, folderId, defaultDest = 'auto') {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-drive-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-drive-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -20664,8 +20670,8 @@ function tripsyFlyoverDriveImportDialog(trip, record, folderId) {
           <div data-drive-count style="font-size:13px; margin-bottom:10px;">${listing ? 'Checking the folder…' : err ? `<span style="color:#E0A33A;">${esc(err)}</span>` : files && files.length ? `<strong>${fresh.length}</strong> new ${fresh.length === 1 ? 'file' : 'files'} in the folder${already ? ` (${already} already imported)` : ''}.` : 'The folder is empty so far.'}</div>
           <label style="display:block; font-size:13px; margin-bottom:12px;">File each photo under
             <select data-drive-dest style="margin-left:6px; max-width:100%;">
-              <option value="auto">the destination matching the day it was taken (recommended)</option>
-              ${stops.map(s => `<option value="${esc(s.id)}">${esc(s.label || 'destination')}</option>`).join('')}
+              <option value="auto"${defaultDest === 'auto' || !stops.some(s => s.id === defaultDest) ? ' selected' : ''}>the destination matching the day it was taken (recommended)</option>
+              ${stops.map(s => `<option value="${esc(s.id)}"${s.id === defaultDest ? ' selected' : ''}>${esc(s.label || 'destination')}</option>`).join('')}
             </select>
           </label>
           <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;">
