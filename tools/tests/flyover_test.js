@@ -1937,6 +1937,21 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/addParents=\$\{encodeURIComponent\(home\)\}&removeParents=\$\{encodeURIComponent\(folderId\)\}/.test(retire) && /JSON\.stringify\(\{ trashed: true \}\)/.test(retire),
       'videos are MOVED into the app folder first (the player streams them by id), then the inbox is trashed, not permanently deleted');
     eval(extractFn('tripsyFlyoverWaitForUploads') + '\nvar tripsyFlyoverUploadedIds = new Map([["pending-a", "d1"]]);');
+    // ---- Each imported photo leaves the Drive folder on its own ("Remember to delete the photos
+    // from drive once they have been uploaded to the app," 2026-10-25) ----
+    eval(extractFn('tripsyFlyoverInboxFilesToTrash'));
+    const waiting = new Map([['pending-a', 'inboxA'], ['pending-b', 'inboxB'], ['pending-c', 'inboxC']]);
+    const uploaded = new Map([['pending-a', 'dA'], ['pending-b', 'dB']]);
+    const recSaved = { stops: [{ photos: [{ driveFileId: 'dA' }, { driveFileId: 'pending-b' }, { driveFileId: 'pending-c' }] }] };
+    const go = tripsyFlyoverInboxFilesToTrash(recSaved, waiting, uploaded);
+    assert(go.length === 1 && go[0].inboxId === 'inboxA', 'an inbox file is trashed only once its photo has landed AND the saved record carries the Drive id — not while still pending (b), not while still uploading (c)');
+    assert(tripsyFlyoverInboxFilesToTrash({ stops: [{ photos: [{ driveFileId: 'v1', posterId: 'pending-a' }] }] }, new Map([['pending-a', 'inboxA']]), uploaded).length === 0, 'a poster still pending in the record holds its file too');
+    assert(/tripsyFlyoverTrashAfterUpload\.set\(pendingId, f\.id\);/.test(setup) && /dupes\+\+; tripsyFlyoverIntakeNote\(\{ skipped: dupes \}\); tripsyFlyoverTrashDriveFile\(f\.id\); continue;/.test(setup),
+      'the import registers each staged photo\'s inbox file for trashing, and trashes a duplicate\'s at once');
+    assert(/if \(resolved !== rec\) await Store\.saveTripsyFlyover\(resolved\);[\s\S]*if \(tripsyFlyoverTrashAfterUpload\.size\) await tripsyFlyoverTrashImportedInboxFiles\(resolved\);/.test(extractFn('tripsyFlyoverScheduleResolvedSave')),
+      'the trash runs after the resolved record is saved, never before');
+    const trashFn = extractFn('tripsyFlyoverTrashDriveFile');
+    assert(/JSON\.stringify\(\{ trashed: true \}\)/.test(trashFn) && /catch \(e\)[\s\S]*return false;/.test(trashFn), 'a file goes to Drive\'s trash, not a permanent delete, and a failure is swallowed (the folder retire or the next import covers it)');
     const known2 = tripsyFlyoverKnownSources({ stops: [{ photos: [{ driveFileId: 'x', src: 'h:1', driveSrc: 'drive:p9' }] }] });
     assert(known2.has('h:1') && known2.has('drive:p9'), 'known sources include a Drive photo\'s content fingerprint AND its Drive id, so a re-uploaded copy is still one photo');
     assert(/if \(out\.full !== file && tripsyFlyoverPendingBlobs\.get\(pendingId\) === file\) tripsyFlyoverPendingBlobs\.set\(pendingId, out\.full\);/.test(html), 'a prepared photo releases its original bytes');
@@ -1959,7 +1974,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     // ---- The upload-complete notification ("Is there a way the app can display a notification
     // when the upload is complete to drive?", 2026-10-25): Drive gives no signal, so the page
     // watches the folder and infers completion from a count that has settled. ----
-    eval([constLine('TRIPSY_FLYOVER_INBOX_POLL_MS'), constLine('TRIPSY_FLYOVER_INBOX_SETTLE_MS')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverInboxWatchStep', 'tripsyFlyoverFinishUploadLabel'].map(extractFn)).join('\n'));
+    eval([constLine('TRIPSY_FLYOVER_INBOX_POLL_MS'), constLine('TRIPSY_FLYOVER_INBOX_SETTLE_MS')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverInboxWatchStep', 'tripsyFlyoverDrivePhase', 'tripsyFlyoverDriveStatusHtml'].map(extractFn)).join('\n'));
     assert(TRIPSY_FLYOVER_INBOX_POLL_MS >= 5000 && TRIPSY_FLYOVER_INBOX_SETTLE_MS >= TRIPSY_FLYOVER_INBOX_POLL_MS, 'the folder is polled no more than every few seconds, and a settle window spans at least one poll');
     let w = tripsyFlyoverInboxWatchStep(null, 0, 1000, 30000);
     assert(!w.announce && w.state.count === 0, 'an empty folder announces nothing');
@@ -1978,13 +1993,26 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     w = tripsyFlyoverInboxWatchStep(w.state, 12, 401000, 30000);
     w = tripsyFlyoverInboxWatchStep(w.state, 12, 431000, 30000);
     assert(w.announce && w.state.announced === 12, 'a later batch that grows the count settles and is announced again');
-    assert(tripsyFlyoverFinishUploadLabel(0) === '⬆️ Finish Upload' && tripsyFlyoverFinishUploadLabel(7) === '⬆️ Finish Upload · 7 new', 'the Finish Upload button names the live new-file count');
-    assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const fresh = tripsyFlyoverDriveNewFiles\(files, record\)\.length;\s*const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\)\);[\s\S]*paintFinishUpload\(fresh\);\s*if \(r\.announce\) announceInboxReady\(fresh\);/.test(setup),
-      'each tick lists the inbox, counts what is new, repaints the button and announces a settled count');
+    // ---- No live count: a flashing "Uploading Photos to Drive" until the count settles, then the
+    // prompt in its place ("Don't have a live count. Until the drive upload is complete display a
+    // flashing message 'Uploading Photos to Drive'. When that is done, change that message to the
+    // completion prompt," 2026-10-25) ----
+    assert(tripsyFlyoverDrivePhase('uploading', { announce: false, changed: true }) === 'uploading' && tripsyFlyoverDrivePhase('uploading', { announce: true, changed: false }) === 'complete'
+      && tripsyFlyoverDrivePhase('complete', { announce: false, changed: false }) === 'complete' && tripsyFlyoverDrivePhase('later', { announce: false, changed: false }) === 'later'
+      && tripsyFlyoverDrivePhase('later', { announce: false, changed: true }) === 'uploading' && tripsyFlyoverDrivePhase(undefined, { announce: false, changed: false }) === 'uploading',
+      'the message phase: uploading until announced, complete on the announcement, Later holds, a count that grows again goes back to uploading');
+    const up = tripsyFlyoverDriveStatusHtml('uploading', 0), done = tripsyFlyoverDriveStatusHtml('complete', 54), lat = tripsyFlyoverDriveStatusHtml('later', 54);
+    assert(/class="tripsy-menu-flash"/.test(up) && /Uploading Photos to Drive/.test(up) && !/\d/.test(up.replace(/<[^>]*>/g, '')), 'the uploading message flashes and carries no count');
+    assert(/Drive upload complete — 54 new files\. Import now\?/.test(done) && /data-drive-import-now/.test(done) && /data-drive-later/.test(done) && !/tripsy-menu-flash/.test(done), 'the completion prompt replaces it, with Import now / Later, not flashing');
+    assert(/54 new files waiting in Drive/.test(lat) && !/data-drive-import-now/.test(lat), 'after Later a quiet reminder stands in its place');
+    assert(!/tripsyFlyoverFinishUploadLabel|announceInboxReady|tripsyConfirmDialog\(`Drive upload looks complete/.test(html), 'the live-count label and the completion dialog are gone');
+    assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const fresh = tripsyFlyoverDriveNewFiles\(files, record\)\.length;\s*const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\)\);[\s\S]*inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r\);\s*paintDriveStatus\(\);/.test(setup),
+      'each tick lists the inbox, counts what is new, moves the phase and repaints the message slot');
+    assert(/>⬆️ Finish Upload<\/button> <span data-flyover-drive-status[^>]*>\$\{driveStatusHtml\(\)\}<\/span>/.test(setup) && /if \(go\) go\.onclick = \(\) => \{ if \(!closed && runFinishUpload && !driveImportRunning\) runFinishUpload\(\); \};/.test(setup) && /if \(later\) later\.onclick = \(\) => \{ if \(inboxWatch\) inboxWatch\.phase = 'later'; paintDriveStatus\(\); \};/.test(setup),
+      'the slot renders beside a plain Finish Upload button; Import now runs its handler, Later holds the quiet reminder');
     assert(/inboxWatch\.timer = setTimeout\(inboxWatchTick, TRIPSY_FLYOVER_INBOX_POLL_MS\);/.test(setup) && /document\.visibilityState !== 'hidden'/.test(setup), 'the watcher polls on a timer and skips the list while the page is hidden');
     assert(/const onInboxVisibility = \(\) => \{ if \(document\.visibilityState === 'visible' && inboxWatch && !inboxWatch\.busy\) inboxWatchTick\(\); \};\s*document\.addEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'returning to the app checks the folder at once');
     assert(/const close = \(\) => \{ closed = true;[^\n]*stopInboxWatch\(\); document\.removeEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'closing the page stops the watcher and drops its listener');
-    assert(/tripsyConfirmDialog\(`Drive upload looks complete — \$\{n\} new file[\s\S]*\{ title: 'Drive upload complete', yes: 'Finish Upload', no: 'Later' \}\);\s*if \(ok && !closed && runFinishUpload && !driveImportRunning\) runFinishUpload\(\);/.test(setup), 'the notification is a persistent dialog whose yes runs Finish Upload');
     assert(/save\(\); render\(\);\s*setStatus\(''\);\s*startInboxWatch\(\);/.test(setup) && /askMissingModes\(\);\s*startInboxWatch\(\);/.test(setup), 'the watcher starts on a hand-off and on opening a page with one pending');
     assert(/driveImportRunning = true;\s*stopInboxWatch\(\);/.test(setup) && /inboxPendingAt: '' \};\s*save\(\);\s*stopInboxWatch\(\);/.test(setup), 'an import stops the watcher, and clearing the hand-off ends it');
     assert(/if \(inboxWatch \|\| closed \|\| !isOwner \|\| !record \|\| !record\.inboxPendingAt \|\| !record\.inboxFolderId\) return;/.test(setup), 'only the owner, with a pending hand-off, watches — and never twice');

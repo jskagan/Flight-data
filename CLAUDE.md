@@ -4852,20 +4852,42 @@ WebView's support for recording is unproven.
     `TRIPSY_FLYOVER_INBOX_POLL_MS` (15 s) — skipped while the page is hidden, and run AT ONCE
     on `visibilitychange` → visible (iOS throttles a backgrounded page's timers, and coming
     back from the Drive app is exactly the moment to look) — counts what is new
-    (`tripsyFlyoverDriveNewFiles`), repaints the Finish Upload button as "⬆️ Finish Upload ·
-    N new" (`tripsyFlyoverFinishUploadLabel`), and runs the pure
+    (`tripsyFlyoverDriveNewFiles`) and runs the pure
     `tripsyFlyoverInboxWatchStep(state, count, nowMs)`: a count that is >0 and unchanged for
     `TRIPSY_FLYOVER_INBOX_SETTLE_MS` (30 s) is announced ONCE (a later batch that grows the
-    count settles and is announced again; an empty folder never is) through a persistent
-    `tripsyConfirmDialog` ("Drive upload looks complete — N new files… Import now?", Finish
-    Upload / Later) whose yes runs `runFinishUpload`, the button's own handler. The watcher
+    count settles and is announced again; an empty folder never is). **What shows is ONE message
+    slot beside a plain Finish Upload button, never a live count** ("Don't have a live count.
+    Until the drive upload is complete display a flashing message 'Uploading Photos to Drive'.
+    When that is done, change that message to the completion prompt," same day — the first cut
+    had a "· N new" button label and a `tripsyConfirmDialog`): `tripsyFlyoverDrivePhase(phase,
+    step)` (pure) moves `uploading` → `complete` on the announcement, anything → `uploading` when
+    the count changes, and holds otherwise; `tripsyFlyoverDriveStatusHtml(phase, count)` renders
+    the flashing (`.tripsy-menu-flash`) "⬆️ Uploading Photos to Drive…", the prompt "✅ Drive
+    upload complete — N new files. Import now?" with **Import now** (`data-drive-import-now` →
+    `runFinishUpload`, the button's own handler) and **Later** (`data-drive-later` → phase
+    `later`, a quiet "N new files waiting in Drive — press Finish Upload when you’re ready").
+    `paintDriveStatus` refills the `data-flyover-drive-status` slot in place each tick. The watcher
     starts on a hand-off and on opening a page with one pending, stops when an import starts,
     restarts after an import that left the hand-off pending, and ends with the page's close
     or the retire that clears the hand-off. The Drive hand-off dialog's step 2 also names
     both upload routes (Drive app ＋ → Upload file, or Photos → Share → Drive), since the Drive
     app's ＋ menu reads "Upload file" ("How do I select my photos from this menu," same day).
-    Verified in Chromium under Playwright's fake clock: polls, hidden/visible behaviour, the
-    one-time announcement, yes → import → folder retired → button gone, close → no polling.
+    **And every imported photo leaves the Drive folder on its own, not only when the folder
+    retires** ("Remember to delete the photos from drive once they have been uploaded to the app,"
+    same day — the folder-level retire ran only after a CLEAN import, so a batch with one
+    unmatched or failed file kept every imported photo in Drive). `runDriveImport` registers each
+    staged photo in `tripsyFlyoverTrashAfterUpload` (pending id → inbox file id) and trashes a
+    duplicate's inbox copy at once; `tripsyFlyoverScheduleResolvedSave`, AFTER the resolved record
+    is saved, runs `tripsyFlyoverTrashImportedInboxFiles` over the pure
+    `tripsyFlyoverInboxFilesToTrash(record, waiting, uploadedIds)` — an inbox file goes only when
+    its photo has landed AND the saved record no longer names the pending id (as `driveFileId` or
+    a video's `posterId`); a reload between the two would otherwise drop the pending photo with
+    nothing left to re-import. `tripsyFlyoverTrashDriveFile` is Drive's trash (never permanent)
+    and fails soft — the folder retire or the next import covers a miss. Videos are untouched
+    here: they are played from the inbox file itself until the retire moves them.
+    Verified in Chromium under Playwright's fake clock: polls, hidden/visible behaviour, flashing
+    while files arrive, the prompt once settled, Later → reminder, a new file → flashing again →
+    prompt again, Import now → import → folder retired → button gone, close → no polling.
   - **A video always plays on a page of its own**: `tripsyFlyoverPhotoGroups` and
     `tripsyFlyoverPages` split one out (in place) even from a saved page, as a `video:true`,
     `layout:'video'` page; the dialog's toggle (`tripsyFlyoverTogglePagePhoto`'s `isVideo`

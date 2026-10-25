@@ -19464,16 +19464,23 @@ async function showTripsyFlyover(tripKey) {
   // The Drive inbox watcher (see tripsyFlyoverInboxWatchStep): alive only while a hand-off is
   // pending and the page is open. `runFinishUpload` is the Finish Upload button's own handler,
   // assigned by render, so the watcher's "Import now?" runs exactly what the button does.
-  let inboxWatch = null; // { timer, state, lastCount, busy }
+  let inboxWatch = null; // { timer, state, phase, count, busy }
   let runFinishUpload = null;
   const stopInboxWatch = () => { if (inboxWatch) { if (inboxWatch.timer) clearTimeout(inboxWatch.timer); inboxWatch = null; } };
-  const paintFinishUpload = count => {
-    const b = body.querySelector('[data-flyover-finish-upload]');
-    if (b) b.textContent = tripsyFlyoverFinishUploadLabel(count);
+  // The message slot beside Finish Upload: flashing "Uploading Photos to Drive…" until the
+  // count settles, then the completion prompt in its place (no live count — by request).
+  const driveStatusHtml = () => tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'uploading', inboxWatch ? inboxWatch.count : 0);
+  const wireDriveStatus = () => {
+    const go = body.querySelector('[data-drive-import-now]');
+    if (go) go.onclick = () => { if (!closed && runFinishUpload && !driveImportRunning) runFinishUpload(); };
+    const later = body.querySelector('[data-drive-later]');
+    if (later) later.onclick = () => { if (inboxWatch) inboxWatch.phase = 'later'; paintDriveStatus(); };
   };
-  const announceInboxReady = async n => {
-    const ok = await tripsyConfirmDialog(`Drive upload looks complete — ${n} new file${n === 1 ? '' : 's'} ${n === 1 ? 'is' : 'are'} in the folder and the count hasn’t changed for half a minute.\n\nImport ${n === 1 ? 'it' : 'them'} now?`, { title: 'Drive upload complete', yes: 'Finish Upload', no: 'Later' });
-    if (ok && !closed && runFinishUpload && !driveImportRunning) runFinishUpload();
+  const paintDriveStatus = () => {
+    const slot = body.querySelector('[data-flyover-drive-status]');
+    if (!slot) return;
+    slot.innerHTML = driveStatusHtml();
+    wireDriveStatus();
   };
   const inboxWatchTick = async () => {
     if (!inboxWatch || closed) return;
@@ -19487,9 +19494,9 @@ async function showTripsyFlyover(tripKey) {
         const fresh = tripsyFlyoverDriveNewFiles(files, record).length;
         const r = tripsyFlyoverInboxWatchStep(inboxWatch.state, fresh, Date.now());
         inboxWatch.state = r.state;
-        inboxWatch.lastCount = fresh;
-        paintFinishUpload(fresh);
-        if (r.announce) announceInboxReady(fresh);
+        inboxWatch.count = fresh;
+        inboxWatch.phase = tripsyFlyoverDrivePhase(inboxWatch.phase, r);
+        paintDriveStatus();
       } catch (e) {
         console.warn('Drive inbox check failed:', e);
       } finally {
@@ -19502,7 +19509,7 @@ async function showTripsyFlyover(tripKey) {
   };
   const startInboxWatch = () => {
     if (inboxWatch || closed || !isOwner || !record || !record.inboxPendingAt || !record.inboxFolderId) return;
-    inboxWatch = { timer: null, state: null, lastCount: 0, busy: false };
+    inboxWatch = { timer: null, state: null, phase: 'uploading', count: 0, busy: false };
     inboxWatchTick();
   };
   // Coming back from the Drive app: check the folder at once rather than on the next tick
@@ -19768,7 +19775,7 @@ async function showTripsyFlyover(tripKey) {
         ${playable} destination${playable === 1 ? '' : 's'} on the map.${isOwner ? ' Add photos to each one — they play as a slideshow when the trip arrives there.' : ''}
         ${isOwner ? `<button class="btn" data-flyover-edit-dests style="font-size:12px; margin-left:6px;" title="Rename, reorder, add, remove or rebuild the destinations">✏️ Edit destinations</button>
         <button class="btn" data-flyover-add-trip-photos style="font-size:12px; margin-left:6px;" title="Pick the trip's photos in one go — each is filed under the destination whose dates cover the day it was taken (its own date and location where the photo carries them)">📷 Add trip photos</button>
-        ${record.inboxPendingAt ? `<button class="btn primary" data-flyover-finish-upload style="font-size:12px; margin-left:6px;" title="Bring in the photos and videos you uploaded to the Drive folder">${esc(tripsyFlyoverFinishUploadLabel(inboxWatch ? inboxWatch.lastCount : 0))}</button>` : ''}` : ''}
+        ${record.inboxPendingAt ? `<button class="btn primary" data-flyover-finish-upload style="font-size:12px; margin-left:6px;" title="Bring in the photos and videos you uploaded to the Drive folder">⬆️ Finish Upload</button> <span data-flyover-drive-status style="margin-left:6px; white-space:nowrap;">${driveStatusHtml()}</span>` : ''}` : ''}
         ${completeHtml}
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; font-size:13px;">
@@ -19949,6 +19956,7 @@ async function showTripsyFlyover(tripKey) {
       runDriveImport(fresh, record.inboxDest || 'auto', folderId);
     };
     if (finishBtn) finishBtn.onclick = runFinishUpload;
+    wireDriveStatus();
     const runDriveImport = async (files, dest, folderId) => {
       driveImportRunning = true;
       stopInboxWatch(); // the import itself is what the watcher was waiting for
@@ -19978,11 +19986,13 @@ async function showTripsyFlyover(tripKey) {
               // The same photo picked earlier (or uploaded to the folder twice) is one photo:
               // the content fingerprint is the `src`, the Drive id the `driveSrc`.
               const fp = await tripsyFlyoverFileFingerprint(blob);
-              if (fp && known.has(fp)) { known.add(src); dupes++; tripsyFlyoverIntakeNote({ skipped: dupes }); continue; }
+              // Already in the app: the inbox copy is redundant and goes to the trash now.
+              if (fp && known.has(fp)) { known.add(src); dupes++; tripsyFlyoverIntakeNote({ skipped: dupes }); tripsyFlyoverTrashDriveFile(f.id); continue; }
               const pendingId = tripsyFlyoverStagePendingPhoto(blob);
               rec = { driveFileId: pendingId, addedAt: new Date().toISOString(), src: fp || src, driveSrc: src };
               if (fp) known.add(fp);
               pendingIds.push(pendingId);
+              tripsyFlyoverTrashAfterUpload.set(pendingId, f.id); // trashed once the app's copy is saved
               tripsyFlyoverQueueUpload(trip.key, pendingId);
             }
             updateStop(stopId, { photos: [...(stopNow().photos || []), rec] });
@@ -19998,7 +20008,7 @@ async function showTripsyFlyover(tripKey) {
         if (taken) save();
         if (!closed) {
           render();
-          const msg = `Imported ${taken} from Drive${dupes ? `, ${dupes} already here` : ''}${unmatched ? `, ${unmatched} fell in no destination’s dates` : ''}${failed ? `, ${failed} failed (press Import again to retry)` : ''}.${taken ? ' Photos are uploading in the background.' : ''}`;
+          const msg = `Imported ${taken} from Drive${dupes ? `, ${dupes} already here` : ''}${unmatched ? `, ${unmatched} fell in no destination’s dates` : ''}${failed ? `, ${failed} failed (press Import again to retry)` : ''}.${taken ? ' Photos are uploading in the background and leave the Drive folder as they land.' : ''}`;
           setStatus(msg);
           toast(msg, failed && !taken ? 'error' : undefined);
           // An import that left the hand-off pending (something failed or fell outside every
@@ -20016,7 +20026,7 @@ async function showTripsyFlyover(tripKey) {
           setStatus(`Imported ${taken} from Drive. Waiting for the uploads to finish before clearing the Drive folder…`);
           const landed = await tripsyFlyoverWaitForUploads(pendingIds, 15 * 60 * 1000);
           if (closed) return;
-          if (!landed) { setStatus(`Imported ${taken} from Drive. Some uploads are still running — the Drive folder is kept until the next import.`); return; }
+          if (!landed) { setStatus(`Imported ${taken} from Drive. Some uploads are still running — each photo leaves the Drive folder as its upload lands; the folder itself is kept until the next import.`); return; }
           setStatus('Clearing the Drive folder…');
           await tripsyFlyoverRetireInbox(folderId, videoIds);
           record = { ...record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' };
@@ -20398,6 +20408,34 @@ const tripsyFlyoverPendingBlobs = new Map();   // pending id -> Blob (the picked
 const tripsyFlyoverUploadedIds = new Map();    // pending id -> Drive file id
 const tripsyFlyoverFailedUploads = new Set();  // pending ids whose upload failed (retryable)
 const TRIPSY_FLYOVER_UPLOAD_PARALLEL = 3;
+// A photo imported from the Drive inbox folder is REMOVED from the folder once it is in the
+// app ("Remember to delete the photos from drive once they have been uploaded to the app,"
+// 2026-10-25) -- per file, not only when the whole folder retires, so a batch that left
+// something unmatched or failed does not keep every imported photo in Drive. The inbox file is
+// trashed only after the app's own copy has landed AND the saved record carries that copy's
+// Drive id (a reload between the two would otherwise drop the pending photo with nothing left
+// to re-import). Drive's trash, never a permanent delete.
+const tripsyFlyoverTrashAfterUpload = new Map(); // pending id -> the inbox Drive file it was downloaded from
+async function tripsyFlyoverTrashDriveFile(id) {
+  try {
+    const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) });
+    return !!(r && r.ok);
+  } catch (e) { console.warn('could not trash Drive file', id, e); return false; }
+}
+// Pure: which inbox files may go now -- their pending id has landed and the saved record no
+// longer refers to it (it carries the Drive id instead).
+function tripsyFlyoverInboxFilesToTrash(record, waiting, uploadedIds) {
+  const stillPending = new Set();
+  for (const s of ((record && record.stops) || [])) for (const p of (s.photos || [])) { if (p && p.driveFileId) stillPending.add(p.driveFileId); if (p && p.posterId) stillPending.add(p.posterId); }
+  const out = [];
+  for (const [pendingId, inboxId] of waiting) if (uploadedIds.has(pendingId) && !stillPending.has(pendingId)) out.push({ pendingId, inboxId });
+  return out;
+}
+async function tripsyFlyoverTrashImportedInboxFiles(record) {
+  for (const { pendingId, inboxId } of tripsyFlyoverInboxFilesToTrash(record, tripsyFlyoverTrashAfterUpload, tripsyFlyoverUploadedIds)) {
+    if (await tripsyFlyoverTrashDriveFile(inboxId)) tripsyFlyoverTrashAfterUpload.delete(pendingId);
+  }
+}
 function tripsyFlyoverPhotoIsPending(id) { return typeof id === 'string' && id.startsWith('pending-') && !tripsyFlyoverUploadedIds.has(id); }
 // Every picked file's identity across picks: SHA-256 of its first 64 KB + its size (the
 // name alone is unreliable -- some iOS versions hand every picked photo over as
@@ -20767,13 +20805,26 @@ const TRIPSY_FLYOVER_INBOX_POLL_MS = 15000;
 const TRIPSY_FLYOVER_INBOX_SETTLE_MS = 30000;
 function tripsyFlyoverInboxWatchStep(state, count, nowMs, settleMs = TRIPSY_FLYOVER_INBOX_SETTLE_MS) {
   const s = state || { count: -1, since: nowMs, announced: 0 };
-  if (count !== s.count) return { state: { count, since: nowMs, announced: s.announced }, announce: false };
+  if (count !== s.count) return { state: { count, since: nowMs, announced: s.announced }, announce: false, changed: true };
   const settled = count > 0 && nowMs - s.since >= settleMs && s.announced !== count;
-  return { state: settled ? { ...s, announced: count } : s, announce: settled };
+  return { state: settled ? { ...s, announced: count } : s, announce: settled, changed: false };
 }
-// The Finish Upload button names how many new files the watcher last saw in the folder.
-function tripsyFlyoverFinishUploadLabel(count) {
-  return count > 0 ? `⬆️ Finish Upload · ${count} new` : '⬆️ Finish Upload';
+// What the page SHOWS for a pending hand-off ("Don't have a live count. Until the drive upload
+// is complete display a flashing message 'Uploading Photos to Drive'. When that is done, change
+// that message to the completion prompt," 2026-10-25): one message slot beside Finish Upload,
+// in one of three phases. `uploading` flashes until a settled count announces completion;
+// `complete` is the prompt itself (Import now / Later); `later` is the quiet reminder after
+// Later. A count that grows again goes back to `uploading`. Pure.
+function tripsyFlyoverDrivePhase(phase, step) {
+  if (step.announce) return 'complete';
+  if (step.changed) return 'uploading';
+  return phase || 'uploading';
+}
+function tripsyFlyoverDriveStatusHtml(phase, count) {
+  const n = count || 0, files = `${n} new file${n === 1 ? '' : 's'}`;
+  if (phase === 'complete') return `<span data-flyover-drive-phase="complete" style="font-size:12px; color:#3AA76D; font-weight:700;">✅ Drive upload complete — ${files}. Import now?</span> <button class="btn primary" data-drive-import-now style="font-size:12px; margin-left:4px;">Import now</button> <button class="btn" data-drive-later style="font-size:12px;">Later</button>`;
+  if (phase === 'later') return `<span data-flyover-drive-phase="later" style="font-size:12px; color:var(--muted);">${files} waiting in Drive — press Finish Upload when you’re ready.</span>`;
+  return `<span class="tripsy-menu-flash" data-flyover-drive-phase="uploading" style="font-size:12px; color:#E0A020; font-weight:700;">⬆️ Uploading Photos to Drive…</span>`;
 }
 // The hand-off to Drive: the folder link (opens in the Google Drive app on the iPad), the
 // steps, and the reminder that ⬆️ Finish Upload on the fly-over page brings them in.
@@ -20943,6 +20994,9 @@ function tripsyFlyoverScheduleResolvedSave(tripKey) {
       if (!rec) return;
       const resolved = tripsyFlyoverResolvePendingIds(rec);
       if (resolved !== rec) await Store.saveTripsyFlyover(resolved);
+      // Only now, with the app's copy saved under its Drive id, may an imported photo's
+      // inbox file go.
+      if (tripsyFlyoverTrashAfterUpload.size) await tripsyFlyoverTrashImportedInboxFiles(resolved);
     } catch (e) { console.error('fly-over resolved-id save failed:', e); }
   }, TRIPSY_FLYOVER_UPLOAD_SAVE_DEBOUNCE_MS));
 }
