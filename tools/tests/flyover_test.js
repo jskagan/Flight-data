@@ -221,7 +221,7 @@ assert(tripsyFlyoverRangeStops(route, 'c', 'a').map(s => s.id).join('') === 'abc
 assert(tripsyFlyoverRangeStops(route, 'zzz', 'b').map(s => s.id).join('') === 'oab', 'an unknown start falls back to the departure');
 assert(tripsyFlyoverRangeStops(route, 'b', undefined).map(s => s.id).join('') === 'bcr', 'no end plays through to the home airport');
 assert(tripsyFlyoverRangeStops(route, 'b', 'b').length === 1, 'the same city twice is one stop (the dialog refuses it; the player would just land there)');
-assert(/tripsyFlyoverRangeDialog\(record, range =>/.test(html) && /const extra = !range \? \{\} : range\.previewStopId \? \{ previewStopId: range\.previewStopId \} : \{ range \};\s*tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, \.\.\.extra \}\)\)/.test(html),
+assert(/tripsyFlyoverRangeDialog\(record, range =>/.test(html) && /const extra = !range \? \{\} : range\.previewStopId \? \{ previewStopId: range\.previewStopId \} : \{ range \};\s*tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, \.\.\.extra, \.\.\.playerHooks \}\)\)/.test(html),
   'the setup page\'s Play asks whole / part / one slideshow first, then which map, and passes the range or the one destination to the player');
 assert(/data-range-all/.test(html) && /data-range-from/.test(html) && /data-range-to/.test(html) && /data-range-part/.test(html) && /<ol/.test(extractFn('tripsyFlyoverRangeDialog')),
   'the dialog lists the cities numbered, with Entire journey and From/To + Play this part');
@@ -858,7 +858,7 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
     const setup = extractFn('showTripsyFlyover');
     assert(/onRemovePhoto: removePhotoFromRecord/.test(setup) && /onRemovePhoto: async \(sid, pid\) => \{ await removePhotoFromRecord\(sid, pid\); if \(onDropped\) onDropped\(pid\); \}/.test(setup),
       'both Preview buttons on the setup page save the removal to the live record; the dialog\'s preview drops it from the draft too');
-    assert(/playPreview\(draft\(\), dropPhoto\)/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the slideshow dialog hands its draft-drop to the preview');
+    assert(/playPreview\(draft\(\), dropPhoto, setAudio\)/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the slideshow dialog hands its draft-drop and draft-sound setters to the preview');
     // EXIF: a hand-built little-endian JPEG APP1 with DateTimeOriginal and a GPS position.
     const exifBuf = () => {
       const bytes = [];
@@ -1359,23 +1359,44 @@ eval(extractFn('tripsyFlyoverStopsNeedingMode'));
 // ---- a video's sound: its own, or the fly-over music ("When the user selects a video, ask the
 // user if he wants to use audio from the video or the flyover music. Also, add an option for the
 // user to hear the music from the video," 2026-10-21) ----
-eval(extractFn('tripsyFlyoverVideoAudio'));
+eval([extractFn('tripsyFlyoverVideoAudio'), extractFn('tripsyFlyoverSetVideoAudio')].join('\n'));
 {
-  assert(tripsyFlyoverVideoAudio({ kind: 'video', audio: 'music' }) === 'music' && tripsyFlyoverVideoAudio({ kind: 'video' }) === 'video'
-    && tripsyFlyoverVideoAudio(null) === 'video', 'a video plays its own sound unless set to the music (older videos keep their sound)');
+  // Default flipped 2026-10-25: "For each video, by default use the existing flyover sound".
+  assert(tripsyFlyoverVideoAudio({ kind: 'video', audio: 'video' }) === 'video' && tripsyFlyoverVideoAudio({ kind: 'video', audio: 'music' }) === 'music'
+    && tripsyFlyoverVideoAudio({ kind: 'video' }) === 'music' && tripsyFlyoverVideoAudio(null) === 'music',
+    'THE ASK: a video plays under the fly-over music unless set to its own sound');
+  const ph = [{ driveFileId: 'a' }, { driveFileId: 'v', kind: 'video' }];
+  const set = tripsyFlyoverSetVideoAudio(ph, 'v', 'video');
+  assert(set[1].audio === 'video' && set[0].audio === undefined && ph[1].audio === undefined && tripsyFlyoverSetVideoAudio(set, 'v', 'music')[1].audio === 'music',
+    'the setter changes one video\'s sound and nothing else, without touching its input');
   const dlg = extractFn('tripsyFlyoverVideoAudioDialog');
   assert(/data-va-pick="video"/.test(dlg) && /data-va-pick="music"/.test(dlg) && /<video data-va-video playsinline controls/.test(dlg) && /▶ Hear the video/.test(dlg)
-    && /v\.muted = false;/.test(dlg), 'THE ASK: the dialog plays the video so its sound can be heard, then asks: its own sound or the fly-over music');
+    && /v\.muted = false;/.test(dlg), 'the hear-the-video dialog still exists for the Slideshow options page');
   const setup = extractFn('showTripsyFlyover');
-  assert(/tripsyFlyoverVideoAudioDialog\(localUrl,[\s\S]*tripsyFlyoverUploadVideo\(file, f =>[\s\S]*rec\.audio = audio === 'music' \? 'music' : 'video';/.test(setup),
-    'each video picked is asked about (from the picked file, before uploading) and the answer saved on it');
+  assert(!/tripsyFlyoverVideoAudioDialog\(localUrl/.test(setup) && /tripsyFlyoverUploadVideo\(file, f =>[\s\S]*rec\.audio = 'music';/.test(setup),
+    'nothing is asked before a video uploads; it is saved under the fly-over music');
+  assert(/const setVideoAudioInRecord = async \(stopId, photoId, mode\) => \{[\s\S]*tripsyFlyoverSetVideoAudio\(st\.photos, photoId, mode\)[\s\S]*await save\(\);/.test(setup)
+    && /const playerHooks = \{ onRemovePhoto: removePhotoFromRecord, onVideoAudio: setVideoAudioInRecord \};/.test(setup)
+    && /playTripsyFlyover\(trip, record, \{ previewStopId: id, \.\.\.playerHooks \}\)/.test(setup)
+    && /onVideoAudio: async \(sid, pid, mode\) => \{ await setVideoAudioInRecord\(sid, pid, mode\); if \(onAudio\) onAudio\(pid, mode\); \}/.test(setup),
+    'every player launch from the fly-over page (Play, card Preview, editor Preview) passes the sound setter; the editor\'s draft takes it too');
   const ss = extractFn('tripsyFlyoverSlideshowDialog');
   assert(/data-ss-vaudio="video"/.test(ss) && /data-ss-vaudio="music"/.test(ss) && /data-ss-vhear/.test(ss) && /photos\[i\] = \{ \.\.\.photos\[i\], audio: val \}/.test(ss),
     'a video page can switch its sound, or play the video to hear it, in Slideshow options (saved with Save)');
   const player = extractFn('playTripsyFlyover');
-  assert(/const underMusic = tripsyFlyoverVideoAudio\(rec\) === 'music';/.test(player) && /v\.muted = underMusic;/.test(player)
+  assert(/let underMusic = tripsyFlyoverVideoAudio\(rec\) === 'music';/.test(player) && /v\.muted = underMusic;/.test(player)
     && /const duck = underMusic \? Promise\.resolve\(\) : duckMusic\(\);/.test(player),
     'a video set to the music plays silently and the music never fades out for it');
+  // THE ASK: the buttons at the foot of the video, only when played from the fly-over page.
+  assert(/if \(s && rec && typeof opts\.onVideoAudio === 'function'\) \{/.test(player)
+    && /showVideoPage\(r, page, enterTr, s\)/.test(player)
+    && /mk\(listening \? '🎵 Back to Flyover Sound' : '🔊 Listen to Video Sound', \(\) => \{ listening = !listening; if \(listening\) videoSoundNow\(\); else musicNow\(\); paint\(\); \}, 'data-tfo-listen'\);/.test(player)
+    && /mk\('✓ Use Video Sound', \(\) => \{ underMusic = false; listening = false; videoSoundNow\(\); persist\('video'\); paint\(\); \}, 'data-tfo-use-video'\);/.test(player)
+    && /mk\('🎵 Use Flyover Sound', \(\) => \{ underMusic = true; listening = false; musicNow\(\); persist\('music'\); paint\(\); \}, 'data-tfo-use-music'\);/.test(player)
+    && /const persist = mode => \{\s*rec\.audio = mode;[\s\S]*opts\.onVideoAudio\(s\.id, rec\.driveFileId, mode\)/.test(player),
+    'under the music: Listen (no setting change) + Use Video Sound (saved); with its own sound: Use Flyover Sound (saved)');
+  assert(/\.tfo-video-ctl \{ position: absolute; left: 50%; bottom: 18px;/.test(html) && /\.tfo-group:has\(\.tfo-video-ctl\) \.tfo-video-sound \{ bottom: 66px; \}/.test(html),
+    'the buttons sit at the bottom of the video, and the iOS tap-for-sound button moves above them');
   assert(/tripsyFlyoverVideoAudio\(p\) === 'music' \? '🎵' : '🔊'/.test(extractFn('tripsyFlyoverThumbHtml')), 'its thumbnail shows which sound it uses');
 }
 
@@ -1800,8 +1821,26 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'added records join the draft and are placed on the page being edited');
   const setup = extractFn('showTripsyFlyover');
   assert(/const addMediaToStop = async \(id, files, setStatusFn\) => \{/.test(setup)
-    && /if \(own\) own\.onclick = \(\) => tripsyFlyoverPickMedia\(async files => \{\s*const r = await addMediaToStop\(id, files, setStatus\);/.test(setup)
+    && /if \(own\) own\.onclick = \(\) => tripsyFlyoverPickMedia\(async files => \{\s*setStatus\([^;]*\);\s*const r = await addMediaToStop\(id, files, setStatus\);/.test(setup)
     && /addMedia: isOwner \? \(files, setStatusFn\) => addMediaToStop\(id, files, setStatusFn\) : null,/.test(setup),
     'ONE add path: the card\'s button and the editor\'s button both run addMediaToStop (stage + background upload for photos, foreground for videos)');
+  // ---- A big pick no longer freezes the page (2026-10-25): landings are coalesced, and the
+  // picker says it is waiting while iOS exports the selection ----
+  {
+    const run = extractFn('tripsyFlyoverRunUpload');
+    assert(/tripsyFlyoverScheduleResolvedSave\(tripKey\);/.test(run) && !/await Store\.saveTripsyFlyover/.test(run),
+      'a landed upload schedules ONE batched save of the record instead of writing Drive per photo');
+    const sched = extractFn('tripsyFlyoverScheduleResolvedSave');
+    assert(/clearTimeout\(prev\)/.test(sched) && /TRIPSY_FLYOVER_UPLOAD_SAVE_DEBOUNCE_MS/.test(sched) && /tripsyFlyoverResolvePendingIds\(rec\)/.test(sched),
+      'the batched save is debounced per trip and resolves the record as it is THEN');
+    assert(/uploadFlush = setTimeout\(\(\) => \{[\s\S]*?record = tripsyFlyoverResolvePendingIds\(record\);[\s\S]*?if \(uploadLanded\) \{ uploadLanded = false; save\(\); \}[\s\S]*?render\(\);[\s\S]*?\}, 400\);/.test(setup),
+      'the setup page repaints and saves ONCE per batch of landings, not per photo');
+    const pick = extractFn('tripsyFlyoverPickMedia');
+    assert(/\{ onWaiting, onCancel \} = \{\}/.test(pick) && /onWaiting\(TRIPSY_FLYOVER_PICK_WAITING\)/.test(pick) && /input\.oncancel = /.test(pick),
+      'the picker reports that it is waiting for Photos, and clears on cancel');
+    assert((setup.match(/\{ onWaiting: setStatus, onCancel: \(\) => setStatus\(''\) \}/g) || []).length === 2
+      && /\{ onWaiting: setStatus, onCancel: \(\) => setStatus\(''\) \}/.test(extractFn('tripsyFlyoverSlideshowDialog')),
+      'all three picker buttons (card, trip photos, editor) show the waiting status');
+  }
   assert(/return \{ added, done, queued, problems \};/.test(setup), 'addMediaToStop reports the records it added');
 }

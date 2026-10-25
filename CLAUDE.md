@@ -4661,6 +4661,30 @@ WebView's support for recording is unproven.
     Verified in Chromium: tap → dialog → Remove updates the record (B,C | pages B / C), dims
     the image, resumes the run; four stubbed files sorted Singapore 2 / Fukuoka 1 / 1 left out.
     `flyover_test.js`.
+    **A big pick lands in ONE write and ONE repaint per batch, and the picker says it is
+    waiting** ("When I select photos to add and then hit the blue check mark, nothing happens,
+    and the app seems to freeze or crash," 2026-10-25 — a 136-item pick with videos on the
+    iPad). Two causes, one in the app and one outside it. **In the app**: every landed
+    background upload wrote the WHOLE data file to Drive twice (`tripsyFlyoverRunUpload`'s own
+    `Store.saveTripsyFlyover` and the setup page's `onUpload` → `save()`) and repainted the whole
+    setup page; measured in Chromium on a 40-photo pick: 83 Drive writes and 41 full repaints,
+    on an iPad with a weak signal that is minutes of continuous half-megabyte PATCHes behind a
+    page rebuilding 150 tiles. Now `tripsyFlyoverRunUpload` only calls
+    `tripsyFlyoverScheduleResolvedSave(tripKey)` — one debounced write
+    (`TRIPSY_FLYOVER_UPLOAD_SAVE_DEBOUNCE_MS`, 1.5 s after the latest landing, resolving the
+    record as it is THEN) — and the page's `onUpload` coalesces landings into one
+    resolve + `save()` + `render()` 400 ms after the latest (a failed landing still repaints
+    for its ⚠️ badge, but never saves). Same 40-photo measurement after: 4 writes, 2 repaints,
+    every photo resolved. **Outside it**: between the check mark and the page's `change` event
+    iOS EXPORTS the selection — each HEIC to JPEG, a video possibly transcoded, and a photo
+    kept in iCloud ("Optimize iPad Storage") downloaded at full size first — which for 100+
+    items takes a minute or more with the sheet already gone and nothing a page can show …
+    except a status line: `tripsyFlyoverPickMedia(onPick, {onWaiting, onCancel})` calls
+    `onWaiting(TRIPSY_FLYOVER_PICK_WAITING)` as the picker opens and `onCancel` on the input's
+    `cancel` event (or an empty change), and all three buttons (card ＋, 📷 Add trip photos, the
+    editor's ＋) pass `setStatus`, so the page reads "Waiting for Photos to hand over your
+    selection…" until the files arrive. Picking in a few smaller batches is the practical
+    answer when the library is iCloud-optimized. `flyover_test.js`.
   - **A video is a stop "photo" record** `{driveFileId, kind:'video', mime, posterId,
     duration, width, height}`, so pages, carry-over and preloading need nothing new.
     `tripsyFlyoverUploadVideo` refuses files over `TRIPSY_FLYOVER_VIDEO_MAX_BYTES` (250 MB,
@@ -4681,17 +4705,37 @@ WebView's support for recording is unproven.
     crossfades in.
   - **Each video chooses its SOUND: its own, or the fly-over music** ("When the user selects
     a video, ask the user if he wants to use audio from the video or the flyover music. Also,
-    add an option for the user to hear the music from the video," 2026-10-21). Every video
-    picked opens `tripsyFlyoverVideoAudioDialog` BEFORE its upload (on a local object URL of the
-    picked file): the video itself with controls and a **▶ Hear the video** button (unmuted),
-    then 🔊 *Use the video's sound* / 🎵 *Keep the fly-over music*; the answer rides the record
-    as `audio: 'video'|'music'` (dismissed → video). `tripsyFlyoverVideoAudio(rec)` is the one
-    reader and treats a record without `audio` as `'video'`, so older videos keep their sound.
-    The page dialog's video note shows the current sound with the same two chips plus ▶ Hear the
-    video (the dialog again, from the stored video), saved with Save; thumbnails badge 🔊/🎵.
-    In the player a `'music'` video plays MUTED with no duck/unduck and no tap-for-sound.
-    Verified in Chromium: the preview played unmuted; a music video ran muted while the music
-    held at 0.7 throughout.
+    add an option for the user to hear the music from the video," 2026-10-21). The answer rides
+    the record as `audio: 'video'|'music'`; `tripsyFlyoverVideoAudio(rec)` is the one reader.
+    The page dialog's video note shows the current sound with two chips plus ▶ Hear the video
+    (`tripsyFlyoverVideoAudioDialog`, from the stored video), saved with Save; thumbnails badge
+    🔊/🎵. In the player a `'music'` video plays MUTED with no duck/unduck and no tap-for-sound.
+    **The DEFAULT is the fly-over music, nothing is asked at upload, and the sound is switched
+    from buttons at the foot of the video in the player** ("For each video, by default use the
+    existing flyover sound, but when viewing the video directly from the flyover page or when
+    a user is viewing a preview of the flyover from the flyover page, put 2 buttons on the
+    bottom of the video 'Listen to Video Sound' and 'Use Video Sound' … If the user has already
+    selected use video sound for any video, display the button 'Use Flyover Sound' only,"
+    2026-10-25). `tripsyFlyoverVideoAudio` now reads a record WITHOUT `audio` as `'music'` (the
+    reverse of before — a video added before the choice existed and never set switches to the
+    music; one press in the player sets it back), `addMediaToStop` saves every uploaded video
+    `audio: 'music'` with no pre-upload dialog, and `tripsyFlyoverSetVideoAudio(photos, id,
+    mode)` (pure) is the one setter. In `showVideoPage(r, page, enterTr, s)` a `.tfo-video-ctl`
+    bar renders ONLY when the caller passed `opts.onVideoAudio` — the setup page's
+    `playerHooks` (`onRemovePhoto` + `onVideoAudio: setVideoAudioInRecord`), spread into all
+    three launches from that page (▶ Play after the range/map dialogs, a card's Preview, the
+    Slideshow options Preview, whose `playPreview(draft, onDropped, onAudio)` also writes the
+    draft via `setAudio` so Save can't revert it); View Fly-Over from the ⚙️ menu passes none,
+    so a viewer sees no buttons. Under the music: **🔊 Listen to Video Sound** (unmute + duck
+    the music for THIS showing only, the setting stays; it toggles to "🎵 Back to Flyover
+    Sound") and **✓ Use Video Sound** (same, and `persist('video')`); with its own sound:
+    **🎵 Use Flyover Sound** only (mute + unduck, `persist('music')`). `persist` updates the
+    page's `rec`, the stop's photo list and the record through the hook. The buttons are user
+    taps, so an unmuted play is allowed; the iOS tap-for-sound button moves above the bar
+    (`:has`). Verified in Chromium: default plays muted at music 0.7; Listen → video unmuted,
+    music fading to 0, nothing saved; Back restores; Use Video Sound saves `video` and flips to
+    the one button; Use Flyover Sound saves `music` and restores both; from the menu, no
+    buttons. `flyover_test.js`.
   - **Fades: `tripsyFlyoverMusicFader`**. Music fades in at the start/Replay, out before and
     back in after each video, and out under "The end" — by ramping the element's volume,
     which desktop browsers allow. iOS keeps an element's volume fixed at 1, so on the iPad
