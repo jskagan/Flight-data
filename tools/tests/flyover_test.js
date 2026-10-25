@@ -523,6 +523,9 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/tripsyFlyoverPhotoReviewDialog\(url, \{ label: [\s\S]*?removeLabel: '🗑 Delete', isVideo \}\)/.test(ep) && /if \(answer === 'remove' && onDelete\) \{ await onDelete\(id\); render\(\); \}/.test(ep),
     'THE ASK: a tap shows it large with Keep and Delete; Delete removes it and the grid redraws from what is left');
   assert(/isVideo\s*\? `<video src="\$\{esc\(url\)\}" controls playsinline/.test(extractFn('tripsyFlyoverPhotoReviewDialog')), 'a video opens playable in the same large view');
+  // "Change Music from here button to say 'Change Music'" (2026-10-25).
+  assert(/data-flyover-stop-music [^>]*>🎵 Change Music<\/button>/.test(setup) && !/Music from here<\/button>|Change music here/.test(setup) && /data-flyover-stop-music-name/.test(setup),
+    'THE ASK: the destination music button always reads "Change Music"; a destination\'s own track is named beside it');
   // "For each location box on the flyover page, make the first line the location, the dates
   // there, and the lodging in large type. The second line should be the drop down box with the
   // type of transportation and the editable name of the destination, the music option box and
@@ -530,6 +533,8 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   const headM = /<div data-flyover-headline style="([^"]*)">([\s\S]*?)<\/div>\s*<!-- Line 2/.exec(setup);
   assert(headM && /font-size:18px/.test(headM[1]) && /<strong style="font-size:20px;">\$\{esc\(s\.label \|\| 'Location'\)\}<\/strong>/.test(headM[2]) && /tripsyFlyoverDatesLabel\(s\)/.test(headM[2]) && /s\.names\.join\(' · '\)/.test(headM[2]),
     'THE ASK: line 1 is the location, its dates and its lodging, in large type');
+  assert(headM && headM[2].indexOf("s.names.join(' · ')") < headM[2].indexOf('tripsyFlyoverDatesLabel(s)') && headM[2].indexOf("esc(s.label || 'Location')") < headM[2].indexOf("s.names.join(' · ')"),
+    'THE ASK: the title reads location, then lodging, then dates ("Swap the location of the date and lodging in the card title," 2026-10-25)');
   const ctlM = /<div data-flyover-controls [^>]*>([\s\S]*?)<\/div>\s*\$\{noPlace && !s\.removed/.exec(setup);
   const ctl = ctlM ? ctlM[1] : '';
   const at = k => ctl.indexOf(k);

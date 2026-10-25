@@ -4203,12 +4203,14 @@ WebView's support for recording is unproven.
       large type. The second line should be the drop down box with the type of transportation
       and the editable name of the destination, the music option box and the remove box (change
       name to delete destination)," 2026-10-25): line 1 (`data-flyover-headline`, 18px, the name
-      20px bold) is the stop number, the location, `tripsyFlyoverDatesLabel(s)` and the lodging
-      names (`s.names`), read-only for everyone; line 2 (`data-flyover-controls`) is 🎞 Edit
+      20px bold) is the stop number, the location, the lodging names (`s.names`) and then
+      `tripsyFlyoverDatesLabel(s)` (lodging before dates: "Swap the location of the date and lodging
+      in the card title," same day), read-only for everyone; line 2 (`data-flyover-controls`) is 🎞 Edit
       slideshow (kept left of the transport, per 10-22), the transport drop-down (+ "via"
-      layovers), the editable name input (owner), the music button — which now carries the track
-      name itself ("🎵 <track>", ellipsised; the carry-on wording moved to its tooltip; the old
-      separate music row is gone) — and **Delete destination** (the old Remove; still a soft
+      layovers), the editable name input (owner), the music button — always "🎵 Change Music"
+      ("Change Music from here button to say 'Change Music'," same day), with a destination's own
+      track named in small grey text beside it (`data-flyover-stop-music-name`, ellipsised); the
+      carry-on wording is in its tooltip and the old separate music row is gone — and **Delete destination** (the old Remove; still a soft
       remove with Restore). A viewer's line 2 has the transport glyph and the music line only.
       Airport-transfer cards are unchanged. **🔍 Suggested photos is gone from the card; ✏️ Edit
       photos replaces it** ("Remove the suggested photos button. Have a button that says edit
