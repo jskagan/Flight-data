@@ -201,8 +201,8 @@ eval([extractFn('tripsyFlyoverResolvePendingIds'), extractFn('tripsyFlyoverDropL
 }
 assert(/const _driveFolderIdMemo = new Map\(\)/.test(html) && /if \(_driveFolderIdMemo\.has\(folderName\)\) return _driveFolderIdMemo\.get\(folderName\)/.test(html),
   'the Drive folder id is looked up once per session, not once per photo');
-assert(/const TRIPSY_FLYOVER_UPLOAD_PARALLEL = 3/.test(html) && /tripsyFlyoverQueueUpload\(trip\.key, pendingId\)/.test(html) && /if \(queued\) \{ save\(\); if \(!closed\) render\(\); \}/.test(html),
-  'picked photos are staged with pending ids, rendered at once, and uploaded three at a time in the background');
+assert(/const TRIPSY_FLYOVER_UPLOAD_PARALLEL = 3/.test(html) && /tripsyFlyoverQueueUpload\(trip\.key, pendingId\)/.test(html) && /if \(b === 0 \|\| b \+ TRIPSY_FLYOVER_INTAKE_BATCH >= photoIdx\.length\) \{ if \(queued\) \{ save\(\); render\(\); \} \}/.test(html),
+  'picked photos are staged with pending ids, rendered after the first batch and the last, and uploaded three at a time in the background');
 assert(/driveFileId\.startsWith\('pending-'\)\) \{\s*if \(tripsyFlyoverUploadedIds\.has\(driveFileId\)\) return tripsyPlacePhotoDisplayUrl/.test(html),
   'tripsyPlacePhotoDisplayUrl paints a pending photo from its local bytes (and follows an uploaded one to its Drive id)');
 assert(/document\.addEventListener\('tripsy-flyover-upload', onUpload\)/.test(html) && /document\.removeEventListener\('tripsy-flyover-upload', onUpload\)/.test(html),
@@ -1823,8 +1823,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   const setup = extractFn('showTripsyFlyover');
   assert(/const addMediaToStop = async \(id, files, setStatusFn\) => \{/.test(setup)
     && /const onPicked = async files => \{\s*setStatus\([^;]*\);\s*const r = await addMediaToStop\(id, files, setStatus\);/.test(setup)
-    && /if \(own\) own\.onclick = \(\) => tripsyFlyoverPickMedia\(onPicked, \{ kind: 'photos'/.test(setup)
-    && /if \(vid\) vid\.onclick = \(\) => tripsyFlyoverPickMedia\(onPicked, \{ kind: 'videos'/.test(setup)
+    && /if \(own\) own\.onclick = \(\) => tripsyFlyoverPickMedia\(onPicked, \{ kind: 'all'/.test(setup) && !/data-flyover-add-video/.test(html)
     && /addMedia: isOwner \? \(files, setStatusFn\) => addMediaToStop\(id, files, setStatusFn\) : null,/.test(setup),
     'ONE add path: the card\'s button and the editor\'s button both run addMediaToStop (stage + background upload for photos, foreground for videos)');
   // ---- A big pick no longer freezes the page (2026-10-25): landings are coalesced, and the
@@ -1839,11 +1838,89 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/uploadFlush = setTimeout\(\(\) => \{[\s\S]*?record = tripsyFlyoverResolvePendingIds\(record\);[\s\S]*?if \(uploadLanded\) \{ uploadLanded = false; save\(\); \}[\s\S]*?render\(\);[\s\S]*?\}, 400\);/.test(setup),
       'the setup page repaints and saves ONCE per batch of landings, not per photo');
     const pick = extractFn('tripsyFlyoverPickMedia');
-    assert(/\{ onWaiting, onCancel, kind = 'photos' \} = \{\}/.test(pick) && /onWaiting\(TRIPSY_FLYOVER_PICK_WAITING\)/.test(pick) && /input\.oncancel = /.test(pick),
+    assert(/\{ onWaiting, onCancel, kind = 'all' \} = \{\}/.test(pick) && /onWaiting\(TRIPSY_FLYOVER_PICK_WAITING\)/.test(pick) && /input\.oncancel = /.test(pick),
       'the picker reports that it is waiting for Photos, and clears on cancel');
-    assert((setup.match(/onWaiting: setStatus, onCancel: \(\) => setStatus\(''\) \}/g) || []).length === 3
-      && /\{ onWaiting: setStatus, onCancel: \(\) => setStatus\(''\) \}/.test(extractFn('tripsyFlyoverSlideshowDialog')),
-      'all four picker buttons (card photos, card video, trip photos, editor) show the waiting status');
+    assert((setup.match(/kind: 'all', onWaiting: setStatus, onCancel: \(\) => setStatus\(''\) \}/g) || []).length === 2
+      && /\{ kind: 'all', onWaiting: setStatus, onCancel: \(\) => setStatus\(''\) \}/.test(extractFn('tripsyFlyoverSlideshowDialog')),
+      'all three picker buttons (card, trip photos, editor) take photos AND videos in one pick and show the waiting status');
   }
-  assert(/return \{ added, done, queued, problems \};/.test(setup), 'addMediaToStop reports the records it added');
+  assert(/return \{ added, done, queued, skipped, problems \};/.test(setup), 'addMediaToStop reports the records it added, and how many it skipped as already there');
+  // ---- Overlapping batches never duplicate (2026-10-25): every added file carries a byte
+  // fingerprint, and a file whose fingerprint the record already holds is skipped ----
+  {
+    eval(extractFn('tripsyFlyoverKnownSources'));
+    const rec = { stops: [{ id: 'a', photos: [{ driveFileId: 'x', src: 'h:1:10' }, { driveFileId: 'y' }] }, { id: 'b', photos: [{ driveFileId: 'v', kind: 'video', src: 'h:2:20' }] }] };
+    const k = tripsyFlyoverKnownSources(rec);
+    assert(k.size === 2 && k.has('h:1:10') && k.has('h:2:20') && tripsyFlyoverKnownSources(null).size === 0, 'known sources = every stamped photo and video on the record, any stop');
+    const fp = extractFn('tripsyFlyoverFileFingerprint');
+    assert(/file\.slice\(0, 65536\)\.arrayBuffer\(\)/.test(fp) && /crypto\.subtle\.digest\('SHA-256', head\)/.test(fp) && /return `h:\$\{hex\}:\$\{file\.size\}`;/.test(fp) && /return `n:\$\{file\.name \|\| ''\}:\$\{file\.size\}`;/.test(fp),
+      'the fingerprint is a hash of the first 64 KB + size, with a name|size fallback');
+    assert(/const known = tripsyFlyoverKnownSources\(record\);[\s\S]*const bf = await Promise\.all\(batch\.map\(k => tripsyFlyoverFileFingerprint\(files\[k\]\)\)\);[\s\S]*if \(fps\[k\] && known\.has\(fps\[k\]\)\) \{ skipped\+\+; continue; \}[\s\S]*\.\.\.\(fps\[k\] \? \{ src: fps\[k\] \} : \{\}\)/.test(setup)
+      && /if \(fps\[k\]\) rec\.src = fps\[k\];/.test(setup) && /if \(skipped\) problems\.push\(`\$\{skipped\} already on this fly-over — skipped\.`\);/.test(setup),
+      'THE ASK: a photo or video already on the fly-over is skipped and counted, new ones are stamped');
+  }
+  // ---- The intake runs in batches and leaves a receipt (2026-10-25: "when i picked 87 it
+  // seemed to freeze again. Can it automatically break the import into batches?") ----
+  {
+    assert(/const TRIPSY_FLYOVER_INTAKE_BATCH = 10;/.test(html)
+      && /for \(let b = 0; b < photoIdx\.length; b \+= TRIPSY_FLYOVER_INTAKE_BATCH\) \{/.test(setup)
+      && /await new Promise\(r => setTimeout\(r, 0\)\);\s*\}\s*if \(closed && queued\) save\(\);/.test(setup)
+      && /status\(`Adding photos… \$\{Math\.min\(b \+ batch\.length, photoIdx\.length\)\} of \$\{photoIdx\.length\} taken in/.test(setup),
+      'THE ASK: photos are taken in ten at a time, the page yields between batches, and the status counts them in');
+    eval([extractFn('tripsyFlyoverIntakeReceiptText'), 'var tripsyFlyoverPhotoIsPending = id => /^pending-/.test(id); var tripsyFlyoverFailedUploads = new Set(["pending-f"]);'].join('\n'));
+    const rec = { stops: [{ photos: [{ driveFileId: 'd1' }, { driveFileId: 'pending-a' }, { driveFileId: 'pending-f' }] }] };
+    assert(tripsyFlyoverIntakeReceiptText(null, rec) === '' && /nothing has arrived from Photos yet/.test(tripsyFlyoverIntakeReceiptText({ openedAt: 1 }, rec))
+      && /closed with nothing picked/.test(tripsyFlyoverIntakeReceiptText({ openedAt: 1, cancelledAt: 2 }, rec)),
+      'the receipt says when the picker opened and whether anything ever arrived');
+    const got = tripsyFlyoverIntakeReceiptText({ openedAt: 1, receivedAt: 2, count: 87, kind: 'photos', staged: 80, skipped: 7 }, rec);
+    assert(/87 photos received/.test(got) && /80 taken in/.test(got) && /7 already here/.test(got) && /1 still uploading/.test(got) && /1 failed/.test(got),
+      'once received it counts: taken in, already here, still uploading, failed');
+    assert(/all uploaded\./.test(tripsyFlyoverIntakeReceiptText({ openedAt: 1, receivedAt: 2, count: 3, staged: 3 }, { stops: [{ photos: [{ driveFileId: 'd1' }] }] })), 'and "all uploaded" once nothing is pending');
+    assert(/2 in no destination’s dates/.test(tripsyFlyoverIntakeReceiptText({ openedAt: 1, receivedAt: 2, count: 5, kind: 'drive', staged: 3, unmatched: 2 }, { stops: [] })) && /files from Drive received/.test(tripsyFlyoverIntakeReceiptText({ openedAt: 1, receivedAt: 2, count: 5, kind: 'drive', staged: 3 }, { stops: [] })),
+      'a Drive import\'s receipt names the files from Drive and the ones that fit no destination');
+    const pick = extractFn('tripsyFlyoverPickMedia');
+    assert(/tripsyFlyoverIntakeNote\(\{ openedAt: Date\.now\(\), kind, receivedAt: 0/.test(pick) && /cancelledAt: Date\.now\(\)/.test(pick)
+      && /tripsyFlyoverIntakeNote\(\{ receivedAt: Date\.now\(\), count: n, photos: photoIdx\.length/.test(setup) && /data-flyover-intake/.test(html),
+      'the picker logs opened / cancelled, the intake logs received and staged, and the page shows the line');
+  }
+  // ---- Import from a Drive folder (2026-10-25: "copy the photos into a temporary drive folder
+  // and then import the photos into the app in the background from the drive folder") ----
+  {
+    eval([extractFn('tripsyFlyoverDriveSrc'), extractFn('tripsyFlyoverDriveMetaInfo'), extractFn('tripsyFlyoverDriveVideoRecord'), extractFn('tripsyFlyoverDriveNewFiles'), extractFn('tripsyFlyoverKnownSources'), extractFn('tripsyFlyoverDriveFolderUrl')].join('\n'));
+    const a = tripsyFlyoverDriveMetaInfo({ id: 'a', imageMediaMetadata: { time: '2026:10:09 18:30:15', location: { latitude: 1.29, longitude: 103.85 } }, createdTime: '2026-10-25T01:00:00Z' });
+    assert(a.takenAt === '2026-10-09T18:30:15' && a.lat === 1.29 && a.lng === 103.85 && a.source === 'exif', 'THE ASK: Drive\'s own listing gives the capture time and GPS, so photos route with no download');
+    const b = tripsyFlyoverDriveMetaInfo({ id: 'b', createdTime: '2026-10-25T01:00:00Z' });
+    assert(b.takenAt && b.source === 'file' && b.lat === null, 'no EXIF in the listing -> the upload time, marked as such');
+    const v = tripsyFlyoverDriveVideoRecord({ id: 'vid1', mimeType: 'video/quicktime', videoMediaMetadata: { durationMillis: '80500', width: '1920', height: '1080' } });
+    assert(v.driveFileId === 'vid1' && v.kind === 'video' && v.audio === 'music' && v.duration === 81 && v.width === 1920 && v.src === 'drive:vid1', 'a video is referenced in place on Drive, under the music by default');
+    const rec = { stops: [{ photos: [{ driveFileId: 'x', src: 'drive:p1' }] }] };
+    const fresh = tripsyFlyoverDriveNewFiles([
+      { id: 'p2', mimeType: 'image/jpeg', imageMediaMetadata: { time: '2026:10:10 09:00:00' } },
+      { id: 'p1', mimeType: 'image/jpeg', imageMediaMetadata: { time: '2026:10:08 09:00:00' } },
+      { id: 'p3', mimeType: 'image/heic', createdTime: '2026-10-09T00:00:00Z' },
+      { id: 'doc', mimeType: 'application/pdf' },
+    ], rec);
+    assert(fresh.map(f => f.id).join() === 'p3,p2', 'only new photos / videos, oldest capture first; a PDF in the folder is ignored');
+    assert(tripsyFlyoverDriveFolderUrl('abc 1') === 'https://drive.google.com/drive/folders/abc%201', 'the folder link opens in Drive');
+    const setup = extractFn('showTripsyFlyover');
+    assert(/data-flyover-drive-import/.test(html) && /const runDriveImport = async \(files, dest, folderId\) => \{/.test(setup)
+      && /const src = tripsyFlyoverDriveSrc\(f\.id\);\s*if \(known\.has\(src\)\) continue;/.test(setup)
+      && /dest === 'auto' \? tripsyFlyoverRoutePhoto\(record\.stops, tripsyFlyoverDriveMetaInfo\(f\)\) : dest/.test(setup)
+      && /const blob = await downloadDriveFileBlob\(f\.id\);[\s\S]*const fp = await tripsyFlyoverFileFingerprint\(blob\);[\s\S]*tripsyFlyoverStagePendingPhoto\(blob\);[\s\S]*src: fp \|\| src, driveSrc: src[\s\S]*tripsyFlyoverQueueUpload\(trip\.key, pendingId\);/.test(setup)
+      && /if \(taken === 1 \|\| taken % 10 === 0\) \{ save\(\); render\(\); \}/.test(setup),
+      'the import runs on the page: resume-safe by src, routed by date or to a chosen destination, each photo downloaded, staged and uploaded resized in the background');
+    assert(/if \(prevRecord && prevRecord\.inboxFolderId\) rec\.inboxFolderId = prevRecord\.inboxFolderId;/.test(html), 'a rebuild keeps the inbox folder');
+    // The folder is temporary: videos moved out, folder trashed, only once everything landed.
+    assert(/if \(!closed && !failed && !unmatched && taken && folderId\) \{[\s\S]*const landed = await tripsyFlyoverWaitForUploads\(pendingIds, 15 \* 60 \* 1000\);[\s\S]*await tripsyFlyoverRetireInbox\(folderId, videoIds\);[\s\S]*record = \{ \.\.\.record, inboxFolderId: '' \};/.test(setup),
+      'THE ASK: after a clean import the folder is retired, but only once every photo upload has landed');
+    const retire = extractFn('tripsyFlyoverRetireInbox');
+    assert(/addParents=\$\{encodeURIComponent\(home\)\}&removeParents=\$\{encodeURIComponent\(folderId\)\}/.test(retire) && /JSON\.stringify\(\{ trashed: true \}\)/.test(retire),
+      'videos are MOVED into the app folder first (the player streams them by id), then the inbox is trashed, not permanently deleted');
+    eval(extractFn('tripsyFlyoverWaitForUploads') + '\nvar tripsyFlyoverUploadedIds = new Map([["pending-a", "d1"]]);');
+    const known2 = tripsyFlyoverKnownSources({ stops: [{ photos: [{ driveFileId: 'x', src: 'h:1', driveSrc: 'drive:p9' }] }] });
+    assert(known2.has('h:1') && known2.has('drive:p9'), 'known sources include a Drive photo\'s content fingerprint AND its Drive id, so a re-uploaded copy is still one photo');
+    assert(/if \(out\.full !== file && tripsyFlyoverPendingBlobs\.get\(pendingId\) === file\) tripsyFlyoverPendingBlobs\.set\(pendingId, out\.full\);/.test(html), 'a prepared photo releases its original bytes');
+    const dlg = extractFn('tripsyFlyoverDriveImportDialog');
+    assert(/data-drive-open/.test(dlg) && /data-drive-refresh/.test(dlg) && /data-drive-go/.test(dlg) && /<option value="auto">/.test(dlg) && /Photos and Videos/.test(dlg), 'the dialog links the folder, explains the Drive app steps, counts what is new, and offers by-date or one destination');
+  }
 }

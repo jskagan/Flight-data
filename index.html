@@ -18778,6 +18778,7 @@ async function tripsyFlyoverBuild(trip, prevRecord, opts = {}) {
   // Rebuilding a completed fly-over (Edit -> Rebuild) leaves it completed.
   if (prevRecord && prevRecord.completedAt) rec.completedAt = prevRecord.completedAt;
   if (prevRecord && prevRecord.music) rec.music = prevRecord.music;
+  if (prevRecord && prevRecord.inboxFolderId) rec.inboxFolderId = prevRecord.inboxFolderId;
   return tripsyFlyoverApplyAirportCities(rec).record;
 }
 
@@ -19243,7 +19244,8 @@ async function showTripsyFlyover(tripKey) {
         ${isOwner ? `<button class="tripsy-close-x tripsy-save-check" data-flyover-save title="Save" aria-label="Save">✓</button>` : ''}
         <button class="tripsy-close-x" data-flyover-close title="Close" aria-label="Close">✕</button>
       </div>
-      <div data-flyover-status style="font-size:12px; color:var(--muted); min-height:16px; margin-bottom:8px;"></div>
+      <div data-flyover-status style="font-size:12px; color:var(--muted); min-height:16px; margin-bottom:4px;"></div>
+      <div data-flyover-intake style="font-size:11px; color:var(--muted); min-height:14px; margin-bottom:8px;"></div>
       <div data-flyover-body><div style="padding:24px 0; color:var(--muted);">Loading…</div></div>
       ${isOwner ? `<div class="tfo-ss-footer" style="justify-content:flex-end;">
         <button class="tripsy-close-x" data-flyover-close title="Close" aria-label="Close">✕</button>
@@ -19254,6 +19256,11 @@ async function showTripsyFlyover(tripKey) {
   const body = ov.querySelector('[data-flyover-body]');
   const statusEl = ov.querySelector('[data-flyover-status]');
   const setStatus = t => { statusEl.textContent = t || ''; };
+  // The last import's receipt -- where it got to, from this device's own log plus the live
+  // upload state -- so a stalled pick can be told apart: "Waiting for Photos" never
+  // becoming "received" is iOS's export; "received" with nothing after is the page.
+  const intakeEl = ov.querySelector('[data-flyover-intake]');
+  const paintIntake = () => { if (!intakeEl) return; intakeEl.textContent = tripsyFlyoverIntakeReceiptText(tripsyFlyoverIntakeLoad(), record); };
   let closed = false;
   const dragState = { drag: null, suppressTapUntil: 0 };
   // A background photo upload landing (or failing) repaints the page: the record adopts the
@@ -19272,6 +19279,7 @@ async function showTripsyFlyover(tripKey) {
       record = tripsyFlyoverResolvePendingIds(record);
       if (uploadLanded) { uploadLanded = false; save(); }
       render();
+      paintIntake();
     }, 400);
   };
   document.addEventListener('tripsy-flyover-upload', onUpload);
@@ -19313,6 +19321,7 @@ async function showTripsyFlyover(tripKey) {
     }
   }
   let saveChain = Promise.resolve();
+  let driveImportRunning = false;
   // The change is staged in memory AT ONCE (so View, Play, and every other reader see it
   // immediately); only the Drive write waits its turn in the chain.
   const save = () => {
@@ -19396,7 +19405,7 @@ async function showTripsyFlyover(tripKey) {
     }
   }
 
-  // Picked files onto ONE stop -- the one add path, shared by the card's "＋ Photos" and "🎬 Video"
+  // Picked files onto ONE stop -- the one add path, shared by the card's "＋ Photos & videos"
   // and the slideshow editor's own "＋ Add photos" ("Add an add photo button to the edit
   // slideshow page," 2026-10-23). PHOTOS go on the stop at once, uploaded behind the page
   // (see tripsyFlyoverQueueUpload); videos keep their foreground upload (progress, the
@@ -19429,19 +19438,50 @@ async function showTripsyFlyover(tripKey) {
     const added = [];
     const problems = [];
     const n = files.length;
-    for (const file of files) {
-      if (tripsyFlyoverFileIsVideo(file)) continue;
-      const pendingId = tripsyFlyoverStagePendingPhoto(file);
-      const rec = { driveFileId: pendingId, addedAt: new Date().toISOString() };
-      updateStop(id, { photos: [...(stopNow().photos || []), rec] });
-      added.push(rec);
-      tripsyFlyoverQueueUpload(trip.key, pendingId);
-      queued++;
+    // A photo the fly-over already holds (anywhere on it) is skipped, so overlapping batches
+    // never duplicate ("if i do it in batches i may either duplicate some or miss some,"
+    // 2026-10-25): every added file is stamped with a fingerprint of its bytes (`src`).
+    const known = tripsyFlyoverKnownSources(record);
+    let skipped = 0;
+    const fps = new Array(n).fill('');
+    // Photos are taken in IN BATCHES of TRIPSY_FLYOVER_INTAKE_BATCH ("when i picked 87 it
+    // seemed to freeze again. Can it automatically break the import into batches?",
+    // 2026-10-25): each batch is fingerprinted, staged and queued, the page repaints so the
+    // first photos show while the rest are still being taken in, and the event loop gets a
+    // turn between batches. The receipt line records every step.
+    const photoIdx = [];
+    for (let k = 0; k < n; k++) if (!tripsyFlyoverFileIsVideo(files[k])) photoIdx.push(k);
+    tripsyFlyoverIntakeNote({ receivedAt: Date.now(), count: n, photos: photoIdx.length, staged: 0, skipped: 0 });
+    paintIntake();
+    for (let b = 0; b < photoIdx.length; b += TRIPSY_FLYOVER_INTAKE_BATCH) {
+      const batch = photoIdx.slice(b, b + TRIPSY_FLYOVER_INTAKE_BATCH);
+      const bf = await Promise.all(batch.map(k => tripsyFlyoverFileFingerprint(files[k])));
+      batch.forEach((k, i) => { fps[k] = bf[i]; });
+      for (const k of batch) {
+        const file = files[k];
+        if (fps[k] && known.has(fps[k])) { skipped++; continue; }
+        if (fps[k]) known.add(fps[k]);
+        const pendingId = tripsyFlyoverStagePendingPhoto(file);
+        const rec = { driveFileId: pendingId, addedAt: new Date().toISOString(), ...(fps[k] ? { src: fps[k] } : {}) };
+        updateStop(id, { photos: [...(stopNow().photos || []), rec] });
+        added.push(rec);
+        tripsyFlyoverQueueUpload(trip.key, pendingId);
+        queued++;
+      }
+      tripsyFlyoverIntakeNote({ staged: queued, skipped });
+      if (closed) break;
+      status(`Adding photos… ${Math.min(b + batch.length, photoIdx.length)} of ${photoIdx.length} taken in${skipped ? `, ${skipped} already here` : ''}.`);
+      paintIntake();
+      if (b === 0 || b + TRIPSY_FLYOVER_INTAKE_BATCH >= photoIdx.length) { if (queued) { save(); render(); } }
+      await new Promise(r => setTimeout(r, 0));
     }
-    if (queued) { save(); if (!closed) render(); }
+    if (closed && queued) save();
     for (let k = 0; k < n; k++) {
       const file = files[k];
       if (!tripsyFlyoverFileIsVideo(file)) continue;
+      fps[k] = await tripsyFlyoverFileFingerprint(file);
+      if (fps[k] && known.has(fps[k])) { skipped++; continue; }
+      if (fps[k]) known.add(fps[k]);
       const what = `video${n > 1 ? ` ${k + 1} of ${n}` : ''}`;
       status(`Uploading ${what}…`);
       try {
@@ -19449,6 +19489,7 @@ async function showTripsyFlyover(tripKey) {
         // default, and the sound is switched from the player's own buttons (2026-10-25).
         const rec = await tripsyFlyoverUploadVideo(file, f => { if (!closed) status(`Uploading ${what}… ${Math.round(f * 100)}%`); });
         rec.audio = 'music';
+        if (fps[k]) rec.src = fps[k];
         updateStop(id, { photos: [...(stopNow().photos || []), rec] });
         added.push(rec);
         done++;
@@ -19457,10 +19498,11 @@ async function showTripsyFlyover(tripKey) {
         problems.push(e && e.userFacing ? e.message : `A video couldn’t be uploaded.`);
       }
     }
+    if (skipped) problems.push(`${skipped} already on this fly-over — skipped.`);
     status(problems.join(' '));
     if (problems.some(m => m.includes('the limit is'))) toast(problems.find(m => m.includes('the limit is')), 'error');
     if (done || queued) { save(); if (!closed) render(); }
-    return { added, done, queued, problems };
+    return { added, done, queued, skipped, problems };
   };
   // The options box opens by itself right after photos are added, and from each
   // destination's "Slideshow options" button. Nothing changes until Save -- except photos
@@ -19514,6 +19556,7 @@ async function showTripsyFlyover(tripKey) {
     } finally { askingModes = false; }
   };
   const render = () => {
+    paintIntake();
     if (!record || !(record.stops || []).length) {
       body.innerHTML = `<div style="padding:18px 0; color:var(--muted);">No destinations found for this trip — it needs lodging or flights with places.</div>`;
       return;
@@ -19530,7 +19573,8 @@ async function showTripsyFlyover(tripKey) {
       <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">
         ${playable} destination${playable === 1 ? '' : 's'} on the map.${isOwner ? ' Add photos to each one — they play as a slideshow when the trip arrives there.' : ''}
         ${isOwner ? `<button class="btn" data-flyover-edit-dests style="font-size:12px; margin-left:6px;" title="Rename, reorder, add, remove or rebuild the destinations">✏️ Edit destinations</button>
-        <button class="btn" data-flyover-add-trip-photos style="font-size:12px; margin-left:6px;" title="Pick the trip's photos in one go — each is filed under the destination whose dates cover the day it was taken (its own date and location where the photo carries them)">📷 Add trip photos</button>` : ''}
+        <button class="btn" data-flyover-add-trip-photos style="font-size:12px; margin-left:6px;" title="Pick the trip's photos in one go — each is filed under the destination whose dates cover the day it was taken (its own date and location where the photo carries them)">📷 Add trip photos</button>
+        <button class="btn" data-flyover-drive-import style="font-size:12px; margin-left:6px;" title="Upload the trip's photos to a Drive folder with the Google Drive app (no limit on how many at once), then import them from here">📁 Import from Drive folder</button>` : ''}
         ${completeHtml}
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; font-size:13px;">
@@ -19600,8 +19644,7 @@ async function showTripsyFlyover(tripKey) {
               const failedIds = photos.filter(p => tripsyFlyoverPhotoIsPending(p.driveFileId) && tripsyFlyoverFailedUploads.has(p.driveFileId)).map(p => p.driveFileId);
               return `<span style="font-size:12px; color:${u.failed ? '#E0A33A' : 'var(--muted)'}; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">${u.uploading ? `⬆️ Uploading ${u.uploading} photo${u.uploading === 1 ? '' : 's'} in the background — you can use the rest of the app.` : ''}${u.failed ? ` ⚠️ ${u.failed} upload${u.failed === 1 ? '' : 's'} failed.${isOwner ? failedIds.map(fid => ` <button class="btn" data-flyover-retry-upload="${esc(fid)}" style="font-size:11px; padding:2px 8px;">Retry</button>`).join('') : ''}` : ''}</span>`; })()}
             ${isOwner ? `
-              <button class="btn" data-flyover-add-own style="font-size:12px;" title="Photos from your library (Albums → Shared Albums) or the camera — pick 30 or fewer at a time">＋ Photos</button>
-              <button class="btn" data-flyover-add-video style="font-size:12px;" title="A video from your library or the camera">🎬 Video</button>
+              <button class="btn" data-flyover-add-own style="font-size:12px;" title="Photos and videos from your library (Albums → Shared Albums) or the camera — for more than about 30 at once, use Import from Drive folder">＋ Photos & videos</button>
               <button class="btn" data-flyover-add-suggested style="font-size:12px;">🔍 Suggested photos</button>` : ''}`}
           </div>
           ${isOwner && photos.length && tripsyFlyoverStopVisited(s, todayKey) ? `
@@ -19656,11 +19699,107 @@ async function showTripsyFlyover(tripKey) {
       const added = [...byStop.values()].reduce((n, g) => n + g.length, 0);
       const msg = added
         ? `Sorted ${added} photo${added === 1 ? '' : 's'} into ${byStop.size} destination${byStop.size === 1 ? '' : 's'}: ${parts.join(', ')}.${unmatched ? ` ${unmatched} didn’t fall in any destination’s dates and weren’t added — add those from their destination’s own button.` : ''}`
-        : `None of those photos fell in a destination’s dates${unmatched ? ` (${unmatched} checked)` : ''} — add them from a destination’s own ＋ Photos button.`;
+        : `None of those photos fell in a destination’s dates${unmatched ? ` (${unmatched} checked)` : ''} — add them from a destination’s own ＋ Photos & videos button.`;
       setStatus(msg);
       toast(msg, added ? undefined : 'error');
       render();
-    }, { onWaiting: setStatus, onCancel: () => setStatus('') });
+    }, { kind: 'all', onWaiting: setStatus, onCancel: () => setStatus('') });
+    // Import from a Drive folder ("Is it possible to copy the photos into a temporary drive
+    // folder and then import the photos into the app in the background from the drive
+    // folder?", 2026-10-25): the Google Drive app uploads any number of photos natively, so
+    // the page never meets the iOS picker's export. The folder is this trip's own inbox; the
+    // listing's own capture time / GPS routes each photo; each is downloaded, staged like a
+    // picked photo and uploaded resized in the background. Resume-safe: every imported file is
+    // stamped `src: 'drive:<id>'`, so a re-run takes only what is new.
+    const driveBtn = body.querySelector('[data-flyover-drive-import]');
+    if (driveBtn) driveBtn.onclick = async () => {
+      if (driveImportRunning) { toast('An import from Drive is already running — see the status line.'); return; }
+      setStatus('Opening the Drive inbox folder…');
+      let folderId;
+      try { folderId = await tripsyFlyoverInboxFolder(trip, record); } catch (e) { console.error(e); setStatus(''); toast('Couldn’t open the Drive folder — check the connection and try again.', 'error'); return; }
+      if (closed) return;
+      if (folderId !== record.inboxFolderId) { record = { ...record, inboxFolderId: folderId }; save(); }
+      setStatus('');
+      const choice = await tripsyFlyoverDriveImportDialog(trip, record, folderId);
+      if (!choice || closed) return;
+      runDriveImport(choice.files, choice.dest, folderId);
+    };
+    const runDriveImport = async (files, dest, folderId) => {
+      driveImportRunning = true;
+      const total = files.length;
+      let taken = 0, unmatched = 0, failed = 0, dupes = 0;
+      const pendingIds = [], videoIds = [];
+      const known = tripsyFlyoverKnownSources(record);
+      tripsyFlyoverIntakeNote({ openedAt: Date.now(), kind: 'drive', receivedAt: Date.now(), count: total, photos: total, staged: 0, skipped: 0 }, true);
+      try {
+        for (let i = 0; i < total; i++) {
+          if (closed) break;
+          const f = files[i];
+          const src = tripsyFlyoverDriveSrc(f.id);
+          if (known.has(src)) continue;
+          setStatus(`Importing from Drive… ${i + 1} of ${total} (${f.name || 'photo'})`);
+          const stopId = dest === 'auto' ? tripsyFlyoverRoutePhoto(record.stops, tripsyFlyoverDriveMetaInfo(f)) : dest;
+          if (!stopId) { unmatched++; tripsyFlyoverIntakeNote({ unmatched }); continue; }
+          try {
+            const stopNow = () => record.stops.find(x => x.id === stopId) || {};
+            let rec;
+            if (/^video\//i.test(f.mimeType || '')) {
+              rec = tripsyFlyoverDriveVideoRecord(f);
+              videoIds.push(f.id);
+            } else {
+              const blob = await downloadDriveFileBlob(f.id);
+              if (closed) break;
+              // The same photo picked earlier (or uploaded to the folder twice) is one photo:
+              // the content fingerprint is the `src`, the Drive id the `driveSrc`.
+              const fp = await tripsyFlyoverFileFingerprint(blob);
+              if (fp && known.has(fp)) { known.add(src); dupes++; tripsyFlyoverIntakeNote({ skipped: dupes }); continue; }
+              const pendingId = tripsyFlyoverStagePendingPhoto(blob);
+              rec = { driveFileId: pendingId, addedAt: new Date().toISOString(), src: fp || src, driveSrc: src };
+              if (fp) known.add(fp);
+              pendingIds.push(pendingId);
+              tripsyFlyoverQueueUpload(trip.key, pendingId);
+            }
+            updateStop(stopId, { photos: [...(stopNow().photos || []), rec] });
+            known.add(src);
+            taken++;
+            tripsyFlyoverIntakeNote({ staged: taken, unmatched });
+            if (taken === 1 || taken % 10 === 0) { save(); render(); }
+          } catch (e) { console.error('Drive import failed for', f.name, e); failed++; }
+          await new Promise(r => setTimeout(r, 0));
+        }
+      } finally {
+        driveImportRunning = false;
+        if (taken) save();
+        if (!closed) {
+          render();
+          const msg = `Imported ${taken} from Drive${dupes ? `, ${dupes} already here` : ''}${unmatched ? `, ${unmatched} fell in no destination’s dates` : ''}${failed ? `, ${failed} failed (press Import again to retry)` : ''}.${taken ? ' Photos are uploading in the background.' : ''}`;
+          setStatus(msg);
+          toast(msg, failed && !taken ? 'error' : undefined);
+        }
+      }
+      // The folder is temporary ("make sure to delete the temporary drive folder after the
+      // photos are imported"): once everything in it is on the fly-over -- nothing failed,
+      // nothing left unmatched -- and every imported photo's background upload has landed
+      // (a reload mid-upload would otherwise lose the only copy), the videos (played from
+      // their Drive id) are MOVED out into the app's own folder and the inbox is trashed.
+      if (!closed && !failed && !unmatched && taken && folderId) {
+        try {
+          setStatus(`Imported ${taken} from Drive. Waiting for the uploads to finish before clearing the Drive folder…`);
+          const landed = await tripsyFlyoverWaitForUploads(pendingIds, 15 * 60 * 1000);
+          if (closed) return;
+          if (!landed) { setStatus(`Imported ${taken} from Drive. Some uploads are still running — the Drive folder is kept until the next import.`); return; }
+          setStatus('Clearing the Drive folder…');
+          await tripsyFlyoverRetireInbox(folderId, videoIds);
+          record = { ...record, inboxFolderId: '' };
+          save();
+          setStatus(`Imported ${taken} from Drive, and the Drive folder has been moved to the trash.`);
+          toast('Drive folder cleared — it is in Drive’s trash for 30 days.');
+        } catch (e) {
+          console.error('Drive inbox cleanup failed:', e);
+          setStatus(`Imported ${taken} from Drive. Couldn’t clear the Drive folder — it is kept; the next import will try again.`);
+        }
+      }
+    };
     // Edit destinations: a draft list to rename / move / add / remove / rebuild, applied on
     // its Save only (the old Rebuild button rebuilt and saved in one go).
     const editBtn = body.querySelector('[data-flyover-edit-dests]');
@@ -19758,20 +19897,18 @@ async function showTripsyFlyover(tripKey) {
           save(); render();
         };
       });
-      // Photos and videos are picked separately (a video in the batch is the slow part of
-      // iOS's export); both land through the one addMediaToStop path.
+      // One picker for photos and videos (a big batch goes through Import from Drive folder
+      // instead); everything lands through the one addMediaToStop path.
       const onPicked = async files => {
         setStatus(`Adding ${files.length} item${files.length === 1 ? '' : 's'}…`);
         const r = await addMediaToStop(id, files, setStatus);
         if (r.done || r.queued) {
           const total = r.done + r.queued;
-          if (!closed) openSlideshowOptions(id, `${total} item${total === 1 ? '' : 's'} added. Choose how this place’s photos and videos play.${r.queued ? ' Photos are uploading in the background — you can keep working or use the rest of the app.' : ''}`);
-        }
+          if (!closed) openSlideshowOptions(id, `${total} item${total === 1 ? '' : 's'} added${r.skipped ? ` (${r.skipped} already here, skipped)` : ''}. Choose how this place’s photos and videos play.${r.queued ? ' Photos are uploading in the background — you can keep working or use the rest of the app.' : ''}`);
+        } else if (r.skipped && !closed) toast(`All ${r.skipped} of those are already on this fly-over.`);
       };
       const own = card.querySelector('[data-flyover-add-own]');
-      if (own) own.onclick = () => tripsyFlyoverPickMedia(onPicked, { kind: 'photos', onWaiting: setStatus, onCancel: () => setStatus('') });
-      const vid = card.querySelector('[data-flyover-add-video]');
-      if (vid) vid.onclick = () => tripsyFlyoverPickMedia(onPicked, { kind: 'videos', onWaiting: setStatus, onCancel: () => setStatus('') });
+      if (own) own.onclick = () => tripsyFlyoverPickMedia(onPicked, { kind: 'all', onWaiting: setStatus, onCancel: () => setStatus('') });
       // A failed background upload: Retry re-queues it from the bytes still held.
       card.querySelectorAll('[data-flyover-retry-upload]').forEach(b => b.onclick = () => {
         tripsyFlyoverQueueUpload(trip.key, b.getAttribute('data-flyover-retry-upload'));
@@ -20030,6 +20167,27 @@ const tripsyFlyoverUploadedIds = new Map();    // pending id -> Drive file id
 const tripsyFlyoverFailedUploads = new Set();  // pending ids whose upload failed (retryable)
 const TRIPSY_FLYOVER_UPLOAD_PARALLEL = 3;
 function tripsyFlyoverPhotoIsPending(id) { return typeof id === 'string' && id.startsWith('pending-') && !tripsyFlyoverUploadedIds.has(id); }
+// Every picked file's identity across picks: SHA-256 of its first 64 KB + its size (the
+// name alone is unreliable -- some iOS versions hand every picked photo over as
+// "image.jpeg"). Falls back to name|size where SubtleCrypto is unavailable; '' when the
+// file can't be read at all (such a file is never deduped).
+async function tripsyFlyoverFileFingerprint(file) {
+  try {
+    const head = await file.slice(0, 65536).arrayBuffer();
+    if (typeof crypto !== 'undefined' && crypto.subtle && crypto.subtle.digest) {
+      const d = await crypto.subtle.digest('SHA-256', head);
+      const hex = [...new Uint8Array(d).slice(0, 12)].map(b => b.toString(16).padStart(2, '0')).join('');
+      return `h:${hex}:${file.size}`;
+    }
+    return `n:${file.name || ''}:${file.size}`;
+  } catch (e) { return ''; }
+}
+// The fingerprints of every photo / video already on the record (any stop). Pure.
+function tripsyFlyoverKnownSources(record) {
+  const out = new Set();
+  for (const s of ((record && record.stops) || [])) for (const p of (s.photos || [])) { if (p && p.src) out.add(p.src); if (p && p.driveSrc) out.add(p.driveSrc); }
+  return out;
+}
 function tripsyFlyoverStagePendingPhoto(file) {
   const id = 'pending-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   tripsyFlyoverPendingBlobs.set(id, file);
@@ -20056,6 +20214,9 @@ function tripsyFlyoverPreparePending(pendingId) {
   if (!file) return Promise.reject(new Error('pending photo not available'));
   const p = _tripsyFlyoverPrepChain.then(async () => {
     const out = await tripsyFlyoverPrepareImage(file, TRIPSY_FLYOVER_UPLOAD_PX, TRIPSY_FLYOVER_THUMB_PX);
+    // The original bytes are no longer needed (the upload takes the prepared copy, a retry
+    // re-prepares from it): a 90-photo import keeps ~45 MB in memory instead of ~400 MB.
+    if (out.full !== file && tripsyFlyoverPendingBlobs.get(pendingId) === file) tripsyFlyoverPendingBlobs.set(pendingId, out.full);
     await new Promise(r => setTimeout(r, 0)); // let the page paint between photos
     return out;
   });
@@ -20212,6 +20373,170 @@ async function tripsyFlyoverPhotoTakenInfo(file) {
     }
   }
   return info;
+}
+// ---- Import from a Drive folder (2026-10-25) ----
+const TRIPSY_FLYOVER_INBOX_PREFIX = 'Fly-over photos — ';
+function tripsyFlyoverDriveSrc(fileId) { return `drive:${fileId}`; }
+// What Drive's own listing says about when / where a photo was taken: imageMediaMetadata.time
+// is the EXIF capture time ("2026:10:09 18:30:15"), its location the GPS fix; a video or a
+// photo without either falls back to the file's createdTime (the upload time -- the same
+// weakness as a picked file's lastModified). Pure.
+function tripsyFlyoverDriveMetaInfo(f) {
+  const info = { takenAt: null, lat: null, lng: null, source: 'none' };
+  const im = (f && f.imageMediaMetadata) || {};
+  const m = /^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(im.time || '');
+  if (m) { info.takenAt = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`; info.source = 'exif'; }
+  if (im.location && isFinite(im.location.latitude) && isFinite(im.location.longitude)) { info.lat = im.location.latitude; info.lng = im.location.longitude; if (info.source === 'none') info.source = 'exif'; }
+  if (!info.takenAt && f && f.createdTime) {
+    const d = new Date(f.createdTime);
+    if (!isNaN(d)) {
+      const pad = n => String(n).padStart(2, '0');
+      info.takenAt = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      if (info.source === 'none') info.source = 'file';
+    }
+  }
+  return info;
+}
+// A video in the inbox is referenced IN PLACE (no download, no re-upload): the player streams
+// it from Drive by id like any other. No poster (the 🎬 badge stands in). Pure.
+function tripsyFlyoverDriveVideoRecord(f) {
+  const vm = (f && f.videoMediaMetadata) || {};
+  const rec = { driveFileId: f.id, kind: 'video', mime: f.mimeType || 'video/mp4', audio: 'music', addedAt: new Date().toISOString(), src: tripsyFlyoverDriveSrc(f.id) };
+  if (vm.durationMillis) rec.duration = Math.round(Number(vm.durationMillis) / 1000);
+  if (vm.width) rec.width = Number(vm.width);
+  if (vm.height) rec.height = Number(vm.height);
+  return rec;
+}
+// The inbox files not yet on the record, oldest capture first. Pure.
+function tripsyFlyoverDriveNewFiles(files, record) {
+  const known = tripsyFlyoverKnownSources(record);
+  const media = (files || []).filter(f => f && f.id && /^(image|video)\//i.test(f.mimeType || ''));
+  const key = f => (f.imageMediaMetadata && f.imageMediaMetadata.time) || f.createdTime || '';
+  return media.filter(f => !known.has(tripsyFlyoverDriveSrc(f.id))).sort((a, b) => key(a).localeCompare(key(b)));
+}
+// This trip's inbox folder: the record's remembered id when it still exists, else a folder
+// named for the trip inside the app's own Drive folder (found by name, else created).
+async function tripsyFlyoverInboxFolder(trip, record) {
+  const name = TRIPSY_FLYOVER_INBOX_PREFIX + String((trip && trip.name) || 'trip').replace(/['\\]/g, ' ').trim();
+  if (record && record.inboxFolderId) {
+    try {
+      const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${record.inboxFolderId}?fields=id,trashed`);
+      const j = await r.json();
+      if (j && j.id && !j.trashed) return j.id;
+    } catch (e) { /* fall through to the search */ }
+  }
+  const parent = await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
+  const q = encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='${name}' and '${parent}' in parents and trashed=false`);
+  const sr = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
+  const sj = await sr.json();
+  if (sj.files && sj.files.length) return sj.files[0].id;
+  const cr = await driveApiFetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parent] }),
+  });
+  const cj = await cr.json();
+  if (!cj || !cj.id) throw new Error('Drive returned no folder id');
+  return cj.id;
+}
+// Every photo / video in the inbox folder, with the metadata the routing needs.
+async function tripsyFlyoverListInbox(folderId) {
+  const out = [];
+  let pageToken = '';
+  do {
+    const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
+    const fields = encodeURIComponent('nextPageToken,files(id,name,mimeType,size,createdTime,imageMediaMetadata(time,location),videoMediaMetadata(durationMillis,width,height))');
+    const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&pageSize=1000${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`);
+    const j = await r.json();
+    out.push(...((j && j.files) || []));
+    pageToken = (j && j.nextPageToken) || '';
+  } while (pageToken);
+  return out;
+}
+// Resolves true once every one of these pending photos has landed (its Drive id known), false
+// on a failed upload or past `maxMs`. Listens for the upload events; a photo already landed
+// counts at once.
+function tripsyFlyoverWaitForUploads(pendingIds, maxMs) {
+  return new Promise(resolve => {
+    const ids = (pendingIds || []).filter(Boolean);
+    let timer = null;
+    const check = () => {
+      if (ids.some(id => tripsyFlyoverFailedUploads.has(id))) return finish(false);
+      if (ids.every(id => tripsyFlyoverUploadedIds.has(id))) return finish(true);
+    };
+    const finish = ok => { clearTimeout(timer); document.removeEventListener('tripsy-flyover-upload', check); resolve(ok); };
+    document.addEventListener('tripsy-flyover-upload', check);
+    timer = setTimeout(() => finish(false), maxMs);
+    check();
+  });
+}
+// Retires an inbox folder: the videos it holds are MOVED into the app's own folder (the
+// fly-over plays them by id, so they must outlive the inbox), then the folder is trashed
+// (recoverable for 30 days, unlike a permanent delete).
+async function tripsyFlyoverRetireInbox(folderId, videoIds) {
+  const home = await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
+  for (const vid of (videoIds || [])) {
+    const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(vid)}?addParents=${encodeURIComponent(home)}&removeParents=${encodeURIComponent(folderId)}&fields=id,parents`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (!r.ok) throw new Error(`could not move video ${vid} out of the inbox`);
+  }
+  const t = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) });
+  if (!t.ok) throw new Error('could not trash the inbox folder');
+  return true;
+}
+function tripsyFlyoverDriveFolderUrl(folderId) { return `https://drive.google.com/drive/folders/${encodeURIComponent(folderId)}`; }
+// The import dialog: the folder, how to fill it, what is in it, where to file it.
+// Resolves {files, dest} ('auto' = by each photo's own date / place) or null.
+function tripsyFlyoverDriveImportDialog(trip, record, folderId) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-flyover-drive-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-drive-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483070';
+    const stops = (record.stops || []).filter(s => !s.removed && s.kind !== 'transit' && s.lat != null);
+    const url = tripsyFlyoverDriveFolderUrl(folderId);
+    const folderName = TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip');
+    let files = null, listing = true, err = '';
+    const done = val => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(val); };
+    const paint = () => {
+      const fresh = files ? tripsyFlyoverDriveNewFiles(files, record) : [];
+      const already = files ? files.length - fresh.length : 0;
+      ov.innerHTML = `
+        <div class="tw-modal-paper" style="max-width:560px;">
+          <h2 style="margin:0 0 6px; font-size:17px;">📁 Import from a Drive folder</h2>
+          <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:10px;">
+            Put the trip's photos and videos in this Drive folder, then import them here. The Google Drive app takes any number in one go, so this avoids the picker's limit.
+            <ol style="margin:8px 0 0 18px; padding:0;">
+              <li>Open the folder: <a href="${esc(url)}" target="_blank" rel="noopener" data-drive-open style="color:var(--accent); word-break:break-all;">${esc(folderName)}</a></li>
+              <li>In the Google Drive app press <strong>＋</strong> → <strong>Upload</strong> → <strong>Photos and Videos</strong>, select everything for this trip, and let it finish uploading.</li>
+              <li>Come back here and press <strong>Import</strong>. Files already imported are skipped, so you can run it again any time.</li>
+            </ol>
+          </div>
+          <div data-drive-count style="font-size:13px; margin-bottom:10px;">${listing ? 'Checking the folder…' : err ? `<span style="color:#E0A33A;">${esc(err)}</span>` : files && files.length ? `<strong>${fresh.length}</strong> new ${fresh.length === 1 ? 'file' : 'files'} in the folder${already ? ` (${already} already imported)` : ''}.` : 'The folder is empty so far.'}</div>
+          <label style="display:block; font-size:13px; margin-bottom:12px;">File each photo under
+            <select data-drive-dest style="margin-left:6px; max-width:100%;">
+              <option value="auto">the destination matching the day it was taken (recommended)</option>
+              ${stops.map(s => `<option value="${esc(s.id)}">${esc(s.label || 'destination')}</option>`).join('')}
+            </select>
+          </label>
+          <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;">
+            <button class="btn" data-drive-refresh>↻ Check again</button>
+            <button class="btn" data-drive-cancel>Cancel</button>
+            <button class="btn primary" data-drive-go ${fresh.length ? '' : 'disabled'}>▶ Import ${fresh.length || ''}</button>
+          </div>
+        </div>`;
+      ov.querySelector('[data-drive-cancel]').onclick = () => done(null);
+      ov.querySelector('[data-drive-refresh]').onclick = () => { listing = true; err = ''; paint(); load(); };
+      ov.querySelector('[data-drive-go]').onclick = () => { if (!fresh.length) return; done({ files: fresh, dest: ov.querySelector('[data-drive-dest]').value || 'auto' }); };
+    };
+    const load = async () => {
+      try { files = await tripsyFlyoverListInbox(folderId); err = ''; }
+      catch (e) { console.error(e); files = files || []; err = 'Couldn’t read the folder — check the connection and press Check again.'; }
+      listing = false;
+      if (ov.style.display !== 'none') paint();
+    };
+    ov.style.display = 'flex';
+    paint();
+    load();
+    ov.onclick = e => { if (e.target === ov) done(null); };
+  });
 }
 const TRIPSY_FLYOVER_ROUTE_GPS_KM = 100;
 // The destination a photo belongs to: the shown, non-transit stop (play order) whose window
@@ -20374,11 +20699,10 @@ function tripsyFlyoverPageThumbHtml(page, w = 84, h = 64, extra = '') {
 // photo kept in iCloud is downloaded first -- which for 100+ items takes a minute or more,
 // with nothing a page can do but say so.
 const TRIPSY_FLYOVER_PICK_WAITING = 'Waiting for Photos to hand over your selection… iOS prepares every item first (a photo kept in iCloud is downloaded, a video converted), which can take a minute or more, or stall on a very large pick — if nothing arrives, try again with 30 or fewer at a time.';
-// `kind`: 'photos' (image/*), 'videos' (video/*) or 'all'. Photos and videos are picked
-// SEPARATELY by default (2026-10-25): a video in the batch is the expensive part of iOS's
-// export, so a photos-only pick hands over far sooner.
+// `kind`: 'all' (image/*,video/*; the one button, 2026-10-25 -- a big batch goes through the
+// Drive folder import instead), 'photos' or 'videos'.
 const TRIPSY_FLYOVER_PICK_ACCEPT = { photos: 'image/*', videos: 'video/*', all: 'image/*,video/*' };
-function tripsyFlyoverPickMedia(onPick, { onWaiting, onCancel, kind = 'photos' } = {}) {
+function tripsyFlyoverPickMedia(onPick, { onWaiting, onCancel, kind = 'all' } = {}) {
   let input = document.getElementById('tripsy-flyover-media-input');
   if (!input) {
     input = document.createElement('input');
@@ -20393,11 +20717,47 @@ function tripsyFlyoverPickMedia(onPick, { onWaiting, onCancel, kind = 'photos' }
   input.onchange = () => {
     const files = [...(input.files || [])];
     if (files.length) onPick(files);
-    else if (typeof onCancel === 'function') onCancel();
+    else { tripsyFlyoverIntakeNote({ cancelledAt: Date.now() }); if (typeof onCancel === 'function') onCancel(); }
   };
-  input.oncancel = () => { if (typeof onCancel === 'function') onCancel(); };
+  input.oncancel = () => { tripsyFlyoverIntakeNote({ cancelledAt: Date.now() }); if (typeof onCancel === 'function') onCancel(); };
+  tripsyFlyoverIntakeNote({ openedAt: Date.now(), kind, receivedAt: 0, cancelledAt: 0, count: 0, photos: 0, staged: 0, skipped: 0 }, true);
   if (typeof onWaiting === 'function') onWaiting(TRIPSY_FLYOVER_PICK_WAITING);
   input.click();
+}
+// The last import's receipt, kept per device in localStorage so it survives a reload or a
+// WebView kill. `tripsyFlyoverIntakeReceiptText` (pure) words it; the setup page shows it
+// under its status line and repaints it as uploads land.
+const TRIPSY_FLYOVER_INTAKE_KEY = 'tripsyFlyoverIntakeV1';
+const TRIPSY_FLYOVER_INTAKE_BATCH = 10;
+function tripsyFlyoverIntakeLoad() {
+  try { return JSON.parse(localStorage.getItem(TRIPSY_FLYOVER_INTAKE_KEY) || 'null') || null; } catch (e) { return null; }
+}
+function tripsyFlyoverIntakeNote(fields, fresh = false) {
+  try {
+    const cur = fresh ? {} : (tripsyFlyoverIntakeLoad() || {});
+    localStorage.setItem(TRIPSY_FLYOVER_INTAKE_KEY, JSON.stringify({ ...cur, ...fields }));
+  } catch (e) { /* storage refused: no receipt, nothing else changes */ }
+}
+function tripsyFlyoverIntakeReceiptText(log, record) {
+  if (!log || !log.openedAt) return '';
+  const t = ms => { try { return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }); } catch (e) { return ''; } };
+  const kindWord = log.kind === 'videos' ? 'videos' : log.kind === 'drive' ? 'files from Drive' : 'photos';
+  if (!log.receivedAt) {
+    if (log.cancelledAt) return `Last import: picker opened ${t(log.openedAt)}, closed with nothing picked.`;
+    return `Last import: picker opened ${t(log.openedAt)} — nothing has arrived from Photos yet.`;
+  }
+  let pendingLeft = 0, failed = 0;
+  for (const s of ((record && record.stops) || [])) for (const p of (s.photos || [])) {
+    if (!tripsyFlyoverPhotoIsPending(p.driveFileId)) continue;
+    if (tripsyFlyoverFailedUploads.has(p.driveFileId)) failed++; else pendingLeft++;
+  }
+  const parts = [`Last import: ${log.count} ${kindWord} received ${t(log.receivedAt)} (opened ${t(log.openedAt)})`, `${log.staged || 0} taken in`];
+  if (log.skipped) parts.push(`${log.skipped} already here`);
+  if (log.unmatched) parts.push(`${log.unmatched} in no destination’s dates`);
+  if (pendingLeft) parts.push(`${pendingLeft} still uploading`);
+  if (failed) parts.push(`${failed} failed`);
+  if (!pendingLeft && !failed && log.staged) parts.push('all uploaded');
+  return parts.join(' · ') + '.';
 }
 // Whether a video plays with ITS OWN sound or under the fly-over's music ("When the user
 // selects a video, ask the user if he wants to use audio from the video or the flyover
@@ -20744,7 +21104,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
             </div>` : ''}
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <div class="tfo-ss-label" style="flex:1; margin-bottom:0;">${videoPage ? 'The video on this page' : `Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)`}</div>
-            ${addMedia ? `<button class="btn" data-ss-add-photos${adding ? ' disabled' : ''} title="Add photos from your library to this destination — pick 30 or fewer at a time">＋ Add photos</button>` : ''}
+            ${addMedia ? `<button class="btn" data-ss-add-photos${adding ? ' disabled' : ''} title="Add photos or videos from your library to this destination">＋ Add photos</button>` : ''}
           </div>
           <div style="font-size:12px; color:var(--muted); margin:6px 0 8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here. Drag a photo onto another to swap them, or to the edge of one to move its page in between (a dashed line shows where).${videoIds.size ? ' A video goes on an empty page of its own.' : ''}${addMedia ? ' ＋ Add photos puts new photos on this page, and the rest on new pages at the end.' : ''}</div>
           ${addMedia ? `<div data-ss-status style="font-size:12px; color:var(--muted); margin-bottom:${status ? 8 : 0}px; min-height:${status ? 'auto' : '0'};">${esc(status)}</div>` : ''}
@@ -20915,7 +21275,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
           adding = false;
           if (ov.style.display !== 'none') render();
         }
-      }, { onWaiting: setStatus, onCancel: () => setStatus('') }); };
+      }, { kind: 'all', onWaiting: setStatus, onCancel: () => setStatus('') }); };
       const del = ov.querySelector('[data-ss-delete]');
       if (del) del.onclick = () => { pages = pages.filter((_, k) => k !== cur); cur = Math.max(0, cur - 1); render(); };
       ov.querySelectorAll('[data-ss-cancel]').forEach(b => b.onclick = () => done(null));

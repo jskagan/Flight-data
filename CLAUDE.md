@@ -4702,6 +4702,95 @@ WebView's support for recording is unproven.
     button titles say the same. Verified in Chromium: the three photo buttons open the input
     with `image/*`, the video button with `video/*`, each showing the waiting status.
     Whether a 30-photo pick hands over on the owner's iPad is the device test that remains.
+    **Overlapping batches never duplicate** ("I may need to add more than 30 photos, and if i
+    do it in batches i may either duplicate some or miss some," same day): every file added
+    through `addMediaToStop` is stamped `src` = `tripsyFlyoverFileFingerprint(file)` (SHA-256
+    of its first 64 KB + size — the NAME is unreliable, some iOS versions hand every picked
+    photo over as "image.jpeg"; `n:name:size` where SubtleCrypto is missing; '' when unreadable,
+    never deduped), and a file whose fingerprint `tripsyFlyoverKnownSources(record)` already
+    holds — on ANY stop, photo or video — is skipped and counted (`r.skipped`; the post-pick
+    message says "(N already here, skipped)", an all-repeats pick toasts). So the owner can
+    re-pick generously: select a destination's whole date range again and only the new ones
+    land. `tripsyFlyoverResolvePendingIds` spreads the record, so `src` survives the id swap.
+    Verified in Chromium: batches [A,B] then [B,C] leave three photos. `flyover_test.js`.
+    **The intake itself runs in batches of ten and leaves a RECEIPT** ("The app worked when i
+    picked 33 photos, but when i picked 87 it seemed to freeze again. Can it automatically
+    break the import into batches?", same day). The hand-over from iOS cannot be split by a
+    page, but what the page does with the files can: `addMediaToStop` takes the photos in
+    `TRIPSY_FLYOVER_INTAKE_BATCH` (10) at a time — fingerprint, stage, queue, a status line
+    "Adding photos… 30 of 87 taken in", `save()` + `render()` after the FIRST batch (so the
+    first tiles show at once) and the last, and a `setTimeout 0` yield between batches so the
+    page stays responsive; videos fingerprint on demand in their own loop. The receipt:
+    `tripsyFlyoverPickMedia` logs `openedAt` (fresh, with `kind`) and `cancelledAt`,
+    `addMediaToStop` logs `receivedAt`/`count`/`photos`/`staged`/`skipped` into
+    `localStorage[TRIPSY_FLYOVER_INTAKE_KEY]` (`tripsyFlyoverIntakeNote`, survives a reload or
+    a WebView kill), and the setup page shows `tripsyFlyoverIntakeReceiptText(log, record)`
+    (pure) under its status line (`data-flyover-intake`, repainted by every render and every
+    upload landing): "Last import: picker opened 2:51:10 PM — nothing has arrived from Photos
+    yet." (iOS's export never finished) vs. "87 photos received 2:52:40 PM (opened 2:51:10 PM)
+    · 87 taken in · 12 still uploading." (the page has them). That line is the device
+    diagnosis for the next freeze report. Verified in Chromium: an 87-photo pick shows the
+    ten-by-ten statuses and lands all 87 with none left pending. `flyover_test.js`.
+    **📁 Import from Drive folder — the route around the iOS picker altogether** ("The app
+    seemed to fail on the 87 photo import. Is it possible to copy the photos into a temporary
+    drive folder and then import the photos into the app in the background from the drive
+    folder? It might take longer, but at least i could just do one photo selection and avoid
+    the crashing," same day). The Google Drive APP uploads any number of photos natively (its
+    own picker, no WebKit export), so the page never meets the stall. The setup page's
+    header button (`data-flyover-drive-import`, owner) opens `tripsyFlyoverInboxFolder(trip,
+    record)` — the record's remembered `inboxFolderId` when it still exists, else a folder
+    `TRIPSY_FLYOVER_INBOX_PREFIX + trip name` ("Fly-over photos — <trip>") found or created
+    INSIDE the app's own `DRIVE_FOLDER_NAME` folder (a rebuild keeps the id) — then
+    `tripsyFlyoverDriveImportDialog`: a link to the folder (`tripsyFlyoverDriveFolderUrl`, opens
+    in the Drive app on the iPad), the three steps (Drive app ＋ → Upload → Photos and Videos;
+    come back; Import), a live count from `tripsyFlyoverListInbox(folderId)` (paged
+    `files.list` with `imageMediaMetadata(time,location)` + `videoMediaMetadata`) filtered by
+    `tripsyFlyoverDriveNewFiles(files, record)` (pure: images/videos only, not yet on the
+    record, oldest capture first; a PDF in the folder is ignored), and a destination select —
+    "the destination matching the day it was taken" (`auto`) or one named stop. `runDriveImport`
+    runs ON THE PAGE, one file at a time: `tripsyFlyoverDriveMetaInfo(f)` (pure: Drive's own
+    EXIF time "2026:10:09 18:30:15" + GPS, else `createdTime` marked `file`) through the same
+    `tripsyFlyoverRoutePhoto` the picker route uses; a PHOTO is `downloadDriveFileBlob`'d,
+    staged as a pending photo and queued (so it is resized and uploaded as a `flyover-photo-*`
+    like a picked one, and shows at once); a VIDEO is referenced IN PLACE
+    (`tripsyFlyoverDriveVideoRecord`, pure: `driveFileId` = the inbox file, `kind:'video'`,
+    `audio:'music'`, duration from the metadata, no poster — the player streams it by id);
+    every added record is stamped `src: 'drive:<id>'` (`tripsyFlyoverDriveSrc`), which is what
+    makes a re-run take only what is new — the import is RESUME-SAFE, so closing the page
+    mid-way loses nothing (the receipt line and status count it in; `save()` + `render()` on
+    the first and every tenth). A photo fitting no destination's dates is counted
+    (`unmatched`, on the receipt as "N in no destination’s dates") and stays "new" for a later
+    run with a destination chosen. Memory: `tripsyFlyoverPreparePending` now swaps the ORIGINAL
+    bytes out of `tripsyFlyoverPendingBlobs` for the prepared 1600px copy once it exists (a
+    retry re-prepares from that copy), so 90 originals never sit in memory at once — this
+    helps the picker path too. Verified in Chromium against a stubbed Drive: five inbox files
+    → two photos to Singapore and one to Fukuoka by capture date, the video on Fukuoka with no
+    download, the September photo left out; a second open reports "1 new file (4 already
+    imported)". Not verified: the Drive app's own upload on the device, and HEIC decoding on a
+    desktop Chrome import (Safari decodes HEIC; Chrome would upload the original bytes).
+    `flyover_test.js`.
+    **The inbox folder is TEMPORARY, and the card is back to ONE picker button** ("make sure
+    to delete the temporary drive folder after the photos are imported. With this change, i
+    should be able to select photos and videos in the same step, correct? So we can remove
+    the separate add photo and add video buttons," same day). After a CLEAN import (nothing
+    failed, nothing unmatched, something taken) `runDriveImport` waits — up to 15 min, via
+    `tripsyFlyoverWaitForUploads(pendingIds)` on the upload events — for every imported photo's
+    background upload to LAND (a reload mid-upload would otherwise lose the only copy), then
+    `tripsyFlyoverRetireInbox(folderId, videoIds)`: the videos are MOVED into the app's own
+    `DRIVE_FOLDER_NAME` folder first (`addParents`/`removeParents` — the player streams them by
+    id, so they must outlive the inbox), then the folder is TRASHED (`trashed:true`, Drive's
+    30-day trash, never a permanent delete), and the record forgets `inboxFolderId`. An unclean
+    import, a still-running upload or a failed cleanup keeps the folder and says so; the next
+    import reuses or recreates it. Because a retired folder's ids never recur, a Drive photo is
+    deduplicated by CONTENT too: `src` = `tripsyFlyoverFileFingerprint(blob)` (the same bytes
+    re-uploaded to a later inbox, or picked through the picker, are one photo) with the Drive id
+    kept as `driveSrc`; `tripsyFlyoverKnownSources` reads both. The picker buttons: the card's
+    ＋ Photos / 🎬 Video pair (that morning's split) is ONE "＋ Photos & videos" again
+    (`kind:'all'`, now the default), as are 📷 Add trip photos and the editor's ＋ — the big
+    batch goes through the Drive folder, where photos and videos upload together. Verified in
+    Chromium: a five-file inbox lands, the video is PATCHed out to the app folder, the folder is
+    PATCHed trashed, `inboxFolderId` clears, and a second open reads "0 new files (5 already
+    imported)". `flyover_test.js`.
   - **A video is a stop "photo" record** `{driveFileId, kind:'video', mime, posterId,
     duration, width, height}`, so pages, carry-over and preloading need nothing new.
     `tripsyFlyoverUploadVideo` refuses files over `TRIPSY_FLYOVER_VIDEO_MAX_BYTES` (250 MB,
