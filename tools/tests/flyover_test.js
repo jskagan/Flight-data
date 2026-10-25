@@ -1925,11 +1925,20 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     const setup = extractFn('showTripsyFlyover');
     assert(!/data-flyover-drive-import|data-flyover-card-drive-import|tripsyFlyoverDriveImportDialog/.test(html) && /const runDriveImport = async \(files, dest, folderId\) => \{/.test(setup)
       && /const src = tripsyFlyoverDriveSrc\(f\.id\);\s*if \(known\.has\(src\)\) continue;/.test(setup)
-      && /dest === 'auto' \? tripsyFlyoverRoutePhoto\(record\.stops, tripsyFlyoverDriveMetaInfo\(f\)\) : dest/.test(setup)
+      && /const stopId = tripsyFlyoverDriveImportDest\(record\.stops, f, dest\);/.test(setup)
       && /const blob = await downloadDriveFileBlob\(f\.id\);[\s\S]*const fp = await tripsyFlyoverFileFingerprint\(blob\);[\s\S]*tripsyFlyoverStagePendingPhoto\(blob\);[\s\S]*src: fp \|\| src, driveSrc: src[\s\S]*tripsyFlyoverQueueUpload\(trip\.key, pendingId\);/.test(setup)
       && /if \(taken === 1 \|\| taken % 10 === 0\) \{ save\(\); render\(\); \}/.test(setup),
       'the import runs on the page: resume-safe by src, routed by date or to a chosen destination, each photo downloaded, staged and uploaded resized in the background');
     assert(/if \(prevRecord && prevRecord\.inboxFolderId\) rec\.inboxFolderId = prevRecord\.inboxFolderId;/.test(html), 'a rebuild keeps the inbox folder');
+    // ---- Capture date first, whichever button started the hand-off ("Will the drive uploaded
+    // photos load in the correct day on the flyover page?", 2026-10-25 -- the live hand-off came
+    // from one destination's card) ----
+    eval([constLine('TRIPSY_FLYOVER_ROUTE_GPS_KM').replace(/^const /, 'var '), extractFn('tripsyFlyoverRoutePhoto'), extractFn('tripsyFlyoverDriveImportDest')].join('\n'));
+    const dStops = [{ id: 'sg', kind: 'stay', lat: 1.3, lng: 103.8, start: '2026-10-08', end: '2026-10-12' }, { id: 'dn', kind: 'stay', lat: 16.0, lng: 108.2, start: '2026-10-17', end: '2026-10-22' }];
+    assert(tripsyFlyoverDriveImportDest(dStops, { imageMediaMetadata: { time: '2026:10:09 10:00:00' }, createdTime: '2026-10-25T01:00:00Z' }, 'dn') === 'sg', 'a photo with an EXIF date goes to ITS day\'s destination even when the hand-off was started from another card');
+    assert(tripsyFlyoverDriveImportDest(dStops, { mimeType: 'video/quicktime', createdTime: '2026-10-25T01:00:00Z' }, 'dn') === 'dn', 'a video (no EXIF in Drive) falls back to the card\'s destination, never to the upload day');
+    assert(tripsyFlyoverDriveImportDest(dStops, { mimeType: 'video/quicktime', createdTime: '2026-10-18T01:00:00Z' }, 'auto') === null, 'with no card and no EXIF nothing is guessed from the upload time');
+    assert(tripsyFlyoverDriveImportDest(dStops, { imageMediaMetadata: { time: '2026:09:01 10:00:00' } }, 'dn') === 'dn' && tripsyFlyoverDriveImportDest(dStops, { imageMediaMetadata: { time: '2026:09:01 10:00:00' } }, 'auto') === null, 'a dated photo fitting no destination takes the card\'s, else is left out');
     // The folder is temporary: videos moved out, folder trashed, only once everything landed.
     assert(/if \(!closed && !failed && !unmatched && taken && folderId\) \{[\s\S]*const landed = await tripsyFlyoverWaitForUploads\(pendingIds, 15 \* 60 \* 1000\);[\s\S]*await tripsyFlyoverRetireInbox\(folderId, videoIds\);[\s\S]*record = \{ \.\.\.record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' \};/.test(setup),
       'THE ASK: after a clean import the folder is retired, but only once every photo upload has landed');
@@ -1968,9 +1977,10 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(tripsyFlyoverLastPickCrashed({ openedAt: 1 }) && !tripsyFlyoverLastPickCrashed({ openedAt: 1, receivedAt: 2 }) && !tripsyFlyoverLastPickCrashed({ openedAt: 1, cancelledAt: 2 }) && !tripsyFlyoverLastPickCrashed({ openedAt: 1, kind: 'drive' }) && !tripsyFlyoverLastPickCrashed(null),
       'a pick that never came back (no files, no cancel) is a crash; a cancel, an arrival or a Drive import is not');
     assert(/if \(tripsyFlyoverLastPickCrashed\(tripsyFlyoverIntakeLoad\(\)\)\) \{[\s\S]*handOffToDrive\(dest, openPicker\);\s*return;/.test(setup), 'after a crashed pick the next one goes through Drive without asking');
-    assert(/record = \{ \.\.\.record, inboxFolderId: folderId, inboxDest: dest \|\| 'auto', inboxPendingAt: new Date\(\)\.toISOString\(\) \};\s*save\(\); render\(\);/.test(setup) && /\$\{record\.inboxPendingAt \? `<button class="btn primary" data-flyover-finish-upload/.test(setup),
-      'the hand-off remembers the destination and the page shows Finish Upload until the import clears it');
-    assert(/runFinishUpload = async \(\) => \{[\s\S]*const fresh = tripsyFlyoverDriveNewFiles\(files, record\);[\s\S]*runDriveImport\(fresh, record\.inboxDest \|\| 'auto', folderId\);\s*\};\s*if \(finishBtn\) finishBtn\.onclick = runFinishUpload;/.test(setup), 'Finish Upload imports everything new straight into the remembered destination (its handler is shared with the watcher\'s Import now)');
+    assert(/record = \{ \.\.\.record, inboxFolderId: folderId, inboxDest: dest \|\| 'auto', inboxPendingAt: new Date\(\)\.toISOString\(\) \};\s*save\(\); render\(\);/.test(setup) && /\$\{record\.inboxPendingAt \? `<span data-flyover-drive-status/.test(setup),
+      'the hand-off remembers the destination and the page shows the Drive status slot until the import clears it');
+    assert(/runFinishUpload = async \(\) => \{[\s\S]*const fresh = tripsyFlyoverDriveNewFiles\(files, record\);[\s\S]*runDriveImport\(fresh, record\.inboxDest \|\| 'auto', folderId\);\s*\};\s*wireDriveStatus\(\);/.test(setup) && !/data-flyover-finish-upload|finishBtn/.test(html),
+      'the import is run from the status slot\'s button; there is no Finish Upload button ("Drop the finish upload button," 2026-10-25)');
     // ---- The upload-complete notification ("Is there a way the app can display a notification
     // when the upload is complete to drive?", 2026-10-25): Drive gives no signal, so the page
     // watches the folder and infers completion from a count that has settled. ----
@@ -2004,12 +2014,12 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     const up = tripsyFlyoverDriveStatusHtml('uploading', 0), done = tripsyFlyoverDriveStatusHtml('complete', 54), lat = tripsyFlyoverDriveStatusHtml('later', 54);
     assert(/class="tripsy-menu-flash"/.test(up) && /Uploading Photos to Drive/.test(up) && !/\d/.test(up.replace(/<[^>]*>/g, '')), 'the uploading message flashes and carries no count');
     assert(/Drive upload complete — 54 new files\. Import now\?/.test(done) && /data-drive-import-now/.test(done) && /data-drive-later/.test(done) && !/tripsy-menu-flash/.test(done), 'the completion prompt replaces it, with Import now / Later, not flashing');
-    assert(/54 new files waiting in Drive/.test(lat) && !/data-drive-import-now/.test(lat), 'after Later a quiet reminder stands in its place');
+    assert(/54 new files waiting in Drive/.test(lat) && /data-drive-import-now/.test(lat) && !/data-drive-later/.test(lat), 'after Later a quiet reminder with an Import button stands in its place (the only way in, now that Finish Upload is gone)');
     assert(!/tripsyFlyoverFinishUploadLabel|announceInboxReady|tripsyConfirmDialog\(`Drive upload looks complete/.test(html), 'the live-count label and the completion dialog are gone');
     assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const fresh = tripsyFlyoverDriveNewFiles\(files, record\)\.length;\s*const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\)\);[\s\S]*inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r\);\s*paintDriveStatus\(\);/.test(setup),
       'each tick lists the inbox, counts what is new, moves the phase and repaints the message slot');
-    assert(/>⬆️ Finish Upload<\/button> <span data-flyover-drive-status[^>]*>\$\{driveStatusHtml\(\)\}<\/span>/.test(setup) && /if \(go\) go\.onclick = \(\) => \{ if \(!closed && runFinishUpload && !driveImportRunning\) runFinishUpload\(\); \};/.test(setup) && /if \(later\) later\.onclick = \(\) => \{ if \(inboxWatch\) inboxWatch\.phase = 'later'; paintDriveStatus\(\); \};/.test(setup),
-      'the slot renders beside a plain Finish Upload button; Import now runs its handler, Later holds the quiet reminder');
+    assert(/<span data-flyover-drive-status[^>]*>\$\{driveStatusHtml\(\)\}<\/span>/.test(setup) && /if \(go\) go\.onclick = \(\) => \{ if \(!closed && runFinishUpload && !driveImportRunning\) runFinishUpload\(\); \};/.test(setup) && /if \(later\) later\.onclick = \(\) => \{ if \(inboxWatch\) inboxWatch\.phase = 'later'; paintDriveStatus\(\); \};/.test(setup),
+      'the slot renders in the header; Import now runs the import, Later holds the quiet reminder');
     assert(/inboxWatch\.timer = setTimeout\(inboxWatchTick, TRIPSY_FLYOVER_INBOX_POLL_MS\);/.test(setup) && /document\.visibilityState !== 'hidden'/.test(setup), 'the watcher polls on a timer and skips the list while the page is hidden');
     assert(/const onInboxVisibility = \(\) => \{ if \(document\.visibilityState === 'visible' && inboxWatch && !inboxWatch\.busy\) inboxWatchTick\(\); \};\s*document\.addEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'returning to the app checks the folder at once');
     assert(/const close = \(\) => \{ closed = true;[^\n]*stopInboxWatch\(\); document\.removeEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'closing the page stops the watcher and drops its listener');
@@ -2018,7 +2028,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/if \(inboxWatch \|\| closed \|\| !isOwner \|\| !record \|\| !record\.inboxPendingAt \|\| !record\.inboxFolderId\) return;/.test(setup), 'only the owner, with a pending hand-off, watches — and never twice');
     assert(/if \(prevRecord && prevRecord\.inboxPendingAt\) \{ rec\.inboxPendingAt = prevRecord\.inboxPendingAt; rec\.inboxDest = prevRecord\.inboxDest \|\| 'auto'; \}/.test(html), 'a rebuild keeps a pending hand-off');
     const hand = extractFn('tripsyFlyoverDriveHandoffDialog');
-    assert(/data-drive-open/.test(hand) && /Photos and Videos/.test(hand) && /Finish Upload/.test(hand) && /data-handoff-picker/.test(hand), 'the hand-off dialog links the folder, gives the Drive app steps, names Finish Upload, and offers the Photos picker instead');
+    assert(/data-drive-open/.test(hand) && /Photos and Videos/.test(hand) && /asks to import them once the upload is complete/.test(hand) && !/Finish Upload/.test(hand) && /data-handoff-picker/.test(hand), 'the hand-off dialog links the folder, gives the Drive app steps, says the page asks to import when complete, and offers the Photos picker instead');
   }
 
   // ---- A storm plotted on the map ("for the portion of the trip that is in Japan, can you find

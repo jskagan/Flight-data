@@ -4856,7 +4856,7 @@ WebView's support for recording is unproven.
     `tripsyFlyoverInboxWatchStep(state, count, nowMs)`: a count that is >0 and unchanged for
     `TRIPSY_FLYOVER_INBOX_SETTLE_MS` (30 s) is announced ONCE (a later batch that grows the
     count settles and is announced again; an empty folder never is). **What shows is ONE message
-    slot beside a plain Finish Upload button, never a live count** ("Don't have a live count.
+    slot in the page header, never a live count** ("Don't have a live count.
     Until the drive upload is complete display a flashing message 'Uploading Photos to Drive'.
     When that is done, change that message to the completion prompt," same day — the first cut
     had a "· N new" button label and a `tripsyConfirmDialog`): `tripsyFlyoverDrivePhase(phase,
@@ -4865,13 +4865,28 @@ WebView's support for recording is unproven.
     the flashing (`.tripsy-menu-flash`) "⬆️ Uploading Photos to Drive…", the prompt "✅ Drive
     upload complete — N new files. Import now?" with **Import now** (`data-drive-import-now` →
     `runFinishUpload`, the button's own handler) and **Later** (`data-drive-later` → phase
-    `later`, a quiet "N new files waiting in Drive — press Finish Upload when you’re ready").
+    `later`, a quiet "N new files waiting in Drive." with its own **Import** button).
+    **The Finish Upload button itself is GONE** ("Drop the finish upload button," same day): the
+    slot's Import now / Import buttons are the only way to run the import, `runFinishUpload`
+    keeps its name as the handler, and the hand-off / source dialogs say the page asks to import
+    once the upload is complete. Earlier notes in this section that mention pressing Finish
+    Upload describe the behaviour before this.
     `paintDriveStatus` refills the `data-flyover-drive-status` slot in place each tick. The watcher
     starts on a hand-off and on opening a page with one pending, stops when an import starts,
     restarts after an import that left the hand-off pending, and ends with the page's close
     or the retire that clears the hand-off. The Drive hand-off dialog's step 2 also names
     both upload routes (Drive app ＋ → Upload file, or Photos → Share → Drive), since the Drive
     app's ＋ menu reads "Upload file" ("How do I select my photos from this menu," same day).
+    **A Drive import routes by CAPTURE DATE first, whichever button started the hand-off**
+    ("Will the drive uploaded photos load in the correct day on the flyover page?", same day —
+    the live hand-off had been started from the Da Nang card, and `inboxDest` would have filed
+    all 50-odd photos and 4 videos under Da Nang). `tripsyFlyoverDriveImportDest(stops, f, dest)`
+    (pure): a file with real EXIF (`tripsyFlyoverDriveMetaInfo` source `exif`) goes through
+    `tripsyFlyoverRoutePhoto`; the card's destination is only the fallback for a file fitting no
+    destination or carrying no EXIF; and a `file`-sourced date (Drive's `createdTime` is the
+    UPLOAD moment) is never routed by — it would have put today's uploads on today's
+    destination, which is where the four videos (Drive extracts no EXIF for video) were headed.
+    With `auto` and no EXIF the file is left out, as before.
     **And every imported photo leaves the Drive folder on its own, not only when the folder
     retires** ("Remember to delete the photos from drive once they have been uploaded to the app,"
     same day — the folder-level retire ran only after a CLEAN import, so a batch with one

@@ -19462,13 +19462,13 @@ async function showTripsyFlyover(tripKey) {
   let saveChain = Promise.resolve();
   let driveImportRunning = false;
   // The Drive inbox watcher (see tripsyFlyoverInboxWatchStep): alive only while a hand-off is
-  // pending and the page is open. `runFinishUpload` is the Finish Upload button's own handler,
-  // assigned by render, so the watcher's "Import now?" runs exactly what the button does.
+  // pending and the page is open. `runFinishUpload` (the name survives the Finish Upload button,
+  // dropped 2026-10-25) is the import, assigned by render and run by the slot's Import button.
   let inboxWatch = null; // { timer, state, phase, count, busy }
   let runFinishUpload = null;
   const stopInboxWatch = () => { if (inboxWatch) { if (inboxWatch.timer) clearTimeout(inboxWatch.timer); inboxWatch = null; } };
-  // The message slot beside Finish Upload: flashing "Uploading Photos to Drive…" until the
-  // count settles, then the completion prompt in its place (no live count — by request).
+  // The message slot in the header: flashing "Uploading Photos to Drive…" until the count
+  // settles, then the completion prompt in its place (no live count, no separate button).
   const driveStatusHtml = () => tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'uploading', inboxWatch ? inboxWatch.count : 0);
   const wireDriveStatus = () => {
     const go = body.querySelector('[data-drive-import-now]');
@@ -19775,7 +19775,7 @@ async function showTripsyFlyover(tripKey) {
         ${playable} destination${playable === 1 ? '' : 's'} on the map.${isOwner ? ' Add photos to each one — they play as a slideshow when the trip arrives there.' : ''}
         ${isOwner ? `<button class="btn" data-flyover-edit-dests style="font-size:12px; margin-left:6px;" title="Rename, reorder, add, remove or rebuild the destinations">✏️ Edit destinations</button>
         <button class="btn" data-flyover-add-trip-photos style="font-size:12px; margin-left:6px;" title="Pick the trip's photos in one go — each is filed under the destination whose dates cover the day it was taken (its own date and location where the photo carries them)">📷 Add trip photos</button>
-        ${record.inboxPendingAt ? `<button class="btn primary" data-flyover-finish-upload style="font-size:12px; margin-left:6px;" title="Bring in the photos and videos you uploaded to the Drive folder">⬆️ Finish Upload</button> <span data-flyover-drive-status style="margin-left:6px; white-space:nowrap;">${driveStatusHtml()}</span>` : ''}` : ''}
+        ${record.inboxPendingAt ? `<span data-flyover-drive-status style="margin-left:6px; white-space:nowrap;">${driveStatusHtml()}</span>` : ''}` : ''}
         ${completeHtml}
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; font-size:13px;">
@@ -19916,7 +19916,7 @@ async function showTripsyFlyover(tripKey) {
     // back last time (tripsyFlyoverLastPickCrashed) is routed to Drive without asking. The
     // Drive route hands the owner the trip's inbox folder (the Google Drive app uploads any
     // number natively), remembers which destination the pick was for (`inboxDest`,
-    // `inboxPendingAt`), and the page shows ⬆️ Finish Upload until the import has run.
+    // `inboxPendingAt`), and the page shows the Drive status slot until the import has run.
     const askSource = (dest, openPicker) => {
       if (tripsyFlyoverLastPickCrashed(tripsyFlyoverIntakeLoad())) {
         toast('Your last pick never came back from Photos, so this one goes through Drive.');
@@ -19936,9 +19936,9 @@ async function showTripsyFlyover(tripKey) {
       startInboxWatch();
       tripsyFlyoverDriveHandoffDialog(tripsyFlyoverDriveFolderUrl(folderId), TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'), { onPickerInstead: openPicker });
     };
-    // Finish Upload: everything new in the inbox folder is imported straight away, into the
-    // destination the pick was started from (or by date, from the page-level button).
-    const finishBtn = body.querySelector('[data-flyover-finish-upload]');
+    // Import from the inbox folder: everything new is imported straight away, by capture date
+    // (the card the pick was started from is the fallback). Run by the status slot's Import
+    // button ("Drop the finish upload button," 2026-10-25 -- there is no separate button).
     runFinishUpload = async () => {
       if (driveImportRunning) { toast('An import from Drive is already running — see the status line.'); return; }
       setStatus('Checking the Drive folder…');
@@ -19950,12 +19950,11 @@ async function showTripsyFlyover(tripKey) {
       const fresh = tripsyFlyoverDriveNewFiles(files, record);
       setStatus('');
       if (!fresh.length) {
-        tripsyFlyoverDriveHandoffDialog(tripsyFlyoverDriveFolderUrl(folderId), TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'), { note: files.length ? `Everything in the folder (${files.length}) is already on the fly-over.` : 'Nothing has arrived in the folder yet — upload the photos and videos with the Google Drive app first, then press Finish Upload again.' });
+        tripsyFlyoverDriveHandoffDialog(tripsyFlyoverDriveFolderUrl(folderId), TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'), { note: files.length ? `Everything in the folder (${files.length}) is already on the fly-over.` : 'Nothing has arrived in the folder yet — upload the photos and videos with the Google Drive app first; the fly-over page will say when they are in.' });
         return;
       }
       runDriveImport(fresh, record.inboxDest || 'auto', folderId);
     };
-    if (finishBtn) finishBtn.onclick = runFinishUpload;
     wireDriveStatus();
     const runDriveImport = async (files, dest, folderId) => {
       driveImportRunning = true;
@@ -19972,7 +19971,7 @@ async function showTripsyFlyover(tripKey) {
           const src = tripsyFlyoverDriveSrc(f.id);
           if (known.has(src)) continue;
           setStatus(`Importing from Drive… ${i + 1} of ${total} (${f.name || 'photo'})`);
-          const stopId = dest === 'auto' ? tripsyFlyoverRoutePhoto(record.stops, tripsyFlyoverDriveMetaInfo(f)) : dest;
+          const stopId = tripsyFlyoverDriveImportDest(record.stops, f, dest);
           if (!stopId) { unmatched++; tripsyFlyoverIntakeNote({ unmatched }); continue; }
           try {
             const stopNow = () => record.stops.find(x => x.id === stopId) || {};
@@ -20675,6 +20674,19 @@ function tripsyFlyoverDriveMetaInfo(f) {
   }
   return info;
 }
+// Where a Drive inbox file goes ("Will the drive uploaded photos load in the correct day on the
+// flyover page?", 2026-10-25 -- the live hand-off had been started from one destination's card,
+// which would have filed every photo of the batch under that one stop). The capture date comes
+// FIRST, whichever button started the hand-off: a file with real EXIF time/GPS is routed by
+// `tripsyFlyoverRoutePhoto`; the card's destination is only the fallback for a file that fits
+// no destination, or carries no EXIF (a video -- Drive extracts none -- or a stripped photo).
+// Drive's `createdTime` is the UPLOAD moment, never the shutter, so a `file`-sourced date is
+// not routed by (it would have put today's uploads on today's destination). Pure.
+function tripsyFlyoverDriveImportDest(stops, f, dest) {
+  const info = tripsyFlyoverDriveMetaInfo(f);
+  const byDate = info.source === 'exif' ? tripsyFlyoverRoutePhoto(stops, info) : null;
+  return byDate || (dest && dest !== 'auto' ? dest : null);
+}
 // A video in the inbox is referenced IN PLACE (no download, no re-upload): the player streams
 // it from Drive by id like any other. No poster (the 🎬 badge stands in). Pure.
 function tripsyFlyoverDriveVideoRecord(f) {
@@ -20779,7 +20791,7 @@ function tripsyFlyoverAddSourceDialog({ onPhotos, onDrive }) {
       </div>
       <div style="display:grid; gap:10px;">
         <button class="btn" data-src-photos style="text-align:left; padding:12px 14px; white-space:normal;"><strong>📷 A few photos</strong><br><span style="font-size:12px; color:var(--muted);">Up to about 30 — picked from Photos and added straight away.</span></button>
-        <button class="btn primary" data-src-drive style="text-align:left; padding:12px 14px; white-space:normal;"><strong>📁 Many photos, or a video</strong><br><span style="font-size:12px; opacity:0.85;">Goes through Drive: you upload them with the Google Drive app (no limit), then press Finish Upload here. A big pick through Photos stalls or crashes the app.</span></button>
+        <button class="btn primary" data-src-drive style="text-align:left; padding:12px 14px; white-space:normal;"><strong>📁 Many photos, or a video</strong><br><span style="font-size:12px; opacity:0.85;">Goes through Drive: you upload them with the Google Drive app (no limit), and this page asks to import them once the upload is complete. A big pick through Photos stalls or crashes the app.</span></button>
       </div>
     </div>`;
   ov.style.display = 'flex';
@@ -20811,7 +20823,7 @@ function tripsyFlyoverInboxWatchStep(state, count, nowMs, settleMs = TRIPSY_FLYO
 }
 // What the page SHOWS for a pending hand-off ("Don't have a live count. Until the drive upload
 // is complete display a flashing message 'Uploading Photos to Drive'. When that is done, change
-// that message to the completion prompt," 2026-10-25): one message slot beside Finish Upload,
+// that message to the completion prompt," 2026-10-25): one message slot in the page header,
 // in one of three phases. `uploading` flashes until a settled count announces completion;
 // `complete` is the prompt itself (Import now / Later); `later` is the quiet reminder after
 // Later. A count that grows again goes back to `uploading`. Pure.
@@ -20823,11 +20835,11 @@ function tripsyFlyoverDrivePhase(phase, step) {
 function tripsyFlyoverDriveStatusHtml(phase, count) {
   const n = count || 0, files = `${n} new file${n === 1 ? '' : 's'}`;
   if (phase === 'complete') return `<span data-flyover-drive-phase="complete" style="font-size:12px; color:#3AA76D; font-weight:700;">✅ Drive upload complete — ${files}. Import now?</span> <button class="btn primary" data-drive-import-now style="font-size:12px; margin-left:4px;">Import now</button> <button class="btn" data-drive-later style="font-size:12px;">Later</button>`;
-  if (phase === 'later') return `<span data-flyover-drive-phase="later" style="font-size:12px; color:var(--muted);">${files} waiting in Drive — press Finish Upload when you’re ready.</span>`;
+  if (phase === 'later') return `<span data-flyover-drive-phase="later" style="font-size:12px; color:var(--muted);">${files} waiting in Drive.</span> <button class="btn" data-drive-import-now style="font-size:12px; margin-left:4px;">Import</button>`;
   return `<span class="tripsy-menu-flash" data-flyover-drive-phase="uploading" style="font-size:12px; color:#E0A020; font-weight:700;">⬆️ Uploading Photos to Drive…</span>`;
 }
 // The hand-off to Drive: the folder link (opens in the Google Drive app on the iPad), the
-// steps, and the reminder that ⬆️ Finish Upload on the fly-over page brings them in.
+// steps, and the reminder that the fly-over page asks to import them once the upload is complete.
 function tripsyFlyoverDriveHandoffDialog(url, folderName, { note = '', onPickerInstead = null } = {}) {
   let ov = document.getElementById('tripsy-flyover-drive-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-drive-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -20840,7 +20852,7 @@ function tripsyFlyoverDriveHandoffDialog(url, folderName, { note = '', onPickerI
         <ol style="margin:0 0 0 18px; padding:0;">
           <li>Open the folder: <a href="${esc(url)}" target="_blank" rel="noopener" data-drive-open style="color:var(--accent); word-break:break-all;">${esc(folderName)}</a></li>
           <li>In the Google Drive app press <strong>＋</strong> → <strong>Upload file</strong> → <strong>Photos and Videos</strong>, select everything, and let Drive finish. Or go the other way round: in the <strong>Photos</strong> app select them all, tap <strong>Share</strong> → <strong>Drive</strong>, and pick this folder.</li>
-          <li>Come back and press <strong>⬆️ Finish Upload</strong> on the fly-over page. Files already imported are skipped, so pressing it again is safe.</li>
+          <li>Come back to the fly-over page. It shows <strong>Uploading Photos to Drive…</strong> while they arrive, then asks to import them once the upload is complete. Files already imported are skipped, so importing again is safe.</li>
         </ol>
       </div>
       <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;">
