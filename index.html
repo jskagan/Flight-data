@@ -22418,7 +22418,15 @@ function tripsyFlyoverMergeLookups(looked, stopFields, topFields = []) {
 // edit view to the right of move called exit that returns to the flyover view"); it resolves 'exit'.
 // `keepButton: false` drops ✓ Keep (Edit photos, "Remove the keep button," 2026-10-25 — there
 // ‹ / › and Exit already carry on without changing anything; Esc and a tap outside still keep).
-function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 Remove', isVideo = false, moveTargets = null, nav = null, exitButton = false, keepButton = true } = {}) {
+// `stay: true` leaves the overlay (and the picture on it) up after answering, so the caller can
+// show the next photo in the SAME overlay with no gap ("When I press delete the view goes back to
+// the flyover page briefly then returns to the next photo don't do that," 2026-10-25); a caller
+// passing it removes the overlay itself (`tripsyFlyoverCloseReviewOverlay`).
+function tripsyFlyoverCloseReviewOverlay() {
+  const ov = document.getElementById('tripsy-flyover-review-overlay');
+  if (ov) { const vid = ov.querySelector('video'); if (vid) { try { vid.pause(); } catch (e) {} } ov.remove(); }
+}
+function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 Remove', isVideo = false, moveTargets = null, nav = null, exitButton = false, keepButton = true, stay = false } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-review-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-review-overlay'; document.body.appendChild(ov); }
@@ -22445,7 +22453,8 @@ function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 R
         <button class="btn" data-review-move style="font-size:15px; padding:8px 16px;">↪ Move</button>` : ''}
         ${exitButton ? `<button class="btn" data-review-exit title="Back to the fly-over page" style="font-size:15px; padding:8px 16px;">Exit</button>` : ''}
       </div>`;
-    const done = v => { document.removeEventListener('keydown', onKey, true); const vid = ov.querySelector('video'); if (vid) { try { vid.pause(); } catch (e) {} } ov.remove(); resolve(v); };
+    let answered = false;
+    const done = v => { if (answered) return; answered = true; document.removeEventListener('keydown', onKey, true); const vid = ov.querySelector('video'); if (vid) { try { vid.pause(); } catch (e) {} } if (!stay) ov.remove(); resolve(v); };
     const onKey = e => {
       if (e.key === 'Escape') { e.stopPropagation(); done('keep'); return; }
       if (nav && e.key === 'ArrowLeft' && nav.hasPrev && !(e.target && /^(SELECT|INPUT)$/.test(e.target.tagName))) { e.stopPropagation(); e.preventDefault(); done('prev'); }
@@ -22497,6 +22506,14 @@ async function tripsyFlyoverReviewStopPhoto(getStop, id, where, { onDelete = nul
   // the same at any time ("When the user presses delete in the photo edit view, delete that
   // photo and move to the next photo for that location if there is one. If not, go back to the
   // flyover page," 2026-10-25).
+  // One overlay stays up for the whole review (`stay`), so a Delete or a ‹ / › step goes straight
+  // to the next photo: the old picture stays on screen until the next one has loaded, and a
+  // Delete's Drive save runs in the background (`onDelete` takes the photo off the stop in memory
+  // before its first await, so `getStop()` already reflects it).
+  try { return await tripsyFlyoverReviewStopPhotoLoop(getStop, id, where, { onDelete, onMove, moveTargets }); }
+  finally { tripsyFlyoverCloseReviewOverlay(); }
+}
+async function tripsyFlyoverReviewStopPhotoLoop(getStop, id, where, { onDelete, onMove, moveTargets }) {
   let cur = id;
   let deletedAny = false;
   for (;;) {
@@ -22513,13 +22530,15 @@ async function tripsyFlyoverReviewStopPhoto(getStop, id, where, { onDelete = nul
     if (!url) { toast('Couldn’t load that photo — check the connection and try again.', 'error'); return 'keep'; }
     const targets = onMove && moveTargets ? moveTargets() : null;
     const nav = k >= 0 ? { hasPrev: k > 0, hasNext: k < seq.length - 1 } : null;
-    const answer = await tripsyFlyoverPhotoReviewDialog(url, { label: `${stop.label || ''} · ${here}${k >= 0 ? ` · ${k + 1} of ${seq.length}` : ''}`, removeLabel: '🗑 Delete', isVideo, moveTargets: targets, nav, exitButton: true, keepButton: false });
+    const answer = await tripsyFlyoverPhotoReviewDialog(url, { label: `${stop.label || ''} · ${here}${k >= 0 ? ` · ${k + 1} of ${seq.length}` : ''}`, removeLabel: '🗑 Delete', isVideo, moveTargets: targets, nav, exitButton: true, keepButton: false, stay: true });
     if (answer === 'exit') return 'exit';
     if (answer === 'prev' && k > 0) { cur = seq[k - 1].photo.driveFileId; continue; }
     if (answer === 'next' && k >= 0 && k < seq.length - 1) { cur = seq[k + 1].photo.driveFileId; continue; }
     if (answer === 'remove' && onDelete) {
       const nextId = k >= 0 && k < seq.length - 1 ? seq[k + 1].photo.driveFileId : null;
-      await onDelete(cur);
+      // Called (not awaited) right here: its in-memory update must land before the next getStop().
+      let saving; try { saving = onDelete(cur); } catch (e) { saving = Promise.reject(e); }
+      Promise.resolve(saving).catch(e => { console.warn('photo delete failed', e); toast('Couldn’t save the deletion — check the connection and try again.', 'error'); });
       deletedAny = true;
       if (!nextId) return 'exit';
       cur = nextId;

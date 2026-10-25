@@ -4265,6 +4265,19 @@ WebView's support for recording is unproven.
       `keepButton: false` from `tripsyFlyoverReviewStopPhoto`; ‹ / › and Exit carry on without
       changing anything, and Esc or a tap outside the picture still keep. The player's own Keep /
       Remove view is unchanged.
+      **Delete goes straight to the next photo, with no flash of the fly-over page** ("When I
+      press delete the view goes back to the flyover page briefly then returns to the next photo
+      don't do that," same day). The dialog used to remove its overlay on every answer, and the
+      review then awaited the Drive save and the next photo's download before building a new
+      one, so the setup page showed through the gap. Now `tripsyFlyoverReviewStopPhoto` passes
+      `stay: true` (the dialog keeps its overlay, and the old picture, up after answering) and
+      wraps its loop (`tripsyFlyoverReviewStopPhotoLoop`) in a `finally` that calls
+      `tripsyFlyoverCloseReviewOverlay`, so the overlay goes only when the review ends. Delete
+      calls `onDelete` WITHOUT awaiting it — `removePhotoFromRecord` takes the photo off the
+      stop synchronously before its first await, so the next `getStop()` already reflects it —
+      and a failed save toasts. ‹ / › get the same no-gap step. Verified in Chromium with a 2 s
+      save and a 300 ms photo load: the overlay never disappeared between Delete and the next
+      photo.
       **A photo goes on a page only when the user puts it there; everything else is "No page"**
       ("Do not place photos on a page unless a user places it there. When photos are Imported
       they should say 'No page'," same day — Da Nang had 2 hand-made pages and 111 imported
