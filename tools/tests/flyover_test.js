@@ -535,6 +535,14 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   // "Change Music from here button to say 'Change Music'" (2026-10-25).
   assert(/data-flyover-stop-music [^>]*>🎵 Change Music<\/button>/.test(setup) && !/Music from here<\/button>|Change music here/.test(setup) && /data-flyover-stop-music-name/.test(setup),
     'THE ASK: the destination music button always reads "Change Music"; a destination\'s own track is named beside it');
+  // "When photos are Imported they should say 'No page'" (2026-10-25): the card, the Edit
+  // photos page, and every add path.
+  assert(/const loose = tripsyFlyoverUnplacedPhotos\(s\); if \(!loose\.length\) return '';[\s\S]*data-flyover-nopage[\s\S]*>No page · \$\{loose\.length\}<\/span>/.test(setup)
+    && /noPage\.onclick = \(\) => openSlideshowOptions\(id,/.test(setup), 'THE ASK: the card shows a "No page · N" tile after its pages, which opens the slideshow editor');
+  assert(/\{ \.\.\.s, \.\.\.tripsyFlyoverFreezePagesOnAdd\(s, fields\) \}/.test(setup) && (setup.match(/updateStop\((id|stopId), \{ photos: \[\.\.\.\(stopNow\(\)\.photos \|\| \[\]\), rec\] \}\)/g) || []).length === 3,
+    'every add path (picker photos, picker videos, Drive import) goes through updateStop, which freezes a never-paged destination first');
+  const ep2 = extractFn('tripsyFlyoverEditPhotosPage');
+  assert(/\$\{page == null \? 'No page' : page\}<\/span>/.test(ep2), 'THE ASK: the Edit photos page badges an unplaced photo "No page"');
   // "For each location box on the flyover page, make the first line the location, the dates
   // there, and the lodging in large type. The second line should be the drop down box with the
   // type of transportation and the editable name of the destination, the music option box and
@@ -631,7 +639,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   extractFn('tripsyFlyoverSlideshowConfig'), extractFn('tripsyFlyoverIsVideo'), extractFn('tripsyFlyoverPhotoGroups'),
   extractFn('tripsyFlyoverGroupLayout'), constLine('TRIPSY_FLYOVER_PAGE_MAX'), extractFn('tripsyFlyoverPageLayout'),
   extractFn('tripsyFlyoverNormalizePage'), extractFn('tripsyFlyoverPages'), extractFn('tripsyFlyoverEnterTransitions'),
-  extractFn('tripsyFlyoverDialogPages'), extractFn('tripsyFlyoverTogglePagePhoto'), extractFn('tripsyFlyoverSlideshowSummary')].join('\n'));
+  extractFn('tripsyFlyoverDialogPages'), extractFn('tripsyFlyoverTogglePagePhoto'), extractFn('tripsyFlyoverSlideshowSummary'), extractFn('tripsyFlyoverUnplacedPhotos'), extractFn('tripsyFlyoverFreezePagesOnAdd')].join('\n'));
 {
   const P = (n, solo) => ({ driveFileId: 'p' + n, solo: !!solo });
   const ph = [P(1), P(2, true), P(3), P(4), P(5), P(6, true), P(7)];
@@ -684,12 +692,27 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     { ids: ['q1', 'gone'], count: 1 },
   ] };
   const pg = tripsyFlyoverPages(stop);
-  assert(pg.map(x => x.ids.join(',')).join('|') === 'q2,q1|q3,q4,q5|q6',
-    'THE ASK: each page plays the photos chosen for it, in order; a photo is on one page only; a removed photo drops off; one on no page plays after -> ' + pg.map(x => x.ids.join(',')).join('|'));
-  assert(pg[0].layout === 'pair' && pg[1].layout === 'collage' && pg[2].layout === 'single' && pg[2].auto,
+  assert(pg.map(x => x.ids.join(',')).join('|') === 'q2,q1|q3,q4,q5',
+    'THE ASK: each page plays the photos chosen for it, in order; a photo is on one page only; a removed photo drops off; one on NO page does not play -> ' + pg.map(x => x.ids.join(',')).join('|'));
+  assert(pg[0].layout === 'pair' && pg[1].layout === 'collage',
     'how many are on a page decides how it is drawn');
+  // ---- "Do not place photos on a page unless a user places it there. When photos are
+  // Imported they should say 'No page'" (2026-10-25) ----
+  assert(tripsyFlyoverUnplacedPhotos(stop).map(p => p.driveFileId).join() === 'q6', 'THE ASK: a photo on none of the saved pages is No page');
+  const neverPaged = tripsyFlyoverPages({ photos: [{ driveFileId: 'seed' }] });
+  assert(neverPaged.length === 1 && neverPaged[0].ids.join() === 'seed' && neverPaged[0].auto, 'a destination that has never had pages still plays its one default photo');
+  assert(tripsyFlyoverPages({ photos: [{ driveFileId: 'a' }], pages: [] }).length === 0 && tripsyFlyoverUnplacedPhotos({ photos: [{ driveFileId: 'a' }], pages: [] }).length === 1,
+    'once a destination has pages (even none left), imports are No page and nothing plays on its own');
+  const seedStop = { photos: [{ driveFileId: 'seed' }] };
+  const frozen = tripsyFlyoverFreezePagesOnAdd(seedStop, { photos: [{ driveFileId: 'seed' }, { driveFileId: 'new1' }] });
+  assert(Array.isArray(frozen.pages) && frozen.pages.length === 1 && frozen.pages[0].ids.join() === 'seed'
+    && tripsyFlyoverUnplacedPhotos({ ...seedStop, ...frozen }).map(p => p.driveFileId).join() === 'new1',
+    'THE ASK: importing into a never-paged destination keeps its default photo on its page and puts the import on No page');
+  assert(tripsyFlyoverFreezePagesOnAdd(seedStop, { photos: [] }).pages === undefined && tripsyFlyoverFreezePagesOnAdd(stop, { photos: [...Q, { driveFileId: 'z' }] }).pages === undefined
+    && tripsyFlyoverFreezePagesOnAdd(seedStop, { photos: [{ driveFileId: 'x' }], pages: [] }).pages.length === 0,
+    'a removal, a destination that already has pages, and a caller passing its own pages are left alone');
   assert(pg[0].seconds === 5 && pg[1].seconds === 2, 'each page has its own time on screen');
-  assert(tripsyFlyoverEnterTransitions(stop, pg).join(',') === 'fade,zoom,none',
+  assert(tripsyFlyoverEnterTransitions(stop, pg).join(',') === 'fade,zoom',
     'THE ASK: "the transition to the next page" is the way the NEXT page comes in');
   assert(tripsyFlyoverPageLayout(3, 'grid') === 'grid' && tripsyFlyoverPageLayout(5, 'grid') === 'collage' && tripsyFlyoverPageLayout(1, 'collage') === 'single',
     'three or four can be a grid or a collage; five or six are a collage');
@@ -1068,7 +1091,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   extractFn('tripsyFlyoverDurationLabel'), extractFn('tripsyFlyoverPhotoGroups'),
   extractFn('tripsyFlyoverGroupLayout'), constLine('TRIPSY_FLYOVER_PAGE_MAX'), extractFn('tripsyFlyoverPageLayout'),
   extractFn('tripsyFlyoverNormalizePage'), extractFn('tripsyFlyoverPages'), extractFn('tripsyFlyoverTogglePagePhoto'),
-  extractFn('tripsyFlyoverSlideshowSummary'), extractFn('tripsyFlyoverMusicFader')].join('\n').replace(/^const /gm, 'var '));
+  extractFn('tripsyFlyoverSlideshowSummary'), extractFn('tripsyFlyoverUnplacedPhotos'), extractFn('tripsyFlyoverMusicFader')].join('\n').replace(/^const /gm, 'var '));
 {
   const ph = id => ({ driveFileId: id });
   const vid = id => ({ driveFileId: id, kind: 'video', duration: 65 });
@@ -1179,13 +1202,13 @@ eval([extractFn('tripsyFlyoverNameIsNonLatin'), extractFn('tripsyFlyoverTidyPlac
 
 // ---- photos listed in PAGE order ("Always show pages in the flyover edit view in the order of
 // the pages … show them in the new order I selected," 2026-10-21) ----
-eval([extractFn('tripsyFlyoverPhotosInPageOrder')].join('\n'));
+eval([extractFn('tripsyFlyoverPhotosInPageOrder'), extractFn('tripsyFlyoverUnplacedPhotos')].join('\n'));
 {
   const ph = id => ({ driveFileId: id });
   const st = { photos: [ph('a'), ph('b'), ph('c'), ph('d')], pages: [{ ids: ['c'], count: 1 }, { ids: ['a', 'd'], count: 2 }] };
   const o = tripsyFlyoverPhotosInPageOrder(st);
-  assert(o.map(x => x.photo.driveFileId + x.page).join(',') === 'c1,a2,d2,b3',
-    'THE ASK: photos come back in the order their pages play, each with its page; one on no page plays last');
+  assert(o.map(x => x.photo.driveFileId + x.page).join(',') === 'c1,a2,d2,bnull',
+    'THE ASK: photos come back in the order their pages play, each with its page; one on No page comes last with page null (it is listed, never lost, but does not play)');
   const setup = extractFn('showTripsyFlyover');
   // Since 2026-10-22 the setup card shows ONE tile per PAGE, in play order ("show each page
   // as a single thumbnail"), so the photo-per-tile pins became page-per-tile pins.
@@ -1866,8 +1889,10 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'an ＋ Add photos button renders beside the grid\'s label (owner-only: the caller passes addMedia only to the owner)');
   assert(/if \(addBtn\) addBtn\.onclick = \(\) => \{ if \(adding\) return; tripsyFlyoverPickMedia\(async files => \{/.test(dlg),
     'the pick opens synchronously inside the tap (iOS), the adding happens in its callback');
-  assert(/const r = await addMedia\(files, setStatus\);[\s\S]*photos\.push\(\{ \.\.\.rec \}\);[\s\S]*pages = tripsyFlyoverPlaceAddedPhotos\(pages, cur, recs\.map\(x => x\.driveFileId\), blank, isVideo\)\.pages;/.test(dlg),
-    'added records join the draft and are placed on the page being edited');
+  assert(/const r = await addMedia\(files, setStatus\);[\s\S]*photos\.push\(\{ \.\.\.rec \}\);/.test(dlg) && !/tripsyFlyoverPlaceAddedPhotos\(/.test(dlg) && /added on No page — tap them onto a page/.test(dlg),
+    'THE ASK: added records join the draft on No page; the editor places nothing on a page by itself (2026-10-25)');
+  assert(/if \(!pages\.length\) pages\.push\(blank\(\)\);/.test(dlg) && !/unplaced0/.test(dlg) && /const addPageAtEnd = \(\) => \{\s*const pg = blank\(\);\s*pages = \[\.\.\.pages, pg\];/.test(dlg) && />\$\{here \? `✓ \$\{order\}` : k != null \? `Page \$\{k \+ 1\}` : 'No page'\}<\/span>/.test(dlg),
+    'THE ASK: opening the editor or adding a page puts no photo on it, and an unplaced photo is badged No page');
   const setup = extractFn('showTripsyFlyover');
   assert(/const addMediaToStop = async \(id, files, setStatusFn\) => \{/.test(setup)
     && /const onPicked = async files => \{\s*setStatus\([^;]*\);\s*const r = await addMediaToStop\(id, files, setStatus\);/.test(setup)

@@ -4219,6 +4219,23 @@ WebView's support for recording is unproven.
       superseding the 10-22 "left of the transport" placement). Owner-only and only once the
       destination is visited, like before; the two edit buttons need photos. The page thumbnails,
       upload status and the slideshow summary with ▶ Preview follow below it.
+      **A photo goes on a page only when the user puts it there; everything else is "No page"**
+      ("Do not place photos on a page unless a user places it there. When photos are Imported
+      they should say 'No page'," same day — Da Nang had 2 hand-made pages and 111 imported
+      photos auto-grouped into pages after them). `tripsyFlyoverPages` no longer derives pages
+      for photos missing from a destination's SAVED pages: they are `tripsyFlyoverUnplacedPhotos`
+      and do not play. Only a destination that has NEVER had pages (`pages` absent — a single
+      seeded itinerary/LAX photo) still plays its photos the old derived way, and the setup
+      page's `updateStop` runs `tripsyFlyoverFreezePagesOnAdd` so an import into one first saves
+      those derived pages, leaving the new photos unplaced (every add path — picker photos,
+      picker videos, Drive import — goes through `updateStop`). `tripsyFlyoverPhotosInPageOrder`
+      now lists the unplaced photos LAST with `page: null`, so its callers that rewrite
+      `stop.photos` never lose one. The slideshow editor places nothing itself: it opens on the
+      existing pages (one empty page if there are none), its ＋ New page / Next ▶ add an EMPTY
+      page, its own ＋ Add photos adds to No page (`tripsyFlyoverPlaceAddedPhotos` is no longer
+      called), and unplaced tiles are badged "No page". The card shows a dashed **"No page · N"**
+      tile after the page tiles (`data-flyover-nopage`, opens the editor), the Edit photos page
+      badges them "No page", and the slideshow summary counts them.
       Airport-transfer cards are unchanged. **🔍 Suggested photos is gone from the card; ✏️ Edit
       photos replaces it** ("Remove the suggested photos button. Have a button that says edit
       photos. When the user hits it, show a page with thumbnails of all photos for that

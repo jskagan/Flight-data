@@ -18385,8 +18385,14 @@ function tripsyFlyoverPageRecord(pg) {
 }
 // The pages a stop actually plays, in order, each with its `photos` (the stop's photo
 // records) and drawn `layout`. Saved pages lose photos no longer on the stop (and a photo
-// can be on one page only); photos on no page yet play after them, grouped the old
-// per-destination way. Empty pages drop out. Pure.
+// can be on one page only). **A photo goes on a page only when the user puts it there** ("Do
+// not place photos on a page unless a user places it there. When photos are Imported they
+// should say 'No page'," 2026-10-25): once a destination has saved pages, a photo on none of
+// them is "No page" -- it is not returned here, so it does not play (see
+// tripsyFlyoverUnplacedPhotos). Only a destination that has NEVER had pages (`pages` absent:
+// a single default itinerary / LAX photo) still plays its photos grouped the old
+// per-destination way; adding photos to one freezes those pages first
+// (tripsyFlyoverFreezePagesOnAdd), so what was added stays off them. Empty pages drop out. Pure.
 function tripsyFlyoverPages(stop) {
   const cfg = tripsyFlyoverSlideshowConfig(stop);
   // A photo still uploading plays from its local bytes; one whose bytes are gone (a reload
@@ -18412,7 +18418,7 @@ function tripsyFlyoverPages(stop) {
     }
     flush();
   }
-  const rest = photos.filter(p => !used.has(p.driveFileId));
+  const rest = (stop && Array.isArray(stop.pages)) ? [] : photos.filter(p => !used.has(p.driveFileId));
   for (const g of tripsyFlyoverPhotoGroups(rest, cfg.layout)) {
     const ids = g.map(p => p.driveFileId);
     const layout = tripsyFlyoverGroupLayout(g, cfg.layout);
@@ -18426,8 +18432,25 @@ function tripsyFlyoverPages(stop) {
 // A stop's photos in PLAY order, each with the page (1-based) it plays on: page 1's
 // photos first, then page 2's … ("Always show pages in the flyover edit view in the order of
 // the pages," 2026-10-21). Pure.
+// Photos on "No page" follow, with `page: null` -- every photo on the stop is listed, so a
+// caller that rewrites `stop.photos` from this never loses one.
 function tripsyFlyoverPhotosInPageOrder(stop) {
-  return tripsyFlyoverPages(stop).flatMap((pg, k) => pg.photos.map(photo => ({ photo, page: k + 1 })));
+  const paged = tripsyFlyoverPages(stop).flatMap((pg, k) => pg.photos.map(photo => ({ photo, page: k + 1 })));
+  return paged.concat(tripsyFlyoverUnplacedPhotos(stop).map(photo => ({ photo, page: null })));
+}
+// The stop's photos on no page, in the stop's own order. Pure.
+function tripsyFlyoverUnplacedPhotos(stop) {
+  const on = new Set(tripsyFlyoverPages(stop).flatMap(pg => pg.ids));
+  return ((stop && stop.photos) || []).filter(p => p && !on.has(p.driveFileId));
+}
+// Adding photos to a destination that has never had pages would put them on its derived
+// pages; freeze what plays now as saved pages first, so the added ones land on "No page".
+// Returns the fields to apply (with `pages` when frozen). Pure.
+function tripsyFlyoverFreezePagesOnAdd(stop, fields) {
+  if (!stop || !fields || !Array.isArray(fields.photos) || fields.pages !== undefined || Array.isArray(stop.pages)) return fields;
+  const had = new Set((stop.photos || []).map(p => p.driveFileId));
+  if (!fields.photos.some(p => p && !had.has(p.driveFileId))) return fields;
+  return { ...fields, pages: tripsyFlyoverPages(stop).map(tripsyFlyoverPageRecord) };
 }
 // The Slideshow options grid's photos as consecutive runs sharing one page: [{page, photos}],
 // `page` the 0-based page index or null for a photo on no page (each of those is its own run).
@@ -19534,7 +19557,7 @@ async function showTripsyFlyover(tripKey) {
     return saveChain;
   };
   const updateStop = (id, fields) => {
-    record = { ...record, stops: record.stops.map(s => s.id === id ? { ...s, ...fields } : s) };
+    record = { ...record, stops: record.stops.map(s => s.id === id ? { ...s, ...tripsyFlyoverFreezePagesOnAdd(s, fields) } : s) };
   };
   const build = async () => {
     setStatus('Finding the destinations on the map…');
@@ -19853,6 +19876,12 @@ async function showTripsyFlyover(tripKey) {
                 <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:rgba(0,0,0,0.65); color:#fff;">Page ${k + 1}${pg.photos.length > 1 ? ` · ${pg.photos.length}` : ''}</span>
                 ${isOwner ? `<button data-flyover-page-remove="${k}" title="Remove ${pg.video ? 'this video' : pg.photos.length > 1 ? `the ${pg.photos.length} photos on this page` : 'this photo'}" style="position:absolute; top:5px; right:5px; width:22px; height:22px; border-radius:50%; border:none; background:rgba(0,0,0,0.65); color:#fff; font-size:12px; cursor:pointer; padding:0;">✕</button>` : ''}
               </div>`).join('')}
+            ${(() => { const loose = tripsyFlyoverUnplacedPhotos(s); if (!loose.length) return '';
+              // Photos on no page (imported, not yet placed) -- one dashed tile, after the pages.
+              return `<button class="btn" data-flyover-nopage style="padding:3px; position:relative; border-style:dashed;"${isOwner ? ' title="Not on a page — they don’t play. Tap to put them on pages in Edit slideshow."' : ' title="Not on a page — they don’t play"'}>
+                ${tripsyFlyoverPageThumbHtml({ photos: loose.slice(0, 3), video: false }, 84, 64, 'border-radius:5px; opacity:0.6;')}
+                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:#8A5A00; color:#fff;">No page · ${loose.length}</span>
+              </button>`; })()}
             ${!tripsyFlyoverStopVisited(s, todayKey)
               ? `<span style="font-size:12px; color:var(--muted);">🔒 Photos open once you get here (${esc(tripsyFlyoverDatesLabel(s))}).</span>`
               : `${!photos.length ? `<span style="font-size:12px; color:var(--muted);">No photos yet.</span>` : ''}
@@ -20157,7 +20186,7 @@ async function showTripsyFlyover(tripKey) {
         const r = await addMediaToStop(id, files, setStatus);
         if (r.done || r.queued) {
           const total = r.done + r.queued;
-          if (!closed) openSlideshowOptions(id, `${total} item${total === 1 ? '' : 's'} added${r.skipped ? ` (${r.skipped} already here, skipped)` : ''}. Choose how this place’s photos and videos play.${r.queued ? ' Photos are uploading in the background — you can keep working or use the rest of the app.' : ''}`);
+          if (!closed) openSlideshowOptions(id, `${total} item${total === 1 ? '' : 's'} added${r.skipped ? ` (${r.skipped} already here, skipped)` : ''}. They’re on No page — put them on pages here to play them.${r.queued ? ' Photos are uploading in the background — you can keep working or use the rest of the app.' : ''}`);
         } else if (r.skipped && !closed) toast(`All ${r.skipped} of those are already on this fly-over.`);
       };
       const own = card.querySelector('[data-flyover-add-own]');
@@ -20169,6 +20198,9 @@ async function showTripsyFlyover(tripKey) {
       });
       // ✏️ Edit photos (replaces 🔍 Suggested photos, 2026-10-25): the stop's thumbnails, each
       // opening large with Keep / Delete. Delete takes it off the stop and its pages and saves.
+      // The "No page" tile opens the slideshow editor, where photos are put on pages.
+      const noPage = card.querySelector('[data-flyover-nopage]');
+      if (noPage) noPage.onclick = () => openSlideshowOptions(id, 'Photos marked No page don’t play. Tap one to put it on this page.');
       const editPhotos = card.querySelector('[data-flyover-edit-photos]');
       if (editPhotos) editPhotos.onclick = () => tripsyFlyoverEditPhotosPage(stop, {
         onDelete: photoId => removePhotoFromRecord(id, photoId),
@@ -21360,7 +21392,10 @@ function tripsyFlyoverSlideshowSummary(stop) {
   const pages = tripsyFlyoverPages(stop);
   const n = pages.length;
   const vids = pages.filter(pg => pg.video).length;
-  return `${n} page${n === 1 ? '' : 's'}: ${pages.map(pg => pg.video ? '🎬' : pg.ids.length).join(' · ')} photo${pages.length === 1 && pages[0].ids.length === 1 ? '' : 's'} per page${vids ? ` (🎬 = ${vids === 1 ? 'a video' : `${vids} videos`})` : ''}`;
+  const loose = tripsyFlyoverUnplacedPhotos(stop).length;
+  const looseText = loose ? `${n ? ' · ' : ''}${loose} on No page` : '';
+  if (!n) return looseText || '0 pages';
+  return `${n} page${n === 1 ? '' : 's'}: ${pages.map(pg => pg.video ? '🎬' : pg.ids.length).join(' · ')} photo${pages.length === 1 && pages[0].ids.length === 1 ? '' : 's'} per page${vids ? ` (🎬 = ${vids === 1 ? 'a video' : `${vids} videos`})` : ''}${looseText}`;
 }
 // The page being edited in the dialog, as plain data. Pure.
 function tripsyFlyoverDialogPages(stop) {
@@ -21411,8 +21446,8 @@ function tripsyFlyoverTogglePagePhoto(pages, cur, id, isVideo = () => false) {
 // Configures a destination's photos ONE PAGE AT A TIME ("show page 1 of photos, ask how
 // many pictures to display on that page, allow users to select how many and which photos,
 // and ask about the transition to the next page," 2026-10-20). Resolves {pages, photos} on
-// Save, null on Cancel; nothing changes until Save. Photos left on no page play after the
-// pages, one per page. `playPreview(stopDraft)` plays the draft without saving it.
+// Save, null on Cancel; nothing changes until Save. Photos left on No page don't play
+// (2026-10-25). `playPreview(stopDraft)` plays the draft without saving it.
 function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, hasMusic = true, page = null, addMedia = null } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-slideshow-overlay');
@@ -21428,21 +21463,16 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
     let pages = tripsyFlyoverDialogPages(stop);
     const onPage = () => new Set(pages.flatMap(pg => pg.ids));
     const blank = () => ({ ids: [], count: 1, style: 'grid', transition: cfg.transition, seconds: cfg.seconds, reveal: 'together', photoTransition: 'none' });
-    // Photos on no page yet (just added) get a new page at the end, opened straight away.
+    // Nothing is put on a page for the user (2026-10-25): photos on no page stay there until
+    // tapped onto one. A destination with no pages yet opens on one empty page to fill.
     let cur = 0;
-    const unplaced0 = photos.filter(p => !onPage().has(p.driveFileId));
-    if (!pages.length || unplaced0.length) {
-      const pg = blank();
-      pg.ids = unplaced0.slice(0, 1).map(p => p.driveFileId);
-      pages.push(pg);
-      cur = pages.length - 1;
-    }
+    if (!pages.length) pages.push(blank());
     // Opened from a page tile on the setup page: start on that page.
     if (page != null && pages[page]) cur = page;
     const dragState = { drag: null, suppressTapUntil: 0 };
     // Photos picked from the box's own "＋ Add photos" go on the destination as picked (the
-    // caller's addMedia, the card button's one path) and are placed on this page, the rest on
-    // new pages at the end ("Add an add photo button to the edit slideshow page," 2026-10-23).
+    // caller's addMedia, the card button's one path) and land on "No page", ready to tap onto
+    // a page (2026-10-25; they used to fill this page and then new pages at the end).
     let status = '';
     let adding = false;
     const setStatus = t => { status = t || ''; const el = ov.querySelector('[data-ss-status]'); if (el) el.textContent = status; };
@@ -21519,7 +21549,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
             <div class="tfo-ss-label" style="flex:1; margin-bottom:0;">${videoPage ? 'The video on this page' : `Choose ${page.count === 1 ? 'the picture' : `the ${page.count} pictures`} (${page.ids.length} of ${page.count} chosen)`}</div>
             ${addMedia ? `<button class="btn" data-ss-add-photos${adding ? ' disabled' : ''} title="Add photos or videos from your library to this destination">＋ Add photos</button>` : ''}
           </div>
-          <div style="font-size:12px; color:var(--muted); margin:6px 0 8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here. Drag a photo onto another to swap them, or to the edge of one to move its page in between (a dashed line shows where).${videoIds.size ? ' A video goes on an empty page of its own.' : ''}${addMedia ? ' ＋ Add photos puts new photos on this page, and the rest on new pages at the end.' : ''}</div>
+          <div style="font-size:12px; color:var(--muted); margin:6px 0 8px;">Tap a photo to put it on this page, tap it again to take it off. A photo on another page moves here. Drag a photo onto another to swap them, or to the edge of one to move its page in between (a dashed line shows where).${videoIds.size ? ' A video goes on an empty page of its own.' : ''}${addMedia ? ' ＋ Add photos adds new photos on No page.' : ''}</div>
           ${addMedia ? `<div data-ss-status style="font-size:12px; color:var(--muted); margin-bottom:${status ? 8 : 0}px; min-height:${status ? 'auto' : '0'};">${esc(status)}</div>` : ''}
           <div data-ss-grid style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start; margin-bottom:14px;">
             ${(() => {
@@ -21535,7 +21565,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
                 return `
               <button class="btn" data-ss-photo="${esc(p.driveFileId)}" style="padding:3px; position:relative; ${here ? 'outline:3px solid #3AA76D; outline-offset:1px;' : k != null ? 'opacity:0.55;' : ''}">
                 ${tripsyFlyoverThumbHtml(p, 84, 64, 'border-radius:5px;')}
-                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:${here ? '#3AA76D' : 'rgba(0,0,0,0.65)'}; color:#fff;">${here ? `✓ ${order}` : k != null ? `Page ${k + 1}` : 'Not on a page'}</span>
+                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:${here ? '#3AA76D' : 'rgba(0,0,0,0.65)'}; color:#fff;">${here ? `✓ ${order}` : k != null ? `Page ${k + 1}` : 'No page'}</span>
               </button>`;
               };
               return tripsyFlyoverGridGroups(photos, where).map(g => g.page != null && g.photos.length > 1
@@ -21566,7 +21596,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
             </select>
             <span style="color:var(--muted);">for page ${cur + 1}</span>
           </div>`}
-          ${unplaced.length ? `<div style="font-size:12px; color:var(--muted); margin-bottom:12px;">${unplaced.length} photo${unplaced.length === 1 ? ' is' : 's are'} on no page yet — ${unplaced.length === 1 ? 'it plays' : 'they play'} after the last page, one per page.</div>` : ''}
+          ${unplaced.length ? `<div data-ss-unplaced-note style="font-size:12px; color:var(--muted); margin-bottom:12px;">${unplaced.length} photo${unplaced.length === 1 ? ' is' : 's are'} on No page — ${unplaced.length === 1 ? 'it doesn’t' : 'they don’t'} play until you put ${unplaced.length === 1 ? 'it' : 'them'} on a page.</div>` : ''}
           <div class="tfo-ss-footer">
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
               <button class="btn" data-ss-prev${cur === 0 ? ' disabled' : ''}>◀ Page ${Math.max(1, cur)}</button>
@@ -21650,13 +21680,11 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
       if (sec) sec.onchange = () => { pages = pages.map((pg, k) => k === cur ? { ...pg, seconds: Number(sec.value) } : pg); render(); };
       const prev = ov.querySelector('[data-ss-prev]');
       if (prev) prev.onclick = () => { if (cur > 0) { cur--; render(); } };
-      // A new page at the END, opened straight away; it starts with the next photo on no page,
-      // if there is one. Reached from Next ▶ past the last page and from the strip's ＋ chip.
+      // A new, EMPTY page at the end, opened straight away (it no longer starts with a photo
+      // of its own choosing, 2026-10-25). Reached from Next ▶ past the last page and from the
+      // strip's ＋ chip.
       const addPageAtEnd = () => {
-        const placed = onPage();
         const pg = blank();
-        const nextPhoto = photos.find(p => !placed.has(p.driveFileId));
-        if (nextPhoto) pg.ids = [nextPhoto.driveFileId];
         pages = [...pages, pg];
         cur = pages.length - 1;
         render();
@@ -21678,9 +21706,8 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
           const recs = (r && r.added) || [];
           if (ov.style.display === 'none') return; // the box was closed meanwhile
           for (const rec of recs) { photos.push({ ...rec }); if (tripsyFlyoverIsVideo(rec)) videoIds.add(rec.driveFileId); }
-          if (recs.length) pages = tripsyFlyoverPlaceAddedPhotos(pages, cur, recs.map(x => x.driveFileId), blank, isVideo).pages;
           const extra = (r && r.problems && r.problems.length) ? ' ' + r.problems.join(' ') : '';
-          setStatus(recs.length ? `${recs.length} item${recs.length === 1 ? '' : 's'} added — ${r.queued ? 'photos are uploading in the background; ' : ''}they stay on this destination even if you cancel.${extra}` : (extra.trim() || 'Nothing was added.'));
+          setStatus(recs.length ? `${recs.length} item${recs.length === 1 ? '' : 's'} added on No page — tap them onto a page. ${r.queued ? 'Photos are uploading in the background; ' : ''}They stay on this destination even if you cancel.${extra}` : (extra.trim() || 'Nothing was added.'));
         } catch (e) {
           console.error('slideshow editor add failed:', e);
           setStatus('Couldn’t add those — try again.');
@@ -22390,12 +22417,12 @@ function tripsyFlyoverEditPhotosPage(getStop, { onDelete } = {}) {
             <h2 style="margin:0; font-size:18px; flex:1; min-width:0;">Photos — ${esc(stop.label || 'Destination')}</h2>
             <button class="tripsy-close-x" data-ep-close title="Close" aria-label="Close">✕</button>
           </div>
-          <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">${list.length ? `${list.length} photo${list.length === 1 ? '' : 's'}, in the order they play. Tap one to see it large and keep or delete it.` : 'No photos left on this destination.'}</div>
+          <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">${list.length ? `${list.length} photo${list.length === 1 ? '' : 's'}, in the order they play${list.some(x => x.page == null) ? ' (those marked No page don’t play until you put them on a page in Edit slideshow)' : ''}. Tap one to see it large and keep or delete it.` : 'No photos left on this destination.'}</div>
           <div data-ep-grid style="display:flex; flex-wrap:wrap; gap:8px;">
             ${list.map(({ photo, page }) => `
-              <button class="btn" data-ep-photo="${esc(photo.driveFileId)}" data-ep-page="${page}" title="Page ${page}" style="padding:3px; position:relative;">
+              <button class="btn" data-ep-photo="${esc(photo.driveFileId)}" data-ep-page="${page == null ? 'No page' : `Page ${page}`}" title="${page == null ? 'No page' : `Page ${page}`}" style="padding:3px; position:relative;">
                 ${tripsyFlyoverThumbHtml(photo, 132, 100, 'border-radius:5px;')}
-                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:rgba(0,0,0,0.65); color:#fff;">${page}</span>
+                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:${page == null ? '#8A5A00' : 'rgba(0,0,0,0.65)'}; color:#fff;">${page == null ? 'No page' : page}</span>
               </button>`).join('')}
           </div>
         </div>`;
@@ -22412,7 +22439,7 @@ function tripsyFlyoverEditPhotosPage(getStop, { onDelete } = {}) {
           try { url = await tripsyPlacePhotoDisplayUrl(id); } catch (e) { console.warn('photo load failed', id, e); }
           if (!url && isVideo && rec.posterId) { try { url = await tripsyPlacePhotoDisplayUrl(rec.posterId); } catch (e) {} }
           if (!url) { toast('Couldn’t load that photo — check the connection and try again.', 'error'); return; }
-          const answer = await tripsyFlyoverPhotoReviewDialog(url, { label: `${(getStop() || {}).label || ''} · Page ${b.getAttribute('data-ep-page')}`, removeLabel: '🗑 Delete', isVideo });
+          const answer = await tripsyFlyoverPhotoReviewDialog(url, { label: `${(getStop() || {}).label || ''} · ${b.getAttribute('data-ep-page')}`, removeLabel: '🗑 Delete', isVideo });
           if (answer === 'remove' && onDelete) { await onDelete(id); render(); }
         } finally { busy = false; }
       });
