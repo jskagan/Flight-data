@@ -537,8 +537,10 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     'THE ASK: the destination music button always reads "Change Music"; a destination\'s own track is named beside it');
   // "When photos are Imported they should say 'No page'" (2026-10-25): the card, the Edit
   // photos page, and every add path.
-  assert(/const loose = tripsyFlyoverUnplacedPhotos\(s\); if \(!loose\.length\) return '';[\s\S]*data-flyover-nopage[\s\S]*>No page · \$\{loose\.length\}<\/span>/.test(setup)
-    && /noPage\.onclick = \(\) => openSlideshowOptions\(id,/.test(setup), 'THE ASK: the card shows a "No page · N" tile after its pages, which opens the slideshow editor');
+  assert(/\$\{tripsyFlyoverUnplacedPhotos\(s\)\.map\(ph => `[\s\S]*data-flyover-nopage="\$\{esc\(ph\.driveFileId\)\}"[\s\S]*tripsyFlyoverThumbHtml\(ph, 84, 64,[\s\S]*>No page<\/span>[\s\S]*data-flyover-nopage-remove/.test(setup)
+    && /card\.querySelectorAll\('\[data-flyover-nopage\]'\)\.forEach\(t => t\.onclick = e => \{[\s\S]*openSlideshowOptions\(id,/.test(setup)
+    && /removePhotoFromRecord\(id, b\.getAttribute\('data-flyover-nopage-remove'\)\)/.test(setup),
+    'THE ASK: every photo on No page shows on the card as its own thumbnail badged "No page" ("Show each photo on the flyover page even they are not on a page," 2026-10-25); a tap opens the slideshow editor, ✕ removes it');
   assert(/\{ \.\.\.s, \.\.\.tripsyFlyoverFreezePagesOnAdd\(s, fields\) \}/.test(setup) && (setup.match(/updateStop\((id|stopId), \{ photos: \[\.\.\.\(stopNow\(\)\.photos \|\| \[\]\), rec\] \}\)/g) || []).length === 3,
     'every add path (picker photos, picker videos, Drive import) goes through updateStop, which freezes a never-paged destination first');
   const ep2 = extractFn('tripsyFlyoverEditPhotosPage');

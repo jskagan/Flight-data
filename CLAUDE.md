@@ -4233,8 +4233,11 @@ WebView's support for recording is unproven.
       `stop.photos` never lose one. The slideshow editor places nothing itself: it opens on the
       existing pages (one empty page if there are none), its ＋ New page / Next ▶ add an EMPTY
       page, its own ＋ Add photos adds to No page (`tripsyFlyoverPlaceAddedPhotos` is no longer
-      called), and unplaced tiles are badged "No page". The card shows a dashed **"No page · N"**
-      tile after the page tiles (`data-flyover-nopage`, opens the editor), the Edit photos page
+      called), and unplaced tiles are badged "No page". The card shows **each No-page photo as its own
+      dashed thumbnail**, badged "No page", after the page tiles ("Show each photo on the flyover
+      page even they are not on a page," same day — it was first one "No page · N" tile):
+      `data-flyover-nopage="<id>"` opens the editor, its ✕ (`data-flyover-nopage-remove`) takes
+      the photo off the destination; they are not draggable (dragging reorders PAGES), the Edit photos page
       badges them "No page", and the slideshow summary counts them.
       Airport-transfer cards are unchanged. **🔍 Suggested photos is gone from the card; ✏️ Edit
       photos replaces it** ("Remove the suggested photos button. Have a button that says edit
