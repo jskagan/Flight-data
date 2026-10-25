@@ -507,9 +507,36 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     'each destination shows how its photos play, with Edit slideshow and Preview buttons');
   // "Change the name of the slideshow options button to edit slideshow, and put the button to
   // the left of the button showing the method of transport for that location" (2026-10-22).
-  assert(/<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">\s*\$\{isOwner && !s\.removed && photos\.length && tripsyFlyoverStopVisited\(s, todayKey\) \? `<button class="btn" data-flyover-slideshow [^`]*>🎞 Edit slideshow<\/button>` : ''\}\s*\$\{legHtml\}/.test(setup)
+  assert(/<div data-flyover-controls [^>]*>\s*\$\{isOwner && !s\.removed && photos\.length && tripsyFlyoverStopVisited\(s, todayKey\) \? `<button class="btn" data-flyover-slideshow [^`]*>🎞 Edit slideshow<\/button>` : ''\}\s*\$\{legHtml\}/.test(setup)
     && !/Slideshow options<\/button>/.test(setup),
     'the card\'s "Edit slideshow" button sits directly left of the transport drop-down on the destination row');
+  // "Remove the suggested photos button. Have a button that says edit photos. When the user hits
+  // it, show a page with thumbnails of all photos for that destination. When the user selects
+  // one, show a large image with the buttons keep and delete" (2026-10-25).
+  assert(!/data-flyover-add-suggested|Suggested photos<\/button>/.test(setup), 'THE ASK: the destination card has no Suggested photos button');
+  assert(/\$\{photos\.length \? `<button class="btn" data-flyover-edit-photos [^`]*>✏️ Edit photos<\/button>` : ''\}/.test(setup)
+    && /editPhotos\.onclick = \(\) => tripsyFlyoverEditPhotosPage\(stop, \{\s*onDelete: photoId => removePhotoFromRecord\(id, photoId\),/.test(setup),
+    'THE ASK: an Edit photos button (when the stop has photos) opens the photos page, and its Delete takes the photo off through the ordinary remove-and-save path');
+  const ep = extractFn('tripsyFlyoverEditPhotosPage');
+  assert(/tripsyFlyoverPhotosInPageOrder\(stop\)/.test(ep) && /data-ep-photo/.test(ep) && /tripsyFlyoverThumbHtml\(photo, 132, 100/.test(ep) && /tripsyDiaryPaintPhotos\(ov\)/.test(ep),
+    'THE ASK: the page shows a thumbnail of every photo on the destination, in play order');
+  assert(/tripsyFlyoverPhotoReviewDialog\(url, \{ label: [\s\S]*?removeLabel: '🗑 Delete', isVideo \}\)/.test(ep) && /if \(answer === 'remove' && onDelete\) \{ await onDelete\(id\); render\(\); \}/.test(ep),
+    'THE ASK: a tap shows it large with Keep and Delete; Delete removes it and the grid redraws from what is left');
+  assert(/isVideo\s*\? `<video src="\$\{esc\(url\)\}" controls playsinline/.test(extractFn('tripsyFlyoverPhotoReviewDialog')), 'a video opens playable in the same large view');
+  // "For each location box on the flyover page, make the first line the location, the dates
+  // there, and the lodging in large type. The second line should be the drop down box with the
+  // type of transportation and the editable name of the destination, the music option box and
+  // the remove box (change name to delete destination)" (2026-10-25).
+  const headM = /<div data-flyover-headline style="([^"]*)">([\s\S]*?)<\/div>\s*<!-- Line 2/.exec(setup);
+  assert(headM && /font-size:18px/.test(headM[1]) && /<strong style="font-size:20px;">\$\{esc\(s\.label \|\| 'Location'\)\}<\/strong>/.test(headM[2]) && /tripsyFlyoverDatesLabel\(s\)/.test(headM[2]) && /s\.names\.join\(' · '\)/.test(headM[2]),
+    'THE ASK: line 1 is the location, its dates and its lodging, in large type');
+  const ctlM = /<div data-flyover-controls [^>]*>([\s\S]*?)<\/div>\s*\$\{noPlace && !s\.removed/.exec(setup);
+  const ctl = ctlM ? ctlM[1] : '';
+  const at = k => ctl.indexOf(k);
+  assert(ctlM && at('${legHtml}') >= 0 && at('${legHtml}') < at('data-flyover-label') && at('data-flyover-label') < at('data-flyover-stop-music') && at('data-flyover-stop-music') < at('data-flyover-remove'),
+    'THE ASK: line 2 is the transport drop-down, the editable name, the music button and the delete button, in that order');
+  assert(/data-flyover-remove [^>]*>Delete destination<\/button>/.test(ctl) && !/data-flyover-remove [^>]*>Remove<\/button>/.test(ctl), 'THE ASK: the destination\'s Remove button reads "Delete destination"');
+  assert(!/data-flyover-label[\s\S]{0,400}<strong style="flex:1/.test(ctl) && !/margin-top:6px; font-size:12px; color:var\(--muted\);">\s*<span>🎵/.test(setup), 'the name is not repeated on line 2 for a viewer, and the old separate music row is gone');
   // "to the left of the last existing page show a button that is the same size as the images
   // of each page with a plus sign in it. If the user selects that, create a new page at the
   // end of the slideshow" (same day).
@@ -674,7 +701,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     'rebuilding the destinations keeps each one\'s pages and settings');
   const setup = extractFn('showTripsyFlyover');
   assert(/const r = await addMediaToStop\(id, files, setStatus\);\s*if \(r\.done \|\| r\.queued\) \{\s*const total = r\.done \+ r\.queued;\s*if \(!closed\) openSlideshowOptions\(id, `\$\{total\} item/.test(setup), 'THE ASK: adding your own photos opens the options box straight away');
-  assert(/added => \{\s*if \(added && !closed\) openSlideshowOptions\(id,/.test(setup), 'and so does closing the suggested photos after picking some');
+  assert(!/tripsyFlyoverSuggestedPhotos\(/.test(setup), 'the suggested-photos grid is no longer offered on the card (Edit photos replaced it, 2026-10-25)');
   assert(/close = \(\) => \{[^}]*if \(onClosed\) onClosed\(added\);/.test(extractFn('tripsyFlyoverSuggestedPhotos')), 'the suggestions grid reports how many it added');
 }
 
@@ -843,7 +870,7 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
       'THE ASK: Remove takes the photo off the destination and its pages (an emptied page goes); the source is untouched');
     const rec = tripsyFlyoverRemovePhoto({ stops: [stop, { id: 't', photos: [{ driveFileId: 'a' }] }] }, 's', 'b');
     assert(rec.stops[0].photos.length === 2 && rec.stops[0].pages[1].ids.join() === 'c' && rec.stops[1].photos.length === 1, 'only the named stop changes');
-    assert(/function tripsyFlyoverPhotoReviewDialog\(url, \{ label = '' \} = \{\}\)/.test(html) && /data-review-remove/.test(html) && /data-review-keep/.test(html)
+    assert(/function tripsyFlyoverPhotoReviewDialog\(url, \{ label = '', removeLabel = '🗑 Remove', isVideo = false \} = \{\}\)/.test(html) && /data-review-remove/.test(html) && /data-review-keep/.test(html)
       && /object-fit:contain/.test(extractFn('tripsyFlyoverPhotoReviewDialog')), 'THE ASK: the enlarged photo fills the screen with Keep and Remove');
     // .tfo-photo is pointer-events:none (the map takes drags), so the tappable image opts back in.
     assert(/\.tfo-photo \{[^}]*pointer-events: none/.test(html) && /img\.style\.pointerEvents = 'auto';\s*img\.setAttribute\('data-tfo-review'/.test(extractFn('playTripsyFlyover')),

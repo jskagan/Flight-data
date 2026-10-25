@@ -4198,7 +4198,33 @@ WebView's support for recording is unproven.
     - **The page-by-page dialog opens BY ITSELF after photos are added**
       (`tripsyFlyoverSlideshowDialog`), and from each card's **Edit slideshow** button;
       the card shows a one-line `tripsyFlyoverSlideshowSummary` ("3 pages: 2 · 3 · 1 photos
-      per page"). **The button is "🎞 Edit slideshow" and sits on the destination row,
+      per page"). **A destination card is two lines, then its photos** ("For each location box on
+      the flyover page, make the first line the location, the dates there, and the lodging in
+      large type. The second line should be the drop down box with the type of transportation
+      and the editable name of the destination, the music option box and the remove box (change
+      name to delete destination)," 2026-10-25): line 1 (`data-flyover-headline`, 18px, the name
+      20px bold) is the stop number, the location, `tripsyFlyoverDatesLabel(s)` and the lodging
+      names (`s.names`), read-only for everyone; line 2 (`data-flyover-controls`) is 🎞 Edit
+      slideshow (kept left of the transport, per 10-22), the transport drop-down (+ "via"
+      layovers), the editable name input (owner), the music button — which now carries the track
+      name itself ("🎵 <track>", ellipsised; the carry-on wording moved to its tooltip; the old
+      separate music row is gone) — and **Delete destination** (the old Remove; still a soft
+      remove with Restore). A viewer's line 2 has the transport glyph and the music line only.
+      Airport-transfer cards are unchanged. **🔍 Suggested photos is gone from the card; ✏️ Edit
+      photos replaces it** ("Remove the suggested photos button. Have a button that says edit
+      photos. When the user hits it, show a page with thumbnails of all photos for that
+      destination. When the user selects one, show a large image with the buttons keep and
+      delete," 2026-10-25). Owner-only, shown when the stop has photos (`data-flyover-edit-photos`),
+      it opens `tripsyFlyoverEditPhotosPage(getStop, {onDelete})` (overlay
+      `tripsy-flyover-photos-overlay`, z 2147483094): every photo and video on the stop in play
+      order (`tripsyFlyoverPhotosInPageOrder`), each a thumbnail badged with its page; a tap opens
+      `tripsyFlyoverPhotoReviewDialog` full-screen — which gained `removeLabel` ("🗑 Delete" here,
+      "🗑 Remove" in the player as before) and `isVideo` (a playable `<video>`) — and Delete runs
+      the page's `removePhotoFromRecord` (off the stop and its pages, saved), then the grid redraws
+      from the live stop. Delete only takes it off the fly-over; the Drive file is left (an
+      itinerary photo or the built-in LAX picture is shared). `tripsyFlyoverSuggestedPhotos`
+      itself is kept but no longer reachable from the card.
+      **The button is "🎞 Edit slideshow" and sits on the destination row,
       directly LEFT of the transport drop-down** ("Change the name of the slideshow options
       button to edit slideshow, and put the button to the left of the button showing the method
       of transport for that location," 2026-10-22 — it was "Slideshow options" in the bottom
