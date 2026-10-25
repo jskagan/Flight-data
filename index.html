@@ -19388,6 +19388,16 @@ async function showTripsyFlyover(tripKey) {
   // (see tripsyFlyoverQueueUpload); videos keep their foreground upload (progress, the
   // sound question). Saves as it goes, like every change on this page. Resolves
   // {added, done, queued, problems}: `added` is the new photo records, in pick order.
+  // A photo removed from the player's Keep / Remove review (2026-10-25): off the destination
+  // and its pages in the live record, saved, and the page repainted.
+  const removePhotoFromRecord = async (stopId, photoId) => {
+    const st = record.stops.find(s => s.id === stopId);
+    if (!st) return;
+    const next = tripsyFlyoverRemovePhotoFromStop(st, photoId);
+    updateStop(stopId, { photos: next.photos, ...(next.pages !== undefined ? { pages: next.pages } : {}) });
+    await save();
+    if (!closed) render();
+  };
   const addMediaToStop = async (id, files, setStatusFn) => {
     const status = typeof setStatusFn === 'function' ? setStatusFn : setStatus;
     const stopNow = () => record.stops.find(s => s.id === id) || {};
@@ -19447,9 +19457,14 @@ async function showTripsyFlyover(tripKey) {
       page,
       hasMusic: !!record.music,
       addMedia: isOwner ? (files, setStatusFn) => addMediaToStop(id, files, setStatusFn) : null,
-      playPreview: draft => {
+      // onDropped: the dialog takes a removed photo off its own draft too, or Save would
+      // put it back.
+      playPreview: (draft, onDropped) => {
         if (draft.lat == null) { toast('Set this destination\'s location first.', 'error'); return; }
-        playTripsyFlyover(trip, { ...record, stops: record.stops.map(x => x.id === id ? draft : x) }, { previewStopId: id });
+        playTripsyFlyover(trip, { ...record, stops: record.stops.map(x => x.id === id ? draft : x) }, {
+          previewStopId: id,
+          onRemovePhoto: async (sid, pid) => { await removePhotoFromRecord(sid, pid); if (onDropped) onDropped(pid); },
+        });
       },
     });
     if (!r || closed) return;
@@ -19495,7 +19510,8 @@ async function showTripsyFlyover(tripKey) {
     body.innerHTML = `
       <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">
         ${playable} destination${playable === 1 ? '' : 's'} on the map.${isOwner ? ' Add photos to each one — they play as a slideshow when the trip arrives there.' : ''}
-        ${isOwner ? `<button class="btn" data-flyover-edit-dests style="font-size:12px; margin-left:6px;" title="Rename, reorder, add, remove or rebuild the destinations">✏️ Edit destinations</button>` : ''}
+        ${isOwner ? `<button class="btn" data-flyover-edit-dests style="font-size:12px; margin-left:6px;" title="Rename, reorder, add, remove or rebuild the destinations">✏️ Edit destinations</button>
+        <button class="btn" data-flyover-add-trip-photos style="font-size:12px; margin-left:6px;" title="Pick the trip's photos in one go — each is filed under the destination whose dates cover the day it was taken (its own date and location where the photo carries them)">📷 Add trip photos</button>` : ''}
         ${completeHtml}
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; font-size:13px;">
@@ -19593,6 +19609,38 @@ async function showTripsyFlyover(tripKey) {
       record = { ...record, music: m };
       save(); render();
     };
+    // Add trip photos: one pick for the whole trip, each photo filed under the destination
+    // whose dates cover the day it was taken (2026-10-25; tripsyFlyoverRoutePhoto).
+    const tripPhotosBtn = body.querySelector('[data-flyover-add-trip-photos]');
+    if (tripPhotosBtn) tripPhotosBtn.onclick = () => tripsyFlyoverPickMedia(async files => {
+      if (!files || !files.length || closed) return;
+      setStatus(`Reading the dates of ${files.length} photo${files.length === 1 ? '' : 's'}…`);
+      const byStop = new Map();
+      let unmatched = 0;
+      for (const file of files) {
+        const info = await tripsyFlyoverPhotoTakenInfo(file);
+        const sid = tripsyFlyoverRoutePhoto(record.stops, info);
+        if (!sid) { unmatched++; continue; }
+        if (!byStop.has(sid)) byStop.set(sid, []);
+        byStop.get(sid).push(file);
+      }
+      if (closed) return;
+      const parts = [];
+      for (const s of record.stops) {
+        const group = byStop.get(s.id);
+        if (!group) continue;
+        const r = await addMediaToStop(s.id, group, setStatus);
+        if (closed) return;
+        parts.push(`${s.label || 'a destination'} ${r.done + r.queued}`);
+      }
+      const added = [...byStop.values()].reduce((n, g) => n + g.length, 0);
+      const msg = added
+        ? `Sorted ${added} photo${added === 1 ? '' : 's'} into ${byStop.size} destination${byStop.size === 1 ? '' : 's'}: ${parts.join(', ')}.${unmatched ? ` ${unmatched} didn’t fall in any destination’s dates and weren’t added — add those from their destination’s own button.` : ''}`
+        : `None of those photos fell in a destination’s dates${unmatched ? ` (${unmatched} checked)` : ''} — add them from a destination’s own ＋ Photos & videos button.`;
+      setStatus(msg);
+      toast(msg, added ? undefined : 'error');
+      render();
+    });
     // Edit destinations: a draft list to rename / move / add / remove / rebuild, applied on
     // its Save only (the old Rebuild button rebuilt and saved in one go).
     const editBtn = body.querySelector('[data-flyover-edit-dests]');
@@ -19632,7 +19680,7 @@ async function showTripsyFlyover(tripKey) {
       const previewBtn = card.querySelector('[data-flyover-preview]');
       if (previewBtn) previewBtn.onclick = () => {
         if (stop().lat == null) { toast('Set this destination\'s location first.', 'error'); return; }
-        playTripsyFlyover(trip, record, { previewStopId: id });
+        playTripsyFlyover(trip, record, { previewStopId: id, onRemovePhoto: removePhotoFromRecord });
       };
       // Music from this destination onward (2026-10-24): the same picker as the fly-over's own
       // music, with genres suggested for this place; null (Use the fly-over music) clears it.
@@ -19961,6 +20009,66 @@ function tripsyFlyoverStagePendingPhoto(file) {
   tripsyFlyoverPendingBlobs.set(id, file);
   return id;
 }
+// A picked photo is PREPARED once -- one decode, giving the 1600px copy that is uploaded
+// and a small thumbnail -- ONE AT A TIME, yielding to the page between photos ("I selected
+// a large number of photos from for the flyover and there is still a substantial delay,"
+// 2026-10-25). Before this, every tile and the slideshow grid painted the ORIGINAL file (a
+// full 12-megapixel decode per thumbnail, dozens at once), and three full-size canvas
+// resizes ran together on the main thread for the uploads -- seconds of frozen page on an
+// iPad. Now nothing ever decodes the original twice, tiles show a photo only once its
+// thumbnail exists (filling in one after another), and the upload takes the prepared copy.
+// createImageBitmap decodes off the main thread where the browser offers it; the <img> +
+// canvas route is the fallback, and any failure hands back the original bytes.
+const tripsyFlyoverPendingPrepared = new Map(); // pending id -> Promise<{full: Blob, thumb: Blob}>
+const TRIPSY_FLYOVER_UPLOAD_PX = 1600;
+const TRIPSY_FLYOVER_THUMB_PX = 320;
+let _tripsyFlyoverPrepChain = Promise.resolve();
+function tripsyFlyoverPreparePending(pendingId) {
+  const have = tripsyFlyoverPendingPrepared.get(pendingId);
+  if (have) return have;
+  const file = tripsyFlyoverPendingBlobs.get(pendingId);
+  if (!file) return Promise.reject(new Error('pending photo not available'));
+  const p = _tripsyFlyoverPrepChain.then(async () => {
+    const out = await tripsyFlyoverPrepareImage(file, TRIPSY_FLYOVER_UPLOAD_PX, TRIPSY_FLYOVER_THUMB_PX);
+    await new Promise(r => setTimeout(r, 0)); // let the page paint between photos
+    return out;
+  });
+  _tripsyFlyoverPrepChain = p.catch(() => {});
+  tripsyFlyoverPendingPrepared.set(pendingId, p);
+  return p;
+}
+async function tripsyFlyoverPrepareImage(file, maxDim, thumbDim) {
+  const toBlob = (canvas, q) => new Promise(res => { try { canvas.toBlob(b => res(b), 'image/jpeg', q); } catch (e) { res(null); } });
+  const draw = (src, sw, sh, dim) => {
+    const scale = Math.min(1, dim / Math.max(sw, sh));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(sw * scale)); c.height = Math.max(1, Math.round(sh * scale));
+    c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+    return c;
+  };
+  const finish = async (src, sw, sh) => {
+    const big = draw(src, sw, sh, maxDim);
+    const small = draw(big, big.width, big.height, thumbDim);
+    const [full, thumb] = await Promise.all([toBlob(big, 0.85), toBlob(small, 0.8)]);
+    return { full: full || file, thumb: thumb || full || file };
+  };
+  try {
+    if (typeof createImageBitmap === 'function') {
+      const bmp = await createImageBitmap(file);
+      try { return await finish(bmp, bmp.width, bmp.height); }
+      finally { try { bmp.close(); } catch (e) {} }
+    }
+  } catch (e) { /* fall through to the <img> route */ }
+  try {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+      return await finish(img, img.naturalWidth || img.width, img.naturalHeight || img.height);
+    } finally { URL.revokeObjectURL(url); }
+  } catch (e) {
+    return { full: file, thumb: file };
+  }
+}
 // Every photo id in the record mapped through `uploaded` (pending -> Drive). Pure.
 function tripsyFlyoverResolvePendingIds(record, uploaded) {
   const map = uploaded || tripsyFlyoverUploadedIds;
@@ -19977,6 +20085,139 @@ function tripsyFlyoverResolvePendingIds(record, uploaded) {
     return changed ? { ...s, photos, ...(pages !== undefined ? { pages } : {}) } : s;
   });
   return changed ? { ...record, stops } : record;
+}
+// Takes ONE photo off a stop: out of `photos` and off every page (an emptied page goes). Pure.
+function tripsyFlyoverRemovePhotoFromStop(stop, photoId) {
+  if (!stop) return stop;
+  const photos = (stop.photos || []).filter(p => p.driveFileId !== photoId);
+  const pages = Array.isArray(stop.pages) ? stop.pages.map(pg => ({ ...pg, ids: (pg.ids || []).filter(id => id !== photoId) })).filter(pg => pg.ids.length) : stop.pages;
+  return { ...stop, photos, ...(pages !== undefined ? { pages } : {}) };
+}
+function tripsyFlyoverRemovePhoto(record, stopId, photoId) {
+  if (!record || !Array.isArray(record.stops)) return record;
+  return { ...record, stops: record.stops.map(s => s.id === stopId ? tripsyFlyoverRemovePhotoFromStop(s, photoId) : s) };
+}
+// ---- Sorting picked photos into destinations by WHEN and WHERE they were taken ("is it
+// possible for the app to automatically select photos that are in the date range for the
+// corresponding leg of the trip and are in the location selected and import those photos
+// into the flyover view?", 2026-10-25). A web page cannot read the Photos library itself --
+// only what the owner picks in the system picker -- so the owner picks the trip's photos in
+// one go (the page-level "📷 Add trip photos" button) and the app files each one under the
+// destination whose dates cover the day it was taken (the capture date from the photo's own
+// EXIF, else the file's date), falling back to the nearest destination when the photo
+// carries GPS but its date fits none. tripsyReadJpegExif is a small reader for exactly the
+// three EXIF fields this needs; anything it can't read is null, never a throw. All pure.
+function tripsyReadJpegExif(buffer) {
+  const out = { takenAt: null, lat: null, lng: null };
+  try {
+    const dv = new DataView(buffer);
+    if (dv.byteLength < 4 || dv.getUint16(0) !== 0xFFD8) return out;
+    let off = 2;
+    while (off + 4 <= dv.byteLength) {
+      if (dv.getUint8(off) !== 0xFF) break;
+      const marker = dv.getUint8(off + 1);
+      if (marker === 0xDA || marker === 0xD9) break; // image data / end
+      const len = dv.getUint16(off + 2);
+      if (marker === 0xE1 && off + 10 <= dv.byteLength && dv.getUint32(off + 4) === 0x45786966 /* "Exif" */) {
+        const t = off + 10; // TIFF header
+        if (t + 8 > dv.byteLength) return out;
+        const le = dv.getUint16(t) === 0x4949;
+        const u16 = p => dv.getUint16(p, le), u32 = p => dv.getUint32(p, le);
+        const ascii = (p, n) => { let s = ''; for (let i = 0; i < n && p + i < dv.byteLength; i++) { const c = dv.getUint8(p + i); if (!c) break; s += String.fromCharCode(c); } return s; };
+        const rational = p => { const a = u32(p), b = u32(p + 4); return b ? a / b : 0; };
+        const entries = ifdOff => {
+          const m = new Map();
+          const base = t + ifdOff;
+          if (base + 2 > dv.byteLength) return m;
+          const n = u16(base);
+          for (let i = 0; i < n; i++) {
+            const e = base + 2 + i * 12;
+            if (e + 12 > dv.byteLength) break;
+            const tag = u16(e), type = u16(e + 2), count = u32(e + 4);
+            const size = ({ 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 })[type] || 1;
+            const vp = size * count > 4 ? t + u32(e + 8) : e + 8;
+            m.set(tag, { type, count, vp });
+          }
+          return m;
+        };
+        const ifd0 = entries(u32(t + 4));
+        const dateOf = (m, tag) => { const e = m.get(tag); if (!e || e.type !== 2) return null; const s = ascii(e.vp, e.count); const mm = s.match(/^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})/); return mm ? `${mm[1]}-${mm[2]}-${mm[3]}T${mm[4]}:${mm[5]}:${mm[6]}` : null; };
+        const exifE = ifd0.get(0x8769);
+        const exif = exifE ? entries(u32(exifE.vp)) : new Map();
+        out.takenAt = dateOf(exif, 0x9003) || dateOf(exif, 0x9004) || dateOf(ifd0, 0x0132);
+        const gpsE = ifd0.get(0x8825);
+        if (gpsE) {
+          const gps = entries(u32(gpsE.vp));
+          const coord = (tagV, tagRef, neg) => {
+            const v = gps.get(tagV), r = gps.get(tagRef);
+            if (!v || v.type !== 5 || v.count < 3) return null;
+            const deg = rational(v.vp) + rational(v.vp + 8) / 60 + rational(v.vp + 16) / 3600;
+            const ref = r ? ascii(r.vp, r.count) : '';
+            return isFinite(deg) ? (ref.toUpperCase().startsWith(neg) ? -deg : deg) : null;
+          };
+          const lat = coord(0x0002, 0x0001, 'S'), lng = coord(0x0004, 0x0003, 'W');
+          if (lat != null && lng != null && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0)) { out.lat = lat; out.lng = lng; }
+        }
+        return out;
+      }
+      off += 2 + len;
+    }
+  } catch (e) { /* unreadable: nulls */ }
+  return out;
+}
+// When/where a picked file was taken: EXIF first, else the file's own date (`source` says
+// which). Never throws.
+async function tripsyFlyoverPhotoTakenInfo(file) {
+  let info = { takenAt: null, lat: null, lng: null, source: 'none' };
+  try {
+    if (/^image\//.test(file.type || '') || /\.(jpe?g|heic|heif)$/i.test(file.name || '')) {
+      const buf = await file.slice(0, 262144).arrayBuffer();
+      const ex = tripsyReadJpegExif(buf);
+      if (ex.takenAt) info = { ...ex, source: 'exif' };
+      else if (ex.lat != null) info = { ...ex, source: 'exif' };
+    }
+  } catch (e) { /* fall through */ }
+  if (!info.takenAt && file.lastModified) {
+    const d = new Date(file.lastModified);
+    if (!isNaN(d)) {
+      const pad = n => String(n).padStart(2, '0');
+      info.takenAt = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      if (info.source === 'none') info.source = 'file';
+    }
+  }
+  return info;
+}
+const TRIPSY_FLYOVER_ROUTE_GPS_KM = 100;
+// The destination a photo belongs to: the shown, non-transit stop (play order) whose window
+// -- from the day it starts up to the day the next one starts; the last stop runs to its
+// end day plus one -- covers the day the photo was taken (two stops starting the same day:
+// the later one, the stay, wins over the airport). A photo outside every window, or with no
+// date, goes to the nearest stop within TRIPSY_FLYOVER_ROUTE_GPS_KM when it carries GPS;
+// otherwise null (not added). Returns the stop id or null.
+function tripsyFlyoverRoutePhoto(stops, info) {
+  const list = (stops || []).filter(s => s && !s.removed && s.kind !== 'transit' && s.lat != null);
+  if (!list.length || !info) return null;
+  const day = v => (v ? String(v).slice(0, 10) : '');
+  const addDays = (k, n) => { const d = new Date(k + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+  const photoDay = day(info.takenAt);
+  if (photoDay) {
+    const dated = list.filter(s => day(s.start));
+    for (let i = dated.length - 1; i >= 0; i--) {
+      const s = dated[i];
+      const from = day(s.start);
+      if (photoDay < from) continue;
+      const next = dated[i + 1];
+      const to = next ? day(next.start) : addDays(day(s.end) >= from ? day(s.end) : from, 2);
+      if (photoDay < to) return s.id;
+      break;
+    }
+  }
+  if (info.lat != null && info.lng != null && typeof tripsyFlyoverDistanceKm === 'function') {
+    let best = null, bestKm = Infinity;
+    for (const s of list) { const km = tripsyFlyoverDistanceKm({ lat: info.lat, lng: info.lng }, { lat: s.lat, lng: s.lng }); if (km < bestKm) { bestKm = km; best = s; } }
+    if (best && bestKm <= TRIPSY_FLYOVER_ROUTE_GPS_KM) return best.id;
+  }
+  return null;
 }
 // Drops pending photos whose bytes this session no longer has (never uploaded). Pure ->
 // {record, dropped}.
@@ -19998,6 +20239,9 @@ let _tripsyFlyoverUploadsRunning = 0;
 const _tripsyFlyoverUploadQueue = [];
 function tripsyFlyoverQueueUpload(tripKey, pendingId) {
   tripsyFlyoverFailedUploads.delete(pendingId);
+  // Preparation starts now, in pick order, so thumbnails fill in one after another
+  // regardless of how the (slower, network-bound) uploads are going.
+  tripsyFlyoverPreparePending(pendingId).catch(() => {});
   _tripsyFlyoverUploadQueue.push({ tripKey, pendingId });
   tripsyFlyoverPumpUploads();
 }
@@ -20013,10 +20257,19 @@ async function tripsyFlyoverRunUpload({ tripKey, pendingId }) {
   const notify = () => { try { document.dispatchEvent(new CustomEvent('tripsy-flyover-upload', { detail: { tripKey, pendingId } })); } catch (e) {} };
   if (!file) return;
   try {
-    const small = await tripsyResizeImageBlob(file, 1600, 0.85);
+    // The prepared 1600px copy (one decode per photo, shared with the thumbnail).
+    const { full: small } = await tripsyFlyoverPreparePending(pendingId);
     const driveFileId = await uploadBlobToDrive(small, `flyover-photo-${Date.now()}-${pendingId.slice(-5)}`, 'image/jpeg');
     if (!driveFileId) throw new Error('Drive returned no file id');
     tripsyPutCachedPhotoBlob(driveFileId, small);
+    // The Drive id paints from the copies already in memory: the page re-renders after
+    // every upload, and without this each repaint read the photo back from disk and
+    // decoded it again, tile by tile.
+    try {
+      const prepared = await tripsyFlyoverPreparePending(pendingId);
+      if (typeof tripsyPhotoObjectUrlCache !== 'undefined' && !tripsyPhotoObjectUrlCache.has(driveFileId)) tripsyPhotoObjectUrlCache.set(driveFileId, Promise.resolve(URL.createObjectURL(prepared.full)));
+      if (typeof tripsyPhotoThumbUrlCache !== 'undefined' && !tripsyPhotoThumbUrlCache.has(driveFileId)) tripsyPhotoThumbUrlCache.set(driveFileId, Promise.resolve(URL.createObjectURL(prepared.thumb)));
+    } catch (e) { /* the disk cache still has it */ }
     tripsyFlyoverUploadedIds.set(pendingId, driveFileId);
     // The saved record as it is NOW (the page may have changed it meanwhile): only the id
     // moves. The pending bytes stay for this session, so a copy still holding the old id
@@ -20048,7 +20301,7 @@ function tripsyFlyoverThumbHtml(p, w = 84, h = 64, extra = '') {
   const pending = !vid && tripsyFlyoverPhotoIsPending(p.driveFileId);
   const failed = pending && tripsyFlyoverFailedUploads.has(p.driveFileId);
   const badge = !pending ? '' : `<span style="position:absolute; right:4px; bottom:3px; font-size:11px; font-weight:700; color:#fff; background:${failed ? 'rgba(180,40,30,0.85)' : 'rgba(0,0,0,0.65)'}; padding:1px 5px; border-radius:4px;" title="${failed ? 'Upload failed' : 'Uploading in the background'}">${failed ? '⚠️' : '⬆️'}</span>`;
-  return `<div style="position:relative; width:${w}px; height:${h}px; border-radius:6px; overflow:hidden; background:${vid ? '#111' : 'var(--panel-2)'} center/cover no-repeat; ${extra}"${paintId ? ` data-diary-img="${esc(paintId)}"` : ''}>${vid
+  return `<div style="position:relative; width:${w}px; height:${h}px; border-radius:6px; overflow:hidden; background:${vid ? '#111' : 'var(--panel-2)'} center/cover no-repeat; ${extra}"${paintId ? ` data-diary-img="${esc(paintId)}" data-diary-thumb` : ''}>${vid
     ? `<span style="position:absolute; left:4px; bottom:3px; font-size:11px; font-weight:700; color:#fff; background:rgba(0,0,0,0.65); padding:1px 5px; border-radius:4px;" title="${tripsyFlyoverVideoAudio(p) === 'music' ? 'Plays under the fly-over music' : 'Plays with its own sound'}">🎬${len ? ` ${len}` : ''} ${tripsyFlyoverVideoAudio(p) === 'music' ? '🎵' : '🔊'}</span>`
     : badge}</div>`;
 }
@@ -20061,7 +20314,7 @@ function tripsyFlyoverThumbHtml(p, w = 84, h = 64, extra = '') {
 function tripsyFlyoverPageThumbHtml(page, w = 84, h = 64, extra = '') {
   const photos = (page && page.photos) || [];
   if (photos.length <= 1) return tripsyFlyoverThumbHtml(photos[0] || {}, w, h, extra);
-  return `<div style="position:relative; width:${w}px; height:${h}px; border-radius:6px; overflow:hidden; display:flex; background:var(--panel-2); ${extra}">${photos.map((p, i) => `<div style="flex:1 1 0; min-width:0; height:100%; background:var(--panel-2) center/cover no-repeat;${i ? ' border-left:1px solid rgba(255,255,255,0.45);' : ''}" data-diary-img="${esc(p.driveFileId)}"></div>`).join('')}</div>`;
+  return `<div style="position:relative; width:${w}px; height:${h}px; border-radius:6px; overflow:hidden; display:flex; background:var(--panel-2); ${extra}">${photos.map((p, i) => `<div style="flex:1 1 0; min-width:0; height:100%; background:var(--panel-2) center/cover no-repeat;${i ? ' border-left:1px solid rgba(255,255,255,0.45);' : ''}" data-diary-img="${esc(p.driveFileId)}" data-diary-thumb></div>`).join('')}</div>`;
 }
 // Photos AND videos in ONE step: a single hidden input with NO `capture`, clicked
 // synchronously from the button's own tap, so iOS opens its own sheet (Photo Library /
@@ -20360,6 +20613,14 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
     const cleaned = () => pages.filter(pg => pg.ids.length).map(pg => ({ ...pg, ids: [...pg.ids], count: Math.max(pg.ids.length, 1) }));
     const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
     const draft = () => ({ ...stop, photos, pages: cleaned() });
+    // A photo removed in the preview's Keep / Remove review leaves the draft too (else Save
+    // would put it back) and the grid repaints.
+    const dropPhoto = id => {
+      const k = photos.findIndex(p => p.driveFileId === id);
+      if (k >= 0) photos.splice(k, 1);
+      pages = pages.map(pg => ({ ...pg, ids: pg.ids.filter(x => x !== id) }));
+      if (ov.style.display !== 'none') render();
+    };
     const render = () => {
       if (cur >= pages.length) cur = pages.length - 1;
       const page = pages[cur];
@@ -20591,7 +20852,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
       ov.querySelectorAll('[data-ss-cancel]').forEach(b => b.onclick = () => done(null));
       ov.querySelectorAll('[data-ss-save]').forEach(b => b.onclick = () => done({ pages: cleaned(), photos }));
       const pv = ov.querySelector('[data-ss-preview]');
-      if (pv) pv.onclick = () => playPreview(draft());
+      if (pv) pv.onclick = () => playPreview(draft(), dropPhoto);
     };
     render();
     ov.style.display = 'flex';
@@ -21228,6 +21489,32 @@ function tripsyFlyoverMergeLookups(looked, stopFields, topFields = []) {
   const merged = tripsyFlyoverMergeLookupFields(Store.getTripsyFlyover(looked.tripKey), looked, stopFields, topFields);
   if (merged) Store.saveTripsyFlyover(merged);
 }
+// A photo tapped while the fly-over plays, enlarged to fill the screen with Keep / Remove
+// ("When i select a photo from the flyover preview page, show an enlarged version of the
+// photo that fills the screen and show 2 buttons: keep and remove. If the user selects
+// remove, remove that photo from the list of photos for use in the flyover," 2026-10-25).
+// Resolves 'remove' or 'keep' (✕, Esc and a tap outside the picture keep). Above the
+// player, below tripsyConfirmDialog.
+function tripsyFlyoverPhotoReviewDialog(url, { label = '' } = {}) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-flyover-review-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-review-overlay'; document.body.appendChild(ov); }
+    ov.style.cssText = 'position:fixed; inset:0; z-index:2147483096; background:#000; display:flex; flex-direction:column; align-items:center; justify-content:center;';
+    ov.innerHTML = `
+      <img src="${esc(url)}" alt="" style="flex:1; min-height:0; width:100%; object-fit:contain; background:#000;">
+      <div style="flex:none; display:flex; align-items:center; gap:10px; padding:12px 16px; width:100%; box-sizing:border-box; background:rgba(0,0,0,0.85); color:#fff;">
+        <span style="flex:1; min-width:0; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(label)}</span>
+        <button class="btn" data-review-remove style="font-size:15px; padding:8px 16px; background:#B4281E; color:#fff; border-color:#B4281E;">🗑 Remove</button>
+        <button class="btn primary" data-review-keep style="font-size:15px; padding:8px 18px;">✓ Keep</button>
+      </div>`;
+    const done = v => { document.removeEventListener('keydown', onKey); ov.remove(); resolve(v); };
+    const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); done('keep'); } };
+    document.addEventListener('keydown', onKey, true);
+    ov.querySelector('[data-review-keep]').onclick = e => { e.stopPropagation(); done('keep'); };
+    ov.querySelector('[data-review-remove]').onclick = e => { e.stopPropagation(); done('remove'); };
+    ov.onclick = e => { if (e.target === ov) done('keep'); };
+  });
+}
 async function playTripsyFlyover(trip, record, opts = {}) {
   record = tripsyFlyoverApplyAirportCities(record).record;
   // opts.range {fromId, toId} plays just that part of the journey (the setup page's Play
@@ -21558,11 +21845,49 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     unduckMusic();
     return true;
   };
-  const showPage = async (r, page, enterTr) => {
+  // Photos removed during this run (the Keep / Remove review): never shown again, even on a
+  // later page of the same destination.
+  const removedIds = new Set();
+  let reviewing = false;
+  // A tapped photo, enlarged with Keep / Remove (owner only). The run pauses meanwhile.
+  // Remove takes the photo off the destination -- the caller's own way when it gave one
+  // (the setup page keeps its record and dialog draft in step), else the saved record -- and
+  // dims it on the page it is showing on.
+  const reviewPhoto = async (r, s, id, img, url) => {
+    if (reviewing || r.cancelled) return;
+    reviewing = true;
+    const wasPaused = r.paused;
+    try {
+      if (!wasPaused) togglePause();
+      const ans = await tripsyFlyoverPhotoReviewDialog(url, { label: s.label || '' });
+      if (ans === 'remove' && !r.cancelled) {
+        removedIds.add(id);
+        for (const st of [s, ...stops.filter(x => x.id === s.id), ...((record && record.stops) || []).filter(x => x.id === s.id)]) {
+          const next = tripsyFlyoverRemovePhotoFromStop(st, id);
+          st.photos = next.photos; if (next.pages !== undefined) st.pages = next.pages;
+        }
+        try {
+          if (typeof opts.onRemovePhoto === 'function') await opts.onRemovePhoto(s.id, id);
+          else if (typeof Store !== 'undefined' && Store.getTripsyFlyover && record && record.tripKey) {
+            const rec = Store.getTripsyFlyover(record.tripKey);
+            if (rec) await Store.saveTripsyFlyover(tripsyFlyoverRemovePhoto(rec, s.id, id));
+          }
+          toast('Photo removed from the fly-over.');
+        } catch (e) { console.error('fly-over photo remove failed:', e); toast('Couldn’t save that removal — try again.', 'error'); }
+        img.style.opacity = '0.25';
+        img.title = 'Removed';
+      }
+    } finally {
+      reviewing = false;
+      if (!wasPaused && r.paused && !r.cancelled) togglePause();
+    }
+  };
+  const showPage = async (r, page, enterTr, s) => {
     if (page.video || page.layout === 'video') return showVideoPage(r, page, enterTr);
-    const urls = [];
+    const urls = [], ids = [];
     for (const id of page.ids) {
-      try { urls.push(await tripsyPlacePhotoDisplayUrl(id)); } catch (e) { /* skip a photo that won't load */ }
+      if (removedIds.has(id)) continue;
+      try { urls.push(await tripsyPlacePhotoDisplayUrl(id)); ids.push(id); } catch (e) { /* skip a photo that won't load */ }
     }
     if (r.cancelled) return false;
     if (!urls.length) return true;
@@ -21598,6 +21923,15 @@ async function playTripsyFlyover(trip, record, opts = {}) {
         img.style.zIndex = String(i + 1);
       }
       img.src = u;
+      // The owner can tap a photo to see it full-screen and keep or remove it.
+      if (typeof isOwner !== 'undefined' && isOwner && s && opts.onRemovePhoto !== false) {
+        // .tfo-photo is pointer-events:none (the map underneath takes drags), so the tappable
+        // image must opt back in on its own.
+        img.style.cursor = 'pointer';
+        img.style.pointerEvents = 'auto';
+        img.setAttribute('data-tfo-review', ids[i]);
+        img.onclick = ev => { ev.stopPropagation(); reviewPhoto(r, s, ids[i], img, u); };
+      }
       g.appendChild(img);
     })));
     if (r.cancelled) return false;
@@ -21735,7 +22069,7 @@ async function playTripsyFlyover(trip, record, opts = {}) {
     const pages = tripsyFlyoverPages(s);
     const enter = tripsyFlyoverEnterTransitions(s, pages);
     for (let k = 0; k < pages.length; k++) {
-      if (!(await showPage(r, pages[k], enter[k]))) return false;
+      if (!(await showPage(r, pages[k], enter[k], s))) return false;
     }
     return endSlideshow(r);
   };
@@ -27894,14 +28228,16 @@ function tripsyPlacePhotoDisplayUrl(driveFileId) {
   // The fly-over's built-in LAX picture: embedded, not a Drive file.
   if (driveFileId === TRIPSY_FLYOVER_LAX_PHOTO_ID) return Promise.resolve(`data:image/jpeg;base64,${PS_RESERVATION_PHOTO_B64}`);
   // A fly-over photo still uploading (or already uploaded under this session's pending id):
-  // its bytes are the picked file, shown at once.
+  // the PREPARED 1600px copy -- never the original, whose full-size decode is what froze
+  // the page with a big batch (2026-10-25); it resolves once that photo's turn in the
+  // one-at-a-time preparation comes.
   if (typeof driveFileId === 'string' && driveFileId.startsWith('pending-')) {
     if (tripsyFlyoverUploadedIds.has(driveFileId)) return tripsyPlacePhotoDisplayUrl(tripsyFlyoverUploadedIds.get(driveFileId));
     const memoP = tripsyPhotoObjectUrlCache.get(driveFileId);
     if (memoP) return memoP;
-    const blob = tripsyFlyoverPendingBlobs.get(driveFileId);
-    if (!blob) return Promise.reject(new Error('pending photo not available'));
-    const pp = Promise.resolve(URL.createObjectURL(blob));
+    if (!tripsyFlyoverPendingBlobs.has(driveFileId)) return Promise.reject(new Error('pending photo not available'));
+    const pp = tripsyFlyoverPreparePending(driveFileId).then(r => URL.createObjectURL(r.full));
+    pp.catch(() => { if (tripsyPhotoObjectUrlCache.get(driveFileId) === pp) tripsyPhotoObjectUrlCache.delete(driveFileId); });
     tripsyPhotoObjectUrlCache.set(driveFileId, pp);
     return pp;
   }
@@ -30349,16 +30685,41 @@ function tripsyDiaryUnplacedPhotos(day) {
 // Fills each diary photo slot from Drive. Its own painter rather than
 // tripsyWardrobeLoadPhotos, which only looks at .tw-photo nodes and would silently skip
 // these; and background-image (not <img>) so a figure keeps its aspect box while loading.
+// A small picture for a TILE: a still-uploading fly-over photo paints from its prepared
+// ~320px thumbnail (decoded once, with its upload copy) instead of the full picture; every
+// other id is the ordinary display picture. Thumbnail object URLs are memoized like the rest.
+const tripsyPhotoThumbUrlCache = new Map();
+function tripsyPlacePhotoThumbUrl(id) {
+  const memo = tripsyPhotoThumbUrlCache.get(id);
+  if (memo) return memo;
+  if (typeof id === 'string' && id.startsWith('pending-') && tripsyFlyoverUploadedIds.has(id)) return tripsyPlacePhotoThumbUrl(tripsyFlyoverUploadedIds.get(id));
+  if (typeof id === 'string' && id.startsWith('pending-') && tripsyFlyoverPendingBlobs.has(id)) {
+    const p = tripsyFlyoverPreparePending(id).then(r => URL.createObjectURL(r.thumb));
+    p.catch(() => { if (tripsyPhotoThumbUrlCache.get(id) === p) tripsyPhotoThumbUrlCache.delete(id); });
+    tripsyPhotoThumbUrlCache.set(id, p);
+    return p;
+  }
+  return tripsyPlacePhotoDisplayUrl(id);
+}
+// Paints every [data-diary-img] box; one marked data-diary-thumb takes the tile-sized
+// picture (fly-over thumbnails). Boxes are painted in parallel -- with a big batch of
+// photos being prepared one at a time, a sequential loop would hold every later tile
+// behind the earliest unprepared one.
 async function tripsyDiaryPaintPhotos(root) {
   if (!root) return;
+  const jobs = [];
   for (const node of root.querySelectorAll('[data-diary-img]')) {
     const id = node.getAttribute('data-diary-img');
     if (!id || node.dataset.painted === '1') continue;
-    try {
-      node.style.backgroundImage = `url("${await tripsyPlacePhotoDisplayUrl(id)}")`;
-      node.dataset.painted = '1';
-    } catch (e) { /* leave the empty box rather than break the page */ }
+    const thumb = node.hasAttribute('data-diary-thumb');
+    jobs.push((async () => {
+      try {
+        node.style.backgroundImage = `url("${await (thumb ? tripsyPlacePhotoThumbUrl(id) : tripsyPlacePhotoDisplayUrl(id))}")`;
+        node.dataset.painted = '1';
+      } catch (e) { /* leave the empty box rather than break the page */ }
+    })());
   }
+  await Promise.all(jobs);
 }
 // Take Photo / Choose Photo over two hidden inputs -- the shape that works on iPad, where
 // a single accept="image/*" input inside a modal is unreliable: `capture` is what opens

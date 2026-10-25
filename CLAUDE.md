@@ -4595,6 +4595,72 @@ WebView's support for recording is unproven.
     `tripsyFlyoverPages` likewise leaves out a pending photo with no bytes, so the player never
     shows a broken frame. Videos keep their foreground upload (progress, the sound question).
     `flyover_test.js`.
+    **A picked photo is PREPARED once, one at a time, and every tile paints from a
+    thumbnail** ("I selected a large number of photos from for the flyover and there is still
+    a substantial delay," 2026-10-25). The staging above still cost the page: a pending id
+    painted from the ORIGINAL file, so every 84×64 tile and the whole slideshow grid decoded
+    a 12-megapixel picture (dozens at once), and three full-size canvas resizes ran together
+    on the main thread for the uploads. Measured in Chromium with 20 phone-sized photos
+    (110 MB): the page frozen 6.5 s in total, the longest single freeze 1.6 s. Now
+    `tripsyFlyoverPreparePending(id)` (memoized; `tripsyFlyoverPendingPrepared`) runs
+    `tripsyFlyoverPrepareImage(file)` on a serial chain (`_tripsyFlyoverPrepChain`, a
+    `setTimeout 0` yield between photos): ONE decode — `createImageBitmap` where offered (off
+    the main thread), the `<img>` route as fallback, the original bytes on failure — gives the
+    `TRIPSY_FLYOVER_UPLOAD_PX` (1600) copy and a `TRIPSY_FLYOVER_THUMB_PX` (320) thumbnail
+    drawn from it. `tripsyFlyoverQueueUpload` kicks the preparation at pick time (pick order,
+    independent of the network), `tripsyFlyoverRunUpload` takes the prepared copy instead of
+    resizing again, and after the upload seeds `tripsyPhotoObjectUrlCache` /
+    `tripsyPhotoThumbUrlCache` for the Drive id from the copies in memory — the page re-renders
+    after EVERY upload, and without that each repaint read the photo back from disk and decoded
+    it again. Display: `tripsyPlacePhotoDisplayUrl(pendingId)` resolves to the prepared full
+    copy (never the original — it waits for that photo's turn), and the new
+    `tripsyPlacePhotoThumbUrl(id)` gives the thumbnail for a pending / just-uploaded photo and
+    the ordinary picture for any other id; `tripsyDiaryPaintPhotos` uses it for boxes marked
+    `data-diary-thumb` (both fly-over tile builders) and now paints boxes in PARALLEL (a
+    sequential loop held every later tile behind the earliest unprepared one). Tiles therefore
+    fill in one after another. Same 20-photo measurement after: no freeze at all, first tile at
+    0.26 s, all 20 at 3.6 s, each tile painting from an 18 KB thumbnail. `tripsyResizeImageBlob`
+    stays for the other photo uploads. `flyover_test.js`.
+  - **Tapping a photo while the fly-over plays shows it full-screen with Keep / Remove, and
+    "📷 Add trip photos" sorts a batch into destinations by WHEN and WHERE each was taken**
+    ("When i select a photo from the flyover preview page, show an enlarged version of the
+    photo that fills the screen and show 2 buttons: keep and remove. If the user selects
+    remove, remove that photo from the list of photos for use in the flyover. When I press the
+    suggested photos button, is it possible for the app to automatically select photos that
+    are in the date range for the corresponding leg of the trip and are in the location
+    selected and import those photos into the flyover view?", 2026-10-25). **Review**: in the
+    player (Play, View, Preview alike), an owner's photo `img` carries `data-tfo-review` and
+    `pointer-events:auto` — `.tfo-photo` is `pointer-events:none` so the map takes drags, which
+    is why the image itself must opt back in (found in Chromium: the first cut's tap landed on
+    the map) — and a tap runs `reviewPhoto`: the run pauses (`togglePause`, restored after
+    unless it was already paused), `tripsyFlyoverPhotoReviewDialog(url, {label})` (own
+    overlay `tripsy-flyover-review-overlay`, z 2147483096, the photo at full size, 🗑 Remove /
+    ✓ Keep, dismissing = keep) and Remove takes the photo off the destination through the pure
+    `tripsyFlyoverRemovePhotoFromStop(stop, id)` (photos AND page ids; an emptied page drops) on
+    the player's own copies, then persists via `opts.onRemovePhoto(stopId, id)` when the caller
+    gave one — the setup page passes `removePhotoFromRecord` from both Preview entry points,
+    and the Slideshow options dialog's Preview ALSO drops it from its unsaved draft
+    (`dropPhoto`), so Save can't write it back — else via
+    `Store.saveTripsyFlyover(tripsyFlyoverRemovePhoto(record, stopId, id))`. The removed image
+    dims to 0.25 on the page showing and `removedIds` keeps it off later pages this run.
+    Viewers see no controls (`isOwner`). **Sorting**: the setup page's header button
+    `data-flyover-add-trip-photos` (owner) opens the SAME system picker as a card's ＋ (a web
+    page cannot read the Photos library itself — it can only sort what the owner picks; the
+    button's tooltip says so), reads each file with `tripsyFlyoverPhotoTakenInfo` (the first
+    256 KB through the pure `tripsyReadJpegExif`: APP1 Exif, both byte orders, DateTimeOriginal
+    / DateTimeDigitized / DateTime and the GPS IFD; a file with no Exif falls back to its
+    `lastModified`, which on a copied or iCloud-downloaded file may be the COPY date, not the
+    shutter) and routes it with the pure `tripsyFlyoverRoutePhoto(stops, info)`: the stop whose
+    date window holds the day (windows run from each shown non-transit stop's start day to the
+    next one's; a later same-day stop wins the day; the last stop's window reaches its end day
+    + 2), else — no usable date — the nearest stop within `TRIPSY_FLYOVER_ROUTE_GPS_KM` (100)
+    of the photo's GPS fix; nothing matching → not added. Groups are added per destination
+    through the ordinary `addMediaToStop` (staged + background upload), oldest destination
+    first, and the toast names the counts per destination and how many were left out.
+    Phone/iOS caveat: Safari may strip GPS from a picked file, so most sorting is by date.
+    Verified in Chromium: tap → dialog → Remove updates the record (B,C | pages B / C), dims
+    the image, resumes the run; four stubbed files sorted Singapore 2 / Fukuoka 1 / 1 left out.
+    `flyover_test.js`.
   - **A video is a stop "photo" record** `{driveFileId, kind:'video', mime, posterId,
     duration, width, height}`, so pages, carry-over and preloading need nothing new.
     `tripsyFlyoverUploadVideo` refuses files over `TRIPSY_FLYOVER_VIDEO_MAX_BYTES` (250 MB,

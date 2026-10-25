@@ -488,7 +488,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
 }
 {
   const player = extractFn('playTripsyFlyover');
-  assert(/const pages = tripsyFlyoverPages\(s\);[\s\S]*const enter = tripsyFlyoverEnterTransitions\(s, pages\);[\s\S]*showPage\(r, pages\[k\], enter\[k\]\)/.test(player), 'each destination plays its OWN pages');
+  assert(/const pages = tripsyFlyoverPages\(s\);[\s\S]*const enter = tripsyFlyoverEnterTransitions\(s, pages\);[\s\S]*showPage\(r, pages\[k\], enter\[k\], s\)/.test(player), 'each destination plays its OWN pages');
   assert(/const ms = Math\.round\(page\.seconds \* 1000\);[\s\S]*return wait\(r, Math\.max\(0, ms - tMs, revealMs \+ 1000 - tMs\)\);/.test(player), 'each page holds for its own seconds (longer only if its photos are still arriving), pause-aware');
   assert(/g\.dataset\.layout = layout;\s*g\.dataset\.tr = enterTr;/.test(player), 'the page\'s layout and entering transition drive its CSS');
   assert(/ov\.classList\.toggle\('tfo-paused', run\.paused\)/.test(player) && /\.tfo-paused \* \{ animation-play-state: paused !important; \}/.test(html), 'pause also freezes the pan-and-zoom animation');
@@ -831,6 +831,107 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
     assert(/const resetMusic = \(\) => \{/.test(player) && /resetMusic\(\);\n\s*play\(run\);/.test(player), 'Replay returns to the opening track');
     assert(/const stopMusic = \(\) => \{ musicEnded = true; stopRetiring\(\);/.test(player), 'closing stops a track still fading out too');
     assert(/musicPlan\.any \? `<button class="tfo-btn" data-tfo-music/.test(player), 'the music button shows when any destination has music, even with no opening track');
+  }
+  // ---- Keep / Remove review of a photo in the player, and photos sorted into destinations by
+  // date and place (both 2026-10-25) ----
+  eval([extractFn('tripsyFlyoverRemovePhotoFromStop'), extractFn('tripsyFlyoverRemovePhoto'), extractFn('tripsyReadJpegExif'), extractFn('tripsyFlyoverRoutePhoto'),
+    extractFn('tripsyFlyoverDistanceKm'), constLine('TRIPSY_FLYOVER_ROUTE_GPS_KM').replace(/^const /, 'var ')].join('\n'));
+  {
+    const stop = { id: 's', photos: [{ driveFileId: 'a' }, { driveFileId: 'b' }, { driveFileId: 'c' }], pages: [{ ids: ['a'], count: 1 }, { ids: ['b', 'c'], count: 2 }] };
+    const r1 = tripsyFlyoverRemovePhotoFromStop(stop, 'a');
+    assert(r1.photos.map(p => p.driveFileId).join() === 'b,c' && r1.pages.length === 1 && r1.pages[0].ids.join() === 'b,c' && stop.photos.length === 3,
+      'THE ASK: Remove takes the photo off the destination and its pages (an emptied page goes); the source is untouched');
+    const rec = tripsyFlyoverRemovePhoto({ stops: [stop, { id: 't', photos: [{ driveFileId: 'a' }] }] }, 's', 'b');
+    assert(rec.stops[0].photos.length === 2 && rec.stops[0].pages[1].ids.join() === 'c' && rec.stops[1].photos.length === 1, 'only the named stop changes');
+    assert(/function tripsyFlyoverPhotoReviewDialog\(url, \{ label = '' \} = \{\}\)/.test(html) && /data-review-remove/.test(html) && /data-review-keep/.test(html)
+      && /object-fit:contain/.test(extractFn('tripsyFlyoverPhotoReviewDialog')), 'THE ASK: the enlarged photo fills the screen with Keep and Remove');
+    // .tfo-photo is pointer-events:none (the map takes drags), so the tappable image opts back in.
+    assert(/\.tfo-photo \{[^}]*pointer-events: none/.test(html) && /img\.style\.pointerEvents = 'auto';\s*img\.setAttribute\('data-tfo-review'/.test(extractFn('playTripsyFlyover')),
+      'a reviewable photo takes the tap itself (the photo layer is click-through for the map)');
+    const player = extractFn('playTripsyFlyover');
+    assert(/img\.onclick = ev => \{ ev\.stopPropagation\(\); reviewPhoto\(r, s, ids\[i\], img, u\); \};/.test(player) && /if \(typeof isOwner !== 'undefined' && isOwner && s && opts\.onRemovePhoto !== false\)/.test(player),
+      'THE ASK: tapping a photo while the fly-over plays opens the review (owner only)');
+    assert(/if \(!wasPaused\) togglePause\(\);/.test(player) && /if \(!wasPaused && r\.paused && !r\.cancelled\) togglePause\(\);/.test(player), 'the run pauses for the review and resumes after');
+    assert(/removedIds\.add\(id\);/.test(player) && /if \(removedIds\.has\(id\)\) continue;/.test(player) && /tripsyFlyoverRemovePhotoFromStop\(st, id\)/.test(player)
+      && /opts\.onRemovePhoto\(s\.id, id\)/.test(player) && /Store\.saveTripsyFlyover\(tripsyFlyoverRemovePhoto\(rec, s\.id, id\)\)/.test(player),
+      'a removed photo is taken off the destination (the caller\'s way, else the saved record) and never shown again this run');
+    const setup = extractFn('showTripsyFlyover');
+    assert(/onRemovePhoto: removePhotoFromRecord/.test(setup) && /onRemovePhoto: async \(sid, pid\) => \{ await removePhotoFromRecord\(sid, pid\); if \(onDropped\) onDropped\(pid\); \}/.test(setup),
+      'both Preview buttons on the setup page save the removal to the live record; the dialog\'s preview drops it from the draft too');
+    assert(/playPreview\(draft\(\), dropPhoto\)/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the slideshow dialog hands its draft-drop to the preview');
+    // EXIF: a hand-built little-endian JPEG APP1 with DateTimeOriginal and a GPS position.
+    const exifBuf = () => {
+      const bytes = [];
+      const u8 = v => bytes.push(v & 255), u16 = v => { u8(v); u8(v >> 8); }, u32 = v => { u16(v & 0xFFFF); u16(v >>> 16); };
+      const str = s => { for (const ch of s) u8(ch.charCodeAt(0)); u8(0); };
+      // TIFF body is built first so offsets are known; all offsets are from the TIFF header.
+      // Layout: header(8) IFD0(2+2*12+4=30 @8) ExifIFD(2+12+4=18 @38) date(20 @56) GPS IFD(2+4*12+4=54 @76) lat(24 @130) lng(24 @154)
+      const tiff = [];
+      const t8 = v => tiff.push(v & 255), t16 = v => { t8(v); t8(v >> 8); }, t32 = v => { t16(v & 0xFFFF); t16(v >>> 16); };
+      const tstr = (s, n) => { for (let i = 0; i < n; i++) t8(i < s.length ? s.charCodeAt(i) : 0); };
+      t16(0x4949); t16(42); t32(8);
+      t16(2); t16(0x8769); t16(4); t32(1); t32(38); t16(0x8825); t16(4); t32(1); t32(76); t32(0);
+      t16(1); t16(0x9003); t16(2); t32(20); t32(56); t32(0);
+      tstr('2026:10:09 18:30:15', 20);
+      t16(4);
+      t16(0x0001); t16(2); t32(2); tstr('N', 4);
+      t16(0x0002); t16(5); t32(3); t32(130);
+      t16(0x0003); t16(2); t32(2); tstr('E', 4);
+      t16(0x0004); t16(5); t32(3); t32(154);
+      t32(0);
+      t32(1); t32(1); t32(17); t32(1); t32(24); t32(1);      // 1°17'24" N
+      t32(103); t32(1); t32(51); t32(1); t32(0); t32(1);     // 103°51'00" E
+      u16(0xD8FF); // SOI as bytes FF D8
+      bytes.length = 0; u8(0xFF); u8(0xD8); u8(0xFF); u8(0xE1); const len = 2 + 6 + tiff.length; u8(len >> 8); u8(len & 255); str('Exif'); u8(0); bytes.push(...tiff); u8(0xFF); u8(0xD9);
+      return new Uint8Array(bytes).buffer;
+    };
+    const ex = tripsyReadJpegExif(exifBuf());
+    assert(ex.takenAt === '2026-10-09T18:30:15' && Math.abs(ex.lat - 1.29) < 0.001 && Math.abs(ex.lng - 103.85) < 0.001, 'THE ASK: the capture date and GPS position are read from the photo: ' + JSON.stringify(ex));
+    assert(tripsyReadJpegExif(new Uint8Array([1, 2, 3]).buffer).takenAt === null && tripsyReadJpegExif(new ArrayBuffer(0)).lat === null, 'a non-JPEG reads as nothing, never a throw');
+    // Routing: a stay's window runs from its start day up to the next stop's start day.
+    const stops = [
+      { id: 'o', kind: 'origin', lat: 33.94, lng: -118.4, start: '2026-10-05T20:00:00' },
+      { id: 'sg', kind: 'stay', lat: 1.3, lng: 103.8, start: '2026-10-07T15:00:00', end: '2026-10-12T11:00:00' },
+      { id: 'tr', kind: 'transit', lat: 13.7, lng: 100.5, start: '2026-10-12T12:00:00' },
+      { id: 'th', kind: 'stay', lat: 20.3, lng: 100.1, start: '2026-10-12T15:00:00', end: '2026-10-17T11:00:00' },
+      { id: 'rm', kind: 'stay', removed: true, lat: 0, lng: 0, start: '2026-10-13T15:00:00' },
+      { id: 'r', kind: 'return', lat: 33.94, lng: -118.4, start: '2026-10-17T23:00:00' },
+    ];
+    const route = info => tripsyFlyoverRoutePhoto(stops, info);
+    assert(route({ takenAt: '2026-10-09T10:00:00' }) === 'sg' && route({ takenAt: '2026-10-14T10:00:00' }) === 'th' && route({ takenAt: '2026-10-12T09:00:00' }) === 'th',
+      'THE ASK: a photo goes to the destination whose dates cover the day it was taken (a moving day to where you were moving to)');
+    assert(route({ takenAt: '2026-10-05T21:00:00' }) === 'o' && route({ takenAt: '2026-10-18T10:00:00' }) === 'r' && route({ takenAt: '2026-10-20T10:00:00' }) === null && route({ takenAt: '2026-10-01T10:00:00' }) === null,
+      'the departure and home airports take their own days; a photo before or well after the trip goes nowhere');
+    assert(route({ takenAt: null, lat: 1.35, lng: 103.9 }) === 'sg' && route({ takenAt: '2026-10-25T10:00:00', lat: 20.2, lng: 100.0 }) === 'th' && route({ takenAt: null, lat: 48.8, lng: 2.3 }) === null,
+      'THE ASK: with no usable date, the location decides -- the nearest destination within ' + TRIPSY_FLYOVER_ROUTE_GPS_KM + ' km');
+    assert(route({ takenAt: '2026-10-12T20:00:00', lat: 13.7, lng: 100.5 }) === 'th', 'a transfer airport is never a destination for photos');
+    assert(/data-flyover-add-trip-photos/.test(setup) && /tripsyFlyoverPhotoTakenInfo\(file\)/.test(setup) && /tripsyFlyoverRoutePhoto\(record\.stops, info\)/.test(setup)
+      && /await addMediaToStop\(s\.id, group, setStatus\)/.test(setup) && /weren’t added/.test(setup), 'THE ASK: the page\'s Add trip photos button files each pick by its date/place through the ordinary add path and names what went where');
+    const taken = extractFn('tripsyFlyoverPhotoTakenInfo');
+    assert(/file\.slice\(0, 262144\)\.arrayBuffer\(\)/.test(taken) && /file\.lastModified/.test(taken), 'only the head of the file is read for its date; the file\'s own date is the fallback');
+  }
+  // ---- a big photo pick no longer freezes the page ("I selected a large number of photos
+  // from for the flyover and there is still a substantial delay," 2026-10-25) ----
+  {
+    const prep = extractFn('tripsyFlyoverPreparePending'), img = extractFn('tripsyFlyoverPrepareImage');
+    assert(/_tripsyFlyoverPrepChain\.then\(async \(\) => \{/.test(prep) && /_tripsyFlyoverPrepChain = p\.catch\(\(\) => \{\}\);/.test(prep) && /setTimeout\(r, 0\)/.test(prep),
+      'THE ASK: photos are prepared ONE AT A TIME, yielding to the page between them');
+    assert(/tripsyFlyoverPendingPrepared\.set\(pendingId, p\)/.test(prep) && /const have = tripsyFlyoverPendingPrepared\.get\(pendingId\);\s*if \(have\) return have;/.test(prep), 'each photo is decoded once, the result memoized');
+    assert(/createImageBitmap\(file\)/.test(img) && /new Image\(\)/.test(img) && /return \{ full: file, thumb: file \};/.test(img) && /draw\(big, big\.width, big\.height, thumbDim\)/.test(img),
+      'one decode gives the upload copy AND a thumbnail made from it; createImageBitmap first, <img> fallback, the original on failure');
+    assert(/const TRIPSY_FLYOVER_UPLOAD_PX = 1600;/.test(html) && /const TRIPSY_FLYOVER_THUMB_PX = 320;/.test(html), 'the upload copy is 1600px, the thumbnail 320px');
+    const up = extractFn('tripsyFlyoverRunUpload');
+    assert(/const \{ full: small \} = await tripsyFlyoverPreparePending\(pendingId\);/.test(up) && !/tripsyResizeImageBlob/.test(up), 'the upload takes the prepared copy instead of resizing the original again');
+    assert(/tripsyPhotoObjectUrlCache\.set\(driveFileId, Promise\.resolve\(URL\.createObjectURL\(prepared\.full\)\)\)/.test(up) && /tripsyPhotoThumbUrlCache\.set\(driveFileId, Promise\.resolve\(URL\.createObjectURL\(prepared\.thumb\)\)\)/.test(up),
+      'after the upload the Drive id paints from the copies in memory, so the per-upload repaint decodes nothing');
+    assert(/tripsyFlyoverPreparePending\(pendingId\)\.catch\(\(\) => \{\}\);/.test(extractFn('tripsyFlyoverQueueUpload')), 'preparation starts at pick time, in pick order');
+    const disp = extractFn('tripsyPlacePhotoDisplayUrl');
+    assert(/tripsyFlyoverPreparePending\(driveFileId\)\.then\(r => URL\.createObjectURL\(r\.full\)\)/.test(disp) && !/URL\.createObjectURL\(blob\)\);\s*tripsyPhotoObjectUrlCache\.set\(driveFileId, pp\)/.test(disp),
+      'a pending photo is never shown from its original bytes');
+    const thumbFn = extractFn('tripsyPlacePhotoThumbUrl'), paint = extractFn('tripsyDiaryPaintPhotos');
+    assert(/then\(r => URL\.createObjectURL\(r\.thumb\)\)/.test(thumbFn) && /return tripsyPlacePhotoDisplayUrl\(id\);/.test(thumbFn), 'a tile takes the thumbnail for a pending photo, the ordinary picture otherwise');
+    assert(/node\.hasAttribute\('data-diary-thumb'\)/.test(paint) && /await Promise\.all\(jobs\)/.test(paint), 'the painter paints thumbnail boxes from thumbnails, and boxes in parallel');
+    assert(/data-diary-thumb/.test(extractFn('tripsyFlyoverThumbHtml')) && /data-diary-thumb/.test(extractFn('tripsyFlyoverPageThumbHtml')), 'both fly-over tile builders are thumbnail boxes');
   }
   assert(/data-tfo-music/.test(player) && /musicMuted = true; audio\.pause\(\)/.test(player), 'a music button mutes, and plays when the browser blocked autoplay');
   assert(/if \(run\.paused\) audio\.pause\(\); else startMusic\(\);/.test(player) && /run\.cancelled = true;\s*stopMusic\(\);/.test(player), 'pause pauses the music; closing stops it');
