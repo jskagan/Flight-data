@@ -4906,7 +4906,14 @@ WebView's support for recording is unproven.
     keeps its name as the handler, and the hand-off / source dialogs say the page asks to import
     once the upload is complete. Earlier notes in this section that mention pressing Finish
     Upload describe the behaviour before this.
-    `paintDriveStatus` refills the `data-flyover-drive-status` slot in place each tick. The watcher
+    `paintDriveStatus` refills the `data-flyover-drive-status` slot in place each tick.
+    **Files that reached Drive long ago are complete at once** ("Why does the flashing uploading
+    photos message display whenever I select the flyover page," same day — the watcher starts
+    from nothing on every open, so a folder uploaded hours earlier flashed "Uploading" for 30 s
+    each visit): the tick passes the newest new file's `createdTime` as
+    `tripsyFlyoverInboxWatchStep`'s `newestMs`, and when that is older than the settle window
+    the count is announced on the first tick. No arrival time, or a file seconds old, keeps the
+    wait. The watcher
     starts on a hand-off and on opening a page with one pending, stops when an import starts,
     restarts after an import that left the hand-off pending, and ends with the page's close
     or the retire that clears the hand-off. The Drive hand-off dialog's step 2 also names

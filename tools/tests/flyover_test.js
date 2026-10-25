@@ -2055,6 +2055,21 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     // prompt in its place ("Don't have a live count. Until the drive upload is complete display a
     // flashing message 'Uploading Photos to Drive'. When that is done, change that message to the
     // completion prompt," 2026-10-25) ----
+    // ---- Files that landed long ago are complete at once ("Why does the flashing uploading
+    // photos message display whenever I select the flyover page," 2026-10-25) ----
+    const hoursAgo = 1000000 - 3 * 3600 * 1000;
+    let o = tripsyFlyoverInboxWatchStep(null, 54, 1000000, 30000, hoursAgo);
+    assert(o.announce && o.state.announced === 54, 'THE ASK: on opening the page, files that all reached Drive long ago go straight to the completion prompt, no flashing');
+    o = tripsyFlyoverInboxWatchStep(o.state, 54, 1015000, 30000, hoursAgo);
+    assert(!o.announce, '…and are announced only once');
+    o = tripsyFlyoverInboxWatchStep(null, 54, 1000000, 30000, 1000000 - 5000);
+    assert(!o.announce && o.changed, 'a file that landed seconds ago still flashes until the count holds still');
+    o = tripsyFlyoverInboxWatchStep(o.state, 55, 1015000, 30000, 1015000 - 2000);
+    o = tripsyFlyoverInboxWatchStep(o.state, 55, 1046000, 30000, 1015000 - 2000);
+    assert(o.announce, 'a still-arriving batch announces once it settles, as before');
+    assert(!tripsyFlyoverInboxWatchStep(null, 0, 1000000, 30000, hoursAgo).announce && !tripsyFlyoverInboxWatchStep(null, 3, 1000000, 30000, NaN).announce, 'an empty folder, or files with no arrival time, never skip the wait');
+    assert(/const times = freshFiles\.map\(f => Date\.parse\(f\.createdTime \|\| ''\)\)\.filter\(isFinite\);\s*const newestMs = times\.length \? Math\.max\(\.\.\.times\) : NaN;\s*const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);/.test(setup),
+      'the watcher passes the newest new file\'s arrival time');
     assert(tripsyFlyoverDrivePhase('uploading', { announce: false, changed: true }) === 'uploading' && tripsyFlyoverDrivePhase('uploading', { announce: true, changed: false }) === 'complete'
       && tripsyFlyoverDrivePhase('complete', { announce: false, changed: false }) === 'complete' && tripsyFlyoverDrivePhase('later', { announce: false, changed: false }) === 'later'
       && tripsyFlyoverDrivePhase('later', { announce: false, changed: true }) === 'uploading' && tripsyFlyoverDrivePhase(undefined, { announce: false, changed: false }) === 'uploading',
@@ -2064,7 +2079,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/Drive upload complete — 54 new files\. Import now\?/.test(done) && /data-drive-import-now/.test(done) && /data-drive-later/.test(done) && !/tripsy-menu-flash/.test(done), 'the completion prompt replaces it, with Import now / Later, not flashing');
     assert(/54 new files waiting in Drive/.test(lat) && /data-drive-import-now/.test(lat) && !/data-drive-later/.test(lat), 'after Later a quiet reminder with an Import button stands in its place (the only way in, now that Finish Upload is gone)');
     assert(!/tripsyFlyoverFinishUploadLabel|announceInboxReady|tripsyConfirmDialog\(`Drive upload looks complete/.test(html), 'the live-count label and the completion dialog are gone');
-    assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const fresh = tripsyFlyoverDriveNewFiles\(files, record\)\.length;\s*const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\)\);[\s\S]*inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r\);\s*paintDriveStatus\(\);/.test(setup),
+    assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const freshFiles = tripsyFlyoverDriveNewFiles\(files, record\);\s*const fresh = freshFiles\.length;[\s\S]*?const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);[\s\S]*inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r\);\s*paintDriveStatus\(\);/.test(setup),
       'each tick lists the inbox, counts what is new, moves the phase and repaints the message slot');
     assert(/<span data-flyover-drive-status[^>]*>\$\{driveStatusHtml\(\)\}<\/span>/.test(setup) && /if \(go\) go\.onclick = \(\) => \{ if \(!closed && runFinishUpload && !driveImportRunning\) runFinishUpload\(\); \};/.test(setup) && /if \(later\) later\.onclick = \(\) => \{ if \(inboxWatch\) inboxWatch\.phase = 'later'; paintDriveStatus\(\); \};/.test(setup),
       'the slot renders in the header; Import now runs the import, Later holds the quiet reminder');

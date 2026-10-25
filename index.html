@@ -19491,8 +19491,11 @@ async function showTripsyFlyover(tripKey) {
       try {
         const files = await tripsyFlyoverListInbox(record.inboxFolderId);
         if (!inboxWatch || closed) return;
-        const fresh = tripsyFlyoverDriveNewFiles(files, record).length;
-        const r = tripsyFlyoverInboxWatchStep(inboxWatch.state, fresh, Date.now());
+        const freshFiles = tripsyFlyoverDriveNewFiles(files, record);
+        const fresh = freshFiles.length;
+        const times = freshFiles.map(f => Date.parse(f.createdTime || '')).filter(isFinite);
+        const newestMs = times.length ? Math.max(...times) : NaN;
+        const r = tripsyFlyoverInboxWatchStep(inboxWatch.state, fresh, Date.now(), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs);
         inboxWatch.state = r.state;
         inboxWatch.count = fresh;
         inboxWatch.phase = tripsyFlyoverDrivePhase(inboxWatch.phase, r);
@@ -20823,8 +20826,16 @@ function tripsyFlyoverLastPickCrashed(log) {
 // grows the count settles and is announced again). Pure: the state is the watcher's own.
 const TRIPSY_FLYOVER_INBOX_POLL_MS = 15000;
 const TRIPSY_FLYOVER_INBOX_SETTLE_MS = 30000;
-function tripsyFlyoverInboxWatchStep(state, count, nowMs, settleMs = TRIPSY_FLYOVER_INBOX_SETTLE_MS) {
+// `newestMs` is when the newest of those files reached Drive (its `createdTime`): files that
+// all landed longer ago than the settle window are complete AT ONCE, so reopening the page
+// on a folder uploaded hours ago shows the prompt straight away instead of flashing
+// "Uploading" for half a minute ("Why does the flashing uploading photos message display
+// whenever I select the flyover page," 2026-10-25 -- the watcher started from nothing on
+// every open).
+function tripsyFlyoverInboxWatchStep(state, count, nowMs, settleMs = TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs = NaN) {
   const s = state || { count: -1, since: nowMs, announced: 0 };
+  const landedLongAgo = count > 0 && isFinite(newestMs) && nowMs - newestMs >= settleMs;
+  if (landedLongAgo && s.announced !== count) return { state: { count, since: s.count === count ? s.since : nowMs, announced: count }, announce: true, changed: s.count !== count };
   if (count !== s.count) return { state: { count, since: nowMs, announced: s.announced }, announce: false, changed: true };
   const settled = count > 0 && nowMs - s.since >= settleMs && s.announced !== count;
   return { state: settled ? { ...s, announced: count } : s, announce: settled, changed: false };
