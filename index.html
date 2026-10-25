@@ -20871,30 +20871,44 @@ const TRIPSY_FLYOVER_ROUTE_GPS_KM = 100;
 // The destination a photo belongs to: the shown, non-transit stop (play order) whose window
 // -- from the day it starts up to the day the next one starts; the last stop runs to its
 // end day plus one -- covers the day the photo was taken (two stops starting the same day:
-// the later one, the stay, wins over the airport). A photo outside every window, or with no
-// date, goes to the nearest stop within TRIPSY_FLYOVER_ROUTE_GPS_KM when it carries GPS;
-// otherwise null (not added). Returns the stop id or null.
+// the later one, the stay, wins over the airport). **A CHANGEOVER day belongs to two
+// destinations, and the photo's GPS fix picks between them** ("Is there a way to place photos
+// that could be in multiple locations based on date by a geo code," 2026-10-25): the day a stop
+// begins is also the day the previous one ends, so a photo taken that day with a fix goes to the
+// NEARER of the two (a breakfast shot in Singapore on the day you flew to Chiang Mai stays in
+// Singapore); with no fix the later stop still wins, as before. A photo outside every window,
+// or with no date, goes to the nearest stop within TRIPSY_FLYOVER_ROUTE_GPS_KM when it carries
+// GPS; otherwise null (not added). Returns the stop id or null.
 function tripsyFlyoverRoutePhoto(stops, info) {
   const list = (stops || []).filter(s => s && !s.removed && s.kind !== 'transit' && s.lat != null);
   if (!list.length || !info) return null;
   const day = v => (v ? String(v).slice(0, 10) : '');
   const addDays = (k, n) => { const d = new Date(k + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+  const hasFix = info.lat != null && info.lng != null && typeof tripsyFlyoverDistanceKm === 'function';
+  const kmTo = s => tripsyFlyoverDistanceKm({ lat: info.lat, lng: info.lng }, { lat: s.lat, lng: s.lng });
   const photoDay = day(info.takenAt);
   if (photoDay) {
     const dated = list.filter(s => day(s.start));
-    for (let i = dated.length - 1; i >= 0; i--) {
-      const s = dated[i];
-      const from = day(s.start);
-      if (photoDay < from) continue;
-      const next = dated[i + 1];
+    // Every stop whose window touches the day: the one it falls inside, plus the one ENDING
+    // that day (whose window ran up to this stop's start).
+    const touching = [];
+    for (let i = 0; i < dated.length; i++) {
+      const s = dated[i], from = day(s.start), next = dated[i + 1];
       const to = next ? day(next.start) : addDays(day(s.end) >= from ? day(s.end) : from, 2);
-      if (photoDay < to) return s.id;
-      break;
+      if (photoDay >= from && (photoDay < to || (next && photoDay === to))) touching.push(s);
+    }
+    if (touching.length) {
+      if (touching.length > 1 && hasFix) {
+        let best = touching[touching.length - 1], bestKm = kmTo(best);
+        for (const s of touching) { const km = kmTo(s); if (km < bestKm) { bestKm = km; best = s; } }
+        return best.id;
+      }
+      return touching[touching.length - 1].id; // the later stop: where you were moving TO
     }
   }
-  if (info.lat != null && info.lng != null && typeof tripsyFlyoverDistanceKm === 'function') {
+  if (hasFix) {
     let best = null, bestKm = Infinity;
-    for (const s of list) { const km = tripsyFlyoverDistanceKm({ lat: info.lat, lng: info.lng }, { lat: s.lat, lng: s.lng }); if (km < bestKm) { bestKm = km; best = s; } }
+    for (const s of list) { const km = kmTo(s); if (km < bestKm) { bestKm = km; best = s; } }
     if (best && bestKm <= TRIPSY_FLYOVER_ROUTE_GPS_KM) return best.id;
   }
   return null;

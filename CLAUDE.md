@@ -4887,6 +4887,15 @@ WebView's support for recording is unproven.
     UPLOAD moment) is never routed by — it would have put today's uploads on today's
     destination, which is where the four videos (Drive extracts no EXIF for video) were headed.
     With `auto` and no EXIF the file is left out, as before.
+    **A changeover day is split by the photo's GPS fix** ("Is there a way to place photos that
+    could be in multiple locations based on date by a geo code," same day): in
+    `tripsyFlyoverRoutePhoto` the day a stop begins is also the previous stop's last day, so a
+    photo taken that day belongs to TWO windows (`touching`); with a fix it goes to the NEARER of
+    the two, with none to the later stop as before (where you were moving to). A day inside one
+    window is never re-routed by GPS, and the outside-every-window GPS fallback (nearest within
+    `TRIPSY_FLYOVER_ROUTE_GPS_KM`) is unchanged. Both import routes (the picker's EXIF read and
+    Drive's `imageMediaMetadata.location`) feed the same function, so both benefit; iOS Safari
+    may strip GPS from a PICKED file, so the Drive route is where this most often applies.
     **And every imported photo leaves the Drive folder on its own, not only when the folder
     retires** ("Remember to delete the photos from drive once they have been uploaded to the app,"
     same day — the folder-level retire ran only after a CLEAN import, so a batch with one

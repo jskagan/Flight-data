@@ -905,6 +905,13 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
     assert(route({ takenAt: null, lat: 1.35, lng: 103.9 }) === 'sg' && route({ takenAt: '2026-10-25T10:00:00', lat: 20.2, lng: 100.0 }) === 'th' && route({ takenAt: null, lat: 48.8, lng: 2.3 }) === null,
       'THE ASK: with no usable date, the location decides -- the nearest destination within ' + TRIPSY_FLYOVER_ROUTE_GPS_KM + ' km');
     assert(route({ takenAt: '2026-10-12T20:00:00', lat: 13.7, lng: 100.5 }) === 'th', 'a transfer airport is never a destination for photos');
+    // ---- A changeover day is decided by the GPS fix ("Is there a way to place photos that
+    // could be in multiple locations based on date by a geo code," 2026-10-25) ----
+    assert(route({ takenAt: '2026-10-12T08:00:00', lat: 1.29, lng: 103.85 }) === 'sg' && route({ takenAt: '2026-10-12T19:00:00', lat: 20.25, lng: 100.08 }) === 'th',
+      'THE ASK: on the day you moved from Singapore to Chiang Rai, a photo with a fix goes to whichever of the TWO it was taken nearer to');
+    assert(route({ takenAt: '2026-10-12T08:00:00' }) === 'th', 'with no fix a changeover day still goes to where you were moving to');
+    assert(route({ takenAt: '2026-10-14T08:00:00', lat: 1.29, lng: 103.85 }) === 'th', 'a day inside one stop\'s window is never re-routed by GPS (a photo of a Singapore postcard in Chiang Rai stays in Chiang Rai)');
+    assert(route({ takenAt: '2026-10-17T20:00:00', lat: 33.9, lng: -118.4 }) === 'r' && route({ takenAt: '2026-10-17T09:00:00', lat: 20.3, lng: 100.1 }) === 'th', 'the last changeover, stay → home airport, splits the same way');
     assert(/data-flyover-add-trip-photos/.test(setup) && /tripsyFlyoverPhotoTakenInfo\(file\)/.test(setup) && /tripsyFlyoverRoutePhoto\(record\.stops, info\)/.test(setup)
       && /await addMediaToStop\(s\.id, group, setStatus\)/.test(setup) && /weren’t added/.test(setup), 'THE ASK: the page\'s Add trip photos button files each pick by its date/place through the ordinary add path and names what went where');
     const taken = extractFn('tripsyFlyoverPhotoTakenInfo');
