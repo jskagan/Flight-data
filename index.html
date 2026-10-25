@@ -22414,7 +22414,11 @@ function tripsyFlyoverMergeLookups(looked, stopFields, topFields = []) {
 // photos, "show carat on the middle left and middle right of the photo to allow the user to
 // navigate to the next photo or back to the last one," 2026-10-25), also the ← / → keys; they
 // resolve 'prev' / 'next', which the caller treats as Keep plus a step.
-function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 Remove', isVideo = false, moveTargets = null, nav = null } = {}) {
+// `exitButton` adds ⏏ Exit at the far right (Edit photos, 2026-10-25: "add a button to the photo
+// edit view to the right of move called exit that returns to the flyover view"); it resolves 'exit'.
+// `keepButton: false` drops ✓ Keep (Edit photos, "Remove the keep button," 2026-10-25 — there
+// ‹ / › and Exit already carry on without changing anything; Esc and a tap outside still keep).
+function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 Remove', isVideo = false, moveTargets = null, nav = null, exitButton = false, keepButton = true } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-review-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-review-overlay'; document.body.appendChild(ov); }
@@ -22430,7 +22434,7 @@ function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 R
       <div style="flex:none; display:flex; align-items:center; gap:10px; padding:12px 16px; width:100%; box-sizing:border-box; background:rgba(0,0,0,0.85); color:#fff;">
         <span style="flex:1; min-width:0; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(label)}</span>
         <button class="btn" data-review-remove style="font-size:15px; padding:8px 16px; background:#B4281E; color:#fff; border-color:#B4281E;">${esc(removeLabel)}</button>
-        <button class="btn primary" data-review-keep style="font-size:15px; padding:8px 18px;">✓ Keep</button>
+        ${keepButton ? `<button class="btn primary" data-review-keep style="font-size:15px; padding:8px 18px;">✓ Keep</button>` : ''}
         ${moveTargets && moveTargets.length ? `
         <span data-review-move-pick style="display:none; align-items:center; gap:6px; flex-wrap:wrap;">
           <select class="field-input" data-review-move-select aria-label="Move to which destination" style="width:auto; max-width:260px; padding:6px 8px; font-size:14px;">
@@ -22439,6 +22443,7 @@ function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 R
           <button class="btn primary" data-review-move-go style="font-size:15px; padding:8px 14px;">Move here</button>
         </span>
         <button class="btn" data-review-move style="font-size:15px; padding:8px 16px;">↪ Move</button>` : ''}
+        ${exitButton ? `<button class="btn" data-review-exit title="Back to the fly-over page" style="font-size:15px; padding:8px 16px;">Exit</button>` : ''}
       </div>`;
     const done = v => { document.removeEventListener('keydown', onKey, true); const vid = ov.querySelector('video'); if (vid) { try { vid.pause(); } catch (e) {} } ov.remove(); resolve(v); };
     const onKey = e => {
@@ -22447,8 +22452,11 @@ function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 R
       if (nav && e.key === 'ArrowRight' && nav.hasNext && !(e.target && /^(SELECT|INPUT)$/.test(e.target.tagName))) { e.stopPropagation(); e.preventDefault(); done('next'); }
     };
     document.addEventListener('keydown', onKey, true);
-    ov.querySelector('[data-review-keep]').onclick = e => { e.stopPropagation(); done('keep'); };
+    const keepBtn = ov.querySelector('[data-review-keep]');
+    if (keepBtn) keepBtn.onclick = e => { e.stopPropagation(); done('keep'); };
     ov.querySelector('[data-review-remove]').onclick = e => { e.stopPropagation(); done('remove'); };
+    const exitBtn = ov.querySelector('[data-review-exit]');
+    if (exitBtn) exitBtn.onclick = e => { e.stopPropagation(); done('exit'); };
     const prevBtn = ov.querySelector('[data-review-prev]'), nextBtn = ov.querySelector('[data-review-next]');
     if (prevBtn) prevBtn.onclick = e => { e.stopPropagation(); done('prev'); };
     if (nextBtn) nextBtn.onclick = e => { e.stopPropagation(); done('next'); };
@@ -22480,17 +22488,23 @@ function tripsyFlyoverPhotoReviewDialog(url, { label = '', removeLabel = '🗑 R
 // both in Edit photos and directly on the destination box ("If a user selects a photo
 // directly from the flyover page, treat it as if he had selected that photo from the edit
 // photo page," 2026-10-25). `where` names its page ("Page 2" / "No page"). Resolves 'keep',
-// 'deleted' or 'moved' once the change (if any) has saved.
+// 'deleted' (a Delete happened and the review then ended on a Keep), 'moved' or 'exit', once
+// the change (if any) has saved.
 async function tripsyFlyoverReviewStopPhoto(getStop, id, where, { onDelete = null, onMove = null, moveTargets = null } = {}) {
   // ‹ / › step through the destination's photos in play order (No-page ones last); a step is
-  // a Keep, so nothing changes until Delete or Move.
+  // a Keep, so nothing changes until Delete or Move. Delete moves on to the NEXT photo of the
+  // destination, and with none after it returns 'exit' (back to the fly-over page); Exit does
+  // the same at any time ("When the user presses delete in the photo edit view, delete that
+  // photo and move to the next photo for that location if there is one. If not, go back to the
+  // flyover page," 2026-10-25).
   let cur = id;
+  let deletedAny = false;
   for (;;) {
     const stop = getStop() || {};
     const seq = tripsyFlyoverPhotosInPageOrder(stop);
     const k = seq.findIndex(x => x.photo.driveFileId === cur);
     const rec = k >= 0 ? seq[k].photo : (stop.photos || []).find(p => p.driveFileId === cur);
-    if (!rec) return 'keep';
+    if (!rec) return deletedAny ? 'deleted' : 'keep';
     const here = k >= 0 ? (seq[k].page == null ? 'No page' : `Page ${seq[k].page}`) : where;
     const isVideo = tripsyFlyoverIsVideo(rec);
     let url = '';
@@ -22499,17 +22513,25 @@ async function tripsyFlyoverReviewStopPhoto(getStop, id, where, { onDelete = nul
     if (!url) { toast('Couldn’t load that photo — check the connection and try again.', 'error'); return 'keep'; }
     const targets = onMove && moveTargets ? moveTargets() : null;
     const nav = k >= 0 ? { hasPrev: k > 0, hasNext: k < seq.length - 1 } : null;
-    const answer = await tripsyFlyoverPhotoReviewDialog(url, { label: `${stop.label || ''} · ${here}${k >= 0 ? ` · ${k + 1} of ${seq.length}` : ''}`, removeLabel: '🗑 Delete', isVideo, moveTargets: targets, nav });
+    const answer = await tripsyFlyoverPhotoReviewDialog(url, { label: `${stop.label || ''} · ${here}${k >= 0 ? ` · ${k + 1} of ${seq.length}` : ''}`, removeLabel: '🗑 Delete', isVideo, moveTargets: targets, nav, exitButton: true, keepButton: false });
+    if (answer === 'exit') return 'exit';
     if (answer === 'prev' && k > 0) { cur = seq[k - 1].photo.driveFileId; continue; }
     if (answer === 'next' && k >= 0 && k < seq.length - 1) { cur = seq[k + 1].photo.driveFileId; continue; }
-    if (answer === 'remove' && onDelete) { await onDelete(cur); return 'deleted'; }
+    if (answer === 'remove' && onDelete) {
+      const nextId = k >= 0 && k < seq.length - 1 ? seq[k + 1].photo.driveFileId : null;
+      await onDelete(cur);
+      deletedAny = true;
+      if (!nextId) return 'exit';
+      cur = nextId;
+      continue;
+    }
     if (answer && answer.move && onMove) {
       const t = (targets || []).find(x => x.id === answer.move);
       await onMove(cur, answer.move);
       toast(`Moved to ${t ? t.label : 'the other destination'} — it’s on No page there.`);
       return 'moved';
     }
-    return 'keep';
+    return deletedAny ? 'deleted' : 'keep';
   }
 }
 // `moveTargets()` lists the destinations a photo can move to and `onMove(photoId, toId)`
@@ -22548,6 +22570,8 @@ function tripsyFlyoverEditPhotosPage(getStop, { onDelete, onMove = null, moveTar
         busy = true;
         try {
           const res = await tripsyFlyoverReviewStopPhoto(getStop, b.getAttribute('data-ep-photo'), b.getAttribute('data-ep-page'), { onDelete, onMove, moveTargets });
+          // Exit (or deleting the last photo) goes all the way back to the fly-over page.
+          if (res === 'exit') { close(); return; }
           if (res !== 'keep') render();
         } finally { busy = false; }
       });

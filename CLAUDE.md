@@ -4252,6 +4252,19 @@ WebView's support for recording is unproven.
       step — a step is a Keep, so nothing is written until Delete or Move, which still end the
       review. The label reads "Da Nang · Page 2 · 3 of 4". Carets only where there is a photo
       to go to (no wrap). Works from Edit photos and from the box, which share the function.
+      **Delete moves on, and Exit leaves** ("When the user presses delete in the photo edit view,
+      delete that photo and move to the next photo for that location if there is one. If not, go
+      back to the flyover page also add a button to the photo edit view to the right of move
+      called exit that returns to the flyover view," same day): in `tripsyFlyoverReviewStopPhoto`
+      Delete notes the NEXT photo in play order before deleting, then shows it; with none after
+      it the review returns 'exit'. The dialog's `exitButton` (passed only by this function, so the
+      player's own review has none) adds **Exit** after Move, also 'exit'. Edit photos closes
+      itself on 'exit', so both land back on the fly-over page; a Delete followed by a later
+      Keep returns 'deleted' (`deletedAny`) so the grid still redraws.
+      **There is no Keep button in the photo edit view** ("Remove the keep button," same day):
+      `keepButton: false` from `tripsyFlyoverReviewStopPhoto`; ‹ / › and Exit carry on without
+      changing anything, and Esc or a tap outside the picture still keep. The player's own Keep /
+      Remove view is unchanged.
       **A photo goes on a page only when the user puts it there; everything else is "No page"**
       ("Do not place photos on a page unless a user places it there. When photos are Imported
       they should say 'No page'," same day — Da Nang had 2 hand-made pages and 111 imported

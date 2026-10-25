@@ -530,8 +530,8 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/tripsyFlyoverPhotosInPageOrder\(stop\)/.test(ep) && /data-ep-photo/.test(ep) && /tripsyFlyoverThumbHtml\(photo, 132, 100/.test(ep) && /tripsyDiaryPaintPhotos\(ov\)/.test(ep),
     'THE ASK: the page shows a thumbnail of every photo on the destination, in play order');
   const rsp = extractFn('tripsyFlyoverReviewStopPhoto');
-  assert(/tripsyFlyoverPhotoReviewDialog\(url, \{ label: [\s\S]*?removeLabel: '🗑 Delete', isVideo, moveTargets: targets, nav \}\)/.test(rsp) && /if \(answer === 'remove' && onDelete\) \{ await onDelete\(cur\); return 'deleted'; \}/.test(rsp)
-    && /const res = await tripsyFlyoverReviewStopPhoto\(getStop, b\.getAttribute\('data-ep-photo'\), b\.getAttribute\('data-ep-page'\), \{ onDelete, onMove, moveTargets \}\);\s*if \(res !== 'keep'\) render\(\);/.test(ep),
+  assert(/tripsyFlyoverPhotoReviewDialog\(url, \{ label: [\s\S]*?removeLabel: '🗑 Delete', isVideo, moveTargets: targets, nav, exitButton: true, keepButton: false \}\)/.test(rsp) && /if \(answer === 'remove' && onDelete\) \{[\s\S]*?await onDelete\(cur\);/.test(rsp)
+    && /const res = await tripsyFlyoverReviewStopPhoto\(getStop, b\.getAttribute\('data-ep-photo'\), b\.getAttribute\('data-ep-page'\), \{ onDelete, onMove, moveTargets \}\);[\s\S]*?if \(res !== 'keep'\) render\(\);/.test(ep),
     'THE ASK: a tap shows it large with Keep and Delete; Delete removes it and the grid redraws from what is left');
   assert(/isVideo\s*\? `<video src="\$\{esc\(url\)\}" controls playsinline/.test(extractFn('tripsyFlyoverPhotoReviewDialog')), 'a video opens playable in the same large view');
   // "Change Music from here button to say 'Change Music'" (2026-10-25).
@@ -565,9 +565,25 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/const seq = tripsyFlyoverPhotosInPageOrder\(stop\);/.test(rsp2) && /const nav = k >= 0 \? \{ hasPrev: k > 0, hasNext: k < seq\.length - 1 \} : null;/.test(rsp2)
     && /if \(answer === 'prev' && k > 0\) \{ cur = seq\[k - 1\]\.photo\.driveFileId; continue; \}/.test(rsp2) && /if \(answer === 'next' && k >= 0 && k < seq\.length - 1\) \{ cur = seq\[k \+ 1\]\.photo\.driveFileId; continue; \}/.test(rsp2),
     'THE ASK: a caret is a Keep plus a step to the next / previous photo of the destination, in play order — nothing changes until Delete or Move');
+  // "When the user presses delete in the photo edit view, delete that photo and move to the
+  // next photo for that location if there is one. If not, go back to the flyover page also add a
+  // button to the photo edit view to the right of move called exit that returns to the flyover
+  // view" (2026-10-25).
+  assert(rv.indexOf('data-review-move style') < rv.indexOf('data-review-exit') && /exitButton \? `<button class="btn" data-review-exit[^`]*>Exit<\/button>` : ''/.test(rv) && /if \(exitBtn\) exitBtn\.onclick = e => \{ e\.stopPropagation\(\); done\('exit'\); \};/.test(rv),
+    'THE ASK: an Exit button sits to the right of Move and resolves exit');
+  const rsp3 = extractFn('tripsyFlyoverReviewStopPhoto');
+  assert(/const nextId = k >= 0 && k < seq\.length - 1 \? seq\[k \+ 1\]\.photo\.driveFileId : null;\s*await onDelete\(cur\);\s*deletedAny = true;\s*if \(!nextId\) return 'exit';\s*cur = nextId;\s*continue;/.test(rsp3)
+    && /if \(answer === 'exit'\) return 'exit';/.test(rsp3) && /return deletedAny \? 'deleted' : 'keep';/.test(rsp3),
+    'THE ASK: Delete goes on to the next photo, and with none after it back to the fly-over page; a later Keep still reports the delete so the grid redraws');
+  assert(/if \(res === 'exit'\) \{ close\(\); return; \}/.test(extractFn('tripsyFlyoverEditPhotosPage')), 'THE ASK: from Edit photos, Exit (or deleting the last photo) closes the photos page too, back to the fly-over page');
+  // "Remove the keep button" (2026-10-25): gone from the photo edit view, kept in the player.
+  assert(/\$\{keepButton \? `<button class="btn primary" data-review-keep[^`]*>✓ Keep<\/button>` : ''\}/.test(rv) && /if \(keepBtn\) keepBtn\.onclick/.test(rv)
+    && /keepButton: false \}\);/.test(extractFn('tripsyFlyoverReviewStopPhoto')) && !/keepButton/.test((html.match(/const ans = await tripsyFlyoverPhotoReviewDialog\(url, \{[^}]*\}\);/) || [''])[0]),
+    'THE ASK: the photo edit view has no Keep button; the player\'s own view still does');
+  assert(!/exitButton/.test((html.match(/const ans = await tripsyFlyoverPhotoReviewDialog\(url, \{[^}]*\}\);/) || [''])[0]), 'the player\'s own review gets no Exit');
   assert(!/moveTargets/.test((html.match(/const ans = await tripsyFlyoverPhotoReviewDialog\(url, \{[^}]*\}\);/) || [''])[0]), 'the player\'s own Keep / Remove view gets no Move');
   const ep3 = extractFn('tripsyFlyoverEditPhotosPage');
-  assert(/moveTargets: targets, nav \}\);/.test(extractFn('tripsyFlyoverReviewStopPhoto')) && /if \(answer && answer\.move && onMove\) \{[\s\S]*await onMove\(cur, answer\.move\);[\s\S]*No page there/.test(extractFn('tripsyFlyoverReviewStopPhoto')) && /tripsyFlyoverReviewStopPhoto\(/.test(ep3), 'Edit photos passes the targets and moves the photo, saying where it went');
+  assert(/moveTargets: targets, nav, exitButton: true, keepButton: false \}\);/.test(extractFn('tripsyFlyoverReviewStopPhoto')) && /if \(answer && answer\.move && onMove\) \{[\s\S]*await onMove\(cur, answer\.move\);[\s\S]*No page there/.test(extractFn('tripsyFlyoverReviewStopPhoto')) && /tripsyFlyoverReviewStopPhoto\(/.test(ep3), 'Edit photos passes the targets and moves the photo, saying where it went');
   assert(/onMove: \(photoId, toId\) => movePhotoInRecord\(id, photoId, toId\),\s*moveTargets: \(\) => photoMoveTargets\(id\),/.test(setup)
     && /filter\(s => s\.id !== fromId && !s\.removed && s\.kind !== 'transit'\)/.test(setup)
     && /updateStop\(toId, \{ photos: \[\.\.\.\(to\.photos \|\| \[\]\)\.filter\(p => p\.driveFileId !== photoId\), rec\] \}\);/.test(setup),
@@ -936,7 +952,7 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
       'THE ASK: Remove takes the photo off the destination and its pages (an emptied page goes); the source is untouched');
     const rec = tripsyFlyoverRemovePhoto({ stops: [stop, { id: 't', photos: [{ driveFileId: 'a' }] }] }, 's', 'b');
     assert(rec.stops[0].photos.length === 2 && rec.stops[0].pages[1].ids.join() === 'c' && rec.stops[1].photos.length === 1, 'only the named stop changes');
-    assert(/function tripsyFlyoverPhotoReviewDialog\(url, \{ label = '', removeLabel = '🗑 Remove', isVideo = false, moveTargets = null, nav = null \} = \{\}\)/.test(html) && /data-review-remove/.test(html) && /data-review-keep/.test(html)
+    assert(/function tripsyFlyoverPhotoReviewDialog\(url, \{ label = '', removeLabel = '🗑 Remove', isVideo = false, moveTargets = null, nav = null, exitButton = false, keepButton = true \} = \{\}\)/.test(html) && /data-review-remove/.test(html) && /data-review-keep/.test(html)
       && /object-fit:contain/.test(extractFn('tripsyFlyoverPhotoReviewDialog')), 'THE ASK: the enlarged photo fills the screen with Keep and Remove');
     // .tfo-photo is pointer-events:none (the map takes drags), so the tappable image opts back in.
     assert(/\.tfo-photo \{[^}]*pointer-events: none/.test(html) && /img\.style\.pointerEvents = 'auto';\s*img\.setAttribute\('data-tfo-review'/.test(extractFn('playTripsyFlyover')),
