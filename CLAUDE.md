@@ -4817,17 +4817,34 @@ WebView's support for recording is unproven.
     survives for the foreground path. Verified in Chromium: the add returns while the stubbed
     upload runs, the tile reads ⬆️ N%, inputs stay usable, the record resolves to the Drive ids.
     `flyover_test.js`.
-    **Every destination card has its own "📁 From Drive folder" button** ("I am still getting
-    this page when I hit the blue check box, followed by a crash," 2026-10-25 — a 106-item pick
-    with two videos through the in-app picker; the crash is WebKit running out of memory while
-    iOS exports the selection, before the page gets a single file, so nothing in the page can
-    prevent it). `data-flyover-card-drive-import="<stop id>"`, beside ＋ Photos & videos, runs the
-    page's one `openDriveImport(defaultDest)` (the header button passes `'auto'`), and
-    `tripsyFlyoverDriveImportDialog`'s fourth arg preselects that destination in the "File each
-    photo under" list, so the big-batch route is one tap from where the picker is and lands in
-    the right place. The picker button's tooltip now says a big pick with videos stalls or
-    crashes the app. Verified in Chromium: the card button opens the dialog with Fukuoka
-    selected, the header button with "by date".
+    **There is NO Drive button by default — the pick itself is ROUTED, and "⬆️ Finish Upload"
+    appears while a Drive hand-off is pending** ("I am still getting this page when I hit the
+    blue check box, followed by a crash" — a 106-item pick with two videos; then "Do not show
+    the import from drive button by default. Instead, when the user selects add photos,
+    automatically route that to drive if the number of photos is large or there is a video. If
+    you do that, display a button on the flyover view that says 'Finish Upload' and when the
+    user presses that, upload the photos and videos from drive," 2026-10-25). The crash is
+    WebKit running out of memory while iOS exports the selection, BEFORE the page gets a single
+    file — so the page cannot count a pick or see a video in it before the step that crashes,
+    and the size question is asked up front instead: ＋ Photos & videos (a card) and 📷 Add trip
+    photos (the page) open `tripsyFlyoverAddSourceDialog` — **📷 A few photos** (opens the iOS
+    picker, synchronously in that tap) / **📁 Many photos, or a video** (the Drive route). The
+    one automatic part: `tripsyFlyoverLastPickCrashed(log)` (pure — the receipt shows a picker
+    opened with neither files nor a cancel, not a Drive import) skips the question and routes
+    straight to Drive with a toast. The Drive route (`handOffToDrive(dest, openPicker)`) makes
+    or finds the trip's inbox folder, stamps the record `inboxDest` (the card's stop, or `auto`
+    from the page button) + `inboxPendingAt`, re-renders so **⬆️ Finish Upload**
+    (`data-flyover-finish-upload`, header, `.primary`) shows, and opens
+    `tripsyFlyoverDriveHandoffDialog` (folder link, the Drive app steps, "press Finish Upload",
+    and a "Use Photos instead" button for a small pick). Finish Upload lists the inbox and runs
+    `runDriveImport(fresh, record.inboxDest || 'auto', folderId)` directly — no dialog; nothing
+    new reopens the hand-off dialog with a note. The clean-import retire clears `inboxDest` /
+    `inboxPendingAt` with the folder, so the button goes away; a rebuild keeps a pending
+    hand-off. The header "📁 Import from Drive folder" button, the per-card button and
+    `tripsyFlyoverDriveImportDialog` are gone. Verified in Chromium: question → A few opens the
+    picker; Many → hand-off + Finish Upload; empty folder → the note; two files → both land on
+    the card's destination, the folder is retired and the button disappears; a crashed last
+    pick skips the question; "Use Photos instead" opens the picker.
   - **A video always plays on a page of its own**: `tripsyFlyoverPhotoGroups` and
     `tripsyFlyoverPages` split one out (in place) even from a saved page, as a `video:true`,
     `layout:'video'` page; the dialog's toggle (`tripsyFlyoverTogglePagePhoto`'s `isVideo`

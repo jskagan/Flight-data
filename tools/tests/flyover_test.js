@@ -1086,7 +1086,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     'THE ASK: one input with no capture, so iOS shows its own Photos Library / camera sheet; photos and videos are picked separately (2026-10-25)');
   assert(/input\.click\(\);\s*\}$/.test(pick.trim()) && !/tw-modal|innerHTML/.test(pick),
     'THE ASK (2026-10-21, "this is inefficient"): no in-app menu in front of the system picker — the tap opens it directly');
-  assert(/tripsyFlyoverPickMedia\(async files =>/.test(extractFn('showTripsyFlyover')) && /tripsyFlyoverStagePendingVideo\(file\)/.test(extractFn('showTripsyFlyover')),
+  assert(/tripsyFlyoverPickMedia\(sortTripPhotos/.test(extractFn('showTripsyFlyover')) && /tripsyFlyoverStagePendingVideo\(file\)/.test(extractFn('showTripsyFlyover')),
     'the setup page uses the media picker and stages videos for a background upload');
   const up = extractFn('uploadBlobToDriveResumable');
   assert(/uploadType=resumable/.test(up) && /Content-Range/.test(up) && /status !== 308/.test(up), 'videos upload resumably, in pieces');
@@ -1823,7 +1823,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   const setup = extractFn('showTripsyFlyover');
   assert(/const addMediaToStop = async \(id, files, setStatusFn\) => \{/.test(setup)
     && /const onPicked = async files => \{\s*setStatus\([^;]*\);\s*const r = await addMediaToStop\(id, files, setStatus\);/.test(setup)
-    && /if \(own\) own\.onclick = \(\) => tripsyFlyoverPickMedia\(onPicked, \{ kind: 'all'/.test(setup) && !/data-flyover-add-video/.test(html)
+    && /if \(own\) own\.onclick = \(\) => askSource\(id, \(\) => tripsyFlyoverPickMedia\(onPicked, \{ kind: 'all'/.test(setup) && !/data-flyover-add-video/.test(html)
     && /addMedia: isOwner \? \(files, setStatusFn\) => addMediaToStop\(id, files, setStatusFn\) : null,/.test(setup),
     'ONE add path: the card\'s button and the editor\'s button both run addMediaToStop (stage + background upload for photos AND videos)');
   // ---- Videos upload in the BACKGROUND too ("can we just automatically route all videos
@@ -1923,10 +1923,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(fresh.map(f => f.id).join() === 'p3,p2', 'only new photos / videos, oldest capture first; a PDF in the folder is ignored');
     assert(tripsyFlyoverDriveFolderUrl('abc 1') === 'https://drive.google.com/drive/folders/abc%201', 'the folder link opens in Drive');
     const setup = extractFn('showTripsyFlyover');
-    assert(/data-flyover-card-drive-import="\$\{esc\(s\.id\)\}"/.test(setup) && /if \(cardDrive\) cardDrive\.onclick = \(\) => openDriveImport\(id\);/.test(setup)
-      && /function tripsyFlyoverDriveImportDialog\(trip, record, folderId, defaultDest = 'auto'\)/.test(html) && /\$\{s\.id === defaultDest \? ' selected' : ''\}/.test(extractFn('tripsyFlyoverDriveImportDialog')),
-      'every destination card has its own From Drive folder button, opening the import with that destination preselected (2026-10-25)');
-    assert(/data-flyover-drive-import/.test(html) && /const runDriveImport = async \(files, dest, folderId\) => \{/.test(setup)
+    assert(!/data-flyover-drive-import|data-flyover-card-drive-import|tripsyFlyoverDriveImportDialog/.test(html) && /const runDriveImport = async \(files, dest, folderId\) => \{/.test(setup)
       && /const src = tripsyFlyoverDriveSrc\(f\.id\);\s*if \(known\.has\(src\)\) continue;/.test(setup)
       && /dest === 'auto' \? tripsyFlyoverRoutePhoto\(record\.stops, tripsyFlyoverDriveMetaInfo\(f\)\) : dest/.test(setup)
       && /const blob = await downloadDriveFileBlob\(f\.id\);[\s\S]*const fp = await tripsyFlyoverFileFingerprint\(blob\);[\s\S]*tripsyFlyoverStagePendingPhoto\(blob\);[\s\S]*src: fp \|\| src, driveSrc: src[\s\S]*tripsyFlyoverQueueUpload\(trip\.key, pendingId\);/.test(setup)
@@ -1934,7 +1931,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       'the import runs on the page: resume-safe by src, routed by date or to a chosen destination, each photo downloaded, staged and uploaded resized in the background');
     assert(/if \(prevRecord && prevRecord\.inboxFolderId\) rec\.inboxFolderId = prevRecord\.inboxFolderId;/.test(html), 'a rebuild keeps the inbox folder');
     // The folder is temporary: videos moved out, folder trashed, only once everything landed.
-    assert(/if \(!closed && !failed && !unmatched && taken && folderId\) \{[\s\S]*const landed = await tripsyFlyoverWaitForUploads\(pendingIds, 15 \* 60 \* 1000\);[\s\S]*await tripsyFlyoverRetireInbox\(folderId, videoIds\);[\s\S]*record = \{ \.\.\.record, inboxFolderId: '' \};/.test(setup),
+    assert(/if \(!closed && !failed && !unmatched && taken && folderId\) \{[\s\S]*const landed = await tripsyFlyoverWaitForUploads\(pendingIds, 15 \* 60 \* 1000\);[\s\S]*await tripsyFlyoverRetireInbox\(folderId, videoIds\);[\s\S]*record = \{ \.\.\.record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' \};/.test(setup),
       'THE ASK: after a clean import the folder is retired, but only once every photo upload has landed');
     const retire = extractFn('tripsyFlyoverRetireInbox');
     assert(/addParents=\$\{encodeURIComponent\(home\)\}&removeParents=\$\{encodeURIComponent\(folderId\)\}/.test(retire) && /JSON\.stringify\(\{ trashed: true \}\)/.test(retire),
@@ -1943,8 +1940,25 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     const known2 = tripsyFlyoverKnownSources({ stops: [{ photos: [{ driveFileId: 'x', src: 'h:1', driveSrc: 'drive:p9' }] }] });
     assert(known2.has('h:1') && known2.has('drive:p9'), 'known sources include a Drive photo\'s content fingerprint AND its Drive id, so a re-uploaded copy is still one photo');
     assert(/if \(out\.full !== file && tripsyFlyoverPendingBlobs\.get\(pendingId\) === file\) tripsyFlyoverPendingBlobs\.set\(pendingId, out\.full\);/.test(html), 'a prepared photo releases its original bytes');
-    const dlg = extractFn('tripsyFlyoverDriveImportDialog');
-    assert(/data-drive-open/.test(dlg) && /data-drive-refresh/.test(dlg) && /data-drive-go/.test(dlg) && /<option value="auto"\$\{/.test(dlg) && /Photos and Videos/.test(dlg), 'the dialog links the folder, explains the Drive app steps, counts what is new, and offers by-date or one destination');
+    // ---- No Drive button by default: the pick itself is routed ("Do not show the import from
+    // drive button by default. Instead, when the user selects add photos, automatically route
+    // that to drive if the number of photos is large or there is a video … display a button on
+    // the flyover view that says 'Finish Upload'," 2026-10-25) ----
+    const src = extractFn('tripsyFlyoverAddSourceDialog');
+    assert(/data-src-photos/.test(src) && /data-src-drive/.test(src) && /onclick = \(\) => \{ close\(\); onPhotos\(\); \};/.test(src) && /onclick = \(\) => \{ close\(\); onDrive\(\); \};/.test(src),
+      'the source question offers A few photos / Many or a video, each handler run synchronously in its tap');
+    assert(/if \(own\) own\.onclick = \(\) => askSource\(id, \(\) => tripsyFlyoverPickMedia\(onPicked/.test(setup) && /tripPhotosBtn\.onclick = \(\) => askSource\('auto', \(\) => tripsyFlyoverPickMedia\(sortTripPhotos/.test(setup),
+      'both add buttons ask first; the card remembers its destination, the page-level button files by date');
+    eval(extractFn('tripsyFlyoverLastPickCrashed'));
+    assert(tripsyFlyoverLastPickCrashed({ openedAt: 1 }) && !tripsyFlyoverLastPickCrashed({ openedAt: 1, receivedAt: 2 }) && !tripsyFlyoverLastPickCrashed({ openedAt: 1, cancelledAt: 2 }) && !tripsyFlyoverLastPickCrashed({ openedAt: 1, kind: 'drive' }) && !tripsyFlyoverLastPickCrashed(null),
+      'a pick that never came back (no files, no cancel) is a crash; a cancel, an arrival or a Drive import is not');
+    assert(/if \(tripsyFlyoverLastPickCrashed\(tripsyFlyoverIntakeLoad\(\)\)\) \{[\s\S]*handOffToDrive\(dest, openPicker\);\s*return;/.test(setup), 'after a crashed pick the next one goes through Drive without asking');
+    assert(/record = \{ \.\.\.record, inboxFolderId: folderId, inboxDest: dest \|\| 'auto', inboxPendingAt: new Date\(\)\.toISOString\(\) \};\s*save\(\); render\(\);/.test(setup) && /\$\{record\.inboxPendingAt \? `<button class="btn primary" data-flyover-finish-upload/.test(setup),
+      'the hand-off remembers the destination and the page shows Finish Upload until the import clears it');
+    assert(/finishBtn\.onclick = async \(\) => \{[\s\S]*const fresh = tripsyFlyoverDriveNewFiles\(files, record\);[\s\S]*runDriveImport\(fresh, record\.inboxDest \|\| 'auto', folderId\);/.test(setup), 'Finish Upload imports everything new straight into the remembered destination');
+    assert(/if \(prevRecord && prevRecord\.inboxPendingAt\) \{ rec\.inboxPendingAt = prevRecord\.inboxPendingAt; rec\.inboxDest = prevRecord\.inboxDest \|\| 'auto'; \}/.test(html), 'a rebuild keeps a pending hand-off');
+    const hand = extractFn('tripsyFlyoverDriveHandoffDialog');
+    assert(/data-drive-open/.test(hand) && /Photos and Videos/.test(hand) && /Finish Upload/.test(hand) && /data-handoff-picker/.test(hand), 'the hand-off dialog links the folder, gives the Drive app steps, names Finish Upload, and offers the Photos picker instead');
   }
 
   // ---- A storm plotted on the map ("for the portion of the trip that is in Japan, can you find

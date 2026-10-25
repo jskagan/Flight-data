@@ -18908,6 +18908,7 @@ async function tripsyFlyoverBuild(trip, prevRecord, opts = {}) {
   if (prevRecord && prevRecord.completedAt) rec.completedAt = prevRecord.completedAt;
   if (prevRecord && prevRecord.music) rec.music = prevRecord.music;
   if (prevRecord && prevRecord.inboxFolderId) rec.inboxFolderId = prevRecord.inboxFolderId;
+  if (prevRecord && prevRecord.inboxPendingAt) { rec.inboxPendingAt = prevRecord.inboxPendingAt; rec.inboxDest = prevRecord.inboxDest || 'auto'; }
   return tripsyFlyoverApplyAirportCities(rec).record;
 }
 
@@ -19718,7 +19719,7 @@ async function showTripsyFlyover(tripKey) {
         ${playable} destination${playable === 1 ? '' : 's'} on the map.${isOwner ? ' Add photos to each one — they play as a slideshow when the trip arrives there.' : ''}
         ${isOwner ? `<button class="btn" data-flyover-edit-dests style="font-size:12px; margin-left:6px;" title="Rename, reorder, add, remove or rebuild the destinations">✏️ Edit destinations</button>
         <button class="btn" data-flyover-add-trip-photos style="font-size:12px; margin-left:6px;" title="Pick the trip's photos in one go — each is filed under the destination whose dates cover the day it was taken (its own date and location where the photo carries them)">📷 Add trip photos</button>
-        <button class="btn" data-flyover-drive-import style="font-size:12px; margin-left:6px;" title="Upload the trip's photos to a Drive folder with the Google Drive app (no limit on how many at once), then import them from here">📁 Import from Drive folder</button>` : ''}
+        ${record.inboxPendingAt ? `<button class="btn primary" data-flyover-finish-upload style="font-size:12px; margin-left:6px;" title="Bring in the photos and videos you uploaded to the Drive folder">⬆️ Finish Upload</button>` : ''}` : ''}
         ${completeHtml}
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; font-size:13px;">
@@ -19788,8 +19789,7 @@ async function showTripsyFlyover(tripKey) {
               const failedIds = photos.filter(p => tripsyFlyoverPhotoIsPending(p.driveFileId) && tripsyFlyoverFailedUploads.has(p.driveFileId)).map(p => p.driveFileId);
               return `<span style="font-size:12px; color:${u.failed ? '#E0A33A' : 'var(--muted)'}; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">${u.uploading ? `⬆️ Uploading ${u.uploading} photo${u.uploading === 1 ? '' : 's'} in the background — you can use the rest of the app.` : ''}${u.failed ? ` ⚠️ ${u.failed} upload${u.failed === 1 ? '' : 's'} failed.${isOwner ? failedIds.map(fid => ` <button class="btn" data-flyover-retry-upload="${esc(fid)}" style="font-size:11px; padding:2px 8px;">Retry</button>`).join('') : ''}` : ''}</span>`; })()}
             ${isOwner ? `
-              <button class="btn" data-flyover-add-own style="font-size:12px;" title="A FEW photos or videos from your library (Albums → Shared Albums) or the camera. iOS converts every picked item before the app gets any — a big pick with videos stalls or crashes the app, so for more than about 30 at once use From Drive folder">＋ Photos & videos</button>
-              <button class="btn" data-flyover-card-drive-import="${esc(s.id)}" style="font-size:12px;" title="Many photos and videos at once: upload them to a Drive folder with the Google Drive app, then import them straight into this destination">📁 From Drive folder</button>
+              <button class="btn" data-flyover-add-own style="font-size:12px;" title="Photos and videos from your library (Albums → Shared Albums) or the camera. A few go straight in; many, or a video, go through Drive">＋ Photos & videos</button>
               <button class="btn" data-flyover-add-suggested style="font-size:12px;">🔍 Suggested photos</button>` : ''}`}
           </div>
           ${isOwner && photos.length && tripsyFlyoverStopVisited(s, todayKey) ? `
@@ -19820,7 +19820,7 @@ async function showTripsyFlyover(tripKey) {
     // Add trip photos: one pick for the whole trip, each photo filed under the destination
     // whose dates cover the day it was taken (2026-10-25; tripsyFlyoverRoutePhoto).
     const tripPhotosBtn = body.querySelector('[data-flyover-add-trip-photos]');
-    if (tripPhotosBtn) tripPhotosBtn.onclick = () => tripsyFlyoverPickMedia(async files => {
+    const sortTripPhotos = async files => {
       if (!files || !files.length || closed) return;
       setStatus(`Reading the dates of ${files.length} photo${files.length === 1 ? '' : 's'}…`);
       const byStop = new Map();
@@ -19848,30 +19848,56 @@ async function showTripsyFlyover(tripKey) {
       setStatus(msg);
       toast(msg, added ? undefined : 'error');
       render();
-    }, { kind: 'all', onWaiting: setStatus, onCancel: () => setStatus('') });
-    // Import from a Drive folder ("Is it possible to copy the photos into a temporary drive
-    // folder and then import the photos into the app in the background from the drive
-    // folder?", 2026-10-25): the Google Drive app uploads any number of photos natively, so
-    // the page never meets the iOS picker's export. The folder is this trip's own inbox; the
-    // listing's own capture time / GPS routes each photo; each is downloaded, staged like a
-    // picked photo and uploaded resized in the background. Resume-safe: every imported file is
-    // stamped `src: 'drive:<id>'`, so a re-run takes only what is new.
-    // Opened from the page header (files by date) or from a destination's own card
-    // (`defaultDest` = that stop, 2026-10-25 -- the big-batch route sits where the picker is).
-    const openDriveImport = async (defaultDest = 'auto') => {
-      if (driveImportRunning) { toast('An import from Drive is already running — see the status line.'); return; }
-      setStatus('Opening the Drive inbox folder…');
+    };
+    if (tripPhotosBtn) tripPhotosBtn.onclick = () => askSource('auto', () => tripsyFlyoverPickMedia(sortTripPhotos, { kind: 'all', onWaiting: setStatus, onCancel: () => setStatus('') }));
+    // Adding photos: a FEW go through the iOS picker; MANY, or any video, go through Drive
+    // ("when the user selects add photos, automatically route that to drive if the number of
+    // photos is large or there is a video … display a button on the flyover view that says
+    // 'Finish Upload'," 2026-10-25). The page cannot see a pick's size before iOS has
+    // prepared every item -- that preparation is the step that stalls or crashes on 100+
+    // items with a video, before a single file reaches the page -- so the one thing it can
+    // decide on is asked up front (tripsyFlyoverAddSourceDialog), and a pick that never came
+    // back last time (tripsyFlyoverLastPickCrashed) is routed to Drive without asking. The
+    // Drive route hands the owner the trip's inbox folder (the Google Drive app uploads any
+    // number natively), remembers which destination the pick was for (`inboxDest`,
+    // `inboxPendingAt`), and the page shows ⬆️ Finish Upload until the import has run.
+    const askSource = (dest, openPicker) => {
+      if (tripsyFlyoverLastPickCrashed(tripsyFlyoverIntakeLoad())) {
+        toast('Your last pick never came back from Photos, so this one goes through Drive.');
+        handOffToDrive(dest, openPicker);
+        return;
+      }
+      tripsyFlyoverAddSourceDialog({ onPhotos: openPicker, onDrive: () => handOffToDrive(dest, openPicker) });
+    };
+    const handOffToDrive = async (dest, openPicker) => {
+      setStatus('Opening the Drive folder…');
       let folderId;
       try { folderId = await tripsyFlyoverInboxFolder(trip, record); } catch (e) { console.error(e); setStatus(''); toast('Couldn’t open the Drive folder — check the connection and try again.', 'error'); return; }
       if (closed) return;
-      if (folderId !== record.inboxFolderId) { record = { ...record, inboxFolderId: folderId }; save(); }
+      record = { ...record, inboxFolderId: folderId, inboxDest: dest || 'auto', inboxPendingAt: new Date().toISOString() };
+      save(); render();
       setStatus('');
-      const choice = await tripsyFlyoverDriveImportDialog(trip, record, folderId, defaultDest);
-      if (!choice || closed) return;
-      runDriveImport(choice.files, choice.dest, folderId);
+      tripsyFlyoverDriveHandoffDialog(tripsyFlyoverDriveFolderUrl(folderId), TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'), { onPickerInstead: openPicker });
     };
-    const driveBtn = body.querySelector('[data-flyover-drive-import]');
-    if (driveBtn) driveBtn.onclick = () => openDriveImport('auto');
+    // Finish Upload: everything new in the inbox folder is imported straight away, into the
+    // destination the pick was started from (or by date, from the page-level button).
+    const finishBtn = body.querySelector('[data-flyover-finish-upload]');
+    if (finishBtn) finishBtn.onclick = async () => {
+      if (driveImportRunning) { toast('An import from Drive is already running — see the status line.'); return; }
+      setStatus('Checking the Drive folder…');
+      let folderId, files;
+      try { folderId = await tripsyFlyoverInboxFolder(trip, record); files = await tripsyFlyoverListInbox(folderId); }
+      catch (e) { console.error(e); setStatus(''); toast('Couldn’t read the Drive folder — check the connection and try again.', 'error'); return; }
+      if (closed) return;
+      if (folderId !== record.inboxFolderId) { record = { ...record, inboxFolderId: folderId }; save(); }
+      const fresh = tripsyFlyoverDriveNewFiles(files, record);
+      setStatus('');
+      if (!fresh.length) {
+        tripsyFlyoverDriveHandoffDialog(tripsyFlyoverDriveFolderUrl(folderId), TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'), { note: files.length ? `Everything in the folder (${files.length}) is already on the fly-over.` : 'Nothing has arrived in the folder yet — upload the photos and videos with the Google Drive app first, then press Finish Upload again.' });
+        return;
+      }
+      runDriveImport(fresh, record.inboxDest || 'auto', folderId);
+    };
     const runDriveImport = async (files, dest, folderId) => {
       driveImportRunning = true;
       const total = files.length;
@@ -19938,7 +19964,7 @@ async function showTripsyFlyover(tripKey) {
           if (!landed) { setStatus(`Imported ${taken} from Drive. Some uploads are still running — the Drive folder is kept until the next import.`); return; }
           setStatus('Clearing the Drive folder…');
           await tripsyFlyoverRetireInbox(folderId, videoIds);
-          record = { ...record, inboxFolderId: '' };
+          record = { ...record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' };
           save();
           setStatus(`Imported ${taken} from Drive, and the Drive folder has been moved to the trash.`);
           toast('Drive folder cleared — it is in Drive’s trash for 30 days.');
@@ -20056,9 +20082,7 @@ async function showTripsyFlyover(tripKey) {
         } else if (r.skipped && !closed) toast(`All ${r.skipped} of those are already on this fly-over.`);
       };
       const own = card.querySelector('[data-flyover-add-own]');
-      if (own) own.onclick = () => tripsyFlyoverPickMedia(onPicked, { kind: 'all', onWaiting: setStatus, onCancel: () => setStatus('') });
-      const cardDrive = card.querySelector('[data-flyover-card-drive-import]');
-      if (cardDrive) cardDrive.onclick = () => openDriveImport(id);
+      if (own) own.onclick = () => askSource(id, () => tripsyFlyoverPickMedia(onPicked, { kind: 'all', onWaiting: setStatus, onCancel: () => setStatus('') }));
       // A failed background upload: Retry re-queues it from the bytes still held.
       card.querySelectorAll('[data-flyover-retry-upload]').forEach(b => b.onclick = () => {
         tripsyFlyoverQueueUpload(trip.key, b.getAttribute('data-flyover-retry-upload'));
@@ -20641,60 +20665,67 @@ async function tripsyFlyoverRetireInbox(folderId, videoIds) {
   return true;
 }
 function tripsyFlyoverDriveFolderUrl(folderId) { return `https://drive.google.com/drive/folders/${encodeURIComponent(folderId)}`; }
-// The import dialog: the folder, how to fill it, what is in it, where to file it.
-// Resolves {files, dest} ('auto' = by each photo's own date / place) or null.
-function tripsyFlyoverDriveImportDialog(trip, record, folderId, defaultDest = 'auto') {
-  return new Promise(resolve => {
-    let ov = document.getElementById('tripsy-flyover-drive-overlay');
-    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-drive-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
-    ov.style.zIndex = '2147483070';
-    const stops = (record.stops || []).filter(s => !s.removed && s.kind !== 'transit' && s.lat != null);
-    const url = tripsyFlyoverDriveFolderUrl(folderId);
-    const folderName = TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip');
-    let files = null, listing = true, err = '';
-    const done = val => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(val); };
-    const paint = () => {
-      const fresh = files ? tripsyFlyoverDriveNewFiles(files, record) : [];
-      const already = files ? files.length - fresh.length : 0;
-      ov.innerHTML = `
-        <div class="tw-modal-paper" style="max-width:560px;">
-          <h2 style="margin:0 0 6px; font-size:17px;">📁 Import from a Drive folder</h2>
-          <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:10px;">
-            Put the trip's photos and videos in this Drive folder, then import them here. The Google Drive app takes any number in one go, so this avoids the picker's limit.
-            <ol style="margin:8px 0 0 18px; padding:0;">
-              <li>Open the folder: <a href="${esc(url)}" target="_blank" rel="noopener" data-drive-open style="color:var(--accent); word-break:break-all;">${esc(folderName)}</a></li>
-              <li>In the Google Drive app press <strong>＋</strong> → <strong>Upload</strong> → <strong>Photos and Videos</strong>, select everything for this trip, and let it finish uploading.</li>
-              <li>Come back here and press <strong>Import</strong>. Files already imported are skipped, so you can run it again any time.</li>
-            </ol>
-          </div>
-          <div data-drive-count style="font-size:13px; margin-bottom:10px;">${listing ? 'Checking the folder…' : err ? `<span style="color:#E0A33A;">${esc(err)}</span>` : files && files.length ? `<strong>${fresh.length}</strong> new ${fresh.length === 1 ? 'file' : 'files'} in the folder${already ? ` (${already} already imported)` : ''}.` : 'The folder is empty so far.'}</div>
-          <label style="display:block; font-size:13px; margin-bottom:12px;">File each photo under
-            <select data-drive-dest style="margin-left:6px; max-width:100%;">
-              <option value="auto"${defaultDest === 'auto' || !stops.some(s => s.id === defaultDest) ? ' selected' : ''}>the destination matching the day it was taken (recommended)</option>
-              ${stops.map(s => `<option value="${esc(s.id)}"${s.id === defaultDest ? ' selected' : ''}>${esc(s.label || 'destination')}</option>`).join('')}
-            </select>
-          </label>
-          <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;">
-            <button class="btn" data-drive-refresh>↻ Check again</button>
-            <button class="btn" data-drive-cancel>Cancel</button>
-            <button class="btn primary" data-drive-go ${fresh.length ? '' : 'disabled'}>▶ Import ${fresh.length || ''}</button>
-          </div>
-        </div>`;
-      ov.querySelector('[data-drive-cancel]').onclick = () => done(null);
-      ov.querySelector('[data-drive-refresh]').onclick = () => { listing = true; err = ''; paint(); load(); };
-      ov.querySelector('[data-drive-go]').onclick = () => { if (!fresh.length) return; done({ files: fresh, dest: ov.querySelector('[data-drive-dest]').value || 'auto' }); };
-    };
-    const load = async () => {
-      try { files = await tripsyFlyoverListInbox(folderId); err = ''; }
-      catch (e) { console.error(e); files = files || []; err = 'Couldn’t read the folder — check the connection and press Check again.'; }
-      listing = false;
-      if (ov.style.display !== 'none') paint();
-    };
-    ov.style.display = 'flex';
-    paint();
-    load();
-    ov.onclick = e => { if (e.target === ov) done(null); };
-  });
+// The source question in front of a pick ("automatically route that to drive if the number
+// of photos is large or there is a video," 2026-10-25). The page cannot count a pick before
+// iOS has prepared every item -- the step that stalls or crashes on a big pick with a video,
+// before any file reaches the page -- so the decision is asked up front, in one tap. BOTH
+// handlers run synchronously inside the button's own click: the Photos option must open the
+// system picker within a user tap (the iOS file-input rule).
+function tripsyFlyoverAddSourceDialog({ onPhotos, onDrive }) {
+  let ov = document.getElementById('tripsy-flyover-source-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-source-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483070';
+  ov.innerHTML = `
+    <div class="tw-modal-paper" style="max-width:460px;">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+        <h2 style="margin:0; font-size:17px; flex:1;">How many are you adding?</h2>
+        <button class="tripsy-close-x" data-src-cancel aria-label="Cancel">✕</button>
+      </div>
+      <div style="display:grid; gap:10px;">
+        <button class="btn" data-src-photos style="text-align:left; padding:12px 14px; white-space:normal;"><strong>📷 A few photos</strong><br><span style="font-size:12px; color:var(--muted);">Up to about 30 — picked from Photos and added straight away.</span></button>
+        <button class="btn primary" data-src-drive style="text-align:left; padding:12px 14px; white-space:normal;"><strong>📁 Many photos, or a video</strong><br><span style="font-size:12px; opacity:0.85;">Goes through Drive: you upload them with the Google Drive app (no limit), then press Finish Upload here. A big pick through Photos stalls or crashes the app.</span></button>
+      </div>
+    </div>`;
+  ov.style.display = 'flex';
+  const close = () => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; };
+  ov.querySelector('[data-src-cancel]').onclick = close;
+  ov.querySelector('[data-src-photos]').onclick = () => { close(); onPhotos(); };
+  ov.querySelector('[data-src-drive]').onclick = () => { close(); onDrive(); };
+  ov.onclick = e => { if (e.target === ov) close(); };
+}
+// A pick that never came back: the picker was opened and neither files nor a cancel arrived
+// (iOS's export stalled or the page was killed) -- the next pick goes through Drive. Pure.
+function tripsyFlyoverLastPickCrashed(log) {
+  return !!(log && log.openedAt && !log.receivedAt && !log.cancelledAt && log.kind !== 'drive');
+}
+// The hand-off to Drive: the folder link (opens in the Google Drive app on the iPad), the
+// steps, and the reminder that ⬆️ Finish Upload on the fly-over page brings them in.
+function tripsyFlyoverDriveHandoffDialog(url, folderName, { note = '', onPickerInstead = null } = {}) {
+  let ov = document.getElementById('tripsy-flyover-drive-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-drive-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483070';
+  ov.innerHTML = `
+    <div class="tw-modal-paper" style="max-width:560px;">
+      <h2 style="margin:0 0 6px; font-size:17px;">📁 Upload through Drive</h2>
+      ${note ? `<div style="font-size:13px; color:#E0A33A; margin-bottom:8px;">${esc(note)}</div>` : ''}
+      <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:12px;">
+        <ol style="margin:0 0 0 18px; padding:0;">
+          <li>Open the folder: <a href="${esc(url)}" target="_blank" rel="noopener" data-drive-open style="color:var(--accent); word-break:break-all;">${esc(folderName)}</a></li>
+          <li>In the Google Drive app press <strong>＋</strong> → <strong>Upload</strong> → <strong>Photos and Videos</strong>, select everything, and let Drive finish.</li>
+          <li>Come back and press <strong>⬆️ Finish Upload</strong> on the fly-over page. Files already imported are skipped, so pressing it again is safe.</li>
+        </ol>
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;">
+        ${onPickerInstead ? `<button class="btn" data-handoff-picker title="A few photos only">Use Photos instead</button>` : ''}
+        <button class="btn primary" data-handoff-close>Got it</button>
+      </div>
+    </div>`;
+  ov.style.display = 'flex';
+  const close = () => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; };
+  ov.querySelector('[data-handoff-close]').onclick = close;
+  const alt = ov.querySelector('[data-handoff-picker]');
+  if (alt) alt.onclick = () => { close(); onPickerInstead(); };
+  ov.onclick = e => { if (e.target === ov) close(); };
 }
 const TRIPSY_FLYOVER_ROUTE_GPS_KM = 100;
 // The destination a photo belongs to: the shown, non-transit stop (play order) whose window
