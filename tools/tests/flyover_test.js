@@ -505,16 +505,25 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   const setup = extractFn('showTripsyFlyover');
   assert(/data-flyover-slideshow/.test(setup) && /data-flyover-preview/.test(setup) && /tripsyFlyoverSlideshowSummary\(s\)/.test(setup),
     'each destination shows how its photos play, with Edit slideshow and Preview buttons');
-  // "Change the name of the slideshow options button to edit slideshow, and put the button to
-  // the left of the button showing the method of transport for that location" (2026-10-22).
-  assert(/<div data-flyover-controls [^>]*>\s*\$\{isOwner && !s\.removed && photos\.length && tripsyFlyoverStopVisited\(s, todayKey\) \? `<button class="btn" data-flyover-slideshow [^`]*>🎞 Edit slideshow<\/button>` : ''\}\s*\$\{legHtml\}/.test(setup)
-    && !/Slideshow options<\/button>/.test(setup),
-    'the card\'s "Edit slideshow" button sits directly left of the transport drop-down on the destination row');
+  // "Change the name of the slideshow options button to edit slideshow" (2026-10-22); its place
+  // beside the transport drop-down was superseded by the photo-buttons line (2026-10-25, below).
+  assert(/>🎞 Edit slideshow<\/button>/.test(setup) && !/Slideshow options<\/button>/.test(setup), 'the slideshow button reads "Edit slideshow"');
+  // "The third line should be three buttons: add photos, then edit photos, then edit slideshow.
+  // Move these buttons from their other locations on the card" (2026-10-25).
+  const pbM = /<div data-flyover-photo-buttons [^>]*>([\s\S]*?)<\/div>` : ''\}/.exec(setup);
+  const pb = pbM ? pbM[1] : '';
+  assert(pbM && pb.indexOf('data-flyover-add-own') >= 0 && pb.indexOf('data-flyover-add-own') < pb.indexOf('data-flyover-edit-photos') && pb.indexOf('data-flyover-edit-photos') < pb.indexOf('data-flyover-slideshow')
+    && />＋ Add photos<\/button>/.test(pb), 'THE ASK: line 3 is Add photos, then Edit photos, then Edit slideshow');
+  assert(['data-flyover-add-own', 'data-flyover-edit-photos', 'data-flyover-slideshow'].every(k => setup.split(k + ' style').length === 2),
+    'THE ASK: each of the three buttons appears once on the card — moved, not copied');
+  const ctl2 = (/<div data-flyover-controls [^>]*>([\s\S]*?)<\/div>/.exec(setup) || [])[1] || '';
+  assert(!/data-flyover-slideshow/.test(ctl2) && setup.indexOf('data-flyover-controls') < setup.indexOf('data-flyover-photo-buttons') && setup.indexOf('data-flyover-photo-buttons') < setup.indexOf('data-flyover-thumb='),
+    'line 2 no longer holds Edit slideshow, and the buttons line sits between line 2 and the page thumbnails');
   // "Remove the suggested photos button. Have a button that says edit photos. When the user hits
   // it, show a page with thumbnails of all photos for that destination. When the user selects
   // one, show a large image with the buttons keep and delete" (2026-10-25).
   assert(!/data-flyover-add-suggested|Suggested photos<\/button>/.test(setup), 'THE ASK: the destination card has no Suggested photos button');
-  assert(/\$\{photos\.length \? `<button class="btn" data-flyover-edit-photos [^`]*>✏️ Edit photos<\/button>` : ''\}/.test(setup)
+  assert(/\$\{photos\.length \? `<button class="btn" data-flyover-edit-photos [^`]*>✏️ Edit photos<\/button>/.test(setup)
     && /editPhotos\.onclick = \(\) => tripsyFlyoverEditPhotosPage\(stop, \{\s*onDelete: photoId => removePhotoFromRecord\(id, photoId\),/.test(setup),
     'THE ASK: an Edit photos button (when the stop has photos) opens the photos page, and its Delete takes the photo off through the ordinary remove-and-save path');
   const ep = extractFn('tripsyFlyoverEditPhotosPage');

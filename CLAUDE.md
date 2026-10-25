@@ -4205,13 +4205,20 @@ WebView's support for recording is unproven.
       name to delete destination)," 2026-10-25): line 1 (`data-flyover-headline`, 18px, the name
       20px bold) is the stop number, the location, the lodging names (`s.names`) and then
       `tripsyFlyoverDatesLabel(s)` (lodging before dates: "Swap the location of the date and lodging
-      in the card title," same day), read-only for everyone; line 2 (`data-flyover-controls`) is 🎞 Edit
-      slideshow (kept left of the transport, per 10-22), the transport drop-down (+ "via"
-      layovers), the editable name input (owner), the music button — always "🎵 Change Music"
+      in the card title," same day), read-only for everyone; line 2 (`data-flyover-controls`) is the
+      transport drop-down (+ "via" layovers), the editable name input (owner), the music button — always "🎵 Change Music"
       ("Change Music from here button to say 'Change Music'," same day), with a destination's own
       track named in small grey text beside it (`data-flyover-stop-music-name`, ellipsised); the
       carry-on wording is in its tooltip and the old separate music row is gone — and **Delete destination** (the old Remove; still a soft
       remove with Restore). A viewer's line 2 has the transport glyph and the music line only.
+      **Line 3 is the photo buttons** (`data-flyover-photo-buttons`; "The third line should be
+      three buttons: add photos, then edit photos, then edit slideshow. Move these buttons from
+      their other locations on the card," same day): **＋ Add photos** (the old "＋ Photos &
+      videos", same `data-flyover-add-own` wiring, videos still accepted), **✏️ Edit photos** and
+      **🎞 Edit slideshow** — moved, each appears once on the card (Edit slideshow left line 2,
+      superseding the 10-22 "left of the transport" placement). Owner-only and only once the
+      destination is visited, like before; the two edit buttons need photos. The page thumbnails,
+      upload status and the slideshow summary with ▶ Preview follow below it.
       Airport-transfer cards are unchanged. **🔍 Suggested photos is gone from the card; ✏️ Edit
       photos replaces it** ("Remove the suggested photos button. Have a button that says edit
       photos. When the user hits it, show a page with thumbnails of all photos for that
