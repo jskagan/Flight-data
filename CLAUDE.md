@@ -5030,6 +5030,21 @@ WebView's support for recording is unproven.
     the link had opened Drive's WEBSITE; the screenshot disproved it and the auto-open is back.)
     The 94-photo Da Nang import earlier that day went through the Drive app, which is the
     evidence the route works once the files are actually uploaded.
+    **"Complete" needs TWO quiet minutes, and the slot says "importing" while an import runs**
+    ("Nothing happens when I hit the import now button. And if the upload is still happening,
+    the app shouldn't say the upload is complete and give me the import now button,"
+    2026-10-26). On that evening's slow connection the Drive app landed a photo every 30–60 s,
+    so the 30 s settle window called an ordinary gap the end; `TRIPSY_FLYOVER_INBOX_SETTLE_MS`
+    is 120000 now and the prompt reads "Nothing new has reached the Drive folder for 2 minutes —
+    N new files. Import now?" (a later arrival still drops it back to `uploading`). And the tap
+    that "did nothing" had been refused because an import was ALREADY running (the 27-file one
+    the status line was reporting, file by file) — `driveStatusHtml` now renders an `importing`
+    phase (⏳, no button) whenever `driveImportRunning`, painted the moment `runDriveImport`
+    starts, and the refusal toast points at the status line. Note the import downloads each
+    FULL original (3–8 MB HEICs) before resizing, so on a slow link 27 files is a quarter of an
+    hour with the page open; it saves after the first and every tenth photo. Also learned that
+    evening: the two "vanished" originals of IMG_4022/4024 were trashed by the import's own
+    duplicate rule, because the owner had uploaded both twice ("2 already here" on the receipt).
     **A failed background upload NAMES its reason on the card, and an un-resizable original
     goes up resumably** ("The app says the upload failed," 2026-10-26 — the first Drive import
     of the evening WORKED (seven HEICs pulled from the folder and routed by date to Fukuoka and

@@ -2157,9 +2157,15 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/inboxWatch = \{ timer: null, state: null, phase: 'waiting'/.test(setup) && /inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);/.test(setup)
       && /if \(cancel\) cancel\.onclick = \(\) => \{ if \(closed\) return; record = \{ \.\.\.record, inboxDest: '', inboxPendingAt: '' \}; save\(\); stopInboxWatch\(\); render\(\); \};/.test(setup),
       'the watcher starts waiting, passes the count to the phase, and Cancel ends the hand-off');
+    // "if the upload is still happening, the app shouldn't say the upload is complete" and
+    // "Nothing happens when I hit the import now button" (2026-10-26).
+    assert(TRIPSY_FLYOVER_INBOX_SETTLE_MS === 120000, 'THE ASK: two quiet minutes before the folder counts as complete (photos landed 30-60 s apart on a slow connection)');
+    const imp = tripsyFlyoverDriveStatusHtml('importing', 0);
+    assert(/data-flyover-drive-phase="importing"/.test(imp) && /Importing from Drive/.test(imp) && !/data-drive-import-now/.test(imp) && /driveImportRunning \? tripsyFlyoverDriveStatusHtml\('importing', 0\)/.test(setup) && /driveImportRunning = true;\s*stopInboxWatch\(\);[^\n]*\n\s*paintDriveStatus\(\);/.test(setup),
+      'THE ASK: while an import runs the slot says so with no button, repainted the moment the import starts');
     const up = tripsyFlyoverDriveStatusHtml('uploading', 0), done = tripsyFlyoverDriveStatusHtml('complete', 54), lat = tripsyFlyoverDriveStatusHtml('later', 54);
     assert(/class="tripsy-menu-flash"/.test(up) && /Uploading Photos to Drive/.test(up) && !/\d/.test(up.replace(/<[^>]*>/g, '')), 'the uploading message flashes and carries no count');
-    assert(/Drive upload complete — 54 new files\. Import now\?/.test(done) && /data-drive-import-now/.test(done) && /data-drive-later/.test(done) && !/tripsy-menu-flash/.test(done), 'the completion prompt replaces it, with Import now / Later, not flashing');
+    assert(/Nothing new has reached the Drive folder for 2 minutes — 54 new files\. Import now\?/.test(done) && /data-drive-import-now/.test(done) && /data-drive-later/.test(done) && !/tripsy-menu-flash/.test(done), 'the completion prompt replaces it, with Import now / Later, not flashing');
     assert(/54 new files waiting in Drive/.test(lat) && /data-drive-import-now/.test(lat) && !/data-drive-later/.test(lat), 'after Later a quiet reminder with an Import button stands in its place (the only way in, now that Finish Upload is gone)');
     assert(!/tripsyFlyoverFinishUploadLabel|announceInboxReady|tripsyConfirmDialog\(`Drive upload looks complete/.test(html), 'the live-count label and the completion dialog are gone');
     assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const freshFiles = tripsyFlyoverDriveNewFiles\(files, record\);\s*const fresh = freshFiles\.length;[\s\S]*?const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);[\s\S]*inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);\s*paintDriveStatus\(\);/.test(setup),

@@ -19356,7 +19356,10 @@ async function showTripsyFlyover(tripKey) {
   const stopInboxWatch = () => { if (inboxWatch) { if (inboxWatch.timer) clearTimeout(inboxWatch.timer); inboxWatch = null; } };
   // The message slot in the header: flashing "Uploading Photos to Drive…" until the count
   // settles, then the completion prompt in its place (no live count, no separate button).
-  const driveStatusHtml = () => tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'waiting', inboxWatch ? inboxWatch.count : 0, record && record.inboxFolderId ? tripsyFlyoverDriveFolderUrl(record.inboxFolderId) : '');
+  // While an import runs the slot says so, with no button ("Nothing happens when I hit the
+  // import now button," 2026-10-26 -- it was ignoring the tap because an import was already
+  // running, which only the status line said).
+  const driveStatusHtml = () => driveImportRunning ? tripsyFlyoverDriveStatusHtml('importing', 0) : tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'waiting', inboxWatch ? inboxWatch.count : 0, record && record.inboxFolderId ? tripsyFlyoverDriveFolderUrl(record.inboxFolderId) : '');
   const wireDriveStatus = () => {
     const go = body.querySelector('[data-drive-import-now]');
     if (go) go.onclick = () => { if (!closed && runFinishUpload && !driveImportRunning) runFinishUpload(); };
@@ -19899,7 +19902,7 @@ async function showTripsyFlyover(tripKey) {
     // (the card the pick was started from is the fallback). Run by the status slot's Import
     // button ("Drop the finish upload button," 2026-10-25 -- there is no separate button).
     runFinishUpload = async () => {
-      if (driveImportRunning) { toast('An import from Drive is already running — see the status line.'); return; }
+      if (driveImportRunning) { toast('An import from Drive is already running — see the status line at the top of the page.'); paintDriveStatus(); return; }
       setStatus('Checking the Drive folder…');
       let folderId, files;
       try { folderId = await tripsyFlyoverInboxFolder(trip, record); files = await tripsyFlyoverListInbox(folderId); }
@@ -19918,6 +19921,7 @@ async function showTripsyFlyover(tripKey) {
     const runDriveImport = async (files, dest, folderId) => {
       driveImportRunning = true;
       stopInboxWatch(); // the import itself is what the watcher was waiting for
+      paintDriveStatus();
       const total = files.length;
       let taken = 0, unmatched = 0, failed = 0, dupes = 0;
       const pendingIds = [], videoIds = [];
@@ -20808,7 +20812,10 @@ function tripsyFlyoverLastPickCrashed(log) {
 // TRIPSY_FLYOVER_INBOX_SETTLE_MS; each settled count is announced once (a later batch that
 // grows the count settles and is announced again). Pure: the state is the watcher's own.
 const TRIPSY_FLYOVER_INBOX_POLL_MS = 15000;
-const TRIPSY_FLYOVER_INBOX_SETTLE_MS = 30000;
+// Two minutes with no new file before "complete" ("if the upload is still happening, the app
+// shouldn't say the upload is complete," 2026-10-26 -- on a slow connection photos landed
+// 30-60 s apart, so the old 30 s window called an ordinary gap the end).
+const TRIPSY_FLYOVER_INBOX_SETTLE_MS = 120000;
 // `newestMs` is when the newest of those files reached Drive (its `createdTime`): files that
 // all landed longer ago than the settle window are complete AT ONCE, so reopening the page
 // on a folder uploaded hours ago shows the prompt straight away instead of flashing
@@ -20842,7 +20849,8 @@ function tripsyFlyoverDrivePhase(phase, step, count) {
 function tripsyFlyoverDriveStatusHtml(phase, count, folderUrl = '') {
   const n = count || 0, files = `${n} new file${n === 1 ? '' : 's'}`;
   if (phase === 'waiting') return `<span data-flyover-drive-phase="waiting" style="font-size:12px; color:var(--muted);">📁 Waiting for photos in the Drive folder.</span>${folderUrl ? ` <a class="btn" href="${esc(folderUrl)}" target="_blank" rel="noopener" data-drive-open-folder style="font-size:12px; margin-left:4px; text-decoration:none;">Open folder</a>` : ''} <button class="btn" data-drive-cancel title="Stop waiting for a Drive upload" style="font-size:12px;">Cancel</button>`;
-  if (phase === 'complete') return `<span data-flyover-drive-phase="complete" style="font-size:12px; color:#3AA76D; font-weight:700;">✅ Drive upload complete — ${files}. Import now?</span> <button class="btn primary" data-drive-import-now style="font-size:12px; margin-left:4px;">Import now</button> <button class="btn" data-drive-later style="font-size:12px;">Later</button>`;
+  if (phase === 'importing') return `<span data-flyover-drive-phase="importing" style="font-size:12px; color:var(--muted);">⏳ Importing from Drive — see the status line above. More files that arrive meanwhile are picked up by the next import.</span>`;
+  if (phase === 'complete') return `<span data-flyover-drive-phase="complete" style="font-size:12px; color:#3AA76D; font-weight:700;">✅ Nothing new has reached the Drive folder for 2 minutes — ${files}. Import now?</span> <button class="btn primary" data-drive-import-now style="font-size:12px; margin-left:4px;">Import now</button> <button class="btn" data-drive-later style="font-size:12px;">Later</button>`;
   if (phase === 'later') return `<span data-flyover-drive-phase="later" style="font-size:12px; color:var(--muted);">${files} waiting in Drive.</span> <button class="btn" data-drive-import-now style="font-size:12px; margin-left:4px;">Import</button>`;
   return `<span class="tripsy-menu-flash" data-flyover-drive-phase="uploading" style="font-size:12px; color:#E0A020; font-weight:700;">⬆️ Uploading Photos to Drive…</span>`;
 }
