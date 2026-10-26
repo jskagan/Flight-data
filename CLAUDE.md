@@ -5030,6 +5030,22 @@ WebView's support for recording is unproven.
     the link had opened Drive's WEBSITE; the screenshot disproved it and the auto-open is back.)
     The 94-photo Da Nang import earlier that day went through the Drive app, which is the
     evidence the route works once the files are actually uploaded.
+    **A failed background upload NAMES its reason on the card, and an un-resizable original
+    goes up resumably** ("The app says the upload failed," 2026-10-26 — the first Drive import
+    of the evening WORKED (seven HEICs pulled from the folder and routed by date to Fukuoka and
+    Nakatsu) and then five of the app's own copy uploads failed, with nothing on the iPad to say
+    why). `tripsyFlyoverFailedUploadReasons` (pending id → message, set beside
+    `tripsyFlyoverFailedUploads` in both catch blocks of `tripsyFlyoverRunUpload`, cleared by
+    `tripsyFlyoverQueueUpload` on a retry) feeds the card's line — "⚠️ 5 uploads failed: <first
+    reason>" — via `tripsyFlyoverUploadFailureReason(e, blob)`, which also says when the
+    prepared copy is the ORIGINAL (a HEIC the WebView could not decode: "the photo could not be
+    resized — image/heic, 3418 KB sent as is"). That fallback is the prime suspect: the morning's
+    94 photos (4–6.5 MB originals) resized and uploaded fine, tonight's were HEIC, and an
+    original sent as is goes through the multipart body (base64, +37%) that Drive caps at 5 MB.
+    So the upload now keeps the prepared blob's real type and, past 4 MB, takes
+    `uploadBlobToDriveResumable`. Verified in Chromium: a 5 MB undecodable "HEIC" goes resumable
+    under `image/heic`; a failed small one shows "Drive upload failed (403): … (the photo could
+    not be resized — image/heic, 98 KB sent as is)" on the card with Retry.
     **An EMPTY folder WAITS quietly; only arriving files flash** ("Why is the app still
     flashing uploading photos?", 2026-10-26 — the live Singapore GP hand-off from 12:37 had an
     empty folder, and the slot flashed "Uploading Photos to Drive…" forever though nothing was

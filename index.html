@@ -19773,7 +19773,7 @@ async function showTripsyFlyover(tripKey) {
             ${isOwner && pageTiles.length > 1 ? `<span style="font-size:11px; color:var(--muted); flex-basis:100%;">Tap a photo to see it large. Drag a page onto another to move it there.</span>` : ''}
             ${(() => { const u = tripsyFlyoverUploadState(s); if (!u.uploading && !u.failed) return '';
               const failedIds = photos.filter(p => tripsyFlyoverPhotoIsPending(p.driveFileId) && tripsyFlyoverFailedUploads.has(p.driveFileId)).map(p => p.driveFileId);
-              return `<span style="font-size:12px; color:${u.failed ? '#E0A33A' : 'var(--muted)'}; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">${u.uploading ? `⬆️ Uploading ${u.uploading} photo${u.uploading === 1 ? '' : 's'} in the background — you can use the rest of the app.` : ''}${u.failed ? ` ⚠️ ${u.failed} upload${u.failed === 1 ? '' : 's'} failed.${isOwner ? failedIds.map(fid => ` <button class="btn" data-flyover-retry-upload="${esc(fid)}" style="font-size:11px; padding:2px 8px;">Retry</button>`).join('') : ''}` : ''}</span>`; })()}`}
+              return `<span style="font-size:12px; color:${u.failed ? '#E0A33A' : 'var(--muted)'}; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">${u.uploading ? `⬆️ Uploading ${u.uploading} photo${u.uploading === 1 ? '' : 's'} in the background — you can use the rest of the app.` : ''}${u.failed ? ` ⚠️ ${u.failed} upload${u.failed === 1 ? '' : 's'} failed${(() => { const why = failedIds.map(fid => tripsyFlyoverFailedUploadReasons.get(fid)).find(Boolean); return why ? `: ${esc(why)}` : ''; })()}.${isOwner ? failedIds.map(fid => ` <button class="btn" data-flyover-retry-upload="${esc(fid)}" style="font-size:11px; padding:2px 8px;">Retry</button>`).join('') : ''}` : ''}</span>`; })()}`}
           </div>
           ${isOwner && photos.length && tripsyFlyoverStopVisited(s, todayKey) ? `
             <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; font-size:12px; color:var(--muted);">
@@ -20389,6 +20389,14 @@ function tripsyFlyoverAskPlace(trip, stop) {
 const tripsyFlyoverPendingBlobs = new Map();   // pending id -> Blob (the picked file)
 const tripsyFlyoverUploadedIds = new Map();    // pending id -> Drive file id
 const tripsyFlyoverFailedUploads = new Set();  // pending ids whose upload failed (retryable)
+// WHY each one failed, for the card's "N uploads failed" line ("The app says the upload failed,"
+// 2026-10-26 -- on the iPad there is no console, so the reason has to be on the page).
+const tripsyFlyoverFailedUploadReasons = new Map();  // pending id -> short message
+function tripsyFlyoverUploadFailureReason(e, blob) {
+  const msg = String((e && e.message) || e || 'unknown error').replace(/\s+/g, ' ').trim().slice(0, 160);
+  const raw = blob && blob.type && !/^image\/jpeg$/i.test(blob.type) ? ` (the photo could not be resized — ${blob.type}, ${Math.round(blob.size / 1024)} KB sent as is)` : '';
+  return msg + raw;
+}
 const TRIPSY_FLYOVER_UPLOAD_PARALLEL = 3;
 // A photo imported from the Drive inbox folder is REMOVED from the folder once it is in the
 // app ("Remember to delete the photos from drive once they have been uploaded to the app,"
@@ -20939,6 +20947,7 @@ let _tripsyFlyoverUploadsRunning = 0;
 const _tripsyFlyoverUploadQueue = [];
 function tripsyFlyoverQueueUpload(tripKey, pendingId) {
   tripsyFlyoverFailedUploads.delete(pendingId);
+  tripsyFlyoverFailedUploadReasons.delete(pendingId);
   // Preparation starts now, in pick order, so thumbnails fill in one after another
   // regardless of how the (slower, network-bound) uploads are going.
   tripsyFlyoverPreparePending(pendingId).catch(() => {});
@@ -20979,15 +20988,24 @@ async function tripsyFlyoverRunUpload({ tripKey, pendingId }) {
     } catch (e) {
       console.error('fly-over background video upload failed:', e);
       tripsyFlyoverFailedUploads.add(pendingId);
+      tripsyFlyoverFailedUploadReasons.set(pendingId, tripsyFlyoverUploadFailureReason(e, null));
     }
     tripsyFlyoverUploadProgress.delete(pendingId);
     notify();
     return;
   }
+  let small = null;
   try {
     // The prepared 1600px copy (one decode per photo, shared with the thumbnail).
-    const { full: small } = await tripsyFlyoverPreparePending(pendingId);
-    const driveFileId = await uploadBlobToDrive(small, `flyover-photo-${Date.now()}-${pendingId.slice(-5)}`, 'image/jpeg');
+    ({ full: small } = await tripsyFlyoverPreparePending(pendingId));
+    // A photo this browser could not decode (a HEIC in a WebView without HEIC support) comes
+    // back as its ORIGINAL bytes: kept under its real type, and past 4 MB sent through the
+    // resumable upload, since the multipart body (base64, +37%) is capped at 5 MB.
+    const mime = small.type && /^image\//i.test(small.type) ? small.type : 'image/jpeg';
+    const name = `flyover-photo-${Date.now()}-${pendingId.slice(-5)}`;
+    const driveFileId = small.size > 4 * 1024 * 1024
+      ? await uploadBlobToDriveResumable(small, name, mime, () => {})
+      : await uploadBlobToDrive(small, name, mime);
     if (!driveFileId) throw new Error('Drive returned no file id');
     tripsyPutCachedPhotoBlob(driveFileId, small);
     // The Drive id paints from the copies already in memory: the page re-renders after
@@ -21006,6 +21024,7 @@ async function tripsyFlyoverRunUpload({ tripKey, pendingId }) {
   } catch (e) {
     console.error('fly-over background photo upload failed:', e);
     tripsyFlyoverFailedUploads.add(pendingId);
+    tripsyFlyoverFailedUploadReasons.set(pendingId, tripsyFlyoverUploadFailureReason(e, small));
   }
   notify();
 }

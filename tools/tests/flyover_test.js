@@ -1042,7 +1042,7 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
       'one decode gives the upload copy AND a thumbnail made from it; createImageBitmap first, <img> fallback, the original on failure');
     assert(/const TRIPSY_FLYOVER_UPLOAD_PX = 1600;/.test(html) && /const TRIPSY_FLYOVER_THUMB_PX = 320;/.test(html), 'the upload copy is 1600px, the thumbnail 320px');
     const up = extractFn('tripsyFlyoverRunUpload');
-    assert(/const \{ full: small \} = await tripsyFlyoverPreparePending\(pendingId\);/.test(up) && !/tripsyResizeImageBlob/.test(up), 'the upload takes the prepared copy instead of resizing the original again');
+    assert(/\(\{ full: small \} = await tripsyFlyoverPreparePending\(pendingId\)\);/.test(up) && !/tripsyResizeImageBlob/.test(up), 'the upload takes the prepared copy instead of resizing the original again');
     assert(/tripsyPhotoObjectUrlCache\.set\(driveFileId, Promise\.resolve\(URL\.createObjectURL\(prepared\.full\)\)\)/.test(up) && /tripsyPhotoThumbUrlCache\.set\(driveFileId, Promise\.resolve\(URL\.createObjectURL\(prepared\.thumb\)\)\)/.test(up),
       'after the upload the Drive id paints from the copies in memory, so the per-upload repaint decodes nothing');
     assert(/tripsyFlyoverPreparePending\(pendingId\)\.catch\(\(\) => \{\}\);/.test(extractFn('tripsyFlyoverQueueUpload')), 'preparation starts at pick time, in pick order');
@@ -2192,6 +2192,20 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     // screen; the 3- and 1-photo tests landed within seconds with NO progress bar (screenshots,
     // 2026-10-26), so the steps name the Upload button and a time rule, not a bar.
     assert(/tap Upload in the top-right corner of the next screen<\/strong> — nothing is sent until you do/.test(hand) && !/upload bar/.test(hand) && /don’t swipe it away in the app switcher/.test(hand), 'the steps say to tap Upload on the confirmation screen, give the Drive app a minute, and never swipe it away -- and promise no progress bar');
+  }
+
+  // ---- A failed background upload NAMES its reason on the card ("The app says the upload
+  // failed," 2026-10-26: seven Drive-imported photos sat with ⚠️ badges and no way to tell why
+  // from the iPad), and an un-resizable photo goes up resumably past 4 MB ----
+  {
+    eval(extractFn('tripsyFlyoverUploadFailureReason'));
+    assert(tripsyFlyoverUploadFailureReason(new Error('Drive upload failed (403)'), { type: 'image/jpeg', size: 300000 }) === 'Drive upload failed (403)', 'a resized copy reports just the error');
+    assert(/^Load failed \(the photo could not be resized — image\/heic, 3418 KB sent as is\)$/.test(tripsyFlyoverUploadFailureReason(new Error('Load failed'), { type: 'image/heic', size: 3500000 })), 'THE ASK: an original that could not be resized says so, with its type and size');
+    assert(tripsyFlyoverUploadFailureReason(null, null) === 'unknown error' && tripsyFlyoverUploadFailureReason({ message: 'x'.repeat(400) }, null).length === 160, 'no error and a long message are bounded');
+    const run = extractFn('tripsyFlyoverRunUpload');
+    assert(/tripsyFlyoverFailedUploadReasons\.set\(pendingId, tripsyFlyoverUploadFailureReason\(e, small\)\)/.test(run) && /tripsyFlyoverFailedUploadReasons\.set\(pendingId, tripsyFlyoverUploadFailureReason\(e, null\)\)/.test(run) && /tripsyFlyoverFailedUploadReasons\.delete\(pendingId\);/.test(extractFn('tripsyFlyoverQueueUpload')), 'photo and video failures record a reason; a retry clears it');
+    assert(/const mime = small\.type && \/\^image\\\/\/i\.test\(small\.type\) \? small\.type : 'image\/jpeg';/.test(run) && /small\.size > 4 \* 1024 \* 1024\s*\? await uploadBlobToDriveResumable\(small, name, mime, \(\) => \{\}\)\s*: await uploadBlobToDrive\(small, name, mime\)/.test(run), 'the prepared copy keeps its real type, and an original past 4 MB takes the resumable upload (the multipart body is capped at 5 MB)');
+    assert(/failed\$\{\(\(\) => \{ const why = failedIds\.map\(fid => tripsyFlyoverFailedUploadReasons\.get\(fid\)\)\.find\(Boolean\); return why \? `: \$\{esc\(why\)\}` : ''; \}\)\(\)\}\./.test(extractFn('showTripsyFlyover')), 'THE ASK: the card\'s "N uploads failed" line carries the first recorded reason');
   }
 
   // ---- Storm tracking was removed ("Remove tracking for the typhoon from flyover," 2026-10-25) ----
