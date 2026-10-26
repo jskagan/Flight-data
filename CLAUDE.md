@@ -4998,23 +4998,45 @@ WebView's support for recording is unproven.
     or the retire that clears the hand-off. The Drive hand-off dialog's step 2 also names
     both upload routes (Drive app ＋ → Upload file, or Photos → Share → Drive), since the Drive
     app's ＋ menu reads "Upload file" ("How do I select my photos from this menu," same day).
-    **The Drive route OPENS the folder itself** ("When I select upload photos through Google
-    Drive, can the app open the drive folder for me instead of making me press the link,"
-    2026-10-26). A page may only open a window inside the user's tap, so `handOffToDrive` calls
-    `window.open` before its first await. When the folder id is already known — remembered on
-    the record, or found by the lookup `askSource` starts while the "How many?" question is up
-    (`tripsyFlyoverInboxFolder(…, {create: false})`, which only finds, so a Photos answer leaves
-    no empty folder) — it opens the folder's own address at once, the case most likely to land
-    in the Google Drive app. Otherwise it opens a blank tab, then points it at the folder once
-    the folder has been found or created, and closes the tab if Drive can't be reached. No
-    `'noopener'` feature on either open: with it `window.open` returns null even on success, so a
-    refused window could not be told apart (the opener link is cut by hand). A refused window
-    leaves the hand-off dialog as before ("Open the folder: <link>"); an opened one says "The
-    folder has been opened for you in Drive" and keeps the link as a fallback (`opened`).
-    `inboxFolderKnown` is cleared when an import retires the folder. Verified in Chromium:
-    remembered, prefetched, created, tapped-before-the-lookup and blocked cases. Whether iOS
-    hands a page-opened Drive address to the Google Drive app (rather than Drive in Safari) is
-    the device check that remains.
+    **The Drive route OPENS the folder itself — and on the iPad that lands in the Google Drive
+    APP** ("When I select upload photos through Google Drive, can the app open the drive folder
+    for me instead of making me press the link," 2026-10-26; a screenshot the same evening
+    showed the folder open in the Drive app, "◀ Travel Tracker" in the status bar). A page may
+    only open a window inside the user's tap, so `handOffToDrive` calls `window.open` before its
+    first await: with the folder id already known — remembered on the record, or found by the
+    lookup `askSource` starts while the "How many?" question is up
+    (`tripsyFlyoverInboxFolder(…, {create: false})`, find only, so a Photos answer leaves no
+    empty folder) — it opens the folder's own address at once; otherwise a blank tab, pointed at
+    the folder once it exists, closed again if Drive can't be reached. No `'noopener'` feature on
+    either open (with it `window.open` returns null even on success, so a refused window could
+    not be told apart; the opener link is cut by hand). A refused window leaves the dialog's
+    "Open the folder: <link>"; an opened one says so and keeps the link as a fallback
+    (`opened`). `inboxFolderKnown` is cleared when an import retires the folder.
+    **A DRIVE-APP upload can still be lost, and the steps now say how not to lose it**: the
+    first 30-item pick that day was made in the Drive app's own ＋ → Upload → Photos and Videos
+    and NOTHING reached the folder ("I selected about 30 photos and videos. What happened?" /
+    "I need to be able to upload photos in the background - this was supposed to do that"). A
+    web page cannot upload in the background on iOS; the Drive app can, but only while it is
+    allowed to finish — an upload it has queued is dropped when the app is swiped away or the
+    iPad sleeps for long, and a pick of iCloud originals with videos can be abandoned by its
+    picker. So step 2 says to STAY in the Drive app until its upload bar at the bottom has
+    finished, to try fewer at a time if it stalls, and gives the Photos app's Share → Drive →
+    this folder route as the alternative (it queues the files in the Drive app without the Drive
+    app's picker). (An interim cut that afternoon removed the auto-open on the wrong theory that
+    the link had opened Drive's WEBSITE; the screenshot disproved it and the auto-open is back.)
+    The 94-photo Da Nang import earlier that day went through the Drive app, which is the
+    evidence the route works once the files are actually uploaded.
+    **An EMPTY folder WAITS quietly; only arriving files flash** ("Why is the app still
+    flashing uploading photos?", 2026-10-26 — the live Singapore GP hand-off from 12:37 had an
+    empty folder, and the slot flashed "Uploading Photos to Drive…" forever though nothing was
+    uploading). `tripsyFlyoverDrivePhase(phase, step, count)` returns a fourth phase, `waiting`,
+    whenever the new-file count is 0 (and the watcher starts in it), rendered by
+    `tripsyFlyoverDriveStatusHtml(phase, count, folderUrl)` as a steady "📁 Waiting for photos in
+    the Drive folder." with **Open folder** (`data-drive-open-folder`, the folder link) and
+    **Cancel** (`data-drive-cancel`: clears `inboxPendingAt`/`inboxDest`, stops the watcher,
+    keeps the empty folder for next time). The first file to arrive moves it to the flashing
+    `uploading`, then `complete` as before; a folder emptied again goes back to `waiting`.
+    Verified in Chromium under a fake clock.
     **A Drive import routes by CAPTURE DATE first, whichever button started the hand-off**
     ("Will the drive uploaded photos load in the correct day on the flyover page?", same day —
     the live hand-off had been started from the Da Nang card, and `inboxDest` would have filed

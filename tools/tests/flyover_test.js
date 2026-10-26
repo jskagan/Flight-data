@@ -2106,6 +2106,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     // ---- The upload-complete notification ("Is there a way the app can display a notification
     // when the upload is complete to drive?", 2026-10-25): Drive gives no signal, so the page
     // watches the folder and infers completion from a count that has settled. ----
+    var esc = typeof esc === 'function' ? esc : (v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]));
     eval([constLine('TRIPSY_FLYOVER_INBOX_POLL_MS'), constLine('TRIPSY_FLYOVER_INBOX_SETTLE_MS')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverInboxWatchStep', 'tripsyFlyoverDrivePhase', 'tripsyFlyoverDriveStatusHtml'].map(extractFn)).join('\n'));
     assert(TRIPSY_FLYOVER_INBOX_POLL_MS >= 5000 && TRIPSY_FLYOVER_INBOX_SETTLE_MS >= TRIPSY_FLYOVER_INBOX_POLL_MS, 'the folder is polled no more than every few seconds, and a settle window spans at least one poll');
     let w = tripsyFlyoverInboxWatchStep(null, 0, 1000, 30000);
@@ -2144,16 +2145,24 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(!tripsyFlyoverInboxWatchStep(null, 0, 1000000, 30000, hoursAgo).announce && !tripsyFlyoverInboxWatchStep(null, 3, 1000000, 30000, NaN).announce, 'an empty folder, or files with no arrival time, never skip the wait');
     assert(/const times = freshFiles\.map\(f => Date\.parse\(f\.createdTime \|\| ''\)\)\.filter\(isFinite\);\s*const newestMs = times\.length \? Math\.max\(\.\.\.times\) : NaN;\s*const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);/.test(setup),
       'the watcher passes the newest new file\'s arrival time');
-    assert(tripsyFlyoverDrivePhase('uploading', { announce: false, changed: true }) === 'uploading' && tripsyFlyoverDrivePhase('uploading', { announce: true, changed: false }) === 'complete'
-      && tripsyFlyoverDrivePhase('complete', { announce: false, changed: false }) === 'complete' && tripsyFlyoverDrivePhase('later', { announce: false, changed: false }) === 'later'
-      && tripsyFlyoverDrivePhase('later', { announce: false, changed: true }) === 'uploading' && tripsyFlyoverDrivePhase(undefined, { announce: false, changed: false }) === 'uploading',
+    assert(tripsyFlyoverDrivePhase('uploading', { announce: false, changed: true }, 3) === 'uploading' && tripsyFlyoverDrivePhase('uploading', { announce: true, changed: false }, 3) === 'complete'
+      && tripsyFlyoverDrivePhase('complete', { announce: false, changed: false }, 3) === 'complete' && tripsyFlyoverDrivePhase('later', { announce: false, changed: false }, 3) === 'later'
+      && tripsyFlyoverDrivePhase('later', { announce: false, changed: true }, 4) === 'uploading' && tripsyFlyoverDrivePhase(undefined, { announce: false, changed: false }, 3) === 'uploading'
+      && tripsyFlyoverDrivePhase('waiting', { announce: false, changed: true }, 1) === 'uploading',
       'the message phase: uploading until announced, complete on the announcement, Later holds, a count that grows again goes back to uploading');
+    // "Why is the app still flashing uploading photos?" (2026-10-26): an EMPTY folder waits quietly.
+    assert(tripsyFlyoverDrivePhase('uploading', { announce: false, changed: false }, 0) === 'waiting' && tripsyFlyoverDrivePhase(undefined, { announce: false, changed: true }, 0) === 'waiting', 'THE ASK: nothing in the folder is waiting, never uploading');
+    const wait = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://drive.google.com/drive/folders/x');
+    assert(!/tripsy-menu-flash/.test(wait) && /Waiting for photos in the Drive folder/.test(wait) && /data-drive-open-folder/.test(wait) && /data-drive-cancel/.test(wait), 'THE ASK: the waiting message does not flash, and offers Open folder and Cancel');
+    assert(/inboxWatch = \{ timer: null, state: null, phase: 'waiting'/.test(setup) && /inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);/.test(setup)
+      && /if \(cancel\) cancel\.onclick = \(\) => \{ if \(closed\) return; record = \{ \.\.\.record, inboxDest: '', inboxPendingAt: '' \}; save\(\); stopInboxWatch\(\); render\(\); \};/.test(setup),
+      'the watcher starts waiting, passes the count to the phase, and Cancel ends the hand-off');
     const up = tripsyFlyoverDriveStatusHtml('uploading', 0), done = tripsyFlyoverDriveStatusHtml('complete', 54), lat = tripsyFlyoverDriveStatusHtml('later', 54);
     assert(/class="tripsy-menu-flash"/.test(up) && /Uploading Photos to Drive/.test(up) && !/\d/.test(up.replace(/<[^>]*>/g, '')), 'the uploading message flashes and carries no count');
     assert(/Drive upload complete — 54 new files\. Import now\?/.test(done) && /data-drive-import-now/.test(done) && /data-drive-later/.test(done) && !/tripsy-menu-flash/.test(done), 'the completion prompt replaces it, with Import now / Later, not flashing');
     assert(/54 new files waiting in Drive/.test(lat) && /data-drive-import-now/.test(lat) && !/data-drive-later/.test(lat), 'after Later a quiet reminder with an Import button stands in its place (the only way in, now that Finish Upload is gone)');
     assert(!/tripsyFlyoverFinishUploadLabel|announceInboxReady|tripsyConfirmDialog\(`Drive upload looks complete/.test(html), 'the live-count label and the completion dialog are gone');
-    assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const freshFiles = tripsyFlyoverDriveNewFiles\(files, record\);\s*const fresh = freshFiles\.length;[\s\S]*?const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);[\s\S]*inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r\);\s*paintDriveStatus\(\);/.test(setup),
+    assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const freshFiles = tripsyFlyoverDriveNewFiles\(files, record\);\s*const fresh = freshFiles\.length;[\s\S]*?const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);[\s\S]*inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);\s*paintDriveStatus\(\);/.test(setup),
       'each tick lists the inbox, counts what is new, moves the phase and repaints the message slot');
     assert(/<span data-flyover-drive-status[^>]*>\$\{driveStatusHtml\(\)\}<\/span>/.test(setup) && /if \(go\) go\.onclick = \(\) => \{ if \(!closed && runFinishUpload && !driveImportRunning\) runFinishUpload\(\); \};/.test(setup) && /if \(later\) later\.onclick = \(\) => \{ if \(inboxWatch\) inboxWatch\.phase = 'later'; paintDriveStatus\(\); \};/.test(setup),
       'the slot renders in the header; Import now runs the import, Later holds the quiet reminder');
@@ -2167,7 +2176,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     const hand = extractFn('tripsyFlyoverDriveHandoffDialog');
     assert(/data-drive-open/.test(hand) && /Photos and Videos/.test(hand) && /asks to import them once the upload is complete/.test(hand) && !/Finish Upload/.test(hand) && /data-handoff-picker/.test(hand), 'the hand-off dialog links the folder, gives the Drive app steps, says the page asks to import when complete, and offers the Photos picker instead');
     // "When I select upload photos through Google Drive, can the app open the drive folder for
-    // me instead of making me press the link" (2026-10-26).
+    // me instead of making me press the link" (2026-10-26) -- and it lands in the Google Drive
+    // APP on the iPad (screenshot, same day), so it stays.
     const hod = setup.slice(setup.indexOf('const handOffToDrive = async'), setup.indexOf('tripsyFlyoverDriveHandoffDialog(', setup.indexOf('const handOffToDrive = async')));
     assert(hod.indexOf('window.open(') > 0 && hod.indexOf('window.open(') < hod.indexOf('await '), 'THE ASK: the Drive route opens a window BEFORE its first await, inside the tap (a later open is blocked)');
     assert(/if \(inboxFolderKnown\) \{ tab = window\.open\(tripsyFlyoverDriveFolderUrl\(inboxFolderKnown\), '_blank'\); if \(tab\) \{ tab\.opener = null; openedDirect = inboxFolderKnown; \} \}/.test(hod) && !/'_blank', 'noopener'/.test(hod) && /else \{ tab = window\.open\('', '_blank'\);/.test(hod) && /tab\.location\.href = tripsyFlyoverDriveFolderUrl\(folderId\)/.test(hod),
@@ -2175,7 +2185,10 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/if \(tab && !openedDirect\) \{ try \{ tab\.close\(\); \}/.test(hod), 'a blank tab is closed again when the folder cannot be reached');
     assert(/inboxPrefetch = tripsyFlyoverInboxFolder\(trip, record, \{ create: false \}\)/.test(setup) && /if \(!create\) return null;/.test(extractFn('tripsyFlyoverInboxFolder')),
       'the folder is looked up (never created) while the source question is up, so the Drive answer can open it in the same tap');
-    assert(/\{ onPickerInstead: openPicker, opened \}\)/.test(setup) && /opened \? 'The folder has been opened for you in Drive' : 'Open the folder'/.test(hand), 'the hand-off dialog says the folder was opened, keeping the link as a fallback');
+    assert(/\{ onPickerInstead: openPicker, opened \}\)/.test(setup) && /opened \? 'The folder has been opened for you in the Drive app' : 'Open the folder'/.test(hand), 'the hand-off dialog says the folder was opened, keeping the link as a fallback');
+    // The first 30-item upload reached the Drive app and never landed (2026-10-26): the steps
+    // say to stay in the Drive app until its upload bar finishes, and give Photos → Share → Drive.
+    assert(/Stay in the Drive app until its upload bar at the bottom has finished/.test(hand) && /Share<\/strong> → <strong>Drive<\/strong>, choose this folder/.test(hand), 'the steps warn that a Drive upload left unfinished is dropped, and offer the Photos → Share → Drive route');
   }
 
   // ---- Storm tracking was removed ("Remove tracking for the typhoon from flyover," 2026-10-25) ----

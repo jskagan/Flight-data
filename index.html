@@ -19356,12 +19356,15 @@ async function showTripsyFlyover(tripKey) {
   const stopInboxWatch = () => { if (inboxWatch) { if (inboxWatch.timer) clearTimeout(inboxWatch.timer); inboxWatch = null; } };
   // The message slot in the header: flashing "Uploading Photos to Drive…" until the count
   // settles, then the completion prompt in its place (no live count, no separate button).
-  const driveStatusHtml = () => tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'uploading', inboxWatch ? inboxWatch.count : 0);
+  const driveStatusHtml = () => tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'waiting', inboxWatch ? inboxWatch.count : 0, record && record.inboxFolderId ? tripsyFlyoverDriveFolderUrl(record.inboxFolderId) : '');
   const wireDriveStatus = () => {
     const go = body.querySelector('[data-drive-import-now]');
     if (go) go.onclick = () => { if (!closed && runFinishUpload && !driveImportRunning) runFinishUpload(); };
     const later = body.querySelector('[data-drive-later]');
     if (later) later.onclick = () => { if (inboxWatch) inboxWatch.phase = 'later'; paintDriveStatus(); };
+    // Cancel ends a hand-off nothing was uploaded for; the (empty) folder is kept for next time.
+    const cancel = body.querySelector('[data-drive-cancel]');
+    if (cancel) cancel.onclick = () => { if (closed) return; record = { ...record, inboxDest: '', inboxPendingAt: '' }; save(); stopInboxWatch(); render(); };
   };
   const paintDriveStatus = () => {
     const slot = body.querySelector('[data-flyover-drive-status]');
@@ -19385,7 +19388,7 @@ async function showTripsyFlyover(tripKey) {
         const r = tripsyFlyoverInboxWatchStep(inboxWatch.state, fresh, Date.now(), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs);
         inboxWatch.state = r.state;
         inboxWatch.count = fresh;
-        inboxWatch.phase = tripsyFlyoverDrivePhase(inboxWatch.phase, r);
+        inboxWatch.phase = tripsyFlyoverDrivePhase(inboxWatch.phase, r, fresh);
         paintDriveStatus();
       } catch (e) {
         console.warn('Drive inbox check failed:', e);
@@ -19399,7 +19402,7 @@ async function showTripsyFlyover(tripKey) {
   };
   const startInboxWatch = () => {
     if (inboxWatch || closed || !isOwner || !record || !record.inboxPendingAt || !record.inboxFolderId) return;
-    inboxWatch = { timer: null, state: null, phase: 'uploading', count: 0, busy: false };
+    inboxWatch = { timer: null, state: null, phase: 'waiting', count: 0, busy: false };
     inboxWatchTick();
   };
   // Coming back from the Drive app: check the folder at once rather than on the next tick
@@ -20774,7 +20777,7 @@ function tripsyFlyoverAddSourceDialog({ onPhotos, onDrive }) {
       </div>
       <div style="display:grid; gap:10px;">
         <button class="btn" data-src-photos style="text-align:left; padding:12px 14px; white-space:normal;"><strong>📷 A few photos</strong><br><span style="font-size:12px; color:var(--muted);">Up to about 30 — picked from Photos and added straight away.</span></button>
-        <button class="btn primary" data-src-drive style="text-align:left; padding:12px 14px; white-space:normal;"><strong>📁 Many photos, or a video</strong><br><span style="font-size:12px; opacity:0.85;">Goes through Drive: you upload them with the Google Drive app (no limit), and this page asks to import them once the upload is complete. A big pick through Photos stalls or crashes the app.</span></button>
+        <button class="btn primary" data-src-drive style="text-align:left; padding:12px 14px; white-space:normal;"><strong>📁 Many photos, or a video</strong><br><span style="font-size:12px; opacity:0.85;">Goes through Drive: the trip’s folder opens in the Drive app, you upload them there (no limit, it keeps uploading in the background while the Drive app stays open), and this page asks to import them once the upload is complete. A big pick here stalls or crashes the app.</span></button>
       </div>
     </div>`;
   ov.style.display = 'flex';
@@ -20818,21 +20821,31 @@ function tripsyFlyoverInboxWatchStep(state, count, nowMs, settleMs = TRIPSY_FLYO
 // in one of three phases. `uploading` flashes until a settled count announces completion;
 // `complete` is the prompt itself (Import now / Later); `later` is the quiet reminder after
 // Later. A count that grows again goes back to `uploading`. Pure.
-function tripsyFlyoverDrivePhase(phase, step) {
+// An EMPTY folder is `waiting`, not uploading ("Why is the app still flashing uploading
+// photos?", 2026-10-26 -- a hand-off started but nothing put in the folder flashed "Uploading"
+// forever): it reads quietly, with Open folder and Cancel, and the flashing starts only once
+// files are actually arriving.
+function tripsyFlyoverDrivePhase(phase, step, count) {
+  if (count === 0) return 'waiting';
   if (step.announce) return 'complete';
   if (step.changed) return 'uploading';
-  return phase || 'uploading';
+  return phase && phase !== 'waiting' ? phase : 'uploading';
 }
-function tripsyFlyoverDriveStatusHtml(phase, count) {
+function tripsyFlyoverDriveStatusHtml(phase, count, folderUrl = '') {
   const n = count || 0, files = `${n} new file${n === 1 ? '' : 's'}`;
+  if (phase === 'waiting') return `<span data-flyover-drive-phase="waiting" style="font-size:12px; color:var(--muted);">📁 Waiting for photos in the Drive folder.</span>${folderUrl ? ` <a class="btn" href="${esc(folderUrl)}" target="_blank" rel="noopener" data-drive-open-folder style="font-size:12px; margin-left:4px; text-decoration:none;">Open folder</a>` : ''} <button class="btn" data-drive-cancel title="Stop waiting for a Drive upload" style="font-size:12px;">Cancel</button>`;
   if (phase === 'complete') return `<span data-flyover-drive-phase="complete" style="font-size:12px; color:#3AA76D; font-weight:700;">✅ Drive upload complete — ${files}. Import now?</span> <button class="btn primary" data-drive-import-now style="font-size:12px; margin-left:4px;">Import now</button> <button class="btn" data-drive-later style="font-size:12px;">Later</button>`;
   if (phase === 'later') return `<span data-flyover-drive-phase="later" style="font-size:12px; color:var(--muted);">${files} waiting in Drive.</span> <button class="btn" data-drive-import-now style="font-size:12px; margin-left:4px;">Import</button>`;
   return `<span class="tripsy-menu-flash" data-flyover-drive-phase="uploading" style="font-size:12px; color:#E0A020; font-weight:700;">⬆️ Uploading Photos to Drive…</span>`;
 }
 // The hand-off to Drive: the folder link (opens in the Google Drive app on the iPad), the
 // steps, and the reminder that the fly-over page asks to import them once the upload is complete.
-// `opened`: the app has already opened the folder in a new tab, so step 1 says so and keeps
-// the link only as a fallback.
+// `opened`: the app has already opened the folder (on the iPad it lands in the Google Drive
+// app, confirmed by screenshot 2026-10-26), so step 1 says so and keeps the link as a fallback.
+// The steps stress keeping the Drive app open until its upload bar finishes: the first 30-item
+// upload that day reached the Drive app and still never landed -- its queued upload was lost
+// (the app swiped away, or iCloud originals with videos abandoned) -- and the Photos → Share →
+// Drive route is given as the alternative that queues the files without the Drive app's picker.
 function tripsyFlyoverDriveHandoffDialog(url, folderName, { note = '', onPickerInstead = null, opened = false } = {}) {
   let ov = document.getElementById('tripsy-flyover-drive-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-drive-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -20843,8 +20856,8 @@ function tripsyFlyoverDriveHandoffDialog(url, folderName, { note = '', onPickerI
       ${note ? `<div style="font-size:13px; color:#E0A33A; margin-bottom:8px;">${esc(note)}</div>` : ''}
       <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:12px;">
         <ol style="margin:0 0 0 18px; padding:0;">
-          <li>${opened ? 'The folder has been opened for you in Drive' : 'Open the folder'}: <a href="${esc(url)}" target="_blank" rel="noopener" data-drive-open style="color:var(--accent); word-break:break-all;">${esc(folderName)}</a>${opened ? ' <span style="font-size:12px;">(tap it if Drive didn’t open)</span>' : ''}</li>
-          <li>In the Google Drive app press <strong>＋</strong> → <strong>Upload file</strong> → <strong>Photos and Videos</strong>, select everything, and let Drive finish. Or go the other way round: in the <strong>Photos</strong> app select them all, tap <strong>Share</strong> → <strong>Drive</strong>, and pick this folder.</li>
+          <li>${opened ? 'The folder has been opened for you in the Drive app' : 'Open the folder'}: <a href="${esc(url)}" target="_blank" rel="noopener" data-drive-open style="color:var(--accent); word-break:break-all;">${esc(folderName)}</a>${opened ? ' <span style="font-size:12px;">(tap it if Drive didn’t open)</span>' : ''}</li>
+          <li>In the Drive app press <strong>＋</strong> → <strong>Upload</strong> → <strong>Photos and Videos</strong> and select them. <strong>Stay in the Drive app until its upload bar at the bottom has finished</strong> — don’t swipe the app away or lock the iPad for long; an upload it hasn’t finished is dropped. If it stalls, try fewer at a time, or go through Photos instead: select them in the <strong>Photos</strong> app, tap <strong>Share</strong> → <strong>Drive</strong>, choose this folder and tap Upload.</li>
           <li>Come back to the fly-over page. It shows <strong>Uploading Photos to Drive…</strong> while they arrive, then asks to import them once the upload is complete. Files already imported are skipped, so importing again is safe.</li>
         </ol>
       </div>
