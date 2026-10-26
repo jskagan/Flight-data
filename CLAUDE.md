@@ -5019,10 +5019,14 @@ WebView's support for recording is unproven.
     web page cannot upload in the background on iOS; the Drive app can, but only while it is
     allowed to finish — an upload it has queued is dropped when the app is swiped away or the
     iPad sleeps for long, and a pick of iCloud originals with videos can be abandoned by its
-    picker. So step 2 says to STAY in the Drive app until its upload bar at the bottom has
-    finished, to try fewer at a time if it stalls, and gives the Photos app's Share → Drive →
-    this folder route as the alternative (it queues the files in the Drive app without the Drive
-    app's picker). (An interim cut that afternoon removed the auto-open on the wrong theory that
+    picker. **What actually happened** (screenshots that evening): the Drive app's picker ends on
+    an "Upload to Drive" CONFIRMATION screen whose **Upload** button (top right) is what sends
+    the files — the 30-item pick had been dismissed there; three photos then uploaded in
+    seconds, and a fourth after it, with NO progress bar anywhere (an earlier claim that one
+    shows along the bottom was wrong; the dialog no longer mentions it). So step 2 names that
+    Upload button, gives a time rule (a minute or so before leaving, longer with videos; never
+    swipe the Drive app away), says to pull down on the folder to see files appear, and advises
+    smaller picks if a big one stalls. (An interim cut that afternoon removed the auto-open on the wrong theory that
     the link had opened Drive's WEBSITE; the screenshot disproved it and the auto-open is back.)
     The 94-photo Da Nang import earlier that day went through the Drive app, which is the
     evidence the route works once the files are actually uploaded.

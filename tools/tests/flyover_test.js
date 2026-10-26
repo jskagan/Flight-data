@@ -2188,7 +2188,10 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/\{ onPickerInstead: openPicker, opened \}\)/.test(setup) && /opened \? 'The folder has been opened for you in the Drive app' : 'Open the folder'/.test(hand), 'the hand-off dialog says the folder was opened, keeping the link as a fallback');
     // The first 30-item upload reached the Drive app and never landed (2026-10-26): the steps
     // say to stay in the Drive app until its upload bar finishes, and give Photos → Share → Drive.
-    assert(/Stay in the Drive app until its upload bar at the bottom has finished/.test(hand) && /Share<\/strong> → <strong>Drive<\/strong>, choose this folder/.test(hand), 'the steps warn that a Drive upload left unfinished is dropped, and offer the Photos → Share → Drive route');
+    // The 30-item pick that never landed had been dismissed at the Drive app's confirmation
+    // screen; the 3- and 1-photo tests landed within seconds with NO progress bar (screenshots,
+    // 2026-10-26), so the steps name the Upload button and a time rule, not a bar.
+    assert(/tap Upload in the top-right corner of the next screen<\/strong> — nothing is sent until you do/.test(hand) && !/upload bar/.test(hand) && /don’t swipe it away in the app switcher/.test(hand), 'the steps say to tap Upload on the confirmation screen, give the Drive app a minute, and never swipe it away -- and promise no progress bar');
   }
 
   // ---- Storm tracking was removed ("Remove tracking for the typhoon from flyover," 2026-10-25) ----
