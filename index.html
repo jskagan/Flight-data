@@ -19847,18 +19847,50 @@ async function showTripsyFlyover(tripKey) {
         handOffToDrive(dest, openPicker);
         return;
       }
+      // Look the folder up while the question is on screen, so a Drive answer can open it
+      // inside the same tap (find only -- a Photos answer leaves no empty folder behind).
+      inboxPrefetch = tripsyFlyoverInboxFolder(trip, record, { create: false })
+        .then(id => { if (id) inboxFolderKnown = id; return id; }).catch(() => null);
       tripsyFlyoverAddSourceDialog({ onPhotos: openPicker, onDrive: () => handOffToDrive(dest, openPicker) });
     };
+    // The folder id once known this session (remembered, or found by the prefetch above).
+    let inboxFolderKnown = record && record.inboxFolderId ? record.inboxFolderId : '';
+    let inboxPrefetch = null;
+    // The Drive route OPENS the folder itself ("When I select upload photos through Google
+    // Drive, can the app open the drive folder for me instead of making me press the link,"
+    // 2026-10-26). A page may only open a window inside the user's tap, so this runs
+    // synchronously up to the window.open: with the folder id already known (remembered on
+    // the record, or found by the prefetch while the question was up) it opens the folder's
+    // own address straight away -- the case most likely to land in the Google Drive app;
+    // otherwise it opens a blank tab now and points it at the folder once the folder has been
+    // found or created. A refused window (or a WebView without tabs) falls back to the link
+    // in the hand-off dialog, which still shows with the steps.
     const handOffToDrive = async (dest, openPicker) => {
+      let tab = null, openedDirect = '';
+      try {
+        // No 'noopener' feature: with it window.open returns null even on success, and a
+        // refused window could not be told apart. The opener link is cut by hand instead.
+        if (inboxFolderKnown) { tab = window.open(tripsyFlyoverDriveFolderUrl(inboxFolderKnown), '_blank'); if (tab) { tab.opener = null; openedDirect = inboxFolderKnown; } }
+        else { tab = window.open('', '_blank'); if (tab) tab.opener = null; }
+      } catch (e) { tab = null; }
       setStatus('Opening the Drive folder…');
       let folderId;
-      try { folderId = await tripsyFlyoverInboxFolder(trip, record); } catch (e) { console.error(e); setStatus(''); toast('Couldn’t open the Drive folder — check the connection and try again.', 'error'); return; }
+      try { folderId = await tripsyFlyoverInboxFolder(trip, { ...record, inboxFolderId: inboxFolderKnown || record.inboxFolderId }); } catch (e) {
+        console.error(e); setStatus('');
+        if (tab && !openedDirect) { try { tab.close(); } catch (x) {} }
+        toast('Couldn’t open the Drive folder — check the connection and try again.', 'error'); return;
+      }
+      inboxFolderKnown = folderId;
+      // A folder opened straight away counts only if it is the folder found now; a blank tab
+      // is pointed at it.
+      let opened = !!openedDirect && folderId === openedDirect;
+      if (tab && !openedDirect) { try { tab.location.href = tripsyFlyoverDriveFolderUrl(folderId); opened = true; } catch (e) { opened = false; } }
       if (closed) return;
       record = { ...record, inboxFolderId: folderId, inboxDest: dest || 'auto', inboxPendingAt: new Date().toISOString() };
       save(); render();
       setStatus('');
       startInboxWatch();
-      tripsyFlyoverDriveHandoffDialog(tripsyFlyoverDriveFolderUrl(folderId), TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'), { onPickerInstead: openPicker });
+      tripsyFlyoverDriveHandoffDialog(tripsyFlyoverDriveFolderUrl(folderId), TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'), { onPickerInstead: openPicker, opened });
     };
     // Import from the inbox folder: everything new is imported straight away, by capture date
     // (the card the pick was started from is the fallback). Run by the status slot's Import
@@ -19953,6 +19985,7 @@ async function showTripsyFlyover(tripKey) {
           setStatus('Clearing the Drive folder…');
           await tripsyFlyoverRetireInbox(folderId, videoIds);
           record = { ...record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' };
+          inboxFolderKnown = '';
           save();
           stopInboxWatch();
           if (!closed) render();
@@ -20653,7 +20686,9 @@ function tripsyFlyoverDriveNewFiles(files, record) {
 }
 // This trip's inbox folder: the record's remembered id when it still exists, else a folder
 // named for the trip inside the app's own Drive folder (found by name, else created).
-async function tripsyFlyoverInboxFolder(trip, record) {
+// `create: false` only FINDS the folder (null when there is none), so a lookup made ahead of
+// the owner's choice never leaves an empty folder behind.
+async function tripsyFlyoverInboxFolder(trip, record, { create = true } = {}) {
   const name = TRIPSY_FLYOVER_INBOX_PREFIX + String((trip && trip.name) || 'trip').replace(/['\\]/g, ' ').trim();
   if (record && record.inboxFolderId) {
     try {
@@ -20667,6 +20702,7 @@ async function tripsyFlyoverInboxFolder(trip, record) {
   const sr = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
   const sj = await sr.json();
   if (sj.files && sj.files.length) return sj.files[0].id;
+  if (!create) return null;
   const cr = await driveApiFetch('https://www.googleapis.com/drive/v3/files', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parent] }),
@@ -20795,7 +20831,9 @@ function tripsyFlyoverDriveStatusHtml(phase, count) {
 }
 // The hand-off to Drive: the folder link (opens in the Google Drive app on the iPad), the
 // steps, and the reminder that the fly-over page asks to import them once the upload is complete.
-function tripsyFlyoverDriveHandoffDialog(url, folderName, { note = '', onPickerInstead = null } = {}) {
+// `opened`: the app has already opened the folder in a new tab, so step 1 says so and keeps
+// the link only as a fallback.
+function tripsyFlyoverDriveHandoffDialog(url, folderName, { note = '', onPickerInstead = null, opened = false } = {}) {
   let ov = document.getElementById('tripsy-flyover-drive-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-drive-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
   ov.style.zIndex = '2147483070';
@@ -20805,7 +20843,7 @@ function tripsyFlyoverDriveHandoffDialog(url, folderName, { note = '', onPickerI
       ${note ? `<div style="font-size:13px; color:#E0A33A; margin-bottom:8px;">${esc(note)}</div>` : ''}
       <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:12px;">
         <ol style="margin:0 0 0 18px; padding:0;">
-          <li>Open the folder: <a href="${esc(url)}" target="_blank" rel="noopener" data-drive-open style="color:var(--accent); word-break:break-all;">${esc(folderName)}</a></li>
+          <li>${opened ? 'The folder has been opened for you in Drive' : 'Open the folder'}: <a href="${esc(url)}" target="_blank" rel="noopener" data-drive-open style="color:var(--accent); word-break:break-all;">${esc(folderName)}</a>${opened ? ' <span style="font-size:12px;">(tap it if Drive didn’t open)</span>' : ''}</li>
           <li>In the Google Drive app press <strong>＋</strong> → <strong>Upload file</strong> → <strong>Photos and Videos</strong>, select everything, and let Drive finish. Or go the other way round: in the <strong>Photos</strong> app select them all, tap <strong>Share</strong> → <strong>Drive</strong>, and pick this folder.</li>
           <li>Come back to the fly-over page. It shows <strong>Uploading Photos to Drive…</strong> while they arrive, then asks to import them once the upload is complete. Files already imported are skipped, so importing again is safe.</li>
         </ol>

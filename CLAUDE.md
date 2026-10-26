@@ -4998,6 +4998,23 @@ WebView's support for recording is unproven.
     or the retire that clears the hand-off. The Drive hand-off dialog's step 2 also names
     both upload routes (Drive app ＋ → Upload file, or Photos → Share → Drive), since the Drive
     app's ＋ menu reads "Upload file" ("How do I select my photos from this menu," same day).
+    **The Drive route OPENS the folder itself** ("When I select upload photos through Google
+    Drive, can the app open the drive folder for me instead of making me press the link,"
+    2026-10-26). A page may only open a window inside the user's tap, so `handOffToDrive` calls
+    `window.open` before its first await. When the folder id is already known — remembered on
+    the record, or found by the lookup `askSource` starts while the "How many?" question is up
+    (`tripsyFlyoverInboxFolder(…, {create: false})`, which only finds, so a Photos answer leaves
+    no empty folder) — it opens the folder's own address at once, the case most likely to land
+    in the Google Drive app. Otherwise it opens a blank tab, then points it at the folder once
+    the folder has been found or created, and closes the tab if Drive can't be reached. No
+    `'noopener'` feature on either open: with it `window.open` returns null even on success, so a
+    refused window could not be told apart (the opener link is cut by hand). A refused window
+    leaves the hand-off dialog as before ("Open the folder: <link>"); an opened one says "The
+    folder has been opened for you in Drive" and keeps the link as a fallback (`opened`).
+    `inboxFolderKnown` is cleared when an import retires the folder. Verified in Chromium:
+    remembered, prefetched, created, tapped-before-the-lookup and blocked cases. Whether iOS
+    hands a page-opened Drive address to the Google Drive app (rather than Drive in Safari) is
+    the device check that remains.
     **A Drive import routes by CAPTURE DATE first, whichever button started the hand-off**
     ("Will the drive uploaded photos load in the correct day on the flyover page?", same day —
     the live hand-off had been started from the Da Nang card, and `inboxDest` would have filed

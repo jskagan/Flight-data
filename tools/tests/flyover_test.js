@@ -2161,11 +2161,21 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/const onInboxVisibility = \(\) => \{ if \(document\.visibilityState === 'visible' && inboxWatch && !inboxWatch\.busy\) inboxWatchTick\(\); \};\s*document\.addEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'returning to the app checks the folder at once');
     assert(/const close = \(\) => \{ closed = true;[^\n]*stopInboxWatch\(\); document\.removeEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'closing the page stops the watcher and drops its listener');
     assert(/save\(\); render\(\);\s*setStatus\(''\);\s*startInboxWatch\(\);/.test(setup) && /askMissingModes\(\);\s*startInboxWatch\(\);/.test(setup), 'the watcher starts on a hand-off and on opening a page with one pending');
-    assert(/driveImportRunning = true;\s*stopInboxWatch\(\);/.test(setup) && /inboxPendingAt: '' \};\s*save\(\);\s*stopInboxWatch\(\);/.test(setup), 'an import stops the watcher, and clearing the hand-off ends it');
+    assert(/driveImportRunning = true;\s*stopInboxWatch\(\);/.test(setup) && /inboxPendingAt: '' \};\s*inboxFolderKnown = '';\s*save\(\);\s*stopInboxWatch\(\);/.test(setup), 'an import stops the watcher, and clearing the hand-off ends it');
     assert(/if \(inboxWatch \|\| closed \|\| !isOwner \|\| !record \|\| !record\.inboxPendingAt \|\| !record\.inboxFolderId\) return;/.test(setup), 'only the owner, with a pending hand-off, watches — and never twice');
     assert(/if \(prevRecord && prevRecord\.inboxPendingAt\) \{ rec\.inboxPendingAt = prevRecord\.inboxPendingAt; rec\.inboxDest = prevRecord\.inboxDest \|\| 'auto'; \}/.test(html), 'a rebuild keeps a pending hand-off');
     const hand = extractFn('tripsyFlyoverDriveHandoffDialog');
     assert(/data-drive-open/.test(hand) && /Photos and Videos/.test(hand) && /asks to import them once the upload is complete/.test(hand) && !/Finish Upload/.test(hand) && /data-handoff-picker/.test(hand), 'the hand-off dialog links the folder, gives the Drive app steps, says the page asks to import when complete, and offers the Photos picker instead');
+    // "When I select upload photos through Google Drive, can the app open the drive folder for
+    // me instead of making me press the link" (2026-10-26).
+    const hod = setup.slice(setup.indexOf('const handOffToDrive = async'), setup.indexOf('tripsyFlyoverDriveHandoffDialog(', setup.indexOf('const handOffToDrive = async')));
+    assert(hod.indexOf('window.open(') > 0 && hod.indexOf('window.open(') < hod.indexOf('await '), 'THE ASK: the Drive route opens a window BEFORE its first await, inside the tap (a later open is blocked)');
+    assert(/if \(inboxFolderKnown\) \{ tab = window\.open\(tripsyFlyoverDriveFolderUrl\(inboxFolderKnown\), '_blank'\); if \(tab\) \{ tab\.opener = null; openedDirect = inboxFolderKnown; \} \}/.test(hod) && !/'_blank', 'noopener'/.test(hod) && /else \{ tab = window\.open\('', '_blank'\);/.test(hod) && /tab\.location\.href = tripsyFlyoverDriveFolderUrl\(folderId\)/.test(hod),
+      'a known folder opens straight away; otherwise a blank tab opens now and is pointed at the folder once it exists');
+    assert(/if \(tab && !openedDirect\) \{ try \{ tab\.close\(\); \}/.test(hod), 'a blank tab is closed again when the folder cannot be reached');
+    assert(/inboxPrefetch = tripsyFlyoverInboxFolder\(trip, record, \{ create: false \}\)/.test(setup) && /if \(!create\) return null;/.test(extractFn('tripsyFlyoverInboxFolder')),
+      'the folder is looked up (never created) while the source question is up, so the Drive answer can open it in the same tap');
+    assert(/\{ onPickerInstead: openPicker, opened \}\)/.test(setup) && /opened \? 'The folder has been opened for you in Drive' : 'Open the folder'/.test(hand), 'the hand-off dialog says the folder was opened, keeping the link as a fallback');
   }
 
   // ---- Storm tracking was removed ("Remove tracking for the typhoon from flyover," 2026-10-25) ----
