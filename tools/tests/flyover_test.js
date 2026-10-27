@@ -1698,7 +1698,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     && /Store\.persistTripsyFlyovers\(\)/.test(setup),
     'a fly-over change is staged in memory before its Drive write queues, so View plays it immediately');
   const dd = { tripsyFlyovers: [{ tripKey: 'a', v: 1 }, { tripKey: 'b', v: 1 }] };
-  const store = new Function('driveData', 'return ({' + html.match(/  stageTripsyFlyover\(record\) \{[\s\S]*?\n  \},/)[0] + '})')(dd);
+  const store = new Function('driveData', 'return ({ _stagedFlyovers: new Map(), ' + html.match(/  stageTripsyFlyover\(record\) \{[\s\S]*?\n  \},/)[0] + '})')(dd);
   store.stageTripsyFlyover({ tripKey: 'a', v: 2 });
   assert(dd.tripsyFlyovers.length === 2 && dd.tripsyFlyovers.find(r => r.tripKey === 'a').v === 2, 'staging replaces the trip\'s record synchronously');
   const play = extractFn('playTripsyFlyover');
@@ -2087,6 +2087,29 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       const st = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x', true);
       assert(/data-flyover-shortcut-note/.test(st) && /Keep Shortcuts in front until it says Done/.test(st) && !/data-flyover-shortcut-note/.test(tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x')), 'the status slot repeats the reminder while a Shortcut launch is watched');
       assert(/if \(prevRecord\.shortcutLaunchedAt\) rec\.shortcutLaunchedAt = prevRecord\.shortcutLaunchedAt; if \(prevRecord\.shortcutNudgedFor\) rec\.shortcutNudgedFor = prevRecord\.shortcutNudgedFor;/.test(html), 'a rebuild keeps a pending launch, and the nudge already shown for it');
+      // "I am still getting the same shortcut message after i canceled it" (2026-10-27): the
+      // fly-over save had no conflict retry -- another writer's revision made persistDriveData
+      // reload the remote copy, which silently dropped the staged Cancel. Executed against a fake
+      // persistDriveData that conflicts once and reloads an older copy.
+      {
+        const method = (sig) => { const s = html.indexOf(sig); let d = 0; for (let j = html.indexOf('{', s); ; j++) { if (html[j] === '{') d++; else if (html[j] === '}') { d--; if (!d) return html.slice(s, j + 1); } } };
+        // driveData is one module-level variable shared by Store and persistDriveData in the
+        // app (a conflict reload REASSIGNS it), so the fake lives in the same scope.
+        const { Store, log } = new Function(
+          'const log = []; let conflicts = 1; const tripsyNotifyAuthExpired = () => {};\n'
+          + "let driveData = { tripsyFlyovers: [{ tripKey: 'sg', inboxPendingAt: 'LAUNCH', shortcutLaunchedAt: 'LAUNCH' }] };\n"
+          + 'async function persistDriveData(opts) {\n'
+          + "  if (conflicts-- > 0) { log.push('conflict silent=' + !!(opts && opts.silentConflict)); driveData = { tripsyFlyovers: [{ tripKey: 'sg', inboxPendingAt: 'LAUNCH', shortcutLaunchedAt: 'LAUNCH', other: 'newer' }] }; const e = new Error('CONFLICT_RELOADED'); e.conflict = true; throw e; }\n"
+          + "  log.push('wrote ' + JSON.stringify(driveData.tripsyFlyovers.map(r => [r.inboxPendingAt, r.shortcutLaunchedAt, r.other])));\n"
+          + '}\n'
+          + 'const Store = {' + method('  stageTripsyFlyover(record) {') + ',\n_stagedFlyovers: new Map(),\n' + method('  async persistTripsyFlyovers() {') + '}; return { Store, log };')();
+        (async () => {
+          Store.stageTripsyFlyover({ tripKey: 'sg', inboxPendingAt: '', shortcutLaunchedAt: '' });
+          const ok = await Store.persistTripsyFlyovers();
+          assert(ok && log[0] === 'conflict silent=true' && log[1] === 'wrote [["","",null]]' && Store._stagedFlyovers.size === 0,
+            'THE FIX: a conflicting fly-over save reloads silently, re-stages this session\'s record onto the fresh copy and writes it -- the Cancel lands');
+        })();
+      }
     }
     // ---- Capture-time dedupe ("If i just over-select photos to upload manually, will the
     // de-dupe logic automatically skip those?", 2026-10-27) ----

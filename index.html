@@ -3911,12 +3911,33 @@ const Store = {
     if (!record || !record.tripKey) return false;
     driveData.tripsyFlyovers = (driveData.tripsyFlyovers || []).filter(r => r.tripKey !== record.tripKey);
     driveData.tripsyFlyovers.push({ ...record, updatedAt: new Date().toISOString() });
+    this._stagedFlyovers.set(record.tripKey, record);
     return true;
   },
-  // Writes whatever is staged (the whole file carries the newest record).
+  // Writes whatever is staged (the whole file carries the newest record). A revision CONFLICT
+  // (another device or tab wrote flight-log-data.json since this one loaded it) reloads the
+  // fresh copy, RE-STAGES the records this session holds and retries, bounded -- it used to
+  // give up, and the reload silently threw the staged change away ("I am still getting the
+  // same shortcut message after i canceled it," 2026-10-27: Cancel cleared the pending launch
+  // in memory, the write conflicted, and the remote copy with the launch still pending came
+  // back). The fly-over page is the one editor of its record, so re-applying it is always right.
+  _stagedFlyovers: new Map(),
   async persistTripsyFlyovers() {
-    try { await persistDriveData(); return true; }
-    catch (e) { console.error('Store.persistTripsyFlyovers failed:', e); return false; }
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await persistDriveData({ silentConflict: true });
+        this._stagedFlyovers.clear();
+        return true;
+      } catch (e) {
+        if (e && e.conflict && attempt < 3) {
+          for (const r of Array.from(this._stagedFlyovers.values())) this.stageTripsyFlyover(r);
+          continue;
+        }
+        console.error('Store.persistTripsyFlyovers failed:', e);
+        if (e && e.authExpired) tripsyNotifyAuthExpired();
+        return false;
+      }
+    }
   },
   async saveTripsyFlyover(record) {
     if (!this.stageTripsyFlyover(record)) return false;

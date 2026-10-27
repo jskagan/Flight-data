@@ -5149,7 +5149,15 @@ WebView's support for recording is unproven.
     reopen of the page re-asked about the same launch ("I am getting this - which i seem to be
     getting a lot," 2026-10-27, after a run that had correctly found 0 photos). Keep waiting
     therefore means "never ask again about THIS launch"; Run it again stamps a new launch and
-    re-arms it. **The "since" moment is EDITABLE in the dialog** ("Found 431 photos" on
+    re-arms it. **And the fly-over save survives a revision conflict** ("I am still getting the
+    same shortcut message after i canceled it," same day — Cancel cleared the launch in
+    memory, `persistTripsyFlyovers` had no retry, and the conflict reload brought the remote
+    copy, launch still pending, straight back): `Store.stageTripsyFlyover` also remembers the
+    record in `_stagedFlyovers`, and `persistTripsyFlyovers` persists with `silentConflict`,
+    re-staging every remembered record onto the reloaded copy and retrying up to three times
+    (the `persistTripsyNarrativeCacheWithRetry` shape) — the fly-over page is the one editor
+    of its record, so re-applying it is always right. Every fly-over write (the page's `save`,
+    the player's Remove, the upload-resolved save) goes through it. **The "since" moment is EDITABLE in the dialog** ("Found 431 photos" on
     the first live run, 2026-10-27 — with no imported photo carrying a capture time yet the
     default was the trip's first day, which would have re-uploaded every photo already on the
     fly-over, none of which the capture dedupe can see): a `datetime-local` field
