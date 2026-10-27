@@ -5109,7 +5109,22 @@ WebView's support for recording is unproven.
     BUILDS IT ONCE from the recipe in the dialog (`tripsyFlyoverShortcutRecipeHtml`, nine
     steps: Split Text on `|`, Get Dates from the first item, Find Photos with Date Taken after
     it, Save File with Ask Where to Save + Overwrite If File Exists into Google Drive ›
-    Travel Tracker › the folder named in the alert, a final "Done — N photos saved" alert).
+    the app's Drive folder › the folder named in the alert, a final "Done — N photos saved"
+    alert). **The path is Drive › My Drive › `DRIVE_FOLDER_NAME` › the inbox folder** ("I
+    didn't see the Singapore GP folder in the save list," 2026-10-27 — the recipe, the alert
+    text and the not-finished dialog all said "Travel Tracker" while the folder was still
+    "Travel Reservation Tracking"; both now interpolate the constant). **And the folder IS
+    "Travel Tracker" now** ("change the name of everything including the folder," same day):
+    `DRIVE_FOLDER_NAME` changed, and because the app finds its folder by NAME,
+    `findOrCreateDriveFolderUncached` renames a folder still carrying
+    `DRIVE_FOLDER_LEGACY_NAME` in place (same id, contents and sharing; a failed rename still
+    returns the id) before it would ever create one — so the first build to open it migrates
+    it, and an older build on another device finds nothing under the old name only AFTER
+    that, when it would create a stray empty folder on its next upload; reload every device
+    once. The cloud Routine's prompt (claude.ai/code/routines) names the folder too and must
+    be edited by the owner. The first live
+    run that evening proved the rest: the split, the date parse ("Found 55 photos" after
+    Oct 25), and a real "Found 0" once the since-date passed the newest photo on the iPad.
     The header button (`data-flyover-shortcut`, owner) opens `tripsyFlyoverShortcutDialog`
     (the reminder in amber, a Run button disabled until `tripsyFlyoverInboxFolder` has found or
     created the folder — it must exist before the Shortcut asks where to save — the recipe

@@ -2553,7 +2553,12 @@ async function loadDriveDataFile(fileId) {
   }
 }
 
-const DRIVE_FOLDER_NAME = 'Travel Reservation Tracking';
+const DRIVE_FOLDER_NAME = 'Travel Tracker';
+// The folder was "Travel Reservation Tracking" until 2026-10-27 ("Can we actually change the
+// name of everything including the folder to Travel Tracker"). The app finds its folder by NAME,
+// so the lookup below RENAMES a folder still carrying the old name rather than creating a second
+// one beside it -- every device converges on one folder, whichever build opens it first.
+const DRIVE_FOLDER_LEGACY_NAME = 'Travel Reservation Tracking';
 
 // The folder id is remembered per session: every photo upload used to run this Drive search
 // again before its own request ("There is a massive delay from the time I select photos for
@@ -2566,11 +2571,32 @@ async function findOrCreateDriveFolder(folderName) {
   if (id) _driveFolderIdMemo.set(folderName, id);
   return id;
 }
-async function findOrCreateDriveFolderUncached(folderName) {
+async function findDriveFolderIdByName(folderName) {
   const query = encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='${folderName}' and trashed=false`);
   const searchRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`);
   const searchJson = await searchRes.json();
-  if (searchJson.files && searchJson.files.length) return searchJson.files[0].id;
+  return (searchJson.files && searchJson.files.length) ? searchJson.files[0].id : null;
+}
+async function findOrCreateDriveFolderUncached(folderName) {
+  const found = await findDriveFolderIdByName(folderName);
+  if (found) return found;
+
+  if (folderName === DRIVE_FOLDER_NAME) {
+    // The one-time migration off the old folder name: rename it in place (same id, same
+    // contents, same sharing). A failed rename still returns the id, so nothing breaks
+    // on a device that can only read it.
+    const legacyId = await findDriveFolderIdByName(DRIVE_FOLDER_LEGACY_NAME);
+    if (legacyId) {
+      try {
+        await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${legacyId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: DRIVE_FOLDER_NAME }),
+        });
+      } catch (e) { console.warn('Drive folder rename failed', e); }
+      return legacyId;
+    }
+  }
 
   const createRes = await driveApiFetch('https://www.googleapis.com/drive/v3/files', {
     method: 'POST',
@@ -2675,7 +2701,7 @@ async function uploadBinaryFileToDrive(file) {
 // matters for more than just its own size.
 async function uploadBlobToDrive(blob, fileName, mimeType, parentFolderId) {
   // parentFolderId lets callers target a subfolder (place photos go in "Photos");
-  // default is the flat "Travel Reservation Tracking" folder as before.
+  // default is the flat DRIVE_FOLDER_NAME folder as before.
   const folderId = parentFolderId || await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
   const buf = await blob.arrayBuffer();
   // Base64-encode in chunks to avoid a call-stack overflow from
@@ -2751,7 +2777,7 @@ async function uploadBlobToDriveResumable(blob, fileName, mimeType, onProgress, 
 
 // Find (or create) a folder named `folderName` that lives INSIDE `parentId`, unlike
 // findOrCreateDriveFolder which works at the Drive root. Used for the place-photo
-// "Photos" subfolder under "Travel Reservation Tracking".
+// "Photos" subfolder under the DRIVE_FOLDER_NAME folder.
 async function findOrCreateSubfolder(folderName, parentId) {
   const query = encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='${folderName}' and '${parentId}' in parents and trashed=false`);
   const searchRes = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`);
@@ -2768,7 +2794,7 @@ async function findOrCreateSubfolder(folderName, parentId) {
 
 const TRIPSY_PHOTOS_SUBFOLDER_NAME = 'Photos';
 let tripsyPhotosFolderIdCache = null;
-// Memoized id of the "Photos" subfolder (inside "Travel Reservation Tracking")
+// Memoized id of the "Photos" subfolder (inside the DRIVE_FOLDER_NAME folder)
 // where all tripsy place/transportation photos are stored.
 async function getTripsyPhotosFolderId() {
   if (tripsyPhotosFolderIdCache) return tripsyPhotosFolderIdCache;
@@ -2802,7 +2828,7 @@ async function uploadTripsyPlacePhotoToDrive(blob, mimeType = 'image/jpeg') {
 }
 
 // One-time (owner) migration: move every existing `tripsy-place-photo-*` file from
-// the flat "Travel Reservation Tracking" folder into the "Photos" subfolder. Lists
+// the flat DRIVE_FOLDER_NAME folder into the "Photos" subfolder. Lists
 // the folder (so it also catches orphans not in tripsyPlacePhotoCache), moves each
 // match, and only sets the done-flag if nothing failed (a partial run retries next
 // load; already-moved files leave the parent, so a re-list never double-moves them).
@@ -16325,7 +16351,7 @@ async function tripsyWardrobeOpenImport(onDone) {
   bodyEl.innerHTML = `<div style="padding:24px 0; color:var(--muted);">Looking for the “Travel Wardrobe” folder…</div>`;
   ov.style.display = 'flex';
   const folderId = await tripsyFindWardrobeImportFolder();
-  if (!folderId) { bodyEl.innerHTML = `<div class="empty-state">Couldn't find a Drive folder named “Travel Wardrobe”. Create one under your Travel Reservation Tracking folder and drop garment photos (JPEG) in it.</div>`; goBtn.style.display = 'none'; return; }
+  if (!folderId) { bodyEl.innerHTML = `<div class="empty-state">Couldn't find a Drive folder named “Travel Wardrobe”. Create one under your ${esc(DRIVE_FOLDER_NAME)} folder and drop garment photos (JPEG) in it.</div>`; goBtn.style.display = 'none'; return; }
   const [files, existing] = await Promise.all([tripsyListWardrobeFolderImages(folderId), Store.listWardrobe()]);
   const alreadyImported = new Set(existing.map(g => g.sourceFileId).filter(Boolean));
   const newFiles = files.filter(f => !alreadyImported.has(f.id));
@@ -20989,8 +21015,8 @@ function tripsyFlyoverShortcutRecipeHtml(name = TRIPSY_FLYOVER_SHORTCUT_NAME) {
     ${li(`Add <strong>Get Item from List</strong> — <em>First Item</em> from Split Text. Then add <strong>Get Dates from Input</strong> on that item (this is the “since” date).`)}
     ${li(`Add <strong>Get Item from List</strong> again — <em>Last Item</em> from Split Text (this is the Drive folder’s name).`)}
     ${li(`Add <strong>Find Photos</strong> — add a filter <em>Date Taken is after</em> the date from step 3; Sort by <em>Date Taken</em>; turn <em>Limit</em> off. To leave videos out, add a second filter <em>Media Type is Image</em>.`)}
-    ${li(`Add <strong>Count</strong> (Items in Photos), then <strong>Show Alert</strong> with the text: “Found [Count] photos. Keep Shortcuts in front until it says Done. Save them into Google Drive › Travel Tracker › [folder name from step 4].”`)}
-    ${li(`Add <strong>Save File</strong> — File: the Photos from step 5; turn ON <em>Ask Where to Save</em> and ON <em>Overwrite If File Exists</em>. When it runs, pick <strong>Google Drive › Travel Tracker › the folder named in the alert</strong> once; all the photos save there.`)}
+    ${li(`Add <strong>Count</strong> (Items in Photos), then <strong>Show Alert</strong> with the text: “Found [Count] photos. Keep Shortcuts in front until it says Done. Save them into Google Drive › ${esc(DRIVE_FOLDER_NAME)} › [folder name from step 4].”`)}
+    ${li(`Add <strong>Save File</strong> — File: the Photos from step 5; turn ON <em>Ask Where to Save</em> and ON <em>Overwrite If File Exists</em>. When it runs, pick <strong>Drive › My Drive › ${esc(DRIVE_FOLDER_NAME)} › the folder named in the alert</strong> once (folders are listed before files; pull down to refresh if the folder is missing); all the photos save there.`)}
     ${li(`Add a final <strong>Show Alert</strong>: “Done — [Count] photos saved. Go back to Travel Tracker; the fly-over imports them about two minutes after the last one lands.”`)}
     ${li(`Tap <strong>Done</strong>. The button below runs it with the date and folder filled in; if the button can’t open Shortcuts on this device, run the shortcut by hand and, when it asks for input, paste the text shown below.`)}
   </ol>`;
@@ -21060,7 +21086,7 @@ function tripsyFlyoverShortcutIncompleteDialog({ folderName, onRunAgain, onKeepW
       <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:10px;">Nothing new has reached the Drive folder <strong>${esc(folderName)}</strong> since it was started. To complete the upload:</div>
       <ol style="margin:0 0 12px 18px; padding:0; font-size:13px; line-height:1.5;">
         <li>Open the <strong>Shortcuts</strong> app and run <strong>${esc(TRIPSY_FLYOVER_SHORTCUT_NAME)}</strong> (or tap <em>Run it again</em> below).</li>
-        <li>If it asks where to save, choose <strong>Google Drive › Travel Tracker › ${esc(folderName)}</strong>.</li>
+        <li>If it asks where to save, choose <strong>Drive › My Drive › ${esc(DRIVE_FOLDER_NAME)} › ${esc(folderName)}</strong> (folders are listed before files).</li>
         <li><strong>Stay in Shortcuts</strong> until it shows “Done — N photos saved.” Don’t switch apps or lock the iPad before that.</li>
         <li>If it shows an error instead, note the message; a very large find (hundreds of photos) can be split by running it after a later date, which the input text sets.</li>
         <li>Come back here. The page imports the photos about two minutes after the last one lands.</li>

@@ -2036,7 +2036,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     // complete, can a dialog appear with instructions on how to complete," 2026-10-27) ----
     {
       var esc = typeof esc === 'function' ? esc : (v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]));
-      eval([constLine('TRIPSY_FLYOVER_SHORTCUT_NAME'), constLine('TRIPSY_FLYOVER_SHORTCUT_GRACE_MS')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverLastCaptureTime', 'tripsyFlyoverShortcutSince', 'tripsyFlyoverShortcutInput', 'tripsyFlyoverShortcutUrl', 'tripsyFlyoverShortcutLooksIncomplete', 'tripsyFlyoverShortcutRecipeHtml'].map(extractFn)).join('\n'));
+      eval([constLine('TRIPSY_FLYOVER_SHORTCUT_NAME'), constLine('TRIPSY_FLYOVER_SHORTCUT_GRACE_MS'), constLine('DRIVE_FOLDER_NAME')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverLastCaptureTime', 'tripsyFlyoverShortcutSince', 'tripsyFlyoverShortcutInput', 'tripsyFlyoverShortcutUrl', 'tripsyFlyoverShortcutLooksIncomplete', 'tripsyFlyoverShortcutRecipeHtml'].map(extractFn)).join('\n'));
       const recS = { stops: [{ photos: [{ driveFileId: 'a', taken: '2026-10-21T09:00:00' }, { driveFileId: 'b', taken: '2026-10-23T18:30:15' }, { driveFileId: 'c' }] }, { photos: [{ driveFileId: 'd', taken: '2026-10-22T08:00:00' }] }] };
       assert(tripsyFlyoverLastCaptureTime(recS) === '2026-10-23T18:30:15' && tripsyFlyoverLastCaptureTime({ stops: [] }) === '', 'the newest capture second on the record, across every destination');
       assert(tripsyFlyoverShortcutSince(recS, '2026-10-06') === '2026-10-23 18:30:15' && tripsyFlyoverShortcutSince({ stops: [] }, '2026-10-06') === '2026-10-06 00:00:00', 'THE ASK: "since" is the last imported photo\'s capture time, else the trip\'s first day');
@@ -2049,6 +2049,21 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       const recipe = tripsyFlyoverShortcutRecipeHtml();
       assert((recipe.match(/<li/g) || []).length === 9 && /Split Text/.test(recipe) && /Find Photos/.test(recipe) && /Date Taken is after/.test(recipe) && /Save File/.test(recipe) && /Ask Where to Save/.test(recipe) && /Overwrite If File Exists/.test(recipe) && /Done — \[Count\] photos saved/.test(recipe),
         'the recipe builds the shortcut: split the input, find photos after the date, save to the folder, end with a Done alert');
+      // "I didn't see the Singapore GP folder in the save list" (2026-10-27): the inbox folder sits
+      // inside the app's REAL Drive folder (DRIVE_FOLDER_NAME), which the recipe and the nudge dialog
+      // had been naming by hand -- and the folder was then RENAMED to match ("change the name of
+      // everything including the folder to Travel Tracker"), by the app itself on its next open.
+      assert(DRIVE_FOLDER_NAME === 'Travel Tracker' && constLine('DRIVE_FOLDER_LEGACY_NAME').includes("'Travel Reservation Tracking'"),
+        'the folder is "Travel Tracker"; the old name survives only as the legacy constant');
+      const fo = extractFn('findOrCreateDriveFolderUncached');
+      assert(/folderName === DRIVE_FOLDER_NAME/.test(fo) && /findDriveFolderIdByName\(DRIVE_FOLDER_LEGACY_NAME\)/.test(fo) && /method: 'PATCH'/.test(fo) && /name: DRIVE_FOLDER_NAME/.test(fo) && /return legacyId;/.test(fo)
+        && fo.indexOf('findDriveFolderIdByName(DRIVE_FOLDER_LEGACY_NAME)') < fo.indexOf("method: 'POST'"),
+        'a folder still under the old name is renamed in place and reused -- never a second folder created beside it');
+      const recipeSrc = extractFn('tripsyFlyoverShortcutRecipeHtml');
+      assert(!/Travel Tracker ›/.test(recipeSrc) && (recipeSrc.match(/\$\{esc\(DRIVE_FOLDER_NAME\)\} › /g) || []).length >= 2 && recipe.includes(`My Drive › ${DRIVE_FOLDER_NAME} › `),
+        'the recipe names the real Drive folder the inbox sits in, by the constant, never a hand-typed name');
+      assert(!/Travel Tracker ›/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')) && /My Drive › \$\{esc\(DRIVE_FOLDER_NAME\)\} › \$\{esc\(folderName\)\}/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')),
+        'so does the not-finished dialog');
       const dlg = extractFn('tripsyFlyoverShortcutDialog'), nudge = extractFn('tripsyFlyoverShortcutIncompleteDialog');
       assert(/Keep the Shortcuts app in front until it shows “Done — N photos saved\.”/.test(dlg) && /data-sc-run disabled/.test(dlg) && /setReady: ok =>/.test(dlg) && /data-sc-copy/.test(dlg), 'THE ASK: the reminder to keep Shortcuts open is on the launch dialog; Run waits for the folder; the input text can be copied');
       // The "since" moment is editable (the first run found 431 photos from the trip's first day).
