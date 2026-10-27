@@ -2059,6 +2059,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       assert(/folderName === DRIVE_FOLDER_NAME/.test(fo) && /findDriveFolderIdByName\(DRIVE_FOLDER_LEGACY_NAME\)/.test(fo) && /method: 'PATCH'/.test(fo) && /name: DRIVE_FOLDER_NAME/.test(fo) && /return legacyId;/.test(fo)
         && fo.indexOf('findDriveFolderIdByName(DRIVE_FOLDER_LEGACY_NAME)') < fo.indexOf("method: 'POST'"),
         'a folder still under the old name is renamed in place and reused -- never a second folder created beside it');
+      assert(/catch \(e\) \{ console\.error\('Pasted-photo recompression failed[^\n]*\n\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*try \{ await findOrCreateDriveFolder\(DRIVE_FOLDER_NAME\); \}/.test(extractFn('runBackgroundSyncs')),
+        'runBackgroundSyncs looks the folder up once per session, so the rename actually runs on an ordinary open (nothing else looks it up -- the fly-over page remembers its inbox id)');
       const recipeSrc = extractFn('tripsyFlyoverShortcutRecipeHtml');
       assert(!/Travel Tracker ›/.test(recipeSrc) && (recipeSrc.match(/\$\{esc\(DRIVE_FOLDER_NAME\)\} › /g) || []).length >= 2 && recipe.includes(`My Drive › ${DRIVE_FOLDER_NAME} › `),
         'the recipe names the real Drive folder the inbox sits in, by the constant, never a hand-typed name');
@@ -2095,19 +2097,29 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         const method = (sig) => { const s = html.indexOf(sig); let d = 0; for (let j = html.indexOf('{', s); ; j++) { if (html[j] === '{') d++; else if (html[j] === '}') { d--; if (!d) return html.slice(s, j + 1); } } };
         // driveData is one module-level variable shared by Store and persistDriveData in the
         // app (a conflict reload REASSIGNS it), so the fake lives in the same scope.
-        const { Store, log } = new Function(
+        const { Store, log, setConflicts } = new Function(
           'const log = []; let conflicts = 1; const tripsyNotifyAuthExpired = () => {};\n'
           + "let driveData = { tripsyFlyovers: [{ tripKey: 'sg', inboxPendingAt: 'LAUNCH', shortcutLaunchedAt: 'LAUNCH' }] };\n"
           + 'async function persistDriveData(opts) {\n'
           + "  if (conflicts-- > 0) { log.push('conflict silent=' + !!(opts && opts.silentConflict)); driveData = { tripsyFlyovers: [{ tripKey: 'sg', inboxPendingAt: 'LAUNCH', shortcutLaunchedAt: 'LAUNCH', other: 'newer' }] }; const e = new Error('CONFLICT_RELOADED'); e.conflict = true; throw e; }\n"
           + "  log.push('wrote ' + JSON.stringify(driveData.tripsyFlyovers.map(r => [r.inboxPendingAt, r.shortcutLaunchedAt, r.other])));\n"
           + '}\n'
-          + 'const Store = {' + method('  stageTripsyFlyover(record) {') + ',\n_stagedFlyovers: new Map(),\n' + method('  async persistTripsyFlyovers() {') + '}; return { Store, log };')();
+          + 'const Store = {' + method('  stageTripsyFlyover(record) {') + ',\n_stagedFlyovers: new Map(),\n' + method('  async persistTripsyFlyovers() {') + '}; return { Store, log, setConflicts: n => { conflicts = n; } };')();
         (async () => {
           Store.stageTripsyFlyover({ tripKey: 'sg', inboxPendingAt: '', shortcutLaunchedAt: '' });
           const ok = await Store.persistTripsyFlyovers();
-          assert(ok && log[0] === 'conflict silent=true' && log[1] === 'wrote [["","",null]]' && Store._stagedFlyovers.size === 0,
+          assert(ok && log[0] === 'conflict silent=true' && log[1] === 'wrote [["","",null]]' && Store._stagedFlyovers.size === 1,
             'THE FIX: a conflicting fly-over save reloads silently, re-stages this session\'s record onto the fresh copy and writes it -- the Cancel lands');
+          // The second lost Cancel (same day): a save queued BEHIND a successful one had its record
+          // staged while that one ran; clearing the memory on success left it nothing to re-apply
+          // when it conflicted itself. The memory is kept, so the later save still re-stages.
+          Store.stageTripsyFlyover({ tripKey: 'sg', inboxPendingAt: 'L2', shortcutLaunchedAt: 'L2', shortcutNudgedFor: '' });
+          const okA = await Store.persistTripsyFlyovers();          // the nudge save, succeeds
+          Store.stageTripsyFlyover({ tripKey: 'sg', inboxPendingAt: '', shortcutLaunchedAt: '' });
+          setConflicts(1);                                          // the Cancel save conflicts
+          const okB = await Store.persistTripsyFlyovers();
+          assert(okA && okB && log[log.length - 1] === 'wrote [["","",null]]',
+            'a save queued behind a successful one still re-applies ITS record on a conflict -- the memory is never cleared on success');
         })();
       }
     }
@@ -2288,8 +2300,9 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     const wait = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://drive.google.com/drive/folders/x');
     assert(!/tripsy-menu-flash/.test(wait) && /Waiting for photos in the Drive folder/.test(wait) && /data-drive-open-folder/.test(wait) && /data-drive-cancel/.test(wait), 'THE ASK: the waiting message does not flash, and offers Open folder and Cancel');
     assert(/inboxWatch = \{ timer: null, state: null, phase: 'waiting'/.test(setup) && /inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);/.test(setup)
-      && /if \(cancel\) cancel\.onclick = \(\) => \{ if \(closed\) return; record = \{ \.\.\.record, inboxDest: '', inboxPendingAt: '', shortcutLaunchedAt: '' \}; save\(\); stopInboxWatch\(\); render\(\); \};/.test(setup),
-      'the watcher starts waiting, passes the count to the phase, and Cancel ends the hand-off');
+      && /if \(cancel\) cancel\.onclick = cancelHandOff;/.test(setup) && /onCancel: cancelHandOff,/.test(setup)
+      && /const cancelHandOff = \(\) => \{\s*const cleared = \{ inboxDest: '', inboxPendingAt: '', shortcutLaunchedAt: '' \};\s*if \(closed\) \{\s*const live = Store\.getTripsyFlyover\(trip\.key\);\s*if \(live && live\.inboxPendingAt\) Store\.saveTripsyFlyover\(\{ \.\.\.live, \.\.\.cleared \}\);\s*return;\s*\}\s*record = \{ \.\.\.record, \.\.\.cleared \}; save\(\); stopInboxWatch\(\); render\(\);/.test(setup),
+      'the watcher starts waiting, passes the count to the phase, and ONE Cancel (status slot and dialog alike) ends the hand-off -- on the Store\'s copy if the page was already closed under the dialog');
     // "if the upload is still happening, the app shouldn't say the upload is complete" and
     // "Nothing happens when I hit the import now button" (2026-10-26).
     assert(TRIPSY_FLYOVER_INBOX_SETTLE_MS === 120000, 'THE ASK: two quiet minutes before the folder counts as complete (photos landed 30-60 s apart on a slow connection)');

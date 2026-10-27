@@ -5157,7 +5157,17 @@ WebView's support for recording is unproven.
     re-staging every remembered record onto the reloaded copy and retrying up to three times
     (the `persistTripsyNarrativeCacheWithRetry` shape) — the fly-over page is the one editor
     of its record, so re-applying it is always right. Every fly-over write (the page's `save`,
-    the player's Remove, the upload-resolved save) goes through it. **The "since" moment is EDITABLE in the dialog** ("Found 431 photos" on
+    the player's Remove, the upload-resolved save) goes through it. **The memory is never
+    cleared on success** (a second lost Cancel, same evening: the Cancel's save was queued
+    behind the nudge's, had staged its record while that one ran, and the first cut's
+    clear-on-success left it nothing to re-apply when it conflicted — the app's own startup
+    syncs race the same page's revision baseline, so same-page conflicts are ordinary). And
+    the status slot's Cancel and the dialog's "Cancel the upload" share `cancelHandOff`,
+    which clears the launch on the Store's copy when the page was already closed under the
+    dialog (the dialog is its own overlay and outlives the page). Also:
+    `runBackgroundSyncs` ends with `findOrCreateDriveFolder(DRIVE_FOLDER_NAME)` so the
+    folder rename above actually runs on an ordinary open — nothing else looks the folder up
+    (the fly-over page remembers its inbox id). **The "since" moment is EDITABLE in the dialog** ("Found 431 photos" on
     the first live run, 2026-10-27 — with no imported photo carrying a capture time yet the
     default was the trip's first day, which would have re-uploaded every photo already on the
     fly-over, none of which the capture dedupe can see): a `datetime-local` field

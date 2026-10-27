@@ -3926,7 +3926,10 @@ const Store = {
     for (let attempt = 0; ; attempt++) {
       try {
         await persistDriveData({ silentConflict: true });
-        this._stagedFlyovers.clear();
+        // The memory is NOT cleared on success: a save queued behind this one has already
+        // staged a newer record into it, and clearing here left that save with nothing to
+        // re-apply when IT conflicted (a second lost Cancel, 2026-10-27). The newest record
+        // staged this session is the truth this session holds, so re-staging it is always right.
         return true;
       } catch (e) {
         if (e && e.conflict && attempt < 3) {
@@ -6247,6 +6250,12 @@ async function runBackgroundSyncs() {
   // path resized (see tripsyRecompressPastedPhotos).
   try { await tripsyRecompressPastedPhotos(); }
   catch (e) { console.error('Pasted-photo recompression failed (will retry next load):', e); }
+  // The one-time folder rename (DRIVE_FOLDER_LEGACY_NAME -> DRIVE_FOLDER_NAME) lives in the
+  // folder lookup, but nothing on an ordinary open LOOKS the folder up -- the fly-over page
+  // remembers its inbox folder id, uploads are rare -- so the rename never ran (2026-10-27).
+  // One search per session (two while the old name still exists), owner-only.
+  try { await findOrCreateDriveFolder(DRIVE_FOLDER_NAME); }
+  catch (e) { console.error('Drive folder lookup failed (will retry next load):', e); }
 }
 
 function todayLocalDateString() {
@@ -19423,12 +19432,24 @@ async function showTripsyFlyover(tripKey) {
   // photos and so, correctly, saved nothing).
   let launchShortcut = null;
   let shortcutSinceOverride = ''; // a "since" the owner typed in the dialog, kept for Run it again
+  // Cancel ends a hand-off nothing was uploaded for; the (empty) folder is kept for next time.
+  // The status slot's Cancel and the not-finished dialog's "Cancel the upload" share it. The
+  // dialog outlives the page (it is its own overlay), so a press after the page was closed still
+  // clears the launch -- on the Store's copy, which is what a reopened page would read.
+  const cancelHandOff = () => {
+    const cleared = { inboxDest: '', inboxPendingAt: '', shortcutLaunchedAt: '' };
+    if (closed) {
+      const live = Store.getTripsyFlyover(trip.key);
+      if (live && live.inboxPendingAt) Store.saveTripsyFlyover({ ...live, ...cleared });
+      return;
+    }
+    record = { ...record, ...cleared }; save(); stopInboxWatch(); render();
+  };
   const wireDriveStatus = () => {
     const go = body.querySelector('[data-drive-import-now]');
     if (go) go.onclick = () => { if (!closed && runFinishUpload && !driveImportRunning) runFinishUpload(); };
-    // Cancel ends a hand-off nothing was uploaded for; the (empty) folder is kept for next time.
     const cancel = body.querySelector('[data-drive-cancel]');
-    if (cancel) cancel.onclick = () => { if (closed) return; record = { ...record, inboxDest: '', inboxPendingAt: '', shortcutLaunchedAt: '' }; save(); stopInboxWatch(); render(); };
+    if (cancel) cancel.onclick = cancelHandOff;
   };
   const paintDriveStatus = () => {
     const slot = body.querySelector('[data-flyover-drive-status]');
@@ -19462,7 +19483,7 @@ async function showTripsyFlyover(tripKey) {
             folderName: TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'),
             onRunAgain: () => { if (launchShortcut) launchShortcut(); },
             onKeepWaiting: () => {},
-            onCancel: () => { if (closed) return; record = { ...record, inboxDest: '', inboxPendingAt: '', shortcutLaunchedAt: '' }; save(); stopInboxWatch(); render(); },
+            onCancel: cancelHandOff,
           });
         }
       } catch (e) {
