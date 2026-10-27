@@ -541,7 +541,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   // photos page, and every add path.
   assert(/\$\{tripsyFlyoverUnplacedPhotos\(s\)\.map\(ph => `[\s\S]*data-flyover-nopage="\$\{esc\(ph\.driveFileId\)\}"[\s\S]*tripsyFlyoverThumbHtml\(ph, 84, 64,[\s\S]*>No page<\/span>[\s\S]*data-flyover-nopage-remove/.test(setup)
     && /card\.querySelectorAll\('\[data-flyover-nopage\]'\)\.forEach\(t => t\.onclick = e => \{[\s\S]*?tripsyFlyoverReviewStopPhoto\(stop, t\.getAttribute\('data-flyover-nopage'\), 'No page', photoHooks\);/.test(setup)
-    && /removePhotoFromRecord\(id, b\.getAttribute\('data-flyover-nopage-remove'\)\)/.test(setup),
+    && /removePhotoFromRecord\(id, b\.getAttribute\('data-flyover-nopage-remove'\)\)\.catch/.test(setup),
     'THE ASK: every photo on No page shows on the card as its own thumbnail badged "No page" ("Show each photo on the flyover page even they are not on a page," 2026-10-25); a tap opens it large (Delete / Keep / Move), ✕ removes it');
   assert(/\{ \.\.\.s, \.\.\.tripsyFlyoverFreezePagesOnAdd\(s, fields\) \}/.test(setup) && (setup.match(/updateStop\((id|stopId), \{ photos: \[\.\.\.\(stopNow\(\)\.photos \|\| \[\]\), rec\] \}\)/g) || []).length === 3,
     'every add path (picker photos, picker videos, Drive import) goes through updateStop, which freezes a never-paged destination first');
@@ -2028,7 +2028,33 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   // ---- Import from a Drive folder (2026-10-25: "copy the photos into a temporary drive folder
   // and then import the photos into the app in the background from the drive folder") ----
   {
-    eval([extractFn('tripsyFlyoverDriveSrc'), extractFn('tripsyFlyoverDriveMetaInfo'), extractFn('tripsyFlyoverDriveVideoRecord'), extractFn('tripsyFlyoverDriveNewFiles'), extractFn('tripsyFlyoverKnownSources'), extractFn('tripsyFlyoverDriveFolderUrl')].join('\n'));
+    eval([extractFn('tripsyFlyoverDriveSrc'), extractFn('tripsyFlyoverDriveMetaInfo'), extractFn('tripsyFlyoverDriveVideoRecord'), extractFn('tripsyFlyoverDrivePhotoRecord'), extractFn('tripsyFlyoverPhotoInPlace'), extractFn('tripsyFlyoverRecordDriveIds'), extractFn('tripsyFlyoverDriveNewFiles'), extractFn('tripsyFlyoverKnownSources'), extractFn('tripsyFlyoverDriveFolderUrl'), extractFn('tripsyFlyoverPreviewUrlAt')].join('\n'));
+    // ---- A delete repaints at once, the save behind it ("When i delete a photo from the flyover
+    // page there is a delay," 2026-10-27) ----
+    {
+      const setupSrc = extractFn('showTripsyFlyover');
+      const rm = setupSrc.slice(setupSrc.indexOf('const removePhotoFromRecord = async'), setupSrc.indexOf('const setVideoAudioInRecord'));
+      assert(/updateStop\(stopId, \{ photos: next\.photos[^\n]*\n\s*if \(!closed\) render\(\);\s*const ok = await save\(\);\s*if \(!ok\) throw new Error\('save failed'\);/.test(rm), 'THE ASK: the tile goes the moment the photo is off the record; the Drive write runs behind, and a failed one throws for the caller');
+      const mv = setupSrc.slice(setupSrc.indexOf('const movePhotoInRecord = async'), setupSrc.indexOf('const photoMoveTargets'));
+      const va = setupSrc.slice(setupSrc.indexOf('const setVideoAudioInRecord = async'), setupSrc.indexOf('const playerHooks'));
+      assert(/if \(!closed\) render\(\);\s*await save\(\);/.test(mv) && /if \(!closed\) render\(\);\s*await save\(\);/.test(va), 'a move and a video-sound change repaint before their save too');
+    }
+    // ---- Photos referenced IN PLACE ("How do we prevent this from happening again? The whole
+    // point is to allow background processing," 2026-10-27): the import is metadata only. ----
+    {
+      const ph = tripsyFlyoverDrivePhotoRecord({ id: 'ph1', mimeType: 'image/heif', md5Checksum: 'abc123' });
+      assert(ph.driveFileId === 'ph1' && ph.inPlace === true && ph.mime === 'image/heif' && ph.src === 'drive:ph1' && ph.md5 === 'md5:abc123', 'THE ASK: an inbox photo is referenced by its own Drive id, with Drive\'s checksum as its content identity');
+      assert(tripsyFlyoverPhotoInPlace(ph) && !tripsyFlyoverPhotoInPlace({ driveFileId: 'x' }) && !tripsyFlyoverPhotoInPlace({ driveFileId: 'pending-1', inPlace: true }), 'in-place is the flag on a real Drive id, never a pending one');
+      assert(tripsyFlyoverKnownSources({ stops: [{ photos: [ph] }] }).has('md5:abc123'), 'a re-upload of the same bytes is known by checksum');
+      const ids = tripsyFlyoverRecordDriveIds({ stops: [{ photos: [ph, { driveFileId: 'v1', kind: 'video', posterId: 'po1' }, { driveFileId: 'pending-z' }, { driveFileId: 'builtin:lax' }] }] });
+      assert(ids.has('ph1') && ids.has('v1') && ids.has('po1') && !ids.has('pending-z') && !ids.has('builtin:lax') && ids.size === 3, 'the retire moves every Drive file the record refers to, never a pending or built-in id');
+      assert(tripsyFlyoverPreviewUrlAt('https://lh3.googleusercontent.com/drive-storage/abc=s220', 1600) === 'https://lh3.googleusercontent.com/drive-storage/abc=s1600' && tripsyFlyoverPreviewUrlAt('https://x/y=s220-c', 1600) === 'https://x/y=s1600' && tripsyFlyoverPreviewUrlAt('', 1600) === '', 'Drive\'s preview link is re-sized by its trailing =s suffix');
+      const disp = extractFn('tripsyPlacePhotoDisplayUrl'), ip = extractFn('tripsyFlyoverDrivePhotoUrl');
+      assert(/if \(tripsyFlyoverInPlaceIds\.has\(driveFileId\)\) \{/.test(disp) && /tripsyGetCachedPhotoBlob\(driveFileId\)/.test(ip) && /fields=thumbnailLink,hasThumbnail/.test(ip) && /return link;/.test(ip) && /const blob = await downloadDriveFileBlob\(driveFileId\);/.test(ip),
+        'an in-place photo shows from Drive\'s server-made preview (cached on disk; the bare URL if its bytes can\'t be read; the original only when there is no preview)');
+      assert(/if \(rec && typeof tripsyFlyoverInPlaceIds !== 'undefined'\) for \(const s of \(rec\.stops \|\| \[\]\)\) for \(const p of \(s\.photos \|\| \[\]\)\) if \(tripsyFlyoverPhotoInPlace\(p\)\) tripsyFlyoverInPlaceIds\.add\(p\.driveFileId\);/.test(html), 'Store.getTripsyFlyover -- the one reader -- registers in-place photos for the display path');
+      assert(/md5Checksum/.test(extractFn('tripsyFlyoverListInbox')), 'the inbox listing asks Drive for each file\'s checksum');
+    }
     const a = tripsyFlyoverDriveMetaInfo({ id: 'a', imageMediaMetadata: { time: '2026:10:09 18:30:15', location: { latitude: 1.29, longitude: 103.85 } }, createdTime: '2026-10-25T01:00:00Z' });
     assert(a.takenAt === '2026-10-09T18:30:15' && a.lat === 1.29 && a.lng === 103.85 && a.source === 'exif', 'THE ASK: Drive\'s own listing gives the capture time and GPS, so photos route with no download');
     const b = tripsyFlyoverDriveMetaInfo({ id: 'b', createdTime: '2026-10-25T01:00:00Z' });
@@ -2048,9 +2074,10 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(!/data-flyover-drive-import|data-flyover-card-drive-import|tripsyFlyoverDriveImportDialog/.test(html) && /const runDriveImport = async \(files, dest, folderId\) => \{/.test(setup)
       && /const src = tripsyFlyoverDriveSrc\(f\.id\);\s*if \(known\.has\(src\)\) continue;/.test(setup)
       && /const stopId = tripsyFlyoverDriveImportDest\(record\.stops, f, dest\);/.test(setup)
-      && /const blob = await downloadDriveFileBlob\(f\.id\);[\s\S]*const fp = await tripsyFlyoverFileFingerprint\(blob\);[\s\S]*tripsyFlyoverStagePendingPhoto\(blob\);[\s\S]*src: fp \|\| src, driveSrc: src[\s\S]*tripsyFlyoverQueueUpload\(trip\.key, pendingId\);/.test(setup)
+      && /rec = tripsyFlyoverDrivePhotoRecord\(f\);\s*if \(rec\.md5 && known\.has\(rec\.md5\)\) \{ known\.add\(src\); dupes\+\+; tripsyFlyoverIntakeNote\(\{ skipped: dupes \}\); tripsyFlyoverTrashDriveFile\(f\.id\); continue; \}[\s\S]*tripsyFlyoverInPlaceIds\.add\(f\.id\);/.test(setup)
+      && !/downloadDriveFileBlob\(f\.id\)|tripsyFlyoverQueueUpload\(trip\.key, pendingId\)/.test(setup.slice(setup.indexOf('const runDriveImport'), setup.indexOf('const editBtn')))
       && /if \(taken === 1 \|\| taken % 10 === 0\) \{ save\(\); render\(\); \}/.test(setup),
-      'the import runs on the page: resume-safe by src, routed by date or to a chosen destination, each photo downloaded, staged and uploaded resized in the background');
+      'the import is metadata only: resume-safe by src, routed by date or to a chosen destination, each photo referenced in place (a checksum twin trashed), nothing downloaded or uploaded');
     assert(/if \(prevRecord && prevRecord\.inboxFolderId\) rec\.inboxFolderId = prevRecord\.inboxFolderId;/.test(html), 'a rebuild keeps the inbox folder');
     // ---- Capture date first, whichever button started the hand-off ("Will the drive uploaded
     // photos load in the correct day on the flyover page?", 2026-10-25 -- the live hand-off came
@@ -2062,11 +2089,12 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(tripsyFlyoverDriveImportDest(dStops, { mimeType: 'video/quicktime', createdTime: '2026-10-18T01:00:00Z' }, 'auto') === null, 'with no card and no EXIF nothing is guessed from the upload time');
     assert(tripsyFlyoverDriveImportDest(dStops, { imageMediaMetadata: { time: '2026:09:01 10:00:00' } }, 'dn') === 'dn' && tripsyFlyoverDriveImportDest(dStops, { imageMediaMetadata: { time: '2026:09:01 10:00:00' } }, 'auto') === null, 'a dated photo fitting no destination takes the card\'s, else is left out');
     // The folder is temporary: videos moved out, folder trashed, only once everything landed.
-    assert(/if \(!closed && !failed && !unmatched && taken && folderId\) \{[\s\S]*const landed = await tripsyFlyoverWaitForUploads\(pendingIds, 15 \* 60 \* 1000\);[\s\S]*await tripsyFlyoverRetireInbox\(folderId, videoIds\);[\s\S]*record = \{ \.\.\.record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' \};/.test(setup),
-      'THE ASK: after a clean import the folder is retired, but only once every photo upload has landed');
+    assert(/if \(!closed && !failed && !unmatched && taken && folderId\) \{[\s\S]*await save\(\);\s*await tripsyFlyoverRetireInbox\(folderId, tripsyFlyoverRecordDriveIds\(record\)\);[\s\S]*record = \{ \.\.\.record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' \};/.test(setup)
+      && !/tripsyFlyoverWaitForUploads/.test(setup),
+      'THE ASK: after a clean import the folder is retired at once -- there is no upload left to wait for');
     const retire = extractFn('tripsyFlyoverRetireInbox');
-    assert(/addParents=\$\{encodeURIComponent\(home\)\}&removeParents=\$\{encodeURIComponent\(folderId\)\}/.test(retire) && /JSON\.stringify\(\{ trashed: true \}\)/.test(retire),
-      'videos are MOVED into the app folder first (the player streams them by id), then the inbox is trashed, not permanently deleted');
+    assert(/const inFolder = await tripsyFlyoverListInbox\(folderId\);\s*for \(const f of inFolder\) \{\s*if \(!keep\.has\(f\.id\)\) continue;/.test(retire) && /addParents=\$\{encodeURIComponent\(home\)\}&removeParents=\$\{encodeURIComponent\(folderId\)\}/.test(retire) && /JSON\.stringify\(\{ trashed: true \}\)/.test(retire),
+      'every referenced file still in the folder is MOVED into the app folder first (the fly-over shows them by id; trashing a folder trashes its contents), then the inbox is trashed, not permanently deleted');
     eval(extractFn('tripsyFlyoverWaitForUploads') + '\nvar tripsyFlyoverUploadedIds = new Map([["pending-a", "d1"]]);');
     // ---- Each imported photo leaves the Drive folder on its own ("Remember to delete the photos
     // from drive once they have been uploaded to the app," 2026-10-25) ----
@@ -2077,8 +2105,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     const go = tripsyFlyoverInboxFilesToTrash(recSaved, waiting, uploaded);
     assert(go.length === 1 && go[0].inboxId === 'inboxA', 'an inbox file is trashed only once its photo has landed AND the saved record carries the Drive id — not while still pending (b), not while still uploading (c)');
     assert(tripsyFlyoverInboxFilesToTrash({ stops: [{ photos: [{ driveFileId: 'v1', posterId: 'pending-a' }] }] }, new Map([['pending-a', 'inboxA']]), uploaded).length === 0, 'a poster still pending in the record holds its file too');
-    assert(/tripsyFlyoverTrashAfterUpload\.set\(pendingId, f\.id\);/.test(setup) && /dupes\+\+; tripsyFlyoverIntakeNote\(\{ skipped: dupes \}\); tripsyFlyoverTrashDriveFile\(f\.id\); continue;/.test(setup),
-      'the import registers each staged photo\'s inbox file for trashing, and trashes a duplicate\'s at once');
+    assert(/dupes\+\+; tripsyFlyoverIntakeNote\(\{ skipped: dupes \}\); tripsyFlyoverTrashDriveFile\(f\.id\); continue;/.test(setup),
+      'the import trashes a duplicate\'s inbox copy at once');
     assert(/if \(resolved !== rec\) await Store\.saveTripsyFlyover\(resolved\);[\s\S]*if \(tripsyFlyoverTrashAfterUpload\.size\) await tripsyFlyoverTrashImportedInboxFiles\(resolved\);/.test(extractFn('tripsyFlyoverScheduleResolvedSave')),
       'the trash runs after the resolved record is saved, never before');
     const trashFn = extractFn('tripsyFlyoverTrashDriveFile');
@@ -2165,13 +2193,15 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       'THE ASK: while an import runs the slot says so with no button, repainted the moment the import starts');
     const up = tripsyFlyoverDriveStatusHtml('uploading', 0), done = tripsyFlyoverDriveStatusHtml('complete', 54), lat = tripsyFlyoverDriveStatusHtml('later', 54);
     assert(/class="tripsy-menu-flash"/.test(up) && /Uploading Photos to Drive/.test(up) && !/\d/.test(up.replace(/<[^>]*>/g, '')), 'the uploading message flashes and carries no count');
-    assert(/Nothing new has reached the Drive folder for 2 minutes — 54 new files\. Import now\?/.test(done) && /data-drive-import-now/.test(done) && /data-drive-later/.test(done) && !/tripsy-menu-flash/.test(done), 'the completion prompt replaces it, with Import now / Later, not flashing');
-    assert(/54 new files waiting in Drive/.test(lat) && /data-drive-import-now/.test(lat) && !/data-drive-later/.test(lat), 'after Later a quiet reminder with an Import button stands in its place (the only way in, now that Finish Upload is gone)');
+    assert(/Nothing new has reached the Drive folder for 2 minutes — 54 new files\./.test(done) && /data-drive-import-now/.test(done) && !/data-drive-later/.test(done) && !/tripsy-menu-flash/.test(done), 'the completion message replaces it, with an Import now button and no Later (the import starts by itself)');
+    assert(/tripsy-menu-flash/.test(lat) && !/data-drive-later|'later'/.test(html), 'there is no Later phase any more (2026-10-27: a settled folder imports itself)');
+    assert(/inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);\s*paintDriveStatus\(\);\s*if \(inboxWatch\.phase === 'complete' && runFinishUpload && !driveImportRunning && freshFiles\.some\(f => !autoImportTried\.has\(f\.id\)\)\) runFinishUpload\(\);/.test(setup) && /for \(const f of files\) autoImportTried\.add\(f\.id\);/.test(setup),
+      'THE ASK: a settled folder is imported automatically, and files an auto-run already tried are not tried again until a new one arrives');
     assert(!/tripsyFlyoverFinishUploadLabel|announceInboxReady|tripsyConfirmDialog\(`Drive upload looks complete/.test(html), 'the live-count label and the completion dialog are gone');
     assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const freshFiles = tripsyFlyoverDriveNewFiles\(files, record\);\s*const fresh = freshFiles\.length;[\s\S]*?const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);[\s\S]*inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);\s*paintDriveStatus\(\);/.test(setup),
       'each tick lists the inbox, counts what is new, moves the phase and repaints the message slot');
-    assert(/<span data-flyover-drive-status[^>]*>\$\{driveStatusHtml\(\)\}<\/span>/.test(setup) && /if \(go\) go\.onclick = \(\) => \{ if \(!closed && runFinishUpload && !driveImportRunning\) runFinishUpload\(\); \};/.test(setup) && /if \(later\) later\.onclick = \(\) => \{ if \(inboxWatch\) inboxWatch\.phase = 'later'; paintDriveStatus\(\); \};/.test(setup),
-      'the slot renders in the header; Import now runs the import, Later holds the quiet reminder');
+    assert(/<span data-flyover-drive-status[^>]*>\$\{driveStatusHtml\(\)\}<\/span>/.test(setup) && /if \(go\) go\.onclick = \(\) => \{ if \(!closed && runFinishUpload && !driveImportRunning\) runFinishUpload\(\); \};/.test(setup) && !/data-drive-later/.test(setup),
+      'the slot renders in the header; Import now runs the import; there is no Later');
     assert(/inboxWatch\.timer = setTimeout\(inboxWatchTick, TRIPSY_FLYOVER_INBOX_POLL_MS\);/.test(setup) && /document\.visibilityState !== 'hidden'/.test(setup), 'the watcher polls on a timer and skips the list while the page is hidden');
     assert(/const onInboxVisibility = \(\) => \{ if \(document\.visibilityState === 'visible' && inboxWatch && !inboxWatch\.busy\) inboxWatchTick\(\); \};\s*document\.addEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'returning to the app checks the folder at once');
     assert(/const close = \(\) => \{ closed = true;[^\n]*stopInboxWatch\(\); document\.removeEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'closing the page stops the watcher and drops its listener');
@@ -2180,7 +2210,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/if \(inboxWatch \|\| closed \|\| !isOwner \|\| !record \|\| !record\.inboxPendingAt \|\| !record\.inboxFolderId\) return;/.test(setup), 'only the owner, with a pending hand-off, watches — and never twice');
     assert(/if \(prevRecord && prevRecord\.inboxPendingAt\) \{ rec\.inboxPendingAt = prevRecord\.inboxPendingAt; rec\.inboxDest = prevRecord\.inboxDest \|\| 'auto'; \}/.test(html), 'a rebuild keeps a pending hand-off');
     const hand = extractFn('tripsyFlyoverDriveHandoffDialog');
-    assert(/data-drive-open/.test(hand) && /Photos and Videos/.test(hand) && /asks to import them once the upload is complete/.test(hand) && !/Finish Upload/.test(hand) && /data-handoff-picker/.test(hand), 'the hand-off dialog links the folder, gives the Drive app steps, says the page asks to import when complete, and offers the Photos picker instead');
+    assert(/data-drive-open/.test(hand) && /Photos and Videos/.test(hand) && /imports them by itself once the upload is complete/.test(hand) && !/Finish Upload/.test(hand) && /data-handoff-picker/.test(hand), 'the hand-off dialog links the folder, gives the Drive app steps, says the page imports by itself when complete, and offers the Photos picker instead');
     // "When I select upload photos through Google Drive, can the app open the drive folder for
     // me instead of making me press the link" (2026-10-26) -- and it lands in the Google Drive
     // APP on the iPad (screenshot, same day), so it stays.

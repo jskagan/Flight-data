@@ -5045,6 +5045,52 @@ WebView's support for recording is unproven.
     hour with the page open; it saves after the first and every tenth photo. Also learned that
     evening: the two "vanished" originals of IMG_4022/4024 were trashed by the import's own
     duplicate rule, because the owner had uploaded both twice ("2 already here" on the receipt).
+    **A Drive-imported photo is referenced IN PLACE, the import is metadata only, and a settled
+    folder imports ITSELF** ("How do we prevent this from happening again? The whole point is to
+    allow background processing," 2026-10-27 — that evening's 27-file import downloaded each
+    3–8 MB original to the page, resized it and uploaded a copy, and died when the iPad locked:
+    10 taken, 1 recorded, 8 stranded as pending, 17 never reached; no web page runs in the
+    background on iOS, so the only fix is an import that moves no bytes). A photo is now
+    `tripsyFlyoverDrivePhotoRecord(f)` — `{driveFileId: <the inbox file itself>, inPlace: true,
+    mime, src: 'drive:<id>', md5: 'md5:<Drive's checksum>'}` — exactly like a video; the loop
+    neither downloads nor uploads (`downloadDriveFileBlob`/`tripsyFlyoverQueueUpload` are gone
+    from it), so a batch is in seconds after the folder settles. **Display**: `Store.getTripsyFlyover`
+    (the one reader) registers every `inPlace` photo in `tripsyFlyoverInPlaceIds`, and
+    `tripsyPlacePhotoDisplayUrl` routes those to `tripsyFlyoverDrivePhotoUrl`: the ordinary
+    photo-blob cache first, else `files.get?fields=thumbnailLink,hasThumbnail` — Drive's own
+    server-made preview, rendered for a HEIC as readily as a JPEG (so the page never decodes an
+    original, which is also what ended the HEIC upload failures) — re-sized by its `=s220`
+    suffix to `TRIPSY_FLYOVER_INPLACE_PX` (`tripsyFlyoverPreviewUrlAt`), fetched into the cache;
+    a browser that refuses the preview's bytes (CORS) gets the bare URL, which an `<img>`/background
+    still shows, and a file with no preview yet falls back to the original. The link expires in
+    hours, so it is looked up per session, never stored. **Dedup** is Drive's `md5Checksum`
+    (asked for in `tripsyFlyoverListInbox`; `tripsyFlyoverKnownSources` reads `md5`): a checksum
+    twin's inbox copy is trashed at once. **Retire**: no upload to wait for, so after a clean
+    import `tripsyFlyoverRetireInbox(folderId, tripsyFlyoverRecordDriveIds(record))` runs at
+    once — it lists the folder and MOVES every file the record refers to (in-place photos, videos,
+    posters; from any earlier import too, since trashing a folder trashes its contents) into the
+    app folder, then trashes the folder. **Auto-import**: `inboxWatchTick` runs `runFinishUpload`
+    itself when the phase turns `complete` and some fresh file is not in `autoImportTried` (a file
+    fitting no destination's dates would otherwise re-import every two minutes); the `later`
+    phase and its Later button are gone, and the hand-off/source dialogs say the page imports by
+    itself. The one cost: originals stay in Drive at full size (~5 MB each) instead of a 1 MB
+    copy — piece 2, shrinking them in the cloud routine, is NOT built. The picker route
+    (staged pending + background upload) is unchanged; the stranded pending entries of the
+    2026-10-26 import are dropped on the next open and their originals, still in the folder,
+    re-import in place; 8 unreferenced `flyover-photo-*` copies from that night remain in the app
+    folder. Verified in Chromium against a stubbed Drive: first tick → auto-import → 3 photos in
+    place + a video, the twin trashed, four moves then the folder trashed, tiles painted from the
+    `=s1600` preview, CORS-refused → URL, no preview → original. `flyover_test.js`,
+    `photoblobcache_test.js` (its scaffold gained the set).
+    **A photo delete repaints at once; the save runs behind it** ("When i delete a photo from
+    the flyover page there is a delay," 2026-10-27): `removePhotoFromRecord` (the large view's
+    Delete, a No-page tile's ✕, the player's Remove) awaited the whole-file Drive write BEFORE
+    `render()`, so the tile stood for the seconds a save takes on the iPad's link. It now
+    renders right after the in-memory `updateStop` and awaits `save()` after, throwing on a
+    failed write (the review loop already toasts that; the ✕ handler swallows it, the toast
+    the save itself raises being enough); `movePhotoInRecord` and `setVideoAudioInRecord` got
+    the same order. The page-tile ✕ already did `save(); render();` with no await. Measured in
+    Chromium against a 2 s stubbed save: tile gone in 137 ms. `flyover_test.js`.
     **A failed background upload NAMES its reason on the card, and an un-resizable original
     goes up resumably** ("The app says the upload failed," 2026-10-26 — the first Drive import
     of the evening WORKED (seven HEICs pulled from the folder and routed by date to Fukuoka and
