@@ -19372,6 +19372,7 @@ async function showTripsyFlyover(tripKey) {
   // The Shortcut launch's own watchdog (tripsyFlyoverShortcutLooksIncomplete): one nudge per launch.
   let shortcutNudged = false;
   let launchShortcut = null;
+  let shortcutSinceOverride = ''; // a "since" the owner typed in the dialog, kept for Run it again
   const wireDriveStatus = () => {
     const go = body.querySelector('[data-drive-import-now]');
     if (go) go.onclick = () => { if (!closed && runFinishUpload && !driveImportRunning) runFinishUpload(); };
@@ -19876,9 +19877,13 @@ async function showTripsyFlyover(tripKey) {
     const folderName = TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip');
     let firstDay = '';
     try { firstDay = tripsyItineraryStartDayKey(trip) || ''; } catch (e) { firstDay = ''; }
-    const shortcutInputText = () => tripsyFlyoverShortcutInput(tripsyFlyoverShortcutSince(record, firstDay), folderName);
-    launchShortcut = () => {
+    // The "since" date can be set by hand in the dialog (the first run, before any imported
+    // photo carries a capture time, would otherwise start at the trip's first day); the pick is
+    // kept for "Run it again".
+    const shortcutInputText = () => tripsyFlyoverShortcutInput(shortcutSinceOverride || tripsyFlyoverShortcutSince(record, firstDay), folderName);
+    launchShortcut = (sinceOverride) => {
       if (closed || !inboxFolderKnown) return;
+      if (sinceOverride) shortcutSinceOverride = sinceOverride;
       try { window.location.href = tripsyFlyoverShortcutUrl(shortcutInputText()); } catch (e) { /* no Shortcuts here: the dialog's text is the fallback */ }
       const now = new Date().toISOString();
       record = { ...record, inboxFolderId: inboxFolderKnown, inboxDest: 'auto', inboxPendingAt: now, shortcutLaunchedAt: now };
@@ -19887,7 +19892,7 @@ async function showTripsyFlyover(tripKey) {
       startInboxWatch();
     };
     if (shortcutBtn) shortcutBtn.onclick = () => {
-      const dlg = tripsyFlyoverShortcutDialog({ since: tripsyFlyoverShortcutSince(record, firstDay), folderName, inputText: shortcutInputText(), onRun: () => launchShortcut() });
+      const dlg = tripsyFlyoverShortcutDialog({ since: shortcutSinceOverride || tripsyFlyoverShortcutSince(record, firstDay), folderName, onRun: since => launchShortcut(since) });
       if (inboxFolderKnown) { dlg.setReady(true); return; }
       tripsyFlyoverInboxFolder(trip, record).then(id => { inboxFolderKnown = id; if (!closed) dlg.setReady(true); }, e => { console.error(e); dlg.setReady(false); });
     };
@@ -20990,30 +20995,48 @@ function tripsyFlyoverShortcutRecipeHtml(name = TRIPSY_FLYOVER_SHORTCUT_NAME) {
     ${li(`Tap <strong>Done</strong>. The button below runs it with the date and folder filled in; if the button can’t open Shortcuts on this device, run the shortcut by hand and, when it asks for input, paste the text shown below.`)}
   </ol>`;
 }
-function tripsyFlyoverShortcutDialog({ since, folderName, inputText, onRun, onClose = null }) {
+// The "since" moment between the dialog's datetime field and the shortcut's text: the field
+// holds "YYYY-MM-DDTHH:MM", the shortcut gets "YYYY-MM-DD HH:MM:SS". Pure, both ways.
+function tripsyFlyoverShortcutSinceToField(since) {
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(since || '');
+  return m ? `${m[1]}T${m[2]}` : '';
+}
+function tripsyFlyoverShortcutSinceFromField(value) {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::(\d{2}))?/.exec(value || '');
+  return m ? `${m[1]} ${m[2]}:${m[3] || '00'}` : '';
+}
+// `since` is editable in the dialog ("Found 431 photos" on the first run, 2026-10-27 -- with no
+// imported photo carrying a capture time yet, the default was the trip's first day, which would
+// have re-uploaded every photo already on the fly-over); the Run button passes the field's value
+// to `onRun(since)`, and the input text follows the field.
+function tripsyFlyoverShortcutDialog({ since, folderName, onRun, onClose = null }) {
   let ov = document.getElementById('tripsy-flyover-shortcut-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-shortcut-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
   ov.style.zIndex = '2147483070';
+  const sinceNow = () => { const f = ov.querySelector('[data-sc-since]'); return (f && tripsyFlyoverShortcutSinceFromField(f.value)) || since || ''; };
+  const inputTextNow = () => tripsyFlyoverShortcutInput(sinceNow(), folderName);
   ov.innerHTML = `
     <div class="tw-modal-paper" style="max-width:620px; max-height:88vh; max-height:88dvh; overflow:auto;">
       <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
         <h2 style="margin:0; font-size:17px; flex:1;">📲 Upload new photos</h2>
         <button class="tripsy-close-x" data-sc-close aria-label="Close">✕</button>
       </div>
-      <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:10px;">The <strong>${esc(TRIPSY_FLYOVER_SHORTCUT_NAME)}</strong> shortcut finds every photo taken since <strong>${esc(since || 'the start of the trip')}</strong> and saves it into the Drive folder <strong>${esc(folderName)}</strong>. This page then imports them by itself.</div>
+      <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:10px;">The <strong>${esc(TRIPSY_FLYOVER_SHORTCUT_NAME)}</strong> shortcut finds every photo taken after the moment below and saves it into the Drive folder <strong>${esc(folderName)}</strong>. This page then imports them by itself.</div>
+      <label style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:13px; margin-bottom:10px;">Photos taken after <input type="datetime-local" data-sc-since value="${esc(tripsyFlyoverShortcutSinceToField(since))}" style="font-size:13px; padding:4px 6px; border-radius:6px; border:1px solid var(--line); background:var(--panel-2); color:inherit;"> <span style="font-size:12px; color:var(--muted);">(the newest photo already here, or the trip’s first day — change it to skip photos you have already added)</span></label>
       <div style="font-size:13px; line-height:1.5; margin-bottom:12px; padding:10px 12px; border:1px solid #E0A020; border-radius:8px; color:#E0A020;"><strong>Keep the Shortcuts app in front until it shows “Done — N photos saved.”</strong> Switching away or locking the iPad before that stops the saving part-way; the photos already saved are kept, and running it again picks up the rest.</div>
       <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
         <button class="btn primary" data-sc-run disabled>▶ Run the shortcut</button>
         <span data-sc-ready style="font-size:12px; color:var(--muted);">Getting the Drive folder ready…</span>
       </div>
       <details style="font-size:13px; margin-bottom:10px;"><summary style="cursor:pointer;">Set up the shortcut (once)</summary><div style="margin-top:8px;">${tripsyFlyoverShortcutRecipeHtml()}</div></details>
-      <div style="font-size:12px; color:var(--muted);">Input text, if the shortcut asks for it: <code data-sc-input style="user-select:all; -webkit-user-select:all; word-break:break-all;">${esc(inputText)}</code> <button class="btn" data-sc-copy style="font-size:11px; margin-left:4px;">Copy</button></div>
+      <div style="font-size:12px; color:var(--muted);">Input text, if the shortcut asks for it: <code data-sc-input style="user-select:all; -webkit-user-select:all; word-break:break-all;">${esc(inputTextNow())}</code> <button class="btn" data-sc-copy style="font-size:11px; margin-left:4px;">Copy</button></div>
     </div>`;
   ov.style.display = 'flex';
   const close = () => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; if (onClose) onClose(); };
   ov.querySelector('[data-sc-close]').onclick = close;
-  ov.querySelector('[data-sc-copy]').onclick = async () => { try { await navigator.clipboard.writeText(inputText); toast('Copied.'); } catch (e) { toast('Couldn’t copy — select the text and copy it by hand.', 'error'); } };
-  ov.querySelector('[data-sc-run]').onclick = () => { onRun(); close(); };
+  ov.querySelector('[data-sc-since]').oninput = () => { const c = ov.querySelector('[data-sc-input]'); if (c) c.textContent = inputTextNow(); };
+  ov.querySelector('[data-sc-copy]').onclick = async () => { try { await navigator.clipboard.writeText(inputTextNow()); toast('Copied.'); } catch (e) { toast('Couldn’t copy — select the text and copy it by hand.', 'error'); } };
+  ov.querySelector('[data-sc-run]').onclick = () => { const s = sinceNow(); onRun(s); close(); };
   ov.onclick = e => { if (e.target === ov) close(); };
   return {
     setReady: ok => {

@@ -5129,7 +5129,13 @@ WebView's support for recording is unproven.
     to complete, with Run it again (relaunches with the same date — the Shortcut's Overwrite
     option keeps a re-run from doubling files, and the dedupe above catches the rest), Keep
     waiting, and Cancel the upload. An import clears `shortcutLaunchedAt`; a rebuild keeps it
-    with the hand-off. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
+    with the hand-off. **The "since" moment is EDITABLE in the dialog** ("Found 431 photos" on
+    the first live run, 2026-10-27 — with no imported photo carrying a capture time yet the
+    default was the trip's first day, which would have re-uploaded every photo already on the
+    fly-over, none of which the capture dedupe can see): a `datetime-local` field
+    (`data-sc-since`, `tripsyFlyoverShortcutSinceToField`/`FromField` map "YYYY-MM-DD HH:MM:SS"
+    ↔ "YYYY-MM-DDTHH:MM"), the input text follows it, Run passes it to `onRun(since)`, and the
+    page keeps it as `shortcutSinceOverride` for Run it again. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
     note in the slot) → nothing for 105 s → nudge → Run it again → nudge once more after the
     grace → a file lands → uploading → settled → auto-import, launch cleared. NOT verifiable
     here: that the Claude iPad WebView opens a `shortcuts://` link (Safari does), that
