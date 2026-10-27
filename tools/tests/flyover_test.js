@@ -1997,7 +1997,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     const fp = extractFn('tripsyFlyoverFileFingerprint');
     assert(/file\.slice\(0, 65536\)\.arrayBuffer\(\)/.test(fp) && /crypto\.subtle\.digest\('SHA-256', head\)/.test(fp) && /return `h:\$\{hex\}:\$\{file\.size\}`;/.test(fp) && /return `n:\$\{file\.name \|\| ''\}:\$\{file\.size\}`;/.test(fp),
       'the fingerprint is a hash of the first 64 KB + size, with a name|size fallback');
-    assert(/const known = tripsyFlyoverKnownSources\(record\);[\s\S]*const bf = await Promise\.all\(batch\.map\(k => tripsyFlyoverFileFingerprint\(files\[k\]\)\)\);[\s\S]*if \(fps\[k\] && known\.has\(fps\[k\]\)\) \{ skipped\+\+; continue; \}[\s\S]*\.\.\.\(fps\[k\] \? \{ src: fps\[k\] \} : \{\}\)/.test(setup)
+    assert(/const known = tripsyFlyoverKnownSources\(record\);[\s\S]*const bf = await Promise\.all\(batch\.map\(k => tripsyFlyoverFileFingerprint\(files\[k\]\)\)\);[\s\S]*if \(\(fps\[k\] && known\.has\(fps\[k\]\)\) \|\| tripsyFlyoverCaptureTwin\(knownCaptures, caps\[k\]\.taken, caps\[k\]\.px\)\) \{ skipped\+\+; continue; \}[\s\S]*\.\.\.\(fps\[k\] \? \{ src: fps\[k\] \} : \{\}\)/.test(setup)
       && /if \(fps\[k\]\) rec\.src = fps\[k\];/.test(setup) && /if \(skipped\) problems\.push\(`\$\{skipped\} already on this fly-over — skipped\.`\);/.test(setup),
       'THE ASK: a photo or video already on the fly-over is skipped and counted, new ones are stamped');
   }
@@ -2028,7 +2028,63 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   // ---- Import from a Drive folder (2026-10-25: "copy the photos into a temporary drive folder
   // and then import the photos into the app in the background from the drive folder") ----
   {
-    eval([extractFn('tripsyFlyoverDriveSrc'), extractFn('tripsyFlyoverDriveMetaInfo'), extractFn('tripsyFlyoverDriveVideoRecord'), extractFn('tripsyFlyoverDrivePhotoRecord'), extractFn('tripsyFlyoverPhotoInPlace'), extractFn('tripsyFlyoverRecordDriveIds'), extractFn('tripsyFlyoverDriveNewFiles'), extractFn('tripsyFlyoverKnownSources'), extractFn('tripsyFlyoverDriveFolderUrl'), extractFn('tripsyFlyoverPreviewUrlAt')].join('\n'));
+    eval([extractFn('tripsyFlyoverDriveSrc'), extractFn('tripsyFlyoverDriveMetaInfo'), extractFn('tripsyFlyoverDriveVideoRecord'), extractFn('tripsyFlyoverDrivePhotoRecord'), extractFn('tripsyFlyoverPhotoInPlace'), extractFn('tripsyFlyoverRecordDriveIds'), extractFn('tripsyFlyoverDriveNewFiles'), extractFn('tripsyFlyoverKnownSources'), extractFn('tripsyFlyoverDriveFolderUrl'), extractFn('tripsyFlyoverPreviewUrlAt'),
+      extractFn('tripsyFlyoverPxKey'), extractFn('tripsyFlyoverCaptureFields'), extractFn('tripsyFlyoverKnownCaptures'), extractFn('tripsyFlyoverCaptureTwin'), extractFn('tripsyFlyoverNoteCapture')].join('\n'));
+    // ---- The "Upload new photos" Shortcut ("Is there a way i can have the app upload all new
+    // photos taken since the date of the last photo uploaded?" … "build the shortcut, but put a
+    // reminder on the screen to keep it open until a completion message, and if it does not
+    // complete, can a dialog appear with instructions on how to complete," 2026-10-27) ----
+    {
+      var esc = typeof esc === 'function' ? esc : (v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]));
+      eval([constLine('TRIPSY_FLYOVER_SHORTCUT_NAME'), constLine('TRIPSY_FLYOVER_SHORTCUT_GRACE_MS')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverLastCaptureTime', 'tripsyFlyoverShortcutSince', 'tripsyFlyoverShortcutInput', 'tripsyFlyoverShortcutUrl', 'tripsyFlyoverShortcutLooksIncomplete', 'tripsyFlyoverShortcutRecipeHtml'].map(extractFn)).join('\n'));
+      const recS = { stops: [{ photos: [{ driveFileId: 'a', taken: '2026-10-21T09:00:00' }, { driveFileId: 'b', taken: '2026-10-23T18:30:15' }, { driveFileId: 'c' }] }, { photos: [{ driveFileId: 'd', taken: '2026-10-22T08:00:00' }] }] };
+      assert(tripsyFlyoverLastCaptureTime(recS) === '2026-10-23T18:30:15' && tripsyFlyoverLastCaptureTime({ stops: [] }) === '', 'the newest capture second on the record, across every destination');
+      assert(tripsyFlyoverShortcutSince(recS, '2026-10-06') === '2026-10-23 18:30:15' && tripsyFlyoverShortcutSince({ stops: [] }, '2026-10-06') === '2026-10-06 00:00:00', 'THE ASK: "since" is the last imported photo\'s capture time, else the trip\'s first day');
+      assert(tripsyFlyoverShortcutInput('2026-10-23 18:30:15', 'Fly-over photos — Singapore GP') === '2026-10-23 18:30:15|Fly-over photos — Singapore GP' && tripsyFlyoverShortcutInput('x', 'a|b') === 'x|a b', 'one text input: date | folder name (the separator never appears in the name)');
+      assert(tripsyFlyoverShortcutUrl('2026-10-23 18:30:15|F') === 'shortcuts://run-shortcut?name=Travel%20Tracker%20Upload&input=text&text=2026-10-23%2018%3A30%3A15%7CF', 'the shortcuts:// link runs the named shortcut with that text');
+      const L = 1000000;
+      assert(!tripsyFlyoverShortcutLooksIncomplete(L, L + 60000, 0, NaN) && tripsyFlyoverShortcutLooksIncomplete(L, L + 90000, 0, NaN), 'nothing in the folder is "incomplete" only once the grace period has passed');
+      assert(tripsyFlyoverShortcutLooksIncomplete(L, L + 90000, 3, L - 5000) && !tripsyFlyoverShortcutLooksIncomplete(L, L + 90000, 3, L + 5000) && !tripsyFlyoverShortcutLooksIncomplete(NaN, L + 90000, 0, NaN),
+        'files older than the launch do not count as arrivals; a file that landed after it does; no launch, no nudge');
+      const recipe = tripsyFlyoverShortcutRecipeHtml();
+      assert((recipe.match(/<li/g) || []).length === 9 && /Split Text/.test(recipe) && /Find Photos/.test(recipe) && /Date Taken is after/.test(recipe) && /Save File/.test(recipe) && /Ask Where to Save/.test(recipe) && /Overwrite If File Exists/.test(recipe) && /Done — \[Count\] photos saved/.test(recipe),
+        'the recipe builds the shortcut: split the input, find photos after the date, save to the folder, end with a Done alert');
+      const dlg = extractFn('tripsyFlyoverShortcutDialog'), nudge = extractFn('tripsyFlyoverShortcutIncompleteDialog');
+      assert(/Keep the Shortcuts app in front until it shows “Done — N photos saved\.”/.test(dlg) && /data-sc-run disabled/.test(dlg) && /setReady: ok =>/.test(dlg) && /data-sc-copy/.test(dlg), 'THE ASK: the reminder to keep Shortcuts open is on the launch dialog; Run waits for the folder; the input text can be copied');
+      assert(/doesn’t seem to have finished/.test(nudge) && (nudge.match(/<li>/g) || []).length === 5 && /data-sn-run/.test(nudge) && /data-sn-wait/.test(nudge) && /data-sn-cancel/.test(nudge), 'THE ASK: the incomplete dialog gives the steps to complete, with Run it again / Keep waiting / Cancel');
+      const setup3 = extractFn('showTripsyFlyover');
+      assert(/data-flyover-shortcut/.test(setup3) && /launchShortcut = \(\) => \{\s*if \(closed \|\| !inboxFolderKnown\) return;\s*try \{ window\.location\.href = tripsyFlyoverShortcutUrl\(shortcutInputText\(\)\); \}/.test(setup3) && /record = \{ \.\.\.record, inboxFolderId: inboxFolderKnown, inboxDest: 'auto', inboxPendingAt: now, shortcutLaunchedAt: now \};\s*shortcutNudged = false;/.test(setup3),
+        'Run opens the link inside the tap and starts the ordinary Drive hand-off, stamped for the watchdog');
+      assert(/else if \(record\.shortcutLaunchedAt && !shortcutNudged && tripsyFlyoverShortcutLooksIncomplete\(Date\.parse\(record\.shortcutLaunchedAt\), Date\.now\(\), fresh, newestMs\)\) \{\s*shortcutNudged = true;\s*tripsyFlyoverShortcutIncompleteDialog\(/.test(setup3) && /if \(record\.shortcutLaunchedAt\) record = \{ \.\.\.record, shortcutLaunchedAt: '' \};/.test(setup3),
+        'the watcher nudges once per launch, and an import clears the launch');
+      eval(extractFn('tripsyFlyoverDriveStatusHtml'));
+      const st = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x', true);
+      assert(/data-flyover-shortcut-note/.test(st) && /Keep Shortcuts in front until it says Done/.test(st) && !/data-flyover-shortcut-note/.test(tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x')), 'the status slot repeats the reminder while a Shortcut launch is watched');
+      assert(/if \(prevRecord\.shortcutLaunchedAt\) rec\.shortcutLaunchedAt = prevRecord\.shortcutLaunchedAt;/.test(html), 'a rebuild keeps a pending launch');
+    }
+    // ---- Capture-time dedupe ("If i just over-select photos to upload manually, will the
+    // de-dupe logic automatically skip those?", 2026-10-27) ----
+    {
+      assert(tripsyFlyoverPxKey(4032, 3024) === '3024x4032' && tripsyFlyoverPxKey(3024, 4032) === '3024x4032' && tripsyFlyoverPxKey(0, 10) === '' && tripsyFlyoverPxKey(undefined, undefined) === '', 'the size key puts the smaller side first, so a rotation reads the same; unknown -> empty');
+      const cf = tripsyFlyoverCaptureFields({ takenAt: '2026-10-21T09:00:00', source: 'exif', width: 4032, height: 3024 });
+      assert(cf.taken === '2026-10-21T09:00:00' && cf.px === '3024x4032', 'EXIF time + size become the record\'s taken / px');
+      assert(Object.keys(tripsyFlyoverCaptureFields({ takenAt: '2026-10-21T09:00:00', source: 'file' })).length === 0 && Object.keys(tripsyFlyoverCaptureFields(null)).length === 0, 'a file date (the upload moment) is never a capture time');
+      const dr = tripsyFlyoverDrivePhotoRecord({ id: 'q', mimeType: 'image/heif', imageMediaMetadata: { time: '2026:10:21 09:00:00', width: 4032, height: 3024 } });
+      assert(dr.taken === '2026-10-21T09:00:00' && dr.px === '3024x4032', 'a Drive-imported photo records them from Drive\'s listing');
+      const kc = tripsyFlyoverKnownCaptures({ stops: [{ photos: [{ driveFileId: 'a', taken: '2026-10-21T09:00:00', px: '3024x4032' }, { driveFileId: 'b', taken: '2026-10-21T09:00:05' }, { driveFileId: 'c' }] }] });
+      assert(tripsyFlyoverCaptureTwin(kc, '2026-10-21T09:00:00', '3024x4032') && tripsyFlyoverCaptureTwin(kc, '2026-10-21T09:00:00', '') && !tripsyFlyoverCaptureTwin(kc, '2026-10-21T09:00:00', '2000x3000'),
+        'THE ASK: the same second is a twin -- unless both sides know their size and it differs (a burst)');
+      assert(tripsyFlyoverCaptureTwin(kc, '2026-10-21T09:00:05', '3024x4032') && !tripsyFlyoverCaptureTwin(kc, '2026-10-21T09:00:06', '3024x4032') && !tripsyFlyoverCaptureTwin(kc, '', '3024x4032') && !tripsyFlyoverCaptureTwin(null, '2026-10-21T09:00:05', ''),
+        'a known photo of unknown size matches any size at its second; no time, no map -> never a twin');
+      tripsyFlyoverNoteCapture(kc, '2026-10-22T10:00:00', '1x2');
+      assert(tripsyFlyoverCaptureTwin(kc, '2026-10-22T10:00:00', '1x2'), 'a photo taken in during a batch is known to the rest of the batch');
+      const setup2 = extractFn('showTripsyFlyover');
+      assert(/\|\| tripsyFlyoverCaptureTwin\(knownCaptures, rec\.taken, rec\.px\)\) \{ known\.add\(src\); dupes\+\+;[\s\S]*tripsyFlyoverNoteCapture\(knownCaptures, rec\.taken, rec\.px\);/.test(setup2)
+        && /const bc = await Promise\.all\(batch\.map\(k => tripsyFlyoverPhotoTakenInfo\(files\[k\]\)\.then\(tripsyFlyoverCaptureFields, \(\) => \(\{\}\)\)\)\);[\s\S]*\|\| tripsyFlyoverCaptureTwin\(knownCaptures, caps\[k\]\.taken, caps\[k\]\.px\)\) \{ skipped\+\+; continue; \}[\s\S]*\.\.\.caps\[k\] \};/.test(setup2),
+        'both routes -- the Drive import and the picker -- skip a capture twin and record taken / px on what they add');
+      assert(/imageMediaMetadata\(time,location,width,height\)/.test(extractFn('tripsyFlyoverListInbox')) && /const pw = numOf\(exif, 0xA002\), ph = numOf\(exif, 0xA003\);/.test(extractFn('tripsyReadJpegExif')) && /info\.width = Number\(im\.width\)/.test(extractFn('tripsyFlyoverDriveMetaInfo')),
+        'the pixel size comes from Drive\'s listing on one route and the EXIF PixelX/YDimension tags on the other');
+    }
     // ---- A delete repaints at once, the save behind it ("When i delete a photo from the flyover
     // page there is a delay," 2026-10-27) ----
     {
@@ -2074,7 +2130,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(!/data-flyover-drive-import|data-flyover-card-drive-import|tripsyFlyoverDriveImportDialog/.test(html) && /const runDriveImport = async \(files, dest, folderId\) => \{/.test(setup)
       && /const src = tripsyFlyoverDriveSrc\(f\.id\);\s*if \(known\.has\(src\)\) continue;/.test(setup)
       && /const stopId = tripsyFlyoverDriveImportDest\(record\.stops, f, dest\);/.test(setup)
-      && /rec = tripsyFlyoverDrivePhotoRecord\(f\);\s*if \(rec\.md5 && known\.has\(rec\.md5\)\) \{ known\.add\(src\); dupes\+\+; tripsyFlyoverIntakeNote\(\{ skipped: dupes \}\); tripsyFlyoverTrashDriveFile\(f\.id\); continue; \}[\s\S]*tripsyFlyoverInPlaceIds\.add\(f\.id\);/.test(setup)
+      && /rec = tripsyFlyoverDrivePhotoRecord\(f\);\s*if \(\(rec\.md5 && known\.has\(rec\.md5\)\) \|\| tripsyFlyoverCaptureTwin\(knownCaptures, rec\.taken, rec\.px\)\) \{ known\.add\(src\); dupes\+\+; tripsyFlyoverIntakeNote\(\{ skipped: dupes \}\); tripsyFlyoverTrashDriveFile\(f\.id\); continue; \}[\s\S]*tripsyFlyoverInPlaceIds\.add\(f\.id\);/.test(setup)
       && !/downloadDriveFileBlob\(f\.id\)|tripsyFlyoverQueueUpload\(trip\.key, pendingId\)/.test(setup.slice(setup.indexOf('const runDriveImport'), setup.indexOf('const editBtn')))
       && /if \(taken === 1 \|\| taken % 10 === 0\) \{ save\(\); render\(\); \}/.test(setup),
       'the import is metadata only: resume-safe by src, routed by date or to a chosen destination, each photo referenced in place (a checksum twin trashed), nothing downloaded or uploaded');
@@ -2183,13 +2239,13 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     const wait = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://drive.google.com/drive/folders/x');
     assert(!/tripsy-menu-flash/.test(wait) && /Waiting for photos in the Drive folder/.test(wait) && /data-drive-open-folder/.test(wait) && /data-drive-cancel/.test(wait), 'THE ASK: the waiting message does not flash, and offers Open folder and Cancel');
     assert(/inboxWatch = \{ timer: null, state: null, phase: 'waiting'/.test(setup) && /inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);/.test(setup)
-      && /if \(cancel\) cancel\.onclick = \(\) => \{ if \(closed\) return; record = \{ \.\.\.record, inboxDest: '', inboxPendingAt: '' \}; save\(\); stopInboxWatch\(\); render\(\); \};/.test(setup),
+      && /if \(cancel\) cancel\.onclick = \(\) => \{ if \(closed\) return; record = \{ \.\.\.record, inboxDest: '', inboxPendingAt: '', shortcutLaunchedAt: '' \}; save\(\); stopInboxWatch\(\); render\(\); \};/.test(setup),
       'the watcher starts waiting, passes the count to the phase, and Cancel ends the hand-off');
     // "if the upload is still happening, the app shouldn't say the upload is complete" and
     // "Nothing happens when I hit the import now button" (2026-10-26).
     assert(TRIPSY_FLYOVER_INBOX_SETTLE_MS === 120000, 'THE ASK: two quiet minutes before the folder counts as complete (photos landed 30-60 s apart on a slow connection)');
     const imp = tripsyFlyoverDriveStatusHtml('importing', 0);
-    assert(/data-flyover-drive-phase="importing"/.test(imp) && /Importing from Drive/.test(imp) && !/data-drive-import-now/.test(imp) && /driveImportRunning \? tripsyFlyoverDriveStatusHtml\('importing', 0\)/.test(setup) && /driveImportRunning = true;\s*stopInboxWatch\(\);[^\n]*\n\s*paintDriveStatus\(\);/.test(setup),
+    assert(/data-flyover-drive-phase="importing"/.test(imp) && /Importing from Drive/.test(imp) && !/data-drive-import-now/.test(imp) && /driveImportRunning \? tripsyFlyoverDriveStatusHtml\('importing', 0\)/.test(setup) && /driveImportRunning = true;\s*stopInboxWatch\(\);[^\n]*\n[^\n]*shortcutLaunchedAt[^\n]*\n\s*paintDriveStatus\(\);/.test(setup),
       'THE ASK: while an import runs the slot says so with no button, repainted the moment the import starts');
     const up = tripsyFlyoverDriveStatusHtml('uploading', 0), done = tripsyFlyoverDriveStatusHtml('complete', 54), lat = tripsyFlyoverDriveStatusHtml('later', 54);
     assert(/class="tripsy-menu-flash"/.test(up) && /Uploading Photos to Drive/.test(up) && !/\d/.test(up.replace(/<[^>]*>/g, '')), 'the uploading message flashes and carries no count');
@@ -2208,7 +2264,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/save\(\); render\(\);\s*setStatus\(''\);\s*startInboxWatch\(\);/.test(setup) && /askMissingModes\(\);\s*startInboxWatch\(\);/.test(setup), 'the watcher starts on a hand-off and on opening a page with one pending');
     assert(/driveImportRunning = true;\s*stopInboxWatch\(\);/.test(setup) && /inboxPendingAt: '' \};\s*inboxFolderKnown = '';\s*save\(\);\s*stopInboxWatch\(\);/.test(setup), 'an import stops the watcher, and clearing the hand-off ends it');
     assert(/if \(inboxWatch \|\| closed \|\| !isOwner \|\| !record \|\| !record\.inboxPendingAt \|\| !record\.inboxFolderId\) return;/.test(setup), 'only the owner, with a pending hand-off, watches — and never twice');
-    assert(/if \(prevRecord && prevRecord\.inboxPendingAt\) \{ rec\.inboxPendingAt = prevRecord\.inboxPendingAt; rec\.inboxDest = prevRecord\.inboxDest \|\| 'auto'; \}/.test(html), 'a rebuild keeps a pending hand-off');
+    assert(/if \(prevRecord && prevRecord\.inboxPendingAt\) \{ rec\.inboxPendingAt = prevRecord\.inboxPendingAt; rec\.inboxDest = prevRecord\.inboxDest \|\| 'auto';/.test(html), 'a rebuild keeps a pending hand-off');
     const hand = extractFn('tripsyFlyoverDriveHandoffDialog');
     assert(/data-drive-open/.test(hand) && /Photos and Videos/.test(hand) && /imports them by itself once the upload is complete/.test(hand) && !/Finish Upload/.test(hand) && /data-handoff-picker/.test(hand), 'the hand-off dialog links the folder, gives the Drive app steps, says the page imports by itself when complete, and offers the Photos picker instead');
     // "When I select upload photos through Google Drive, can the app open the drive folder for

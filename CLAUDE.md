@@ -5082,6 +5082,60 @@ WebView's support for recording is unproven.
     place + a video, the twin trashed, four moves then the folder trashed, tiles painted from the
     `=s1600` preview, CORS-refused → URL, no preview → original. `flyover_test.js`,
     `photoblobcache_test.js` (its scaffold gained the set).
+    **Both routes also dedupe by CAPTURE TIME** ("If i just over-select photos to upload
+    manually, will the de-dupe logic automatically skip those?", 2026-10-27 — byte identity
+    never crosses the routes: iOS hands the picker a JPEG made from the HEIC the Drive app
+    uploads as is, and photos imported before the in-place build carry neither a checksum nor
+    a fingerprint of the original). Every photo added from now on records `taken` (the EXIF
+    second — `tripsyReadJpegExif`/`tripsyFlyoverPhotoTakenInfo` on the picker side, Drive's
+    `imageMediaMetadata.time` on the other; a `file`-sourced date is never used) and `px`
+    (`tripsyFlyoverPxKey`: "WxH", smaller side first, from EXIF PixelX/YDimension or Drive's
+    `width`/`height`, both newly read), via the pure `tripsyFlyoverCaptureFields(info)`.
+    `tripsyFlyoverKnownCaptures(record)` (second → Set of sizes, '' = unknown) feeds
+    `tripsyFlyoverCaptureTwin(known, taken, px)`: same second = twin, UNLESS both sides know
+    their size and it differs (an iPhone burst shares a second); `tripsyFlyoverNoteCapture`
+    registers each photo taken in so the rest of a batch sees it. The Drive import trashes a
+    twin's folder copy like a checksum twin; `addMediaToStop` counts it as skipped. Reaches
+    only photos imported from now on — nothing can be backfilled for the ones whose originals
+    were resized and trashed. Verified in Chromium: a twin with different bytes trashed, a
+    burst mate of another size kept. `flyover_test.js`.
+    **📲 Upload new photos — an iOS Shortcut saves everything taken since the last imported
+    photo into the trip's Drive folder, with a keep-it-open reminder and a how-to-complete
+    dialog** ("Is there a way i can have the app upload all new photos taken since the date of
+    the last photo uploaded?" then "build the shortcut, but put a reminder on the screen to keep
+    it open until a completion message, and if it does not complete, can a dialog appear with
+    instructions on how to complete," 2026-10-27). A web page cannot read the Photos library and
+    cannot install a Shortcut, so the Shortcuts app does the finding and saving and the OWNER
+    BUILDS IT ONCE from the recipe in the dialog (`tripsyFlyoverShortcutRecipeHtml`, nine
+    steps: Split Text on `|`, Get Dates from the first item, Find Photos with Date Taken after
+    it, Save File with Ask Where to Save + Overwrite If File Exists into Google Drive ›
+    Travel Tracker › the folder named in the alert, a final "Done — N photos saved" alert).
+    The header button (`data-flyover-shortcut`, owner) opens `tripsyFlyoverShortcutDialog`
+    (the reminder in amber, a Run button disabled until `tripsyFlyoverInboxFolder` has found or
+    created the folder — it must exist before the Shortcut asks where to save — the recipe
+    under a `<details>`, and the input text with Copy for a device where the `shortcuts://` link
+    doesn't open). Run sets `window.location.href = tripsyFlyoverShortcutUrl(input)` INSIDE the
+    tap — `shortcuts://run-shortcut?name=Travel Tracker Upload&input=text&text=<since>|<folder
+    name>` (`TRIPSY_FLYOVER_SHORTCUT_NAME`, `tripsyFlyoverShortcutInput`); `since` is
+    `tripsyFlyoverShortcutSince`: the newest `taken` on the record (`tripsyFlyoverLastCaptureTime`,
+    the capture-time field above — so this only reaches back as far as photos imported since
+    it exists), else the trip's first day — then starts the ordinary Drive hand-off
+    (`inboxPendingAt` + watcher + auto-import) stamped `shortcutLaunchedAt`, which the status
+    slot shows as "Keep Shortcuts in front until it says Done." (`tripsyFlyoverDriveStatusHtml`'s
+    fourth arg). **Watchdog**: `tripsyFlyoverShortcutLooksIncomplete(launchedMs, nowMs, count,
+    newestMs)` (pure) is true once `TRIPSY_FLYOVER_SHORTCUT_GRACE_MS` (90 s) has passed with
+    nothing in the folder newer than the launch; the tick then shows
+    `tripsyFlyoverShortcutIncompleteDialog` ONCE per launch (`shortcutNudged`): the five steps
+    to complete, with Run it again (relaunches with the same date — the Shortcut's Overwrite
+    option keeps a re-run from doubling files, and the dedupe above catches the rest), Keep
+    waiting, and Cancel the upload. An import clears `shortcutLaunchedAt`; a rebuild keeps it
+    with the hand-off. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
+    note in the slot) → nothing for 105 s → nudge → Run it again → nudge once more after the
+    grace → a file lands → uploading → settled → auto-import, launch cleared. NOT verifiable
+    here: that the Claude iPad WebView opens a `shortcuts://` link (Safari does), that
+    "Get Dates from Input" parses "2026-10-23 18:30:15", and Save File's behaviour with the
+    Google Drive file provider; the Copy fallback and the recipe are the hedges.
+    `flyover_test.js`.
     **A photo delete repaints at once; the save runs behind it** ("When i delete a photo from
     the flyover page there is a delay," 2026-10-27): `removePhotoFromRecord` (the large view's
     Delete, a No-page tile's ✕, the player's Remove) awaited the whole-file Drive write BEFORE
