@@ -18832,7 +18832,7 @@ async function tripsyFlyoverBuild(trip, prevRecord, opts = {}) {
   if (prevRecord && prevRecord.completedAt) rec.completedAt = prevRecord.completedAt;
   if (prevRecord && prevRecord.music) rec.music = prevRecord.music;
   if (prevRecord && prevRecord.inboxFolderId) rec.inboxFolderId = prevRecord.inboxFolderId;
-  if (prevRecord && prevRecord.inboxPendingAt) { rec.inboxPendingAt = prevRecord.inboxPendingAt; rec.inboxDest = prevRecord.inboxDest || 'auto'; if (prevRecord.shortcutLaunchedAt) rec.shortcutLaunchedAt = prevRecord.shortcutLaunchedAt; }
+  if (prevRecord && prevRecord.inboxPendingAt) { rec.inboxPendingAt = prevRecord.inboxPendingAt; rec.inboxDest = prevRecord.inboxDest || 'auto'; if (prevRecord.shortcutLaunchedAt) rec.shortcutLaunchedAt = prevRecord.shortcutLaunchedAt; if (prevRecord.shortcutNudgedFor) rec.shortcutNudgedFor = prevRecord.shortcutNudgedFor; }
   return tripsyFlyoverApplyAirportCities(rec).record;
 }
 
@@ -19395,8 +19395,11 @@ async function showTripsyFlyover(tripKey) {
   // import now button," 2026-10-26 -- it was ignoring the tap because an import was already
   // running, which only the status line said).
   const driveStatusHtml = () => driveImportRunning ? tripsyFlyoverDriveStatusHtml('importing', 0) : tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'waiting', inboxWatch ? inboxWatch.count : 0, record && record.inboxFolderId ? tripsyFlyoverDriveFolderUrl(record.inboxFolderId) : '', !!(record && record.shortcutLaunchedAt));
-  // The Shortcut launch's own watchdog (tripsyFlyoverShortcutLooksIncomplete): one nudge per launch.
-  let shortcutNudged = false;
+  // The Shortcut launch's own watchdog (tripsyFlyoverShortcutLooksIncomplete): one nudge per
+  // launch, remembered ON THE RECORD (`shortcutNudgedFor` = the launch it was shown for). It was
+  // a page-local flag, so every reopen of this page asked again about the same launch ("I am
+  // getting this - which i seem to be getting a lot," 2026-10-27, after a run that had found 0
+  // photos and so, correctly, saved nothing).
   let launchShortcut = null;
   let shortcutSinceOverride = ''; // a "since" the owner typed in the dialog, kept for Run it again
   const wireDriveStatus = () => {
@@ -19431,8 +19434,9 @@ async function showTripsyFlyover(tripKey) {
         inboxWatch.phase = tripsyFlyoverDrivePhase(inboxWatch.phase, r, fresh);
         paintDriveStatus();
         if (inboxWatch.phase === 'complete' && runFinishUpload && !driveImportRunning && freshFiles.some(f => !autoImportTried.has(f.id))) runFinishUpload();
-        else if (record.shortcutLaunchedAt && !shortcutNudged && tripsyFlyoverShortcutLooksIncomplete(Date.parse(record.shortcutLaunchedAt), Date.now(), fresh, newestMs)) {
-          shortcutNudged = true;
+        else if (record.shortcutLaunchedAt && record.shortcutNudgedFor !== record.shortcutLaunchedAt && tripsyFlyoverShortcutLooksIncomplete(Date.parse(record.shortcutLaunchedAt), Date.now(), fresh, newestMs)) {
+          record = { ...record, shortcutNudgedFor: record.shortcutLaunchedAt };
+          save();
           tripsyFlyoverShortcutIncompleteDialog({
             folderName: TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'),
             onRunAgain: () => { if (launchShortcut) launchShortcut(); },
@@ -19913,7 +19917,6 @@ async function showTripsyFlyover(tripKey) {
       try { window.location.href = tripsyFlyoverShortcutUrl(shortcutInputText()); } catch (e) { /* no Shortcuts here: the dialog's text is the fallback */ }
       const now = new Date().toISOString();
       record = { ...record, inboxFolderId: inboxFolderKnown, inboxDest: 'auto', inboxPendingAt: now, shortcutLaunchedAt: now };
-      shortcutNudged = false;
       save(); render();
       startInboxWatch();
     };

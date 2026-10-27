@@ -2076,14 +2076,17 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         'a typed since is used for the launch and kept for Run it again');
       assert(/doesn’t seem to have finished/.test(nudge) && (nudge.match(/<li>/g) || []).length === 5 && /data-sn-run/.test(nudge) && /data-sn-wait/.test(nudge) && /data-sn-cancel/.test(nudge), 'THE ASK: the incomplete dialog gives the steps to complete, with Run it again / Keep waiting / Cancel');
       const setup3 = extractFn('showTripsyFlyover');
-      assert(/data-flyover-shortcut/.test(setup3) && /launchShortcut = \(sinceOverride\) => \{\s*if \(closed \|\| !inboxFolderKnown\) return;[\s\S]*?try \{ window\.location\.href = tripsyFlyoverShortcutUrl\(shortcutInputText\(\)\); \}/.test(setup3) && /record = \{ \.\.\.record, inboxFolderId: inboxFolderKnown, inboxDest: 'auto', inboxPendingAt: now, shortcutLaunchedAt: now \};\s*shortcutNudged = false;/.test(setup3),
+      assert(/data-flyover-shortcut/.test(setup3) && /launchShortcut = \(sinceOverride\) => \{\s*if \(closed \|\| !inboxFolderKnown\) return;[\s\S]*?try \{ window\.location\.href = tripsyFlyoverShortcutUrl\(shortcutInputText\(\)\); \}/.test(setup3) && /record = \{ \.\.\.record, inboxFolderId: inboxFolderKnown, inboxDest: 'auto', inboxPendingAt: now, shortcutLaunchedAt: now \};\s*save\(\); render\(\);/.test(setup3),
         'Run opens the link inside the tap and starts the ordinary Drive hand-off, stamped for the watchdog');
-      assert(/else if \(record\.shortcutLaunchedAt && !shortcutNudged && tripsyFlyoverShortcutLooksIncomplete\(Date\.parse\(record\.shortcutLaunchedAt\), Date\.now\(\), fresh, newestMs\)\) \{\s*shortcutNudged = true;\s*tripsyFlyoverShortcutIncompleteDialog\(/.test(setup3) && /if \(record\.shortcutLaunchedAt\) record = \{ \.\.\.record, shortcutLaunchedAt: '' \};/.test(setup3),
-        'the watcher nudges once per launch, and an import clears the launch');
+      // "I am getting this - which i seem to be getting a lot" (2026-10-27): the once-per-launch
+      // memory was a page-local flag, so every reopen of the page asked again about the same
+      // launch. It is stamped on the record now (shortcutNudgedFor = the launch it was shown for).
+      assert(/else if \(record\.shortcutLaunchedAt && record\.shortcutNudgedFor !== record\.shortcutLaunchedAt && tripsyFlyoverShortcutLooksIncomplete\(Date\.parse\(record\.shortcutLaunchedAt\), Date\.now\(\), fresh, newestMs\)\) \{\s*record = \{ \.\.\.record, shortcutNudgedFor: record\.shortcutLaunchedAt \};\s*save\(\);\s*tripsyFlyoverShortcutIncompleteDialog\(/.test(setup3) && !/shortcutNudged\b/.test(setup3) && /if \(record\.shortcutLaunchedAt\) record = \{ \.\.\.record, shortcutLaunchedAt: '' \};/.test(setup3),
+        'the watcher nudges once per launch, remembered on the record so a reopened page never re-asks; an import clears the launch');
       eval(extractFn('tripsyFlyoverDriveStatusHtml'));
       const st = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x', true);
       assert(/data-flyover-shortcut-note/.test(st) && /Keep Shortcuts in front until it says Done/.test(st) && !/data-flyover-shortcut-note/.test(tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x')), 'the status slot repeats the reminder while a Shortcut launch is watched');
-      assert(/if \(prevRecord\.shortcutLaunchedAt\) rec\.shortcutLaunchedAt = prevRecord\.shortcutLaunchedAt;/.test(html), 'a rebuild keeps a pending launch');
+      assert(/if \(prevRecord\.shortcutLaunchedAt\) rec\.shortcutLaunchedAt = prevRecord\.shortcutLaunchedAt; if \(prevRecord\.shortcutNudgedFor\) rec\.shortcutNudgedFor = prevRecord\.shortcutNudgedFor;/.test(html), 'a rebuild keeps a pending launch, and the nudge already shown for it');
     }
     // ---- Capture-time dedupe ("If i just over-select photos to upload manually, will the
     // de-dupe logic automatically skip those?", 2026-10-27) ----

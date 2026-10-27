@@ -5144,7 +5144,12 @@ WebView's support for recording is unproven.
     to complete, with Run it again (relaunches with the same date — the Shortcut's Overwrite
     option keeps a re-run from doubling files, and the dedupe above catches the rest), Keep
     waiting, and Cancel the upload. An import clears `shortcutLaunchedAt`; a rebuild keeps it
-    with the hand-off. **The "since" moment is EDITABLE in the dialog** ("Found 431 photos" on
+    with the hand-off. **The once-per-launch memory is ON THE RECORD** (`shortcutNudgedFor` =
+    the launch it was shown for; carried by a rebuild) — it was a page-local flag, so every
+    reopen of the page re-asked about the same launch ("I am getting this - which i seem to be
+    getting a lot," 2026-10-27, after a run that had correctly found 0 photos). Keep waiting
+    therefore means "never ask again about THIS launch"; Run it again stamps a new launch and
+    re-arms it. **The "since" moment is EDITABLE in the dialog** ("Found 431 photos" on
     the first live run, 2026-10-27 — with no imported photo carrying a capture time yet the
     default was the trip's first day, which would have re-uploaded every photo already on the
     fly-over, none of which the capture dedupe can see): a `datetime-local` field
