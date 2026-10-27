@@ -2059,6 +2059,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       assert(/folderName === DRIVE_FOLDER_NAME/.test(fo) && /findDriveFolderIdByName\(DRIVE_FOLDER_LEGACY_NAME\)/.test(fo) && /method: 'PATCH'/.test(fo) && /name: DRIVE_FOLDER_NAME/.test(fo) && /return legacyId;/.test(fo)
         && fo.indexOf('findDriveFolderIdByName(DRIVE_FOLDER_LEGACY_NAME)') < fo.indexOf("method: 'POST'"),
         'a folder still under the old name is renamed in place and reused -- never a second folder created beside it');
+      assert(/const hit = \(searchJson\.files \|\| \[\]\)\.find\(f => f\.name === folderName\) \|\| null;/.test(extractFn('findDriveFolderIdByName')),
+        'the name match is re-checked exactly on the client, so a loose search answer under the OLD name cannot pass for the new one and skip the rename');
       assert(/catch \(e\) \{ console\.error\('Pasted-photo recompression failed[^\n]*\n\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*try \{ await findOrCreateDriveFolder\(DRIVE_FOLDER_NAME\); \}/.test(extractFn('runBackgroundSyncs')),
         'runBackgroundSyncs looks the folder up once per session, so the rename actually runs on an ordinary open (nothing else looks it up -- the fly-over page remembers its inbox id)');
       const recipeSrc = extractFn('tripsyFlyoverShortcutRecipeHtml');

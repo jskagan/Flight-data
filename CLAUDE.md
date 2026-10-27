@@ -5167,7 +5167,10 @@ WebView's support for recording is unproven.
     dialog (the dialog is its own overlay and outlives the page). Also:
     `runBackgroundSyncs` ends with `findOrCreateDriveFolder(DRIVE_FOLDER_NAME)` so the
     folder rename above actually runs on an ordinary open — nothing else looks the folder up
-    (the fly-over page remembers its inbox id). **The "since" moment is EDITABLE in the dialog** ("Found 431 photos" on
+    (the fly-over page remembers its inbox id). `findDriveFolderIdByName` re-checks the name
+    EXACTLY on the client (`f.name === folderName`): the Drive connector's own search answered
+    "Travel Reservation Tracking" for a `title = 'Travel Tracker'` query, and a loose answer
+    from the API would hand the old folder back as the new one and skip the rename forever. **The "since" moment is EDITABLE in the dialog** ("Found 431 photos" on
     the first live run, 2026-10-27 — with no imported photo carrying a capture time yet the
     default was the trip's first day, which would have re-uploaded every photo already on the
     fly-over, none of which the capture dedupe can see): a `datetime-local` field
