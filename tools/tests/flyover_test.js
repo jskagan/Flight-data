@@ -2047,9 +2047,9 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         'the dialog pre-fills the later of the typed since and the newest capture, so an import moves it on');
       // "This process is just not working … we need another solution" (2026-10-28): the Shortcut
       // uploads STRAIGHT to Drive, so the input carries the folder's id and a Drive access token.
-      // "Got 0 photos" / "Says found 0 photos" (2026-10-29): a bare "2026-10-28 13:50:48" read as UTC, and prose "12:05:25 AM" read as PM; the since carries its own offset.
-      assert(tripsyFlyoverShortcutSinceText('2026-10-29 00:05:25', 540) === '2026-10-29T00:05:25+09:00' && tripsyFlyoverShortcutSinceText('2026-10-28 13:50:48', -420) === '2026-10-28T13:50:48-07:00' && tripsyFlyoverShortcutSinceText('2026-12-01T12:05', 330) === '2026-12-01T12:05:00+05:30' && tripsyFlyoverShortcutSinceText('2026-12-01 12:05:00', 0) === '2026-12-01T12:05:00+00:00' && tripsyFlyoverShortcutSinceText('junk') === 'junk' && tripsyFlyoverShortcutSinceText('') === '',
-        'the since-moment goes to the Shortcut as ISO 8601 with an explicit offset -- no form Get Dates can reinterpret');
+      // "Got 0 photos" / "Says found 0 photos" (2026-10-29): Get Dates misread prose (AM as PM) and ISO+offset alike; the one form it reads consistently is plain "YYYY-MM-DD HH:MM:SS" as UTC, so the moment is converted to UTC.
+      assert(tripsyFlyoverShortcutSinceText('2026-10-29 00:38:09', 540) === '2026-10-28 15:38:09' && tripsyFlyoverShortcutSinceText('2026-10-28 13:50:48', -420) === '2026-10-28 20:50:48' && tripsyFlyoverShortcutSinceText('2026-12-01T12:05', 330) === '2026-12-01 06:35:00' && tripsyFlyoverShortcutSinceText('2026-12-01 12:05:00', 0) === '2026-12-01 12:05:00' && tripsyFlyoverShortcutSinceText('junk') === 'junk' && tripsyFlyoverShortcutSinceText('') === '',
+        'the since-moment goes to the Shortcut as UTC in the plain form Get Dates reads as UTC');
       // "I tried that already" (2026-10-29): the Shortcut's own move never takes, so the page moves root uploads into the inbox itself.
       eval([extractFn('tripsyFlyoverRootUploadName')].join('\n'));
       assert(tripsyFlyoverRootUploadName(' IMG_4114', 'image/jpeg') === 'IMG_4114.jpg' && tripsyFlyoverRootUploadName('IMG_0340', 'image/heic') === 'IMG_0340.heic' && tripsyFlyoverRootUploadName('IMG_1.JPG', 'image/jpeg') === 'IMG_1.JPG' && tripsyFlyoverRootUploadName('', 'video/quicktime') === 'photo.mov' && tripsyFlyoverRootUploadName('Untitled', 'application/x-odd') === 'Untitled',
@@ -2062,8 +2062,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         assert(/if \(record\.shortcutLaunchedAt\) \{\s*try \{ await tripsyFlyoverAdoptRootUploads\(record\.inboxFolderId, record\.shortcutLaunchedAt\); \}[\s\S]*?\}\s*const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);/.test(setupR),
           'every watcher tick with a launch pending sweeps root BEFORE listing the inbox, so the uploads are counted the same tick');
       }
-      assert(/^2026-10-23T18:30:15[+-]\d\d:\d\d$/.test(tripsyFlyoverShortcutSinceText('2026-10-23 18:30:15')), 'with no offset given, the device\'s own offset for that moment is used');
-      assert(/^2026-10-23T18:30:15[+-]\d\d:\d\d\|FOLDER1\|ya29\.tok$/.test(tripsyFlyoverShortcutInput('2026-10-23 18:30:15', 'FOLDER1', 'ya29.tok')) && tripsyFlyoverShortcutInput('x', 'a|b', 'c|d') === 'x|ab|cd' && tripsyFlyoverShortcutInput('', '', '') === '||',
+      assert(/^2026-10-2\d \d\d:\d\d:15$/.test(tripsyFlyoverShortcutSinceText('2026-10-23 18:30:15')), 'with no offset given, the device\'s own offset for that moment is used');
+      assert(/^2026-10-2\d \d\d:\d\d:15\|FOLDER1\|ya29\.tok$/.test(tripsyFlyoverShortcutInput('2026-10-23 18:30:15', 'FOLDER1', 'ya29.tok')) && tripsyFlyoverShortcutInput('x', 'a|b', 'c|d') === 'x|ab|cd' && tripsyFlyoverShortcutInput('', '', '') === '||',
         'THE ASK: one text input: date | folder id | token (the separator never appears in either)');
       const tokSrc = extractFn('tripsyFlyoverShortcutToken');
       assert(/await authWorkerGetAccessToken\(\)/.test(tokSrc) && /driveAccessToken = viaWorker\.accessToken;/.test(tokSrc) && /return driveAccessToken \|\| '';/.test(tokSrc),

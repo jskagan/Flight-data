@@ -5239,10 +5239,13 @@ WebView's support for recording is unproven.
     the morning's "Found 0" at 12:47 PM with photos taken 1:22 PM): the Shortcut's Get Dates step
     reads "2026-10-28 13:50:48" as UTC, so on a Japan-time iPad "after 1:50 PM" became "after
     10:50 PM". The first fix, prose "Oct 29, 2026 at 12:05:25 AM", was then read as 12:05 PM
-    ("Says found 0 photos," same night; a since of 11:50 PM the day before found both photos), so
-    `tripsyFlyoverShortcutSinceText` now writes ISO 8601 with an EXPLICIT offset —
-    "2026-10-29T00:05:25+09:00", the device's own offset for that wall-clock moment — the one
-    form Get Dates cannot reinterpret. The dialog field and the record keep the
+    ("Says found 0 photos," same night; a since of 11:50 PM the day before found both photos), and
+    ISO 8601 with an explicit "+09:00" offset found nothing either ("Shortcut says it found 0
+    photos," same night, since 12:38 AM, photo taken ~6:30 AM). The one form Get Dates read
+    CONSISTENTLY was the plain "YYYY-MM-DD HH:MM:SS", always as UTC, so
+    `tripsyFlyoverShortcutSinceText` converts the local wall-clock moment to UTC (the device's
+    own offset for it) and sends that: 12:38 AM in Japan goes out as "2026-10-28 15:38:09". Don't
+    try another form without a device test — three looked right on paper. The dialog field and the record keep the
     "YYYY-MM-DD HH:MM:SS" form; only the launch text changes. **The PAGE moves the uploads
     into the inbox** ("I tried that already," 2026-10-29): the PATCH's `addParents` move never
     took on the owner's Shortcut (the rename in the same call does), and re-pointing its folder
