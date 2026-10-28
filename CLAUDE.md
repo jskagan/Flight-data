@@ -5243,9 +5243,16 @@ WebView's support for recording is unproven.
     `tripsyFlyoverShortcutSinceText` now writes ISO 8601 with an EXPLICIT offset —
     "2026-10-29T00:05:25+09:00", the device's own offset for that wall-clock moment — the one
     form Get Dates cannot reinterpret. The dialog field and the record keep the
-    "YYYY-MM-DD HH:MM:SS" form; only the launch text changes. **Still open**: the PATCH's
-    `addParents` move does not take on the owner's Shortcut (the rename in the same call does),
-    so uploads land in My Drive's root and a session has moved them into the inbox by hand. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
+    "YYYY-MM-DD HH:MM:SS" form; only the launch text changes. **The PAGE moves the uploads
+    into the inbox** ("I tried that already," 2026-10-29): the PATCH's `addParents` move never
+    took on the owner's Shortcut (the rename in the same call does), and re-pointing its folder
+    chip did not fix it, so uploads landed in My Drive's root. While `shortcutLaunchedAt` is set,
+    every watcher tick first runs `tripsyFlyoverAdoptRootUploads(folderId, launchedAt)`: each
+    image/video in root created from a minute before the launch to
+    `TRIPSY_FLYOVER_ROOT_ADOPT_MS` (3 h) after it is PATCHed into the inbox, renamed by
+    `tripsyFlyoverRootUploadName` (leading space trimmed, extension from the type), BEFORE the
+    inbox is listed, so the same tick counts them and the auto-import follows as before. The
+    Shortcut's own PATCH can stay or go; it no longer matters. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
     note in the slot) → nothing for 105 s → nudge → Run it again → nudge once more after the
     grace → a file lands → uploading → settled → auto-import, launch cleared. NOT verifiable
     here: that the Claude iPad WebView opens a `shortcuts://` link (Safari does), that

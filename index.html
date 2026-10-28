@@ -19523,6 +19523,12 @@ async function showTripsyFlyover(tripKey) {
     if (!driveImportRunning && document.visibilityState !== 'hidden') {
       inboxWatch.busy = true;
       try {
+        // A Shortcut launch pending: first pull its uploads out of My Drive's root, where they
+        // land when the Shortcut's own move does not take (tripsyFlyoverAdoptRootUploads).
+        if (record.shortcutLaunchedAt) {
+          try { await tripsyFlyoverAdoptRootUploads(record.inboxFolderId, record.shortcutLaunchedAt); } catch (e) { console.warn('root upload sweep failed:', e); }
+          if (!inboxWatch || closed) return;
+        }
         const files = await tripsyFlyoverListInbox(record.inboxFolderId);
         if (!inboxWatch || closed) return;
         // The Shortcut's report (travel-tracker-found.txt): read once, trashed, and acted on --
@@ -21065,6 +21071,37 @@ async function tripsyFlyoverListInbox(folderId) {
     pageToken = (j && j.nextPageToken) || '';
   } while (pageToken);
   return out;
+}
+// The Shortcut's uploads land in My Drive's ROOT when its PATCH move does not take ("I tried
+// that already," 2026-10-29 -- the rename in the same call works on the owner's Shortcut, the
+// addParents move never has, and re-pointing the folder chip did not fix it). So while a launch
+// is pending the PAGE moves them itself: every image/video in root created from shortly before
+// the launch to TRIPSY_FLYOVER_ROOT_ADOPT_MS after it goes into the inbox, named cleanly. Root
+// is the owner's own top level and the window is a few hours from a launch they just made, so
+// nothing unrelated is plausibly there; a miss just leaves a photo where Drive put it.
+const TRIPSY_FLYOVER_ROOT_ADOPT_MS = 3 * 3600 * 1000;
+// " IMG_4114" (no extension, Shortcuts' leading space) → "IMG_4114.jpg". Pure.
+function tripsyFlyoverRootUploadName(name, mime) {
+  const n = String(name || '').trim() || 'photo';
+  if (/\.[a-z0-9]{2,5}$/i.test(n)) return n;
+  const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/heic': 'heic', 'image/heif': 'heif', 'image/gif': 'gif', 'image/webp': 'webp', 'video/quicktime': 'mov', 'video/mp4': 'mp4' }[String(mime || '').toLowerCase()];
+  return ext ? `${n}.${ext}` : n;
+}
+async function tripsyFlyoverAdoptRootUploads(folderId, launchedAt) {
+  const t0 = Date.parse(launchedAt || '');
+  if (!folderId || !isFinite(t0)) return 0;
+  const from = new Date(t0 - 60000).toISOString(), to = new Date(t0 + TRIPSY_FLYOVER_ROOT_ADOPT_MS).toISOString();
+  const q = encodeURIComponent(`'root' in parents and trashed=false and createdTime > '${from}' and createdTime < '${to}' and (mimeType contains 'image/' or mimeType contains 'video/')`);
+  const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=${encodeURIComponent('files(id,name,mimeType)')}&pageSize=500`);
+  const j = await r.json();
+  let moved = 0;
+  for (const f of ((j && j.files) || [])) {
+    try {
+      const m = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(f.id)}?addParents=${encodeURIComponent(folderId)}&removeParents=root&fields=id`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: tripsyFlyoverRootUploadName(f.name, f.mimeType) }) });
+      if (m.ok) moved++;
+    } catch (e) { console.warn('root upload move failed:', e); }
+  }
+  return moved;
 }
 // Resolves true once every one of these pending photos has landed (its Drive id known), false
 // on a failed upload or past `maxMs`. Listens for the upload events; a photo already landed

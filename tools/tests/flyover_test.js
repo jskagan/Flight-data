@@ -2050,6 +2050,18 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       // "Got 0 photos" / "Says found 0 photos" (2026-10-29): a bare "2026-10-28 13:50:48" read as UTC, and prose "12:05:25 AM" read as PM; the since carries its own offset.
       assert(tripsyFlyoverShortcutSinceText('2026-10-29 00:05:25', 540) === '2026-10-29T00:05:25+09:00' && tripsyFlyoverShortcutSinceText('2026-10-28 13:50:48', -420) === '2026-10-28T13:50:48-07:00' && tripsyFlyoverShortcutSinceText('2026-12-01T12:05', 330) === '2026-12-01T12:05:00+05:30' && tripsyFlyoverShortcutSinceText('2026-12-01 12:05:00', 0) === '2026-12-01T12:05:00+00:00' && tripsyFlyoverShortcutSinceText('junk') === 'junk' && tripsyFlyoverShortcutSinceText('') === '',
         'the since-moment goes to the Shortcut as ISO 8601 with an explicit offset -- no form Get Dates can reinterpret');
+      // "I tried that already" (2026-10-29): the Shortcut's own move never takes, so the page moves root uploads into the inbox itself.
+      eval([extractFn('tripsyFlyoverRootUploadName')].join('\n'));
+      assert(tripsyFlyoverRootUploadName(' IMG_4114', 'image/jpeg') === 'IMG_4114.jpg' && tripsyFlyoverRootUploadName('IMG_0340', 'image/heic') === 'IMG_0340.heic' && tripsyFlyoverRootUploadName('IMG_1.JPG', 'image/jpeg') === 'IMG_1.JPG' && tripsyFlyoverRootUploadName('', 'video/quicktime') === 'photo.mov' && tripsyFlyoverRootUploadName('Untitled', 'application/x-odd') === 'Untitled',
+        'a root upload is renamed cleanly: leading space trimmed, an extension added from its type when missing');
+      {
+        const adopt = extractFn('tripsyFlyoverAdoptRootUploads');
+        assert(/'root' in parents and trashed=false and createdTime > '\$\{from\}' and createdTime < '\$\{to\}' and \(mimeType contains 'image\/' or mimeType contains 'video\/'\)/.test(adopt) && /new Date\(t0 - 60000\)/.test(adopt) && /t0 \+ TRIPSY_FLYOVER_ROOT_ADOPT_MS/.test(adopt) && /addParents=\$\{encodeURIComponent\(folderId\)\}&removeParents=root/.test(adopt),
+          'the sweep takes only images/videos in root created in the launch window, and moves each into the inbox');
+        const setupR = extractFn('showTripsyFlyover');
+        assert(/if \(record\.shortcutLaunchedAt\) \{\s*try \{ await tripsyFlyoverAdoptRootUploads\(record\.inboxFolderId, record\.shortcutLaunchedAt\); \}[\s\S]*?\}\s*const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);/.test(setupR),
+          'every watcher tick with a launch pending sweeps root BEFORE listing the inbox, so the uploads are counted the same tick');
+      }
       assert(/^2026-10-23T18:30:15[+-]\d\d:\d\d$/.test(tripsyFlyoverShortcutSinceText('2026-10-23 18:30:15')), 'with no offset given, the device\'s own offset for that moment is used');
       assert(/^2026-10-23T18:30:15[+-]\d\d:\d\d\|FOLDER1\|ya29\.tok$/.test(tripsyFlyoverShortcutInput('2026-10-23 18:30:15', 'FOLDER1', 'ya29.tok')) && tripsyFlyoverShortcutInput('x', 'a|b', 'c|d') === 'x|ab|cd' && tripsyFlyoverShortcutInput('', '', '') === '||',
         'THE ASK: one text input: date | folder id | token (the separator never appears in either)');
