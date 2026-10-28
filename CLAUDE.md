@@ -5234,6 +5234,39 @@ WebView's support for recording is unproven.
     "Get Dates from Input" parses "2026-10-23 18:30:15", and Save File's behaviour with the
     Google Drive file provider; the Copy fallback and the recipe are the hedges.
     `flyover_test.js`.
+    **The Shortcut now uploads STRAIGHT to Drive — no Save File, no share sheet, no Drive app**
+    ("This process is just not working. It is supposed to be simple with minimal user
+    intervention and run in the background … we need another solution," 2026-10-28, after the
+    first real run: Save File's "Ask Where to Save" picker greys out EVERY third-party provider
+    (Drive and OneDrive alike — a Shortcuts rule, not a Drive fault; the Apple locations are
+    white), the Share-step replacement handed 59 photos to the Drive app, which uploaded 26 and
+    dropped the rest the moment the owner switched back to Travel Tracker, and the count file
+    never arrived through the share extension). The owner is away from the Mac, so the Worker
+    cannot be redeployed; the Shortcut therefore calls the Drive API itself with the APP's own
+    access token. The launch text is `<since>|<folder id>|<token>` (`tripsyFlyoverShortcutInput`,
+    three args now); `tripsyFlyoverShortcutToken` renews it through the auth Worker when it can
+    (a fresh ~1h grant, also adopted by the page) else uses the page's current token — no
+    credential is stored in the Shortcut, it only rides the `shortcuts://` link. The page fetches
+    folder + token while the dialog is up (`shortcutPrepare`; Run enabled only with both; the
+    dialog's `inputFor` callback builds the text so `setReady` can refresh it), and **Run it
+    again** (`relaunchShortcut`, both nudge dialogs) reuses a token under 40 minutes old inside
+    the tap, else renews first — a lapsed token would make every upload fail SILENTLY, since Get
+    Contents of URL does not fail on an HTTP error. The 13-step recipe: Split Text; First Item →
+    Get Dates (since); Item at Index 2 (folder id); Last Item (token); Find Photos (Date Taken
+    after, Media Type is Image — a video through this path would be one huge POST); Count +
+    Found alert; Repeat with Each over the photos, inside it **Get Contents of URL** POST
+    `upload/drive/v3/files?uploadType=media` with `Authorization: Bearer <token>` and the Repeat
+    Item as a File body (Shortcuts sends the file's own type, so Drive still extracts EXIF/GPS
+    and the in-place import routes by capture date as before), **Get Dictionary Value** `id`,
+    then PATCH `drive/v3/files/<id>?addParents=<folder>&removeParents=root` with JSON `name` =
+    the item's Name (a media upload lands untitled in My Drive's root; Drive's single-parent
+    rule needs the removeParents); Done alert. Nothing else changes: the launch is still the
+    ordinary hand-off (watcher + auto-import), the count-file reader stays but the recipe no
+    longer writes one, so completion is the two-quiet-minutes rule. First run needs Settings →
+    Apps → Shortcuts → Advanced → Allow Sharing Large Amounts of Data (iOS asked this on the
+    share-sheet cut too). NOT verifiable here: the two REST calls from Shortcuts (sandbox has no
+    Drive token; both are standard Drive v3) and that `root` is accepted in `removeParents`.
+    `flyover_test.js`.
     **A photo delete repaints at once; the save runs behind it** ("When i delete a photo from
     the flyover page there is a delay," 2026-10-27): `removePhotoFromRecord` (the large view's
     Delete, a No-page tile's ✕, the player's Remove) awaited the whole-file Drive write BEFORE

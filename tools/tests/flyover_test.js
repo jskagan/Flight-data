@@ -2040,15 +2040,25 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       const recS = { stops: [{ photos: [{ driveFileId: 'a', taken: '2026-10-21T09:00:00' }, { driveFileId: 'b', taken: '2026-10-23T18:30:15' }, { driveFileId: 'c' }] }, { photos: [{ driveFileId: 'd', taken: '2026-10-22T08:00:00' }] }] };
       assert(tripsyFlyoverLastCaptureTime(recS) === '2026-10-23T18:30:15' && tripsyFlyoverLastCaptureTime({ stops: [] }) === '', 'the newest capture second on the record, across every destination');
       assert(tripsyFlyoverShortcutSince(recS, '2026-10-06') === '2026-10-23 18:30:15' && tripsyFlyoverShortcutSince({ stops: [] }, '2026-10-06') === '2026-10-06 00:00:00', 'THE ASK: "since" is the last imported photo\'s capture time, else the trip\'s first day');
-      assert(tripsyFlyoverShortcutInput('2026-10-23 18:30:15', 'Fly-over photos — Singapore GP') === '2026-10-23 18:30:15|Fly-over photos — Singapore GP' && tripsyFlyoverShortcutInput('x', 'a|b') === 'x|a b', 'one text input: date | folder name (the separator never appears in the name)');
+      // "This process is just not working … we need another solution" (2026-10-28): the Shortcut
+      // uploads STRAIGHT to Drive, so the input carries the folder's id and a Drive access token.
+      assert(tripsyFlyoverShortcutInput('2026-10-23 18:30:15', 'FOLDER1', 'ya29.tok') === '2026-10-23 18:30:15|FOLDER1|ya29.tok' && tripsyFlyoverShortcutInput('x', 'a|b', 'c|d') === 'x|ab|cd' && tripsyFlyoverShortcutInput('', '', '') === '||',
+        'THE ASK: one text input: date | folder id | token (the separator never appears in either)');
+      const tokSrc = extractFn('tripsyFlyoverShortcutToken');
+      assert(/await authWorkerGetAccessToken\(\)/.test(tokSrc) && /driveAccessToken = viaWorker\.accessToken;/.test(tokSrc) && /return driveAccessToken \|\| '';/.test(tokSrc),
+        'the token is renewed through the auth Worker when it can be (a fresh hour), else the page\'s current one; no credential lives in the Shortcut');
       assert(tripsyFlyoverShortcutUrl('2026-10-23 18:30:15|F') === 'shortcuts://run-shortcut?name=Travel%20Tracker%20Upload&input=text&text=2026-10-23%2018%3A30%3A15%7CF', 'the shortcuts:// link runs the named shortcut with that text');
       const L = 1000000;
       assert(!tripsyFlyoverShortcutLooksIncomplete(L, L + 60000, 0, NaN) && tripsyFlyoverShortcutLooksIncomplete(L, L + 90000, 0, NaN), 'nothing in the folder is "incomplete" only once the grace period has passed');
       assert(tripsyFlyoverShortcutLooksIncomplete(L, L + 90000, 3, L - 5000) && !tripsyFlyoverShortcutLooksIncomplete(L, L + 90000, 3, L + 5000) && !tripsyFlyoverShortcutLooksIncomplete(NaN, L + 90000, 0, NaN),
         'files older than the launch do not count as arrivals; a file that landed after it does; no launch, no nudge');
       const recipe = tripsyFlyoverShortcutRecipeHtml();
-      assert((recipe.match(/<li/g) || []).length === 11 && /Split Text/.test(recipe) && /Set Name/.test(recipe) && /Add to Variable/.test(recipe) && recipe.includes('travel-tracker-found.txt') && /Find Photos/.test(recipe) && /Date Taken is after/.test(recipe) && /Save File/.test(recipe) && /Ask Where to Save/.test(recipe) && /Overwrite If File Exists/.test(recipe) && /Done — \[Count\] photos saved/.test(recipe),
-        'the recipe builds the shortcut: split the input, find photos after the date, save to the folder, end with a Done alert');
+      assert((recipe.match(/<li/g) || []).length === 13 && /Split Text/.test(recipe) && /Item at Index<\/em> <code>2<\/code>/.test(recipe) && /Find Photos/.test(recipe) && /Date Taken is after/.test(recipe) && /Media Type is Image/.test(recipe) && /Repeat with Each/.test(recipe)
+        && recipe.includes('https://www.googleapis.com/upload/drive/v3/files?uploadType=media') && /Method <em>POST<\/em>/.test(recipe) && /<code>Bearer <\/code>/.test(recipe) && /Request Body <em>File<\/em>/.test(recipe)
+        && /Get Dictionary Value/.test(recipe) && recipe.includes('https://www.googleapis.com/drive/v3/files/') && /\?addParents=/.test(recipe) && /&amp;removeParents=root/.test(recipe) && /Method <em>PATCH<\/em>/.test(recipe) && /key <code>name<\/code>/.test(recipe)
+        && /Done — \[Count\] photos uploaded/.test(recipe) && /Allow Sharing Large Amounts of Data/.test(recipe)
+        && !/Save File/.test(recipe) && !/Ask Where to Save/.test(recipe) && !/travel-tracker-found/.test(recipe) && !/share sheet/i.test(recipe),
+        'the recipe builds the direct-upload shortcut: split the input, find photos after the date, per photo a media upload then a PATCH that names and moves it, a Done alert -- no Save File, no share sheet, no count file');
       // "I didn't see the Singapore GP folder in the save list" (2026-10-27): the inbox folder sits
       // inside the app's REAL Drive folder (DRIVE_FOLDER_NAME), which the recipe and the nudge dialog
       // had been naming by hand -- and the folder was then RENAMED to match ("change the name of
@@ -2064,10 +2074,9 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       assert(/catch \(e\) \{ console\.error\('Pasted-photo recompression failed[^\n]*\n\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*try \{ await findOrCreateDriveFolder\(DRIVE_FOLDER_NAME\); \}/.test(extractFn('runBackgroundSyncs')),
         'runBackgroundSyncs looks the folder up once per session, so the rename actually runs on an ordinary open (nothing else looks it up -- the fly-over page remembers its inbox id)');
       const recipeSrc = extractFn('tripsyFlyoverShortcutRecipeHtml');
-      assert(!/Travel Tracker ›/.test(recipeSrc) && (recipeSrc.match(/\$\{esc\(DRIVE_FOLDER_NAME\)\} › /g) || []).length >= 2 && recipe.includes(`My Drive › ${DRIVE_FOLDER_NAME} › `),
-        'the recipe names the real Drive folder the inbox sits in, by the constant, never a hand-typed name');
-      assert(!/Travel Tracker ›/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')) && /My Drive › \$\{esc\(DRIVE_FOLDER_NAME\)\} › \$\{esc\(folderName\)\}/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')),
-        'so does the not-finished dialog');
+      assert(!/Travel Tracker ›/.test(recipeSrc) && !/Travel Reservation Tracking/.test(recipeSrc), 'the recipe never hand-types the Drive folder name');
+      assert(!/Travel Tracker ›/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')) && /\$\{esc\(DRIVE_FOLDER_NAME\)\} › \$\{esc\(folderName\)\}/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')) && !/asks where to save/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')),
+        'the not-finished dialog names the folder by the constant and no longer talks about a save picker');
       // "If there are no photos, we should just have a message that says 'No new photos to upload.'
       // And then say the date and time of the last photo uploaded … and then have a close button"
       // (2026-10-28): the page cannot see the Shortcut's count, so a run that saved nothing reads
@@ -2101,7 +2110,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         'with a reported count the slot counts arrivals against it; without one it reads as before');
       assert(/found === 0;/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')) && /The shortcut found no photos taken after the last one uploaded/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')), 'a reported 0 is said outright in the dialog');
       const dlg = extractFn('tripsyFlyoverShortcutDialog'), nudge = extractFn('tripsyFlyoverShortcutIncompleteDialog');
-      assert(/Keep the Shortcuts app in front until it shows “Done — N photos saved\.”/.test(dlg) && /data-sc-run disabled/.test(dlg) && /setReady: ok =>/.test(dlg) && /data-sc-copy/.test(dlg), 'THE ASK: the reminder to keep Shortcuts open is on the launch dialog; Run waits for the folder; the input text can be copied');
+      assert(/Keep the Shortcuts app in front until it shows “Done — N photos uploaded\.”/.test(dlg) && /data-sc-run disabled/.test(dlg) && /setReady: ok =>/.test(dlg) && /data-sc-copy/.test(dlg) && /inputFor \? inputFor\(sinceNow\(\)\) : ''/.test(dlg) && /if \(c\) c\.textContent = inputTextNow\(\);/.test(dlg),
+        'THE ASK: the reminder to keep Shortcuts open is on the launch dialog; Run waits for the folder and token; the input text (built by the page) can be copied and refreshes once ready');
       // The "since" moment is editable (the first run found 431 photos from the trip's first day).
       eval([extractFn('tripsyFlyoverShortcutSinceToField'), extractFn('tripsyFlyoverShortcutSinceFromField')].join('\n'));
       assert(tripsyFlyoverShortcutSinceToField('2026-10-23 18:30:15') === '2026-10-23T18:30' && tripsyFlyoverShortcutSinceToField('') === '', 'the shortcut text maps onto the datetime field');
@@ -2112,8 +2122,12 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         'a typed since is used for the launch and kept for Run it again');
       assert(/No new photos to upload/.test(nudge) && (nudge.match(/<li>/g) || []).length === 5 && /data-sn-run/.test(nudge) && /data-sn-wait/.test(nudge) && /data-sn-close/.test(nudge), 'the nothing-arrived dialog keeps the five steps to complete (folded), Run it again / Keep waiting, and Close');
       const setup3 = extractFn('showTripsyFlyover');
-      assert(/data-flyover-shortcut/.test(setup3) && /launchShortcut = \(sinceOverride\) => \{\s*if \(closed \|\| !inboxFolderKnown\) return;[\s\S]*?try \{ window\.location\.href = tripsyFlyoverShortcutUrl\(shortcutInputText\(\)\); \}/.test(setup3) && /record = \{ \.\.\.record, inboxFolderId: inboxFolderKnown, inboxDest: 'auto', inboxPendingAt: now, shortcutLaunchedAt: now \};\s*save\(\); render\(\);/.test(setup3),
+      assert(/data-flyover-shortcut/.test(setup3) && /launchShortcut = \(sinceOverride\) => \{\s*if \(closed \|\| !inboxFolderKnown \|\| !shortcutToken\) return;[\s\S]*?try \{ window\.location\.href = tripsyFlyoverShortcutUrl\(shortcutInputText\(\)\); \}/.test(setup3) && /record = \{ \.\.\.record, inboxFolderId: inboxFolderKnown, inboxDest: 'auto', inboxPendingAt: now, shortcutLaunchedAt: now \};\s*save\(\); render\(\);/.test(setup3),
         'Run opens the link inside the tap and starts the ordinary Drive hand-off, stamped for the watchdog');
+      assert(/tripsyFlyoverShortcutInput\(shortcutSinceOverride \|\| tripsyFlyoverShortcutSince\(record, firstDay\), inboxFolderKnown, shortcutToken\)/.test(setup3) && /tripsyFlyoverShortcutToken\(\)\.then\(t => \{ shortcutToken = t; shortcutTokenAt = Date\.now\(\); return t; \}\)/.test(setup3) && /shortcutPrepare\(\)\.then\(ok => \{ if \(!closed\) dlg\.setReady\(ok\); \}/.test(setup3),
+        'the launch text carries the folder id and a token fetched while the dialog is up; Run is enabled only once both are in hand');
+      assert(/relaunchShortcut = \(\) => \{\s*if \(inboxFolderKnown && shortcutToken && Date\.now\(\) - shortcutTokenAt < 40 \* 60000\) \{ launchShortcut\(\); return; \}\s*shortcutPrepare\(\)\.then/.test(setup3) && (setup3.match(/onRunAgain: \(\) => \{ if \(relaunchShortcut\) relaunchShortcut\(\); \}/g) || []).length === 2 && !/onRunAgain: \(\) => \{ if \(launchShortcut\) launchShortcut\(\); \}/.test(setup3),
+        'Run it again reuses a token under 40 minutes old inside the tap, else renews it first -- a lapsed token would make every upload fail silently');
       // "I am getting this - which i seem to be getting a lot" (2026-10-27): the once-per-launch
       // memory was a page-local flag, so every reopen of the page asked again about the same
       // launch. It is stamped on the record now (shortcutNudgedFor = the launch it was shown for).

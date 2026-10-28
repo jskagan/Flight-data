@@ -19489,7 +19489,7 @@ async function showTripsyFlyover(tripKey) {
   // a page-local flag, so every reopen of this page asked again about the same launch ("I am
   // getting this - which i seem to be getting a lot," 2026-10-27, after a run that had found 0
   // photos and so, correctly, saved nothing).
-  let launchShortcut = null;
+  let launchShortcut = null, relaunchShortcut = null;
   let shortcutSinceOverride = ''; // a "since" the owner typed in the dialog, kept for Run it again
   // Cancel ends a hand-off nothing was uploaded for; the (empty) folder is kept for next time.
   // The status slot's Cancel and the not-finished dialog's "Cancel the upload" share it. The
@@ -19542,7 +19542,7 @@ async function showTripsyFlyover(tripKey) {
               folderName: TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'),
               lastTaken: tripsyFlyoverLastCaptureTime(record),
               found: 0,
-              onRunAgain: () => { if (launchShortcut) launchShortcut(); },
+              onRunAgain: () => { if (relaunchShortcut) relaunchShortcut(); },
               onKeepWaiting: () => {},
               onClose: () => {},
             });
@@ -19568,7 +19568,7 @@ async function showTripsyFlyover(tripKey) {
           tripsyFlyoverShortcutIncompleteDialog({
             folderName: TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'),
             lastTaken: tripsyFlyoverLastCaptureTime(record),
-            onRunAgain: () => { if (launchShortcut) launchShortcut(); },
+            onRunAgain: () => { if (relaunchShortcut) relaunchShortcut(); },
             onKeepWaiting: () => {},
             onClose: cancelHandOff,
           });
@@ -20050,9 +20050,18 @@ async function showTripsyFlyover(tripKey) {
     // The "since" date can be set by hand in the dialog (the first run, before any imported
     // photo carries a capture time, would otherwise start at the trip's first day); the pick is
     // kept for "Run it again".
-    const shortcutInputText = () => tripsyFlyoverShortcutInput(shortcutSinceOverride || tripsyFlyoverShortcutSince(record, firstDay), folderName);
+    // The Shortcut uploads straight to Drive, so the launch text carries the folder's ID and a
+    // Drive access token good for the next hour (tripsyFlyoverShortcutToken); both are fetched
+    // while the dialog is up, and Run is enabled only once both are in hand. A relaunch (Run it
+    // again) refreshes the token first -- the one from the earlier launch may have lapsed.
+    let shortcutToken = '', shortcutTokenAt = 0;
+    const shortcutInputText = () => tripsyFlyoverShortcutInput(shortcutSinceOverride || tripsyFlyoverShortcutSince(record, firstDay), inboxFolderKnown, shortcutToken);
+    const shortcutPrepare = () => Promise.all([
+      inboxFolderKnown ? Promise.resolve(inboxFolderKnown) : tripsyFlyoverInboxFolder(trip, record).then(id => { inboxFolderKnown = id; return id; }),
+      tripsyFlyoverShortcutToken().then(t => { shortcutToken = t; shortcutTokenAt = Date.now(); return t; }),
+    ]).then(([id, t]) => !!(id && t));
     launchShortcut = (sinceOverride) => {
-      if (closed || !inboxFolderKnown) return;
+      if (closed || !inboxFolderKnown || !shortcutToken) return;
       if (sinceOverride) shortcutSinceOverride = sinceOverride;
       try { window.location.href = tripsyFlyoverShortcutUrl(shortcutInputText()); } catch (e) { /* no Shortcuts here: the dialog's text is the fallback */ }
       const now = new Date().toISOString();
@@ -20060,10 +20069,16 @@ async function showTripsyFlyover(tripKey) {
       save(); render();
       startInboxWatch();
     };
+    // Run it again: a token fetched within the last 40 minutes is reused INSIDE the tap (the
+    // shortcuts:// navigation is safest with the tap's activation); an older one is renewed
+    // first, since a lapsed token would make every upload fail silently.
+    relaunchShortcut = () => {
+      if (inboxFolderKnown && shortcutToken && Date.now() - shortcutTokenAt < 40 * 60000) { launchShortcut(); return; }
+      shortcutPrepare().then(ok => { if (ok) launchShortcut(); else toast('Couldn’t get the Drive sign-in ready — check the connection and try again.', 'error'); });
+    };
     if (shortcutBtn) shortcutBtn.onclick = () => {
-      const dlg = tripsyFlyoverShortcutDialog({ since: shortcutSinceOverride || tripsyFlyoverShortcutSince(record, firstDay), folderName, onRun: since => launchShortcut(since) });
-      if (inboxFolderKnown) { dlg.setReady(true); return; }
-      tripsyFlyoverInboxFolder(trip, record).then(id => { inboxFolderKnown = id; if (!closed) dlg.setReady(true); }, e => { console.error(e); dlg.setReady(false); });
+      const dlg = tripsyFlyoverShortcutDialog({ since: shortcutSinceOverride || tripsyFlyoverShortcutSince(record, firstDay), folderName, inputFor: s => tripsyFlyoverShortcutInput(s, inboxFolderKnown, shortcutToken), onRun: since => launchShortcut(since) });
+      shortcutPrepare().then(ok => { if (!closed) dlg.setReady(ok); }, e => { console.error(e); dlg.setReady(false); });
     };
     // Adding photos: a FEW go through the iOS picker; MANY, or any video, go through Drive
     // ("when the user selects add photos, automatically route that to drive if the number of
@@ -21140,11 +21155,14 @@ const TRIPSY_FLYOVER_INBOX_SETTLE_MS = 120000;
 // taken since the date of the last photo uploaded?" / "Could you also build the shortcut, but
 // put a reminder on the screen to keep it open until a completion message, and if it does not
 // complete, can a dialog appear with instructions on how to complete," 2026-10-27). A web page
-// cannot read the Photos library, so the Shortcuts app does the finding and saving: the page
-// hands it ONE text input, "<since>|<folder name>" (tripsyFlyoverShortcutInput), through the
-// shortcuts:// URL (tripsyFlyoverShortcutUrl), and the owner builds the Shortcut once from the
-// recipe the dialog shows (tripsyFlyoverShortcutRecipeHtml). `since` is the capture second of
-// the newest photo on the record (tripsyFlyoverLastCaptureTime), else the trip's first day.
+// cannot read the Photos library, so the Shortcuts app does the finding and uploading: the page
+// hands it ONE text input, "<since>|<folder id>|<access token>" (tripsyFlyoverShortcutInput),
+// through the shortcuts:// URL (tripsyFlyoverShortcutUrl), and the owner builds the Shortcut
+// once from the recipe the dialog shows (tripsyFlyoverShortcutRecipeHtml): for each photo found,
+// a media upload to Drive and a PATCH that names it and moves it into the folder. `since` is the
+// capture second of the newest photo on the record (tripsyFlyoverLastCaptureTime), else the
+// trip's first day. (The earlier Save File / share-sheet recipes are gone: Save File's picker
+// greys out Drive, and the share sheet needs the Drive app kept in front, 2026-10-28.)
 // The launch is a Drive hand-off like any other (inboxPendingAt + the watcher), stamped
 // `shortcutLaunchedAt`; tripsyFlyoverShortcutLooksIncomplete judges, on the first tick
 // TRIPSY_FLYOVER_SHORTCUT_GRACE_MS or more after the launch, that nothing new has reached the
@@ -21161,7 +21179,32 @@ function tripsyFlyoverShortcutSince(record, firstDayKey) {
   if (last) return last.replace('T', ' ');
   return firstDayKey ? `${firstDayKey} 00:00:00` : '';
 }
-function tripsyFlyoverShortcutInput(since, folderName) { return `${since || ''}|${String(folderName || '').replace(/\|/g, ' ')}`; }
+// The Shortcut uploads STRAIGHT to Drive, so the input carries what its two web calls need:
+// "<since>|<folder id>|<access token>" ("This process is just not working … we need another
+// solution," 2026-10-28 -- Save File's folder picker greys out every third-party provider, the
+// Drive app drops its upload queue the moment it leaves the front, and the share sheet needs
+// taps in two apps; a POST per photo from the Shortcut itself needs none of them). The token
+// is the app's own ~1h Drive access token (tripsyFlyoverShortcutToken, renewed through the auth
+// Worker when it can be), so no credential is stored in the Shortcut; it only ever travels
+// device-to-device through the shortcuts:// link. Pure.
+function tripsyFlyoverShortcutInput(since, folderId, token) {
+  const clean = v => String(v || '').replace(/\|/g, '');
+  return `${since || ''}|${clean(folderId)}|${clean(token)}`;
+}
+// A Drive access token good for the next hour, for the Shortcut's uploads: the auth Worker's
+// (a fresh ~1h grant from the stored refresh token, also adopted by the page), else the token
+// the page is already using. '' only when the page has none at all.
+async function tripsyFlyoverShortcutToken() {
+  try {
+    const viaWorker = await authWorkerGetAccessToken();
+    if (viaWorker && viaWorker.accessToken) {
+      driveAccessToken = viaWorker.accessToken;
+      try { if (localStorage.getItem(TOKEN_CACHE_KEY) !== null) saveCachedToken(viaWorker.accessToken, viaWorker.expiresIn); } catch (_) {}
+      return viaWorker.accessToken;
+    }
+  } catch (e) { console.log('Shortcut token: Worker renewal failed, using the current token', (e && e.message) || e); }
+  return driveAccessToken || '';
+}
 function tripsyFlyoverShortcutUrl(input, name = TRIPSY_FLYOVER_SHORTCUT_NAME) {
   return `shortcuts://run-shortcut?name=${encodeURIComponent(name)}&input=text&text=${encodeURIComponent(input)}`;
 }
@@ -21176,14 +21219,16 @@ function tripsyFlyoverShortcutRecipeHtml(name = TRIPSY_FLYOVER_SHORTCUT_NAME) {
     ${li(`Open the <strong>Shortcuts</strong> app, tap <strong>＋</strong>, and name the new shortcut exactly <strong>${esc(name)}</strong> (tap its title to rename).`)}
     ${li(`Add <strong>Split Text</strong> — Text: <em>Shortcut Input</em>; Separator: <em>Custom</em>, the character <code>|</code>.`)}
     ${li(`Add <strong>Get Item from List</strong> — <em>First Item</em> from Split Text. Then add <strong>Get Dates from Input</strong> on that item (this is the “since” date).`)}
-    ${li(`Add <strong>Get Item from List</strong> again — <em>Last Item</em> from Split Text (this is the Drive folder’s name).`)}
-    ${li(`Add <strong>Find Photos</strong> — add a filter <em>Date Taken is after</em> the date from step 3; Sort by <em>Date Taken</em>; turn <em>Limit</em> off. To leave videos out, add a second filter <em>Media Type is Image</em>.`)}
-    ${li(`Add <strong>Count</strong> (Items in Photos), then <strong>Show Alert</strong> with the text: “Found [Count] photos. Keep Shortcuts in front until it says Done. Save them into Google Drive › ${esc(DRIVE_FOLDER_NAME)} › [folder name from step 4].”`)}
-    ${li(`Add <strong>Text</strong> holding just the <strong>Count</strong> variable, then <strong>Set Name</strong> on it: <code>${esc(TRIPSY_FLYOVER_FOUND_MARKER)}</code> (turn <em>Don’t Include File Extension</em> OFF). This tiny file is how the app learns how many photos the shortcut found — 0 shows “No new photos to upload” at once.`)}
-    ${li(`Add <strong>Add to Variable</strong> twice: the <strong>Photos</strong> from step 5 into a new variable named <strong>Upload</strong>, then the <strong>Renamed Item</strong> from step 7 into <strong>Upload</strong>.`)}
-    ${li(`Add <strong>Save File</strong> — File: the <strong>Upload</strong> variable; turn ON <em>Ask Where to Save</em> and ON <em>Overwrite If File Exists</em>. When it runs, pick <strong>Drive › My Drive › ${esc(DRIVE_FOLDER_NAME)} › the folder named in the alert</strong> once (folders are listed before files; pull down to refresh if the folder is missing); the photos and the count file save there together.`)}
-    ${li(`Add a final <strong>Show Alert</strong>: “Done — [Count] photos saved. Go back to Travel Tracker; the fly-over imports them about two minutes after the last one lands.”`)}
-    ${li(`Tap <strong>Done</strong>. The button below runs it with the date and folder filled in; if the button can’t open Shortcuts on this device, run the shortcut by hand and, when it asks for input, paste the text shown below.`)}
+    ${li(`Add <strong>Get Item from List</strong> — <em>Item at Index</em> <code>2</code> from Split Text (this is the Drive folder’s id).`)}
+    ${li(`Add <strong>Get Item from List</strong> — <em>Last Item</em> from Split Text (this is the Drive sign-in token; it changes on every run).`)}
+    ${li(`Add <strong>Find Photos</strong> — add a filter <em>Date Taken is after</em> the date from step 3, and a second filter <em>Media Type is Image</em>; Sort by <em>Date Taken</em>; turn <em>Limit</em> off.`)}
+    ${li(`Add <strong>Count</strong> (Items in Photos), then <strong>Show Alert</strong>: “Found [Count] photos. Keep Shortcuts in front until it says Done.”`)}
+    ${li(`Add <strong>Repeat with Each</strong>, and choose the <strong>Photos</strong> from step 6 as its list. The next three steps go <em>inside</em> the repeat block.`)}
+    ${li(`Inside: <strong>Get Contents of URL</strong> — URL <code>https://www.googleapis.com/upload/drive/v3/files?uploadType=media</code>; tap the arrow to expand: Method <em>POST</em>; under Headers add <code>Authorization</code> with the value <code>Bearer </code> followed by the <strong>Item from List</strong> variable from step 5 (type the word Bearer, a space, then insert the variable); Request Body <em>File</em>, and pick <strong>Repeat Item</strong>. This uploads one photo.`)}
+    ${li(`Inside: <strong>Get Dictionary Value</strong> — Get <em>Value</em> for <code>id</code> in <strong>Contents of URL</strong> (the step just above).`)}
+    ${li(`Inside: <strong>Get Contents of URL</strong> again — URL: type <code>https://www.googleapis.com/drive/v3/files/</code>, insert the <strong>Dictionary Value</strong> variable, type <code>?addParents=</code>, insert the <strong>Item from List</strong> from step 4, then type <code>&amp;removeParents=root</code>. Method <em>PATCH</em>; the same <code>Authorization</code> header as step 9; Request Body <em>JSON</em> with one field: key <code>name</code>, value the <strong>Repeat Item</strong> variable (tap it and choose <em>Name</em>). This moves the photo into the trip’s folder.`)}
+    ${li(`After the repeat block, add a final <strong>Show Alert</strong>: “Done — [Count] photos uploaded. Go back to Travel Tracker; the fly-over imports them by itself.”`)}
+    ${li(`Tap <strong>Done</strong>. The button below runs it with the date, folder and sign-in filled in; if the button can’t open Shortcuts on this device, run the shortcut by hand and, when it asks for input, paste the text shown below. The first time it runs, allow it to share photos when asked (Settings → Apps → Shortcuts → Advanced → <em>Allow Sharing Large Amounts of Data</em> if it refuses).`)}
   </ol>`;
 }
 // The "since" moment between the dialog's datetime field and the shortcut's text: the field
@@ -21200,24 +21245,26 @@ function tripsyFlyoverShortcutSinceFromField(value) {
 // imported photo carrying a capture time yet, the default was the trip's first day, which would
 // have re-uploaded every photo already on the fly-over); the Run button passes the field's value
 // to `onRun(since)`, and the input text follows the field.
-function tripsyFlyoverShortcutDialog({ since, folderName, onRun, onClose = null }) {
+// `inputFor(since)` builds the launch text (the page holds the folder id and the token; both
+// are only known once `setReady(true)`, which also refreshes the shown text).
+function tripsyFlyoverShortcutDialog({ since, folderName, inputFor, onRun, onClose = null }) {
   let ov = document.getElementById('tripsy-flyover-shortcut-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-shortcut-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
   ov.style.zIndex = '2147483070';
   const sinceNow = () => { const f = ov.querySelector('[data-sc-since]'); return (f && tripsyFlyoverShortcutSinceFromField(f.value)) || since || ''; };
-  const inputTextNow = () => tripsyFlyoverShortcutInput(sinceNow(), folderName);
+  const inputTextNow = () => (inputFor ? inputFor(sinceNow()) : '');
   ov.innerHTML = `
     <div class="tw-modal-paper" style="max-width:620px; max-height:88vh; max-height:88dvh; overflow:auto;">
       <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
         <h2 style="margin:0; font-size:17px; flex:1;">📲 Upload new photos</h2>
         <button class="tripsy-close-x" data-sc-close aria-label="Close">✕</button>
       </div>
-      <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:10px;">The <strong>${esc(TRIPSY_FLYOVER_SHORTCUT_NAME)}</strong> shortcut finds every photo taken after the moment below and saves it into the Drive folder <strong>${esc(folderName)}</strong>. This page then imports them by itself.</div>
+      <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:10px;">The <strong>${esc(TRIPSY_FLYOVER_SHORTCUT_NAME)}</strong> shortcut finds every photo taken after the moment below and uploads each one straight into the Drive folder <strong>${esc(folderName)}</strong> — no share sheet, no Drive app. This page then imports them by itself.</div>
       <label style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:13px; margin-bottom:10px;">Photos taken after <input type="datetime-local" data-sc-since value="${esc(tripsyFlyoverShortcutSinceToField(since))}" style="font-size:13px; padding:4px 6px; border-radius:6px; border:1px solid var(--line); background:var(--panel-2); color:inherit;"> <span style="font-size:12px; color:var(--muted);">(the newest photo already here, or the trip’s first day — change it to skip photos you have already added)</span></label>
-      <div style="font-size:13px; line-height:1.5; margin-bottom:12px; padding:10px 12px; border:1px solid #E0A020; border-radius:8px; color:#E0A020;"><strong>Keep the Shortcuts app in front until it shows “Done — N photos saved.”</strong> Switching away or locking the iPad before that stops the saving part-way; the photos already saved are kept, and running it again picks up the rest.</div>
+      <div style="font-size:13px; line-height:1.5; margin-bottom:12px; padding:10px 12px; border:1px solid #E0A020; border-radius:8px; color:#E0A020;"><strong>Keep the Shortcuts app in front until it shows “Done — N photos uploaded.”</strong> Switching away or locking the iPad before that pauses the upload; the photos already uploaded are kept, and running it again picks up the rest.</div>
       <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
         <button class="btn primary" data-sc-run disabled>▶ Run the shortcut</button>
-        <span data-sc-ready style="font-size:12px; color:var(--muted);">Getting the Drive folder ready…</span>
+        <span data-sc-ready style="font-size:12px; color:var(--muted);">Getting the Drive folder and sign-in ready…</span>
       </div>
       <details style="font-size:13px; margin-bottom:10px;"><summary style="cursor:pointer;">Set up the shortcut (once)</summary><div style="margin-top:8px;">${tripsyFlyoverShortcutRecipeHtml()}</div></details>
       <div style="font-size:12px; color:var(--muted);">Input text, if the shortcut asks for it: <code data-sc-input style="user-select:all; -webkit-user-select:all; word-break:break-all;">${esc(inputTextNow())}</code> <button class="btn" data-sc-copy style="font-size:11px; margin-left:4px;">Copy</button></div>
@@ -21231,10 +21278,11 @@ function tripsyFlyoverShortcutDialog({ since, folderName, onRun, onClose = null 
   ov.onclick = e => { if (e.target === ov) close(); };
   return {
     setReady: ok => {
-      const btn = ov.querySelector('[data-sc-run]'), note = ov.querySelector('[data-sc-ready]');
+      const btn = ov.querySelector('[data-sc-run]'), note = ov.querySelector('[data-sc-ready]'), c = ov.querySelector('[data-sc-input]');
       if (!btn) return;
       btn.disabled = !ok;
-      if (note) note.textContent = ok ? `Folder ready: ${folderName}` : 'Couldn’t reach Drive — check the connection and try again.';
+      if (note) note.textContent = ok ? `Ready — folder: ${folderName}` : 'Couldn’t reach Drive — check the connection and try again.';
+      if (c) c.textContent = inputTextNow();
     },
   };
 }
@@ -21275,10 +21323,10 @@ function tripsyFlyoverShortcutIncompleteDialog({ folderName, lastTaken = '', fou
       <div style="font-size:13px; line-height:1.5; margin-bottom:10px;">${lastLine}</div>
       <details style="font-size:13px; margin-bottom:12px;"><summary style="cursor:pointer; color:var(--muted);">The shortcut didn’t finish? What to do</summary>
         <ol style="margin:8px 0 8px 18px; padding:0; line-height:1.5;">
-          <li>Open the <strong>Shortcuts</strong> app and run <strong>${esc(TRIPSY_FLYOVER_SHORTCUT_NAME)}</strong> (or tap <em>Run it again</em>).</li>
-          <li>If it asks where to save, choose <strong>Drive › My Drive › ${esc(DRIVE_FOLDER_NAME)} › ${esc(folderName)}</strong> (folders are listed before files).</li>
-          <li><strong>Stay in Shortcuts</strong> until it shows “Done — N photos saved.” Don’t switch apps or lock the iPad before that.</li>
-          <li>If it shows an error instead, note the message; a very large find (hundreds of photos) can be split by running it after a later date, which the input text sets.</li>
+          <li>Tap <em>Run it again</em> below (the shortcut needs a fresh sign-in token from this page each time, so run it from here rather than from the Shortcuts app).</li>
+          <li>If it asks to allow sharing photos, allow it; if it refuses, turn on Settings → Apps → Shortcuts → Advanced → <em>Allow Sharing Large Amounts of Data</em>.</li>
+          <li><strong>Stay in Shortcuts</strong> until it shows “Done — N photos uploaded.” Don’t switch apps or lock the iPad before that.</li>
+          <li>If it shows an error instead, note the message; a very large find (hundreds of photos) can be split by running it after a later date, which the input text sets. The uploads go into <strong>${esc(DRIVE_FOLDER_NAME)} › ${esc(folderName)}</strong>.</li>
           <li>Come back here. The page imports the photos about two minutes after the last one lands.</li>
         </ol>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
