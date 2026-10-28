@@ -2036,7 +2036,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     // complete, can a dialog appear with instructions on how to complete," 2026-10-27) ----
     {
       var esc = typeof esc === 'function' ? esc : (v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]));
-      eval([constLine('TRIPSY_FLYOVER_SHORTCUT_NAME'), constLine('TRIPSY_FLYOVER_SHORTCUT_GRACE_MS'), constLine('DRIVE_FOLDER_NAME')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverLastCaptureTime', 'tripsyFlyoverShortcutSince', 'tripsyFlyoverShortcutInput', 'tripsyFlyoverShortcutUrl', 'tripsyFlyoverShortcutLooksIncomplete', 'tripsyFlyoverShortcutRecipeHtml'].map(extractFn)).join('\n'));
+      eval([constLine('TRIPSY_FLYOVER_SHORTCUT_NAME'), constLine('TRIPSY_FLYOVER_SHORTCUT_GRACE_MS'), constLine('DRIVE_FOLDER_NAME'), constLine('TRIPSY_FLYOVER_FOUND_MARKER')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverLastCaptureTime', 'tripsyFlyoverShortcutSince', 'tripsyFlyoverShortcutInput', 'tripsyFlyoverShortcutUrl', 'tripsyFlyoverShortcutLooksIncomplete', 'tripsyFlyoverShortcutRecipeHtml'].map(extractFn)).join('\n'));
       const recS = { stops: [{ photos: [{ driveFileId: 'a', taken: '2026-10-21T09:00:00' }, { driveFileId: 'b', taken: '2026-10-23T18:30:15' }, { driveFileId: 'c' }] }, { photos: [{ driveFileId: 'd', taken: '2026-10-22T08:00:00' }] }] };
       assert(tripsyFlyoverLastCaptureTime(recS) === '2026-10-23T18:30:15' && tripsyFlyoverLastCaptureTime({ stops: [] }) === '', 'the newest capture second on the record, across every destination');
       assert(tripsyFlyoverShortcutSince(recS, '2026-10-06') === '2026-10-23 18:30:15' && tripsyFlyoverShortcutSince({ stops: [] }, '2026-10-06') === '2026-10-06 00:00:00', 'THE ASK: "since" is the last imported photo\'s capture time, else the trip\'s first day');
@@ -2047,7 +2047,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       assert(tripsyFlyoverShortcutLooksIncomplete(L, L + 90000, 3, L - 5000) && !tripsyFlyoverShortcutLooksIncomplete(L, L + 90000, 3, L + 5000) && !tripsyFlyoverShortcutLooksIncomplete(NaN, L + 90000, 0, NaN),
         'files older than the launch do not count as arrivals; a file that landed after it does; no launch, no nudge');
       const recipe = tripsyFlyoverShortcutRecipeHtml();
-      assert((recipe.match(/<li/g) || []).length === 9 && /Split Text/.test(recipe) && /Find Photos/.test(recipe) && /Date Taken is after/.test(recipe) && /Save File/.test(recipe) && /Ask Where to Save/.test(recipe) && /Overwrite If File Exists/.test(recipe) && /Done — \[Count\] photos saved/.test(recipe),
+      assert((recipe.match(/<li/g) || []).length === 11 && /Split Text/.test(recipe) && /Set Name/.test(recipe) && /Add to Variable/.test(recipe) && recipe.includes('travel-tracker-found.txt') && /Find Photos/.test(recipe) && /Date Taken is after/.test(recipe) && /Save File/.test(recipe) && /Ask Where to Save/.test(recipe) && /Overwrite If File Exists/.test(recipe) && /Done — \[Count\] photos saved/.test(recipe),
         'the recipe builds the shortcut: split the input, find photos after the date, save to the folder, end with a Done alert');
       // "I didn't see the Singapore GP folder in the save list" (2026-10-27): the inbox folder sits
       // inside the app's REAL Drive folder (DRIVE_FOLDER_NAME), which the recipe and the nudge dialog
@@ -2068,6 +2068,38 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         'the recipe names the real Drive folder the inbox sits in, by the constant, never a hand-typed name');
       assert(!/Travel Tracker ›/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')) && /My Drive › \$\{esc\(DRIVE_FOLDER_NAME\)\} › \$\{esc\(folderName\)\}/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')),
         'so does the not-finished dialog');
+      // "If there are no photos, we should just have a message that says 'No new photos to upload.'
+      // And then say the date and time of the last photo uploaded … and then have a close button"
+      // (2026-10-28): the page cannot see the Shortcut's count, so a run that saved nothing reads
+      // as that plain news; the didn't-finish steps sit behind a <details>.
+      eval(extractFn('tripsyFlyoverCaptureTimeLabel'));
+      assert(tripsyFlyoverCaptureTimeLabel('2026-10-26T22:48:15') === 'Mon, Oct 26 at 10:48 PM' && tripsyFlyoverCaptureTimeLabel('2026-10-26 09:05:00') === 'Mon, Oct 26 at 9:05 AM' && tripsyFlyoverCaptureTimeLabel('') === '' && tripsyFlyoverCaptureTimeLabel('junk') === '',
+        'a capture second reads as a day and clock time; nothing for none');
+      const nudgeSrc = extractFn('tripsyFlyoverShortcutIncompleteDialog');
+      assert(/No new photos to upload<\/h2>/.test(nudgeSrc) && /'The last photo uploaded was taken'\} <strong>\$\{esc\(lastLabel\)\}<\/strong>/.test(nudgeSrc) && /carries a capture time, so the last upload’s date isn’t known/.test(nudgeSrc)
+        && /<details[^>]*><summary[^>]*>The shortcut didn’t finish\? What to do<\/summary>/.test(nudgeSrc) && /data-sn-close>Close</.test(nudgeSrc) && !/data-sn-cancel/.test(nudgeSrc)
+        && /\[data-sn-close\]'\)\.onclick = \(\) => \{ close\(\); onClose\(\); \};/.test(nudgeSrc),
+        'THE ASK: "No new photos to upload", the last photo\'s capture time (or that none is known), the steps folded away, and Close ends the hand-off');
+      assert(/lastTaken: tripsyFlyoverLastCaptureTime\(record\),\s*onRunAgain:[^\n]*\n\s*onKeepWaiting: \(\) => \{\},\s*onClose: cancelHandOff,/.test(extractFn('showTripsyFlyover')),
+        'the page passes the newest capture time and wires Close to the shared cancel');
+      // "Is it possible to check photos to see if there are photos taken after the last date?"
+      // (2026-10-28): the Shortcut saves travel-tracker-found.txt (its Count) beside the photos;
+      // the watcher reads it, trashes it, and acts: 0 -> "No new photos" at once, N -> expected.
+      eval([constLine('TRIPSY_FLYOVER_FOUND_MARKER')].map(x => x.replace(/^const /, 'var ')).concat(['tripsyFlyoverFoundMarker', 'tripsyFlyoverParseFoundCount'].map(extractFn)).join('\n'));
+      assert(TRIPSY_FLYOVER_FOUND_MARKER === 'travel-tracker-found.txt', 'the marker file has a fixed name the recipe tells the owner to type');
+      const mk = tripsyFlyoverFoundMarker([{ id: 'p1', name: 'IMG_1.jpg' }, { id: 'm1', name: 'Travel-Tracker-Found.txt', modifiedTime: '2026-10-28T08:00:00Z' }, { id: 'm2', name: 'travel-tracker-found.txt', modifiedTime: '2026-10-28T09:00:00Z' }]);
+      assert(mk && mk.id === 'm2' && tripsyFlyoverFoundMarker([{ id: 'p1', name: 'IMG_1.jpg' }]) === null && tripsyFlyoverFoundMarker(null) === null, 'the newest file of that name (case-insensitive) is the report; none without it');
+      assert(tripsyFlyoverParseFoundCount('0') === 0 && tripsyFlyoverParseFoundCount(' 12\n') === 12 && tripsyFlyoverParseFoundCount('Found 3 photos') === 3 && tripsyFlyoverParseFoundCount('') === null && tripsyFlyoverParseFoundCount('-1') === null, 'the count is the first whole number in the file; nothing or a negative is no report');
+      const tick = extractFn('showTripsyFlyover');
+      assert(/const marker = tripsyFlyoverFoundMarker\(files\);\s*if \(marker && inboxWatch\.markerId !== marker\.id\) \{/.test(tick) && /tripsyFlyoverTrashDriveFile\(marker\.id\)\.catch/.test(tick) && /if \(found !== null\) inboxWatch\.expected = found;/.test(tick)
+        && /if \(found === 0\) \{[\s\S]*?cancelHandOff\(\);[\s\S]*?found: 0,[\s\S]*?return;\s*\}/.test(tick)
+        && /if \(inboxWatch\.expected > 0 && fresh >= inboxWatch\.expected && inboxWatch\.phase !== 'complete' && !r\.announce\) r = \{ \.\.\.r, announce: true \};/.test(tick)
+        && /else if \(!\(inboxWatch\.expected > 0\) && record\.shortcutLaunchedAt/.test(tick) && /expected: 0, markerId: ''/.test(tick),
+        'THE ASK: the watcher reads the report once and trashes it; 0 ends the hand-off and says No new photos at once; N completes the moment N have arrived and silences the didn\'t-finish guess');
+      eval(extractFn('tripsyFlyoverDriveStatusHtml'));
+      assert(/3 of 12 arrived/.test(tripsyFlyoverDriveStatusHtml('uploading', 3, '', true, 12)) && /All 12 photos the shortcut found have reached/.test(tripsyFlyoverDriveStatusHtml('complete', 12, '', true, 12)) && /Nothing new has reached the Drive folder for 2 minutes/.test(tripsyFlyoverDriveStatusHtml('complete', 5, '', true, 12)) && !/arrived/.test(tripsyFlyoverDriveStatusHtml('uploading', 3, '', true)),
+        'with a reported count the slot counts arrivals against it; without one it reads as before');
+      assert(/found === 0;/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')) && /The shortcut found no photos taken after the last one uploaded/.test(extractFn('tripsyFlyoverShortcutIncompleteDialog')), 'a reported 0 is said outright in the dialog');
       const dlg = extractFn('tripsyFlyoverShortcutDialog'), nudge = extractFn('tripsyFlyoverShortcutIncompleteDialog');
       assert(/Keep the Shortcuts app in front until it shows “Done — N photos saved\.”/.test(dlg) && /data-sc-run disabled/.test(dlg) && /setReady: ok =>/.test(dlg) && /data-sc-copy/.test(dlg), 'THE ASK: the reminder to keep Shortcuts open is on the launch dialog; Run waits for the folder; the input text can be copied');
       // The "since" moment is editable (the first run found 431 photos from the trip's first day).
@@ -2078,14 +2110,14 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         'the dialog has a Photos-taken-after field; Run passes its value and the input text follows it');
       assert(/launchShortcut = \(sinceOverride\) => \{[\s\S]*if \(sinceOverride\) shortcutSinceOverride = sinceOverride;/.test(extractFn('showTripsyFlyover')) && /shortcutSinceOverride \|\| tripsyFlyoverShortcutSince\(record, firstDay\)/.test(extractFn('showTripsyFlyover')),
         'a typed since is used for the launch and kept for Run it again');
-      assert(/doesn’t seem to have finished/.test(nudge) && (nudge.match(/<li>/g) || []).length === 5 && /data-sn-run/.test(nudge) && /data-sn-wait/.test(nudge) && /data-sn-cancel/.test(nudge), 'THE ASK: the incomplete dialog gives the steps to complete, with Run it again / Keep waiting / Cancel');
+      assert(/No new photos to upload/.test(nudge) && (nudge.match(/<li>/g) || []).length === 5 && /data-sn-run/.test(nudge) && /data-sn-wait/.test(nudge) && /data-sn-close/.test(nudge), 'the nothing-arrived dialog keeps the five steps to complete (folded), Run it again / Keep waiting, and Close');
       const setup3 = extractFn('showTripsyFlyover');
       assert(/data-flyover-shortcut/.test(setup3) && /launchShortcut = \(sinceOverride\) => \{\s*if \(closed \|\| !inboxFolderKnown\) return;[\s\S]*?try \{ window\.location\.href = tripsyFlyoverShortcutUrl\(shortcutInputText\(\)\); \}/.test(setup3) && /record = \{ \.\.\.record, inboxFolderId: inboxFolderKnown, inboxDest: 'auto', inboxPendingAt: now, shortcutLaunchedAt: now \};\s*save\(\); render\(\);/.test(setup3),
         'Run opens the link inside the tap and starts the ordinary Drive hand-off, stamped for the watchdog');
       // "I am getting this - which i seem to be getting a lot" (2026-10-27): the once-per-launch
       // memory was a page-local flag, so every reopen of the page asked again about the same
       // launch. It is stamped on the record now (shortcutNudgedFor = the launch it was shown for).
-      assert(/else if \(record\.shortcutLaunchedAt && record\.shortcutNudgedFor !== record\.shortcutLaunchedAt && tripsyFlyoverShortcutLooksIncomplete\(Date\.parse\(record\.shortcutLaunchedAt\), Date\.now\(\), fresh, newestMs\)\) \{\s*record = \{ \.\.\.record, shortcutNudgedFor: record\.shortcutLaunchedAt \};\s*save\(\);\s*tripsyFlyoverShortcutIncompleteDialog\(/.test(setup3) && !/shortcutNudged\b/.test(setup3) && /if \(record\.shortcutLaunchedAt\) record = \{ \.\.\.record, shortcutLaunchedAt: '' \};/.test(setup3),
+      assert(/else if \(!\(inboxWatch\.expected > 0\) && record\.shortcutLaunchedAt && record\.shortcutNudgedFor !== record\.shortcutLaunchedAt && tripsyFlyoverShortcutLooksIncomplete\(Date\.parse\(record\.shortcutLaunchedAt\), Date\.now\(\), fresh, newestMs\)\) \{\s*record = \{ \.\.\.record, shortcutNudgedFor: record\.shortcutLaunchedAt \};\s*save\(\);\s*tripsyFlyoverShortcutIncompleteDialog\(/.test(setup3) && !/shortcutNudged\b/.test(setup3) && /if \(record\.shortcutLaunchedAt\) record = \{ \.\.\.record, shortcutLaunchedAt: '' \};/.test(setup3),
         'the watcher nudges once per launch, remembered on the record so a reopened page never re-asks; an import clears the launch');
       eval(extractFn('tripsyFlyoverDriveStatusHtml'));
       const st = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x', true);
@@ -2290,7 +2322,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     o = tripsyFlyoverInboxWatchStep(o.state, 55, 1046000, 30000, 1015000 - 2000);
     assert(o.announce, 'a still-arriving batch announces once it settles, as before');
     assert(!tripsyFlyoverInboxWatchStep(null, 0, 1000000, 30000, hoursAgo).announce && !tripsyFlyoverInboxWatchStep(null, 3, 1000000, 30000, NaN).announce, 'an empty folder, or files with no arrival time, never skip the wait');
-    assert(/const times = freshFiles\.map\(f => Date\.parse\(f\.createdTime \|\| ''\)\)\.filter\(isFinite\);\s*const newestMs = times\.length \? Math\.max\(\.\.\.times\) : NaN;\s*const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);/.test(setup),
+    assert(/const times = freshFiles\.map\(f => Date\.parse\(f\.createdTime \|\| ''\)\)\.filter\(isFinite\);\s*if \(marker\) times\.push\([^\n]*\n\s*const newestMs = times\.filter\(isFinite\)\.length \? Math\.max\(\.\.\.times\.filter\(isFinite\)\) : NaN;\s*let r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);/.test(setup),
       'the watcher passes the newest new file\'s arrival time');
     assert(tripsyFlyoverDrivePhase('uploading', { announce: false, changed: true }, 3) === 'uploading' && tripsyFlyoverDrivePhase('uploading', { announce: true, changed: false }, 3) === 'complete'
       && tripsyFlyoverDrivePhase('complete', { announce: false, changed: false }, 3) === 'complete' && tripsyFlyoverDrivePhase('later', { announce: false, changed: false }, 3) === 'later'
@@ -2302,7 +2334,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     const wait = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://drive.google.com/drive/folders/x');
     assert(!/tripsy-menu-flash/.test(wait) && /Waiting for photos in the Drive folder/.test(wait) && /data-drive-open-folder/.test(wait) && /data-drive-cancel/.test(wait), 'THE ASK: the waiting message does not flash, and offers Open folder and Cancel');
     assert(/inboxWatch = \{ timer: null, state: null, phase: 'waiting'/.test(setup) && /inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);/.test(setup)
-      && /if \(cancel\) cancel\.onclick = cancelHandOff;/.test(setup) && /onCancel: cancelHandOff,/.test(setup)
+      && /if \(cancel\) cancel\.onclick = cancelHandOff;/.test(setup) && /onClose: cancelHandOff,/.test(setup)
       && /const cancelHandOff = \(\) => \{\s*const cleared = \{ inboxDest: '', inboxPendingAt: '', shortcutLaunchedAt: '' \};\s*if \(closed\) \{\s*const live = Store\.getTripsyFlyover\(trip\.key\);\s*if \(live && live\.inboxPendingAt\) Store\.saveTripsyFlyover\(\{ \.\.\.live, \.\.\.cleared \}\);\s*return;\s*\}\s*record = \{ \.\.\.record, \.\.\.cleared \}; save\(\); stopInboxWatch\(\); render\(\);/.test(setup),
       'the watcher starts waiting, passes the count to the phase, and ONE Cancel (status slot and dialog alike) ends the hand-off -- on the Store\'s copy if the page was already closed under the dialog');
     // "if the upload is still happening, the app shouldn't say the upload is complete" and
@@ -2318,7 +2350,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);\s*paintDriveStatus\(\);\s*if \(inboxWatch\.phase === 'complete' && runFinishUpload && !driveImportRunning && freshFiles\.some\(f => !autoImportTried\.has\(f\.id\)\)\) runFinishUpload\(\);/.test(setup) && /for \(const f of files\) autoImportTried\.add\(f\.id\);/.test(setup),
       'THE ASK: a settled folder is imported automatically, and files an auto-run already tried are not tried again until a new one arrives');
     assert(!/tripsyFlyoverFinishUploadLabel|announceInboxReady|tripsyConfirmDialog\(`Drive upload looks complete/.test(html), 'the live-count label and the completion dialog are gone');
-    assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const freshFiles = tripsyFlyoverDriveNewFiles\(files, record\);\s*const fresh = freshFiles\.length;[\s\S]*?const r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);[\s\S]*inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);\s*paintDriveStatus\(\);/.test(setup),
+    assert(/const files = await tripsyFlyoverListInbox\(record\.inboxFolderId\);[\s\S]*const freshFiles = tripsyFlyoverDriveNewFiles\(files, record\);\s*const fresh = freshFiles\.length;[\s\S]*?let r = tripsyFlyoverInboxWatchStep\(inboxWatch\.state, fresh, Date\.now\(\), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs\);[\s\S]*inboxWatch\.phase = tripsyFlyoverDrivePhase\(inboxWatch\.phase, r, fresh\);\s*paintDriveStatus\(\);/.test(setup),
       'each tick lists the inbox, counts what is new, moves the phase and repaints the message slot');
     assert(/<span data-flyover-drive-status[^>]*>\$\{driveStatusHtml\(\)\}<\/span>/.test(setup) && /if \(go\) go\.onclick = \(\) => \{ if \(!closed && runFinishUpload && !driveImportRunning\) runFinishUpload\(\); \};/.test(setup) && !/data-drive-later/.test(setup),
       'the slot renders in the header; Import now runs the import; there is no Later');

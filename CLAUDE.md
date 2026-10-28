@@ -5149,7 +5149,36 @@ WebView's support for recording is unproven.
     reopen of the page re-asked about the same launch ("I am getting this - which i seem to be
     getting a lot," 2026-10-27, after a run that had correctly found 0 photos). Keep waiting
     therefore means "never ask again about THIS launch"; Run it again stamps a new launch and
-    re-arms it. **And the fly-over save survives a revision conflict** ("I am still getting the
+    re-arms it. **That dialog reads as NEWS, not a warning** ("If there are no photos, we
+    should just have a message that says 'No new photos to upload.' And then say the date and
+    time of the last photo uploaded, if we can read the meta data. And then have a close
+    button," 2026-10-28 — a second launch the evening before had correctly found 0 and still
+    earned "doesn't seem to have finished"): the page cannot see the Shortcut's count, but a
+    run that saved nothing is almost always one that found nothing, so
+    `tripsyFlyoverShortcutIncompleteDialog` is headed "No new photos to upload", names the
+    newest capture already here (`tripsyFlyoverLastCaptureTime` → `tripsyFlyoverCaptureTimeLabel`,
+    "Mon, Oct 26 at 10:48 PM"; or says no imported photo carries a capture time), and its
+    primary button is **Close**, which ends the hand-off through `cancelHandOff`. The five
+    didn't-finish steps, Run it again and Keep waiting sit behind a `<details>`.
+    **And the Shortcut now REPORTS its count** ("Is it possible to check photos to see if
+    there are photos taken after the last date?", 2026-10-28 — a page cannot read the Photos
+    library; the Shortcut can, and already does in Find Photos): recipe steps 7–8 put the
+    Count into a text file named `TRIPSY_FLYOVER_FOUND_MARKER` (`travel-tracker-found.txt`,
+    Text → Set Name) and add it to the photos (Add to Variable → `Upload`) so the ONE Save
+    File step saves it into the watched folder beside them — the report reaches whichever
+    device has the page open, with no second app instance (an Open URLs report would have
+    landed in Safari's copy of the app, not the Claude app's). `inboxWatchTick` finds it with
+    `tripsyFlyoverFoundMarker(files)` (pure; newest of that name, case-insensitive), reads it
+    once (`inboxWatch.markerId`), parses it with `tripsyFlyoverParseFoundCount` (first whole
+    number), trashes it, and acts: **0** → `cancelHandOff()` and the dialog with `found: 0`
+    ("The shortcut found no photos taken after the last one uploaded …") at once, no 90 s
+    grace; **N** → `inboxWatch.expected`, the slot reads "Uploading Photos to Drive… 3 of 12
+    arrived" (`tripsyFlyoverDriveStatusHtml`'s fifth arg) and the phase turns `complete` the
+    moment N have arrived ("All 12 photos the shortcut found have reached the Drive folder")
+    instead of after two quiet minutes; the didn't-finish guess is silenced while a count is
+    known, and the marker's `modifiedTime` counts as an arrival for it. `tripsyFlyoverListInbox`
+    asks for `modifiedTime`. A Shortcut without the two steps behaves exactly as before.
+    **And the fly-over save survives a revision conflict** ("I am still getting the
     same shortcut message after i canceled it," same day — Cancel cleared the launch in
     memory, `persistTripsyFlyovers` had no retry, and the conflict reload brought the remote
     copy, launch still pending, straight back): `Store.stageTripsyFlyover` also remembers the

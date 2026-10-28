@@ -19427,7 +19427,7 @@ async function showTripsyFlyover(tripKey) {
   // While an import runs the slot says so, with no button ("Nothing happens when I hit the
   // import now button," 2026-10-26 -- it was ignoring the tap because an import was already
   // running, which only the status line said).
-  const driveStatusHtml = () => driveImportRunning ? tripsyFlyoverDriveStatusHtml('importing', 0) : tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'waiting', inboxWatch ? inboxWatch.count : 0, record && record.inboxFolderId ? tripsyFlyoverDriveFolderUrl(record.inboxFolderId) : '', !!(record && record.shortcutLaunchedAt));
+  const driveStatusHtml = () => driveImportRunning ? tripsyFlyoverDriveStatusHtml('importing', 0) : tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'waiting', inboxWatch ? inboxWatch.count : 0, record && record.inboxFolderId ? tripsyFlyoverDriveFolderUrl(record.inboxFolderId) : '', !!(record && record.shortcutLaunchedAt), inboxWatch ? inboxWatch.expected : 0);
   // The Shortcut launch's own watchdog (tripsyFlyoverShortcutLooksIncomplete): one nudge per
   // launch, remembered ON THE RECORD (`shortcutNudgedFor` = the launch it was shown for). It was
   // a page-local flag, so every reopen of this page asked again about the same launch ("I am
@@ -19469,24 +19469,52 @@ async function showTripsyFlyover(tripKey) {
       try {
         const files = await tripsyFlyoverListInbox(record.inboxFolderId);
         if (!inboxWatch || closed) return;
+        // The Shortcut's report (travel-tracker-found.txt): read once, trashed, and acted on --
+        // 0 is "No new photos" right now, N is how many arrivals to expect.
+        const marker = tripsyFlyoverFoundMarker(files);
+        if (marker && inboxWatch.markerId !== marker.id) {
+          inboxWatch.markerId = marker.id;
+          let found = null;
+          try { found = tripsyFlyoverParseFoundCount(await (await downloadDriveFileBlob(marker.id)).text()); } catch (e) { console.warn('found-marker read failed:', e); }
+          tripsyFlyoverTrashDriveFile(marker.id).catch(() => {});
+          if (!inboxWatch || closed) return;
+          if (found !== null) inboxWatch.expected = found;
+          if (found === 0) {
+            record = { ...record, shortcutNudgedFor: record.shortcutLaunchedAt || record.inboxPendingAt };
+            cancelHandOff(); // ends the hand-off; the dialog below is the news, Close just closes
+            tripsyFlyoverShortcutIncompleteDialog({
+              folderName: TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'),
+              lastTaken: tripsyFlyoverLastCaptureTime(record),
+              found: 0,
+              onRunAgain: () => { if (launchShortcut) launchShortcut(); },
+              onKeepWaiting: () => {},
+              onClose: () => {},
+            });
+            return;
+          }
+        }
         const freshFiles = tripsyFlyoverDriveNewFiles(files, record);
         const fresh = freshFiles.length;
         const times = freshFiles.map(f => Date.parse(f.createdTime || '')).filter(isFinite);
-        const newestMs = times.length ? Math.max(...times) : NaN;
-        const r = tripsyFlyoverInboxWatchStep(inboxWatch.state, fresh, Date.now(), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs);
+        if (marker) times.push(Date.parse(marker.modifiedTime || marker.createdTime || ''));
+        const newestMs = times.filter(isFinite).length ? Math.max(...times.filter(isFinite)) : NaN;
+        let r = tripsyFlyoverInboxWatchStep(inboxWatch.state, fresh, Date.now(), TRIPSY_FLYOVER_INBOX_SETTLE_MS, newestMs);
+        // Every photo the Shortcut said it found is here: complete now, no two-minute wait.
+        if (inboxWatch.expected > 0 && fresh >= inboxWatch.expected && inboxWatch.phase !== 'complete' && !r.announce) r = { ...r, announce: true };
         inboxWatch.state = r.state;
         inboxWatch.count = fresh;
         inboxWatch.phase = tripsyFlyoverDrivePhase(inboxWatch.phase, r, fresh);
         paintDriveStatus();
         if (inboxWatch.phase === 'complete' && runFinishUpload && !driveImportRunning && freshFiles.some(f => !autoImportTried.has(f.id))) runFinishUpload();
-        else if (record.shortcutLaunchedAt && record.shortcutNudgedFor !== record.shortcutLaunchedAt && tripsyFlyoverShortcutLooksIncomplete(Date.parse(record.shortcutLaunchedAt), Date.now(), fresh, newestMs)) {
+        else if (!(inboxWatch.expected > 0) && record.shortcutLaunchedAt && record.shortcutNudgedFor !== record.shortcutLaunchedAt && tripsyFlyoverShortcutLooksIncomplete(Date.parse(record.shortcutLaunchedAt), Date.now(), fresh, newestMs)) {
           record = { ...record, shortcutNudgedFor: record.shortcutLaunchedAt };
           save();
           tripsyFlyoverShortcutIncompleteDialog({
             folderName: TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'),
+            lastTaken: tripsyFlyoverLastCaptureTime(record),
             onRunAgain: () => { if (launchShortcut) launchShortcut(); },
             onKeepWaiting: () => {},
-            onCancel: cancelHandOff,
+            onClose: cancelHandOff,
           });
         }
       } catch (e) {
@@ -19501,7 +19529,7 @@ async function showTripsyFlyover(tripKey) {
   };
   const startInboxWatch = () => {
     if (inboxWatch || closed || !isOwner || !record || !record.inboxPendingAt || !record.inboxFolderId) return;
-    inboxWatch = { timer: null, state: null, phase: 'waiting', count: 0, busy: false };
+    inboxWatch = { timer: null, state: null, phase: 'waiting', count: 0, busy: false, expected: 0, markerId: '' };
     inboxWatchTick();
   };
   // Coming back from the Drive app: check the folder at once rather than on the next tick
@@ -20781,6 +20809,26 @@ async function tripsyFlyoverPhotoTakenInfo(file) {
 // ---- Import from a Drive folder (2026-10-25) ----
 const TRIPSY_FLYOVER_INBOX_PREFIX = 'Fly-over photos — ';
 function tripsyFlyoverDriveSrc(fileId) { return `drive:${fileId}`; }
+// The Shortcut's REPORT ("Is it possible to check photos to see if there are photos taken after
+// the last date?", 2026-10-28 -- a page cannot read the Photos library, so the Shortcut, which
+// can, tells the page what it found): its Save File step saves this one tiny text file holding
+// the count ALONGSIDE the photos, into the folder the page already watches, so the answer reaches
+// whichever device has the page open with no second app instance involved. The watcher reads it,
+// trashes it, and either says "No new photos" at once (0) or knows how many to expect (N).
+const TRIPSY_FLYOVER_FOUND_MARKER = 'travel-tracker-found.txt';
+function tripsyFlyoverFoundMarker(files) {
+  const want = TRIPSY_FLYOVER_FOUND_MARKER.toLowerCase();
+  const hits = (files || []).filter(f => f && f.id && String(f.name || '').trim().toLowerCase() === want);
+  if (!hits.length) return null;
+  const key = f => f.modifiedTime || f.createdTime || '';
+  return hits.sort((a, b) => key(b).localeCompare(key(a)))[0];
+}
+function tripsyFlyoverParseFoundCount(text) {
+  const m = /-?\d+/.exec(String(text == null ? '' : text));
+  if (!m) return null;
+  const n = parseInt(m[0], 10);
+  return isFinite(n) && n >= 0 ? n : null;
+}
 // What Drive's own listing says about when / where a photo was taken: imageMediaMetadata.time
 // is the EXIF capture time ("2026:10:09 18:30:15"), its location the GPS fix; a video or a
 // photo without either falls back to the file's createdTime (the upload time -- the same
@@ -20925,7 +20973,7 @@ async function tripsyFlyoverListInbox(folderId) {
   let pageToken = '';
   do {
     const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
-    const fields = encodeURIComponent('nextPageToken,files(id,name,mimeType,size,md5Checksum,createdTime,imageMediaMetadata(time,location,width,height),videoMediaMetadata(durationMillis,width,height))');
+    const fields = encodeURIComponent('nextPageToken,files(id,name,mimeType,size,md5Checksum,createdTime,modifiedTime,imageMediaMetadata(time,location,width,height),videoMediaMetadata(durationMillis,width,height))');
     const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&pageSize=1000${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`);
     const j = await r.json();
     out.push(...((j && j.files) || []));
@@ -21064,7 +21112,9 @@ function tripsyFlyoverShortcutRecipeHtml(name = TRIPSY_FLYOVER_SHORTCUT_NAME) {
     ${li(`Add <strong>Get Item from List</strong> again — <em>Last Item</em> from Split Text (this is the Drive folder’s name).`)}
     ${li(`Add <strong>Find Photos</strong> — add a filter <em>Date Taken is after</em> the date from step 3; Sort by <em>Date Taken</em>; turn <em>Limit</em> off. To leave videos out, add a second filter <em>Media Type is Image</em>.`)}
     ${li(`Add <strong>Count</strong> (Items in Photos), then <strong>Show Alert</strong> with the text: “Found [Count] photos. Keep Shortcuts in front until it says Done. Save them into Google Drive › ${esc(DRIVE_FOLDER_NAME)} › [folder name from step 4].”`)}
-    ${li(`Add <strong>Save File</strong> — File: the Photos from step 5; turn ON <em>Ask Where to Save</em> and ON <em>Overwrite If File Exists</em>. When it runs, pick <strong>Drive › My Drive › ${esc(DRIVE_FOLDER_NAME)} › the folder named in the alert</strong> once (folders are listed before files; pull down to refresh if the folder is missing); all the photos save there.`)}
+    ${li(`Add <strong>Text</strong> holding just the <strong>Count</strong> variable, then <strong>Set Name</strong> on it: <code>${esc(TRIPSY_FLYOVER_FOUND_MARKER)}</code> (turn <em>Don’t Include File Extension</em> OFF). This tiny file is how the app learns how many photos the shortcut found — 0 shows “No new photos to upload” at once.`)}
+    ${li(`Add <strong>Add to Variable</strong> twice: the <strong>Photos</strong> from step 5 into a new variable named <strong>Upload</strong>, then the <strong>Renamed Item</strong> from step 7 into <strong>Upload</strong>.`)}
+    ${li(`Add <strong>Save File</strong> — File: the <strong>Upload</strong> variable; turn ON <em>Ask Where to Save</em> and ON <em>Overwrite If File Exists</em>. When it runs, pick <strong>Drive › My Drive › ${esc(DRIVE_FOLDER_NAME)} › the folder named in the alert</strong> once (folders are listed before files; pull down to refresh if the folder is missing); the photos and the count file save there together.`)}
     ${li(`Add a final <strong>Show Alert</strong>: “Done — [Count] photos saved. Go back to Travel Tracker; the fly-over imports them about two minutes after the last one lands.”`)}
     ${li(`Tap <strong>Done</strong>. The button below runs it with the date and folder filled in; if the button can’t open Shortcuts on this device, run the shortcut by hand and, when it asks for input, paste the text shown below.`)}
   </ol>`;
@@ -21121,33 +21171,61 @@ function tripsyFlyoverShortcutDialog({ since, folderName, onRun, onClose = null 
     },
   };
 }
+// A capture second ("2026-10-26T22:48:15", the photo's own wall clock) as "Mon, Oct 26 at
+// 10:48 PM"; '' when there is none.
+function tripsyFlyoverCaptureTimeLabel(taken) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(String(taken || ''));
+  if (!m) return '';
+  const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+  if (isNaN(d.getTime())) return '';
+  const day = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return `${day} at ${time}`;
+}
 // Shown once per launch when nothing new has reached the folder TRIPSY_FLYOVER_SHORTCUT_GRACE_MS
-// after it: how to complete the upload. "Run it again" relaunches with the same date (photos
-// already saved are overwritten in place, never doubled); "Keep waiting" leaves the watcher on.
-function tripsyFlyoverShortcutIncompleteDialog({ folderName, onRunAgain, onKeepWaiting, onCancel }) {
+// after it. The page cannot see the Shortcut's own count, but a run that saved nothing is
+// almost always one that FOUND nothing, so it reads as plain news -- "No new photos to upload",
+// the newest capture already here, and Close (which ends the hand-off) -- rather than a
+// warning ("If there are no photos, we should just have a message that says 'No new photos to
+// upload.' And then say the date and time of the last photo uploaded … and then have a close
+// button," 2026-10-28). The steps for a run that really did not finish sit behind a
+// <details>, with Run it again (same date; saved photos are overwritten in place, never
+// doubled) and Keep waiting.
+// `found: 0` means the Shortcut itself REPORTED finding nothing (its travel-tracker-found.txt),
+// so the line says so outright; otherwise the page is inferring it from an empty folder.
+function tripsyFlyoverShortcutIncompleteDialog({ folderName, lastTaken = '', found = null, onRunAgain, onKeepWaiting, onClose }) {
   let ov = document.getElementById('tripsy-flyover-shortcut-nudge-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-shortcut-nudge-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
   ov.style.zIndex = '2147483071';
+  const lastLabel = tripsyFlyoverCaptureTimeLabel(lastTaken);
+  const reported = found === 0;
+  const lastLine = lastLabel
+    ? `${reported ? 'The shortcut found no photos taken after the last one uploaded' : 'The last photo uploaded was taken'} <strong>${esc(lastLabel)}</strong>.`
+    : `${reported ? 'The shortcut found no photos taken after the date it was given. ' : ''}None of the photos already here carries a capture time, so the last upload’s date isn’t known.`;
   ov.innerHTML = `
-    <div class="tw-modal-paper" style="max-width:560px;">
-      <h2 style="margin:0 0 6px; font-size:17px;">⚠️ The shortcut doesn’t seem to have finished</h2>
-      <div style="font-size:13px; color:var(--muted); line-height:1.5; margin-bottom:10px;">Nothing new has reached the Drive folder <strong>${esc(folderName)}</strong> since it was started. To complete the upload:</div>
-      <ol style="margin:0 0 12px 18px; padding:0; font-size:13px; line-height:1.5;">
-        <li>Open the <strong>Shortcuts</strong> app and run <strong>${esc(TRIPSY_FLYOVER_SHORTCUT_NAME)}</strong> (or tap <em>Run it again</em> below).</li>
-        <li>If it asks where to save, choose <strong>Drive › My Drive › ${esc(DRIVE_FOLDER_NAME)} › ${esc(folderName)}</strong> (folders are listed before files).</li>
-        <li><strong>Stay in Shortcuts</strong> until it shows “Done — N photos saved.” Don’t switch apps or lock the iPad before that.</li>
-        <li>If it shows an error instead, note the message; a very large find (hundreds of photos) can be split by running it after a later date, which the input text sets.</li>
-        <li>Come back here. The page imports the photos about two minutes after the last one lands.</li>
-      </ol>
+    <div class="tw-modal-paper" style="max-width:520px;">
+      <h2 style="margin:0 0 6px; font-size:17px;">No new photos to upload</h2>
+      <div style="font-size:13px; line-height:1.5; margin-bottom:10px;">${lastLine}</div>
+      <details style="font-size:13px; margin-bottom:12px;"><summary style="cursor:pointer; color:var(--muted);">The shortcut didn’t finish? What to do</summary>
+        <ol style="margin:8px 0 8px 18px; padding:0; line-height:1.5;">
+          <li>Open the <strong>Shortcuts</strong> app and run <strong>${esc(TRIPSY_FLYOVER_SHORTCUT_NAME)}</strong> (or tap <em>Run it again</em>).</li>
+          <li>If it asks where to save, choose <strong>Drive › My Drive › ${esc(DRIVE_FOLDER_NAME)} › ${esc(folderName)}</strong> (folders are listed before files).</li>
+          <li><strong>Stay in Shortcuts</strong> until it shows “Done — N photos saved.” Don’t switch apps or lock the iPad before that.</li>
+          <li>If it shows an error instead, note the message; a very large find (hundreds of photos) can be split by running it after a later date, which the input text sets.</li>
+          <li>Come back here. The page imports the photos about two minutes after the last one lands.</li>
+        </ol>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn" data-sn-wait>Keep waiting</button>
+          <button class="btn" data-sn-run>▶ Run it again</button>
+        </div>
+      </details>
       <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;">
-        <button class="btn" data-sn-cancel>Cancel the upload</button>
-        <button class="btn" data-sn-wait>Keep waiting</button>
-        <button class="btn primary" data-sn-run>▶ Run it again</button>
+        <button class="btn primary" data-sn-close>Close</button>
       </div>
     </div>`;
   ov.style.display = 'flex';
   const close = () => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; };
-  ov.querySelector('[data-sn-cancel]').onclick = () => { close(); onCancel(); };
+  ov.querySelector('[data-sn-close]').onclick = () => { close(); onClose(); };
   ov.querySelector('[data-sn-wait]').onclick = () => { close(); onKeepWaiting(); };
   ov.querySelector('[data-sn-run]').onclick = () => { onRunAgain(); close(); };
   ov.onclick = e => { if (e.target === ov) { close(); onKeepWaiting(); } };
@@ -21176,10 +21254,15 @@ function tripsyFlyoverDrivePhase(phase, step, count) {
   if (step.changed) return 'uploading';
   return phase && phase !== 'waiting' ? phase : 'uploading';
 }
-function tripsyFlyoverDriveStatusHtml(phase, count, folderUrl = '', shortcut = false) {
+// `expected`: the count the Shortcut reported (its travel-tracker-found.txt), 0 when unknown --
+// the uploading line then counts arrivals against it, and complete says every one is here.
+function tripsyFlyoverDriveStatusHtml(phase, count, folderUrl = '', shortcut = false, expected = 0) {
   const n = count || 0, files = `${n} new file${n === 1 ? '' : 's'}`;
+  const exp = expected > 0 ? expected : 0;
   // A Shortcut launch keeps the reminder in view while the folder is watched.
   const keep = shortcut ? ` <span data-flyover-shortcut-note style="font-size:12px; color:#E0A020; font-weight:700;">Keep Shortcuts in front until it says Done.</span>` : '';
+  if (phase === 'complete' && exp && n >= exp) return `<span data-flyover-drive-phase="complete" style="font-size:12px; color:#3AA76D; font-weight:700;">✅ All ${exp} photo${exp === 1 ? '' : 's'} the shortcut found have reached the Drive folder.</span> <button class="btn primary" data-drive-import-now style="font-size:12px; margin-left:4px;">Import now</button>`;
+  if (phase === 'uploading' && exp) return `<span class="tripsy-menu-flash" data-flyover-drive-phase="uploading" style="font-size:12px; color:#E0A020; font-weight:700;">⬆️ Uploading Photos to Drive… ${n} of ${exp} arrived.</span>${keep}`;
   if (phase === 'waiting') return `<span data-flyover-drive-phase="waiting" style="font-size:12px; color:var(--muted);">📁 Waiting for photos in the Drive folder.</span>${keep}${folderUrl ? ` <a class="btn" href="${esc(folderUrl)}" target="_blank" rel="noopener" data-drive-open-folder style="font-size:12px; margin-left:4px; text-decoration:none;">Open folder</a>` : ''} <button class="btn" data-drive-cancel title="Stop waiting for a Drive upload" style="font-size:12px;">Cancel</button>`;
   if (phase === 'importing') return `<span data-flyover-drive-phase="importing" style="font-size:12px; color:var(--muted);">⏳ Importing from Drive — see the status line above. More files that arrive meanwhile are picked up by the next import.</span>`;
   if (phase === 'complete') return `<span data-flyover-drive-phase="complete" style="font-size:12px; color:#3AA76D; font-weight:700;">✅ Nothing new has reached the Drive folder for 2 minutes — ${files}.</span> <button class="btn primary" data-drive-import-now style="font-size:12px; margin-left:4px;">Import now</button>`;
