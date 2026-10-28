@@ -5238,9 +5238,14 @@ WebView's support for recording is unproven.
     travels as PROSE** ("Got 0 photos," 2026-10-29, after a test photo taken that evening — and
     the morning's "Found 0" at 12:47 PM with photos taken 1:22 PM): the Shortcut's Get Dates step
     reads "2026-10-28 13:50:48" as UTC, so on a Japan-time iPad "after 1:50 PM" became "after
-    10:50 PM". `tripsyFlyoverShortcutSinceText` (pure) writes it "Oct 28, 2026 at 1:50:48 PM",
-    which iOS reads in the device's own zone; the dialog field and the record keep the
-    "YYYY-MM-DD HH:MM:SS" form, only the launch text changes. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
+    10:50 PM". The first fix, prose "Oct 29, 2026 at 12:05:25 AM", was then read as 12:05 PM
+    ("Says found 0 photos," same night; a since of 11:50 PM the day before found both photos), so
+    `tripsyFlyoverShortcutSinceText` now writes ISO 8601 with an EXPLICIT offset —
+    "2026-10-29T00:05:25+09:00", the device's own offset for that wall-clock moment — the one
+    form Get Dates cannot reinterpret. The dialog field and the record keep the
+    "YYYY-MM-DD HH:MM:SS" form; only the launch text changes. **Still open**: the PATCH's
+    `addParents` move does not take on the owner's Shortcut (the rename in the same call does),
+    so uploads land in My Drive's root and a session has moved them into the inbox by hand. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
     note in the slot) → nothing for 105 s → nudge → Run it again → nudge once more after the
     grace → a file lands → uploading → settled → auto-import, launch cleared. NOT verifiable
     here: that the Claude iPad WebView opens a `shortcuts://` link (Safari does), that

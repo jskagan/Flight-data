@@ -2047,10 +2047,11 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         'the dialog pre-fills the later of the typed since and the newest capture, so an import moves it on');
       // "This process is just not working … we need another solution" (2026-10-28): the Shortcut
       // uploads STRAIGHT to Drive, so the input carries the folder's id and a Drive access token.
-      // "Got 0 photos" (2026-10-29): the Shortcut reads "2026-10-28 13:50:48" as UTC, so the since-moment is written as prose, which it reads in local time.
-      assert(tripsyFlyoverShortcutSinceText('2026-10-28 13:50:48') === 'Oct 28, 2026 at 1:50:48 PM' && tripsyFlyoverShortcutSinceText('2026-10-06 00:00:00') === 'Oct 6, 2026 at 12:00:00 AM' && tripsyFlyoverShortcutSinceText('2026-12-01T12:05') === 'Dec 1, 2026 at 12:05:00 PM' && tripsyFlyoverShortcutSinceText('junk') === 'junk' && tripsyFlyoverShortcutSinceText('') === '',
-        'the since-moment goes to the Shortcut as "Oct 28, 2026 at 1:50:48 PM", never the computer-style form it reads as UTC');
-      assert(tripsyFlyoverShortcutInput('2026-10-23 18:30:15', 'FOLDER1', 'ya29.tok') === 'Oct 23, 2026 at 6:30:15 PM|FOLDER1|ya29.tok' && tripsyFlyoverShortcutInput('x', 'a|b', 'c|d') === 'x|ab|cd' && tripsyFlyoverShortcutInput('', '', '') === '||',
+      // "Got 0 photos" / "Says found 0 photos" (2026-10-29): a bare "2026-10-28 13:50:48" read as UTC, and prose "12:05:25 AM" read as PM; the since carries its own offset.
+      assert(tripsyFlyoverShortcutSinceText('2026-10-29 00:05:25', 540) === '2026-10-29T00:05:25+09:00' && tripsyFlyoverShortcutSinceText('2026-10-28 13:50:48', -420) === '2026-10-28T13:50:48-07:00' && tripsyFlyoverShortcutSinceText('2026-12-01T12:05', 330) === '2026-12-01T12:05:00+05:30' && tripsyFlyoverShortcutSinceText('2026-12-01 12:05:00', 0) === '2026-12-01T12:05:00+00:00' && tripsyFlyoverShortcutSinceText('junk') === 'junk' && tripsyFlyoverShortcutSinceText('') === '',
+        'the since-moment goes to the Shortcut as ISO 8601 with an explicit offset -- no form Get Dates can reinterpret');
+      assert(/^2026-10-23T18:30:15[+-]\d\d:\d\d$/.test(tripsyFlyoverShortcutSinceText('2026-10-23 18:30:15')), 'with no offset given, the device\'s own offset for that moment is used');
+      assert(/^2026-10-23T18:30:15[+-]\d\d:\d\d\|FOLDER1\|ya29\.tok$/.test(tripsyFlyoverShortcutInput('2026-10-23 18:30:15', 'FOLDER1', 'ya29.tok')) && tripsyFlyoverShortcutInput('x', 'a|b', 'c|d') === 'x|ab|cd' && tripsyFlyoverShortcutInput('', '', '') === '||',
         'THE ASK: one text input: date | folder id | token (the separator never appears in either)');
       const tokSrc = extractFn('tripsyFlyoverShortcutToken');
       assert(/await authWorkerGetAccessToken\(\)/.test(tokSrc) && /driveAccessToken = viaWorker\.accessToken;/.test(tokSrc) && /return driveAccessToken \|\| '';/.test(tokSrc),
