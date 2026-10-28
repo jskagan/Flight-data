@@ -5227,7 +5227,14 @@ WebView's support for recording is unproven.
     fly-over, none of which the capture dedupe can see): a `datetime-local` field
     (`data-sc-since`, `tripsyFlyoverShortcutSinceToField`/`FromField` map "YYYY-MM-DD HH:MM:SS"
     ↔ "YYYY-MM-DDTHH:MM"), the input text follows it, Run passes it to `onRun(since)`, and the
-    page keeps it as `shortcutSinceOverride` for Run it again. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
+    page keeps it as `shortcutSinceOverride` for Run it again. **A kept pick stands only while
+    it is LATER than the record's newest capture** ("It didn't reset the date," 2026-10-29 — after
+    59 newer photos had imported, the dialog still offered the Oct 27 date typed before the run):
+    `tripsyFlyoverShortcutSinceDefault(record, firstDay, override)` (pure, the later of the two)
+    feeds the dialog's pre-fill and a Run-it-again relaunch; a since typed for THIS launch is
+    used verbatim (`shortcutInputText(since)`). And `tripsyFlyoverLastCaptureTime` ignores
+    `mime: 'image/png'` — a screenshot's time is when the screen was grabbed, hours after the
+    last camera photo, and the Shortcut would skip everything taken in between. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
     note in the slot) → nothing for 105 s → nudge → Run it again → nudge once more after the
     grace → a file lands → uploading → settled → auto-import, launch cleared. NOT verifiable
     here: that the Claude iPad WebView opens a `shortcuts://` link (Safari does), that

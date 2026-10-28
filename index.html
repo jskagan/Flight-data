@@ -20055,7 +20055,10 @@ async function showTripsyFlyover(tripKey) {
     // while the dialog is up, and Run is enabled only once both are in hand. A relaunch (Run it
     // again) refreshes the token first -- the one from the earlier launch may have lapsed.
     let shortcutToken = '', shortcutTokenAt = 0;
-    const shortcutInputText = () => tripsyFlyoverShortcutInput(shortcutSinceOverride || tripsyFlyoverShortcutSince(record, firstDay), inboxFolderKnown, shortcutToken);
+    // The since-date: a typed one wins for THAT launch; otherwise the later of the kept pick and
+    // the record's newest capture (tripsyFlyoverShortcutSinceDefault), so an import moves it on.
+    const shortcutSinceDefault = () => tripsyFlyoverShortcutSinceDefault(record, firstDay, shortcutSinceOverride);
+    const shortcutInputText = (since) => tripsyFlyoverShortcutInput(since || shortcutSinceDefault(), inboxFolderKnown, shortcutToken);
     const shortcutPrepare = () => Promise.all([
       inboxFolderKnown ? Promise.resolve(inboxFolderKnown) : tripsyFlyoverInboxFolder(trip, record).then(id => { inboxFolderKnown = id; return id; }),
       tripsyFlyoverShortcutToken().then(t => { shortcutToken = t; shortcutTokenAt = Date.now(); return t; }),
@@ -20063,7 +20066,7 @@ async function showTripsyFlyover(tripKey) {
     launchShortcut = (sinceOverride) => {
       if (closed || !inboxFolderKnown || !shortcutToken) return;
       if (sinceOverride) shortcutSinceOverride = sinceOverride;
-      try { window.location.href = tripsyFlyoverShortcutUrl(shortcutInputText()); } catch (e) { /* no Shortcuts here: the dialog's text is the fallback */ }
+      try { window.location.href = tripsyFlyoverShortcutUrl(shortcutInputText(sinceOverride)); } catch (e) { /* no Shortcuts here: the dialog's text is the fallback */ }
       const now = new Date().toISOString();
       record = { ...record, inboxFolderId: inboxFolderKnown, inboxDest: 'auto', inboxPendingAt: now, shortcutLaunchedAt: now };
       save(); render();
@@ -20077,7 +20080,7 @@ async function showTripsyFlyover(tripKey) {
       shortcutPrepare().then(ok => { if (ok) launchShortcut(); else toast('Couldn’t get the Drive sign-in ready — check the connection and try again.', 'error'); });
     };
     if (shortcutBtn) shortcutBtn.onclick = () => {
-      const dlg = tripsyFlyoverShortcutDialog({ since: shortcutSinceOverride || tripsyFlyoverShortcutSince(record, firstDay), folderName, inputFor: s => tripsyFlyoverShortcutInput(s, inboxFolderKnown, shortcutToken), onRun: since => launchShortcut(since) });
+      const dlg = tripsyFlyoverShortcutDialog({ since: shortcutSinceDefault(), folderName, inputFor: s => tripsyFlyoverShortcutInput(s, inboxFolderKnown, shortcutToken), onRun: since => launchShortcut(since) });
       shortcutPrepare().then(ok => { if (!closed) dlg.setReady(ok); }, e => { console.error(e); dlg.setReady(false); });
     };
     // Adding photos: a FEW go through the iOS picker; MANY, or any video, go through Drive
@@ -21171,13 +21174,25 @@ const TRIPSY_FLYOVER_SHORTCUT_NAME = 'Travel Tracker Upload';
 const TRIPSY_FLYOVER_SHORTCUT_GRACE_MS = 90000;
 function tripsyFlyoverLastCaptureTime(record) {
   let best = '';
-  for (const s of ((record && record.stops) || [])) for (const p of (s.photos || [])) if (p && typeof p.taken === 'string' && p.taken > best) best = p.taken;
+  // A PNG is a screenshot, not a camera photo: its time is when the screen was grabbed, which
+  // can be hours after the last real photo, and the Shortcut would then skip everything taken
+  // in between. Only camera photos set the mark.
+  for (const s of ((record && record.stops) || [])) for (const p of (s.photos || [])) if (p && typeof p.taken === 'string' && p.taken > best && p.mime !== 'image/png') best = p.taken;
   return best;
 }
 function tripsyFlyoverShortcutSince(record, firstDayKey) {
   const last = tripsyFlyoverLastCaptureTime(record);
   if (last) return last.replace('T', ' ');
   return firstDayKey ? `${firstDayKey} 00:00:00` : '';
+}
+// What the dialog pre-fills: a "since" the owner typed earlier in the visit is kept ONLY while
+// it is later than the record's own newest capture -- once an import has landed newer photos,
+// their time wins ("It didn't reset the date," 2026-10-29: the page kept offering the Oct 27
+// date typed before the run, after 59 newer photos had come in). Pure.
+function tripsyFlyoverShortcutSinceDefault(record, firstDayKey, override) {
+  const auto = tripsyFlyoverShortcutSince(record, firstDayKey);
+  const typed = String(override || '').replace('T', ' ');
+  return typed > auto ? typed : auto;
 }
 // The Shortcut uploads STRAIGHT to Drive, so the input carries what its two web calls need:
 // "<since>|<folder id>|<access token>" ("This process is just not working … we need another
