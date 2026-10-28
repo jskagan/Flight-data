@@ -1694,11 +1694,11 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
 {
   // Slideshow options take effect at once; bookend photos; sharp tiles (2026-10-21).
   const setup = extractFn('showTripsyFlyover');
-  assert(/const save = \(\) => \{[\s\S]{0,400}?record = tripsyFlyoverResolvePendingIds\(record\);\s*Store\.stageTripsyFlyover\(record\);/.test(setup)
+  assert(/const save = \(\) => \{[\s\S]{0,400}?record = tripsyFlyoverResolvePendingIds\(record\);\s*const staged = Store\.stageTripsyFlyover\(record\);/.test(setup)
     && /Store\.persistTripsyFlyovers\(\)/.test(setup),
     'a fly-over change is staged in memory before its Drive write queues, so View plays it immediately');
   const dd = { tripsyFlyovers: [{ tripKey: 'a', v: 1 }, { tripKey: 'b', v: 1 }] };
-  const store = new Function('driveData', 'return ({ _stagedFlyovers: new Map(), ' + html.match(/  stageTripsyFlyover\(record\) \{[\s\S]*?\n  \},/)[0] + '})')(dd);
+  const store = new Function('driveData', 'const TRIPSY_SESSION_ID = "me"; return ({ _stagedFlyovers: new Map(), _staleFlyoverKeys: new Set(), ' + html.match(/  stageTripsyFlyover\(record, \{ force = false \} = \{\}\) \{[\s\S]*?\n  \},/)[0] + '})')(dd);
   store.stageTripsyFlyover({ tripKey: 'a', v: 2 });
   assert(dd.tripsyFlyovers.length === 2 && dd.tripsyFlyovers.find(r => r.tripKey === 'a').v === 2, 'staging replaces the trip\'s record synchronously');
   const play = extractFn('playTripsyFlyover');
@@ -2123,22 +2123,26 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       const st = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x', true);
       assert(/data-flyover-shortcut-note/.test(st) && /Keep Shortcuts in front until it says Done/.test(st) && !/data-flyover-shortcut-note/.test(tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x')), 'the status slot repeats the reminder while a Shortcut launch is watched');
       assert(/if \(prevRecord\.shortcutLaunchedAt\) rec\.shortcutLaunchedAt = prevRecord\.shortcutLaunchedAt; if \(prevRecord\.shortcutNudgedFor\) rec\.shortcutNudgedFor = prevRecord\.shortcutNudgedFor;/.test(html), 'a rebuild keeps a pending launch, and the nudge already shown for it');
+      assert(/const staged = Store\.stageTripsyFlyover\(record\);\s*if \(!staged\) \{ adoptLiveRecord\(\); return Promise\.resolve\(false\); \}\s*record = staged;/.test(extractFn('showTripsyFlyover')) && /if \(Store\.takeStaleFlyover\(trip\.key\)\) adoptLiveRecord\(\);/.test(extractFn('showTripsyFlyover')),
+        'the page adopts the stamped record it staged, and reloads the live one (with a toast) when its copy was refused as stale');
+      assert(/const TRIPSY_FLYOVER_RESTORE_FILENAME = 'tripsy-flyover-restore\.json';/.test(html) && /Store\.stageTripsyFlyover\(r, \{ force: true \}\);/.test(extractFn('drainTripsyFlyoverRestore')) && /if \(!ok\) throw new Error/.test(extractFn('drainTripsyFlyoverRestore')) && /await drainTripsyFlyoverRestore\(\);/.test(html),
+        'a Claude session can put a record back through the restore relay, drained in syncTripsyRelays, kept on a failed save');
       // "I am still getting the same shortcut message after i canceled it" (2026-10-27): the
       // fly-over save had no conflict retry -- another writer's revision made persistDriveData
       // reload the remote copy, which silently dropped the staged Cancel. Executed against a fake
       // persistDriveData that conflicts once and reloads an older copy.
       {
-        const method = (sig) => { const s = html.indexOf(sig); let d = 0; for (let j = html.indexOf('{', s); ; j++) { if (html[j] === '{') d++; else if (html[j] === '}') { d--; if (!d) return html.slice(s, j + 1); } } };
+        const method = (sig) => { const s = html.indexOf(sig); let d = 0; for (let j = s + sig.length - 1; ; j++) { if (html[j] === '{') d++; else if (html[j] === '}') { d--; if (!d) return html.slice(s, j + 1); } } };
         // driveData is one module-level variable shared by Store and persistDriveData in the
         // app (a conflict reload REASSIGNS it), so the fake lives in the same scope.
-        const { Store, log, setConflicts } = new Function(
+        const { Store, log, setConflicts, setLive } = new Function(
           'const log = []; let conflicts = 1; const tripsyNotifyAuthExpired = () => {};\n'
           + "let driveData = { tripsyFlyovers: [{ tripKey: 'sg', inboxPendingAt: 'LAUNCH', shortcutLaunchedAt: 'LAUNCH' }] };\n"
           + 'async function persistDriveData(opts) {\n'
           + "  if (conflicts-- > 0) { log.push('conflict silent=' + !!(opts && opts.silentConflict)); driveData = { tripsyFlyovers: [{ tripKey: 'sg', inboxPendingAt: 'LAUNCH', shortcutLaunchedAt: 'LAUNCH', other: 'newer' }] }; const e = new Error('CONFLICT_RELOADED'); e.conflict = true; throw e; }\n"
           + "  log.push('wrote ' + JSON.stringify(driveData.tripsyFlyovers.map(r => [r.inboxPendingAt, r.shortcutLaunchedAt, r.other])));\n"
           + '}\n'
-          + 'const Store = {' + method('  stageTripsyFlyover(record) {') + ',\n_stagedFlyovers: new Map(),\n' + method('  async persistTripsyFlyovers() {') + '}; return { Store, log, setConflicts: n => { conflicts = n; } };')();
+          + 'const TRIPSY_SESSION_ID = "me"; const Store = {' + method('  stageTripsyFlyover(record, { force = false } = {}) {') + ',\n_stagedFlyovers: new Map(), _staleFlyoverKeys: new Set(),\n' + method('  async persistTripsyFlyovers() {') + ',\n' + method('  takeStaleFlyover(tripKey) {') + '}; return { Store, log, setConflicts: n => { conflicts = n; }, setLive: r => { driveData.tripsyFlyovers = [r]; } };')();
         (async () => {
           Store.stageTripsyFlyover({ tripKey: 'sg', inboxPendingAt: '', shortcutLaunchedAt: '' });
           const ok = await Store.persistTripsyFlyovers();
@@ -2154,6 +2158,29 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
           const okB = await Store.persistTripsyFlyovers();
           assert(okA && okB && log[log.length - 1] === 'wrote [["","",null]]',
             'a save queued behind a successful one still re-applies ITS record on a conflict -- the memory is never cleared on success');
+          // 2026-10-28: a fly-over page left open on another device since Oct 26 wrote its
+          // two-day-old record over the live one (18 photos and every capture time gone). A
+          // copy whose stamp is OLDER than a record another session saved is refused; this
+          // session's own saves (same savedBy) never make the page stale; force bypasses.
+          Store.stageTripsyFlyover({ tripKey: 'sg', v: 'mine' });
+          const mine = Store._stagedFlyovers.get('sg');
+          assert(mine.savedBy === 'me' && !!mine.updatedAt, 'every stage stamps updatedAt and this session\'s savedBy');
+          // another device saves later
+          await new Promise(r => setTimeout(r, 5));
+          const other = { tripKey: 'sg', v: 'theirs', updatedAt: new Date(Date.now() + 1000).toISOString(), savedBy: 'other-device' };
+          setConflicts(1);
+          Store.stageTripsyFlyover({ ...mine, v: 'mine-2' });            // the page's next change, stamped from its own copy
+          // simulate the conflict reload handing back the other device's newer record
+          const okC = await (async () => { const p = Store.persistTripsyFlyovers(); return p; })();
+          assert(okC === true, 'no stale copy was involved yet, so the retry wrote this session\'s record');
+          const staleCopy = { tripKey: 'sg', v: 'stale', updatedAt: '2026-10-26T13:20:31.613Z' };
+          // the other device's record arrives as the live one (a conflict reload)
+          setLive(other);
+          const refused = Store.stageTripsyFlyover(staleCopy);
+          assert(refused === false && Store._staleFlyoverKeys.has('sg') && Store.takeStaleFlyover('sg') && !Store.takeStaleFlyover('sg'),
+            'THE FIX: a copy older than another device\'s save is refused, noted once for the page, and nothing is staged');
+          assert(Store.stageTripsyFlyover({ ...other, v: 'theirs-edited' }) !== false, 'a copy carrying the live record\'s own stamp (loaded after their save) stages fine');
+          assert(Store.stageTripsyFlyover(staleCopy, { force: true }) !== false, 'force (the restore relay) overrules a newer live record');
         })();
       }
     }

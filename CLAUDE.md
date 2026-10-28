@@ -5194,6 +5194,28 @@ WebView's support for recording is unproven.
     the status slot's Cancel and the dialog's "Cancel the upload" share `cancelHandOff`,
     which clears the launch on the Store's copy when the page was already closed under the
     dialog (the dialog is its own overlay and outlives the page). Also:
+    **A STALE fly-over copy never replaces a newer record** (2026-10-28, "Why did I get this
+    message" / "updated on another device": a fly-over page left open on ANOTHER device since
+    Oct 26 10:20 PM saved one added photo, and the ordinary reload-then-stage path wrote its
+    whole two-day-old record over the live one — Fukuoka 2→1, Nakatsu 22→11, Hita 10→4, the
+    inbox folder id from Oct 26 back; found by diffing the 08:23 UTC snapshot against the
+    file). Every stored record carries `updatedAt` AND `savedBy` (`TRIPSY_SESSION_ID`, one
+    id per page load); `Store.stageTripsyFlyover(record, {force})` returns the STAMPED record
+    (the page adopts it: `record = staged`, so its next save carries this stage's stamp) and
+    refuses — `false`, nothing staged, the trip noted in `_staleFlyoverKeys` — a copy whose
+    stamp is OLDER than a record saved by a DIFFERENT session; this session's own out-of-page
+    saves (the upload-resolved save, a background lookup) stamp the same `savedBy` and never
+    make the page stale. `persistTripsyFlyovers` reports false when a conflict re-stage was
+    refused, and the page's `save()` then `adoptLiveRecord`s: shows the live version with a
+    toast asking for the last change again (`Store.takeStaleFlyover` clears the note). An old
+    build on another device can still clobber — reload every device. **Putting a record back
+    is a relay** (`tripsy-flyover-restore.json`, `{records:[<whole records>]}`,
+    `drainTripsyFlyoverRestore` in `syncTripsyRelays`, staged with `force`, file kept on a
+    failed save): the 2026-10-28 restore was the 08:23 snapshot plus the 3 Oct-26 photos only
+    the stale copy still had (9 others it held were duplicates of the Oct 27 re-picks, by
+    fingerprint), hand-off fields cleared. Note the "every capture time gone" first read was
+    wrong — no photo carried one yet (`taken` arrived with the Oct 27 build, after the last
+    import). Also:
     `runBackgroundSyncs` ends with `findOrCreateDriveFolder(DRIVE_FOLDER_NAME)` so the
     folder rename above actually runs on an ordinary open — nothing else looks the folder up
     (the fly-over page remembers its inbox id). `findDriveFolderIdByName` re-checks the name

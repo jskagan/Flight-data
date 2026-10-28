@@ -3503,6 +3503,9 @@ async function handleDriveWriteConflict() {
   }
 }
 
+// One id per page load: a fly-over record stamped with it was written by THIS session, so a
+// later save from this page is never mistaken for a stale copy of another device's work.
+const TRIPSY_SESSION_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
 const Store = {
   async saveInvoice(invoiceNo, data) {
     try {
@@ -3910,12 +3913,35 @@ const Store = {
   },
   // In memory only, synchronously, so every reader (View on the menu, the player) sees a
   // change the moment it is made, however long the Drive write queued behind it takes.
-  stageTripsyFlyover(record) {
+  // A STALE copy never replaces a newer record (2026-10-28: a fly-over page left open on
+  // another device since Oct 26 saved one added photo and, through the ordinary reload-then-
+  // stage path, wrote its whole two-day-old record over the live one -- 18 of Monday's photos
+  // and every capture time gone). Every stored record carries the `updatedAt` it was staged
+  // with, and a page's copy carries the stamp of the last stage IT made (stage returns the
+  // stamped record and the page adopts it), so a copy whose stamp is OLDER than the live
+  // record's was loaded before someone else's save and is refused: `false`, nothing
+  // staged, `_staleFlyoverKeys` noted so the page can reload its copy and say so. `force`
+  // (the restore relay) bypasses the check. A record with no stamp on either side is never
+  // refused (pre-stamp data).
+  stageTripsyFlyover(record, { force = false } = {}) {
     if (!record || !record.tripKey) return false;
+    const live = (driveData.tripsyFlyovers || []).find(r => r.tripKey === record.tripKey);
+    // Only ANOTHER writer's newer save makes a copy stale: this session's own out-of-page
+    // saves (the upload-resolved save, a background lookup) stamp the same `savedBy`, and the
+    // page's next save may legitimately carry an older stamp than those.
+    const otherWriter = live && (!live.savedBy || live.savedBy !== TRIPSY_SESSION_ID);
+    if (!force && otherWriter && live.updatedAt && record.updatedAt && live.updatedAt > record.updatedAt) {
+      console.warn('stageTripsyFlyover refused: the live record is newer than this copy', record.tripKey, live.updatedAt, record.updatedAt);
+      this._staleFlyoverKeys.add(record.tripKey);
+      this._stagedFlyovers.delete(record.tripKey);
+      return false;
+    }
+    const stamped = { ...record, updatedAt: new Date().toISOString(), savedBy: TRIPSY_SESSION_ID };
     driveData.tripsyFlyovers = (driveData.tripsyFlyovers || []).filter(r => r.tripKey !== record.tripKey);
-    driveData.tripsyFlyovers.push({ ...record, updatedAt: new Date().toISOString() });
-    this._stagedFlyovers.set(record.tripKey, record);
-    return true;
+    driveData.tripsyFlyovers.push(stamped);
+    this._stagedFlyovers.set(record.tripKey, stamped);
+    this._staleFlyoverKeys.delete(record.tripKey);
+    return stamped;
   },
   // Writes whatever is staged (the whole file carries the newest record). A revision CONFLICT
   // (another device or tab wrote flight-log-data.json since this one loaded it) reloads the
@@ -3923,9 +3949,12 @@ const Store = {
   // give up, and the reload silently threw the staged change away ("I am still getting the
   // same shortcut message after i canceled it," 2026-10-27: Cancel cleared the pending launch
   // in memory, the write conflicted, and the remote copy with the launch still pending came
-  // back). The fly-over page is the one editor of its record, so re-applying it is always right.
+  // back). A re-stage goes through the same staleness check: a record another device saved
+  // AFTER this session's last stage wins, and the write reports false so the page reloads it.
   _stagedFlyovers: new Map(),
+  _staleFlyoverKeys: new Set(),
   async persistTripsyFlyovers() {
+    let refused = false;
     for (let attempt = 0; ; attempt++) {
       try {
         await persistDriveData({ silentConflict: true });
@@ -3933,10 +3962,10 @@ const Store = {
         // staged a newer record into it, and clearing here left that save with nothing to
         // re-apply when IT conflicted (a second lost Cancel, 2026-10-27). The newest record
         // staged this session is the truth this session holds, so re-staging it is always right.
-        return true;
+        return !refused;
       } catch (e) {
         if (e && e.conflict && attempt < 3) {
-          for (const r of Array.from(this._stagedFlyovers.values())) this.stageTripsyFlyover(r);
+          for (const r of Array.from(this._stagedFlyovers.values())) { if (!this.stageTripsyFlyover(r)) refused = true; }
           continue;
         }
         console.error('Store.persistTripsyFlyovers failed:', e);
@@ -3945,9 +3974,16 @@ const Store = {
       }
     }
   },
-  async saveTripsyFlyover(record) {
-    if (!this.stageTripsyFlyover(record)) return false;
+  async saveTripsyFlyover(record, opts) {
+    if (!this.stageTripsyFlyover(record, opts)) return false;
     return this.persistTripsyFlyovers();
+  },
+  // True once for a trip whose stage was refused as stale (and clears it): the page reloads
+  // its copy from the live record and tells the owner to redo the last change.
+  takeStaleFlyover(tripKey) {
+    const was = this._staleFlyoverKeys.has(tripKey);
+    this._staleFlyoverKeys.delete(tripKey);
+    return was;
   },
   async getTripsyPartialItinerary(tripKey) {
     return (driveData.tripsyPartialItineraries || []).find(p => p.tripKey === tripKey) || null;
@@ -6052,6 +6088,24 @@ async function drainTripsyNarrativeResults() {
 // same ACL as trips-data.json itself, so it grants nothing new: anyone
 // able to write the relay could edit the data file directly.
 const TRIPSY_TRIP_EDITS_FILENAME = 'tripsy-trip-edits.json';
+// A fly-over record put BACK by a Claude session (2026-10-28: a stale page on another device
+// had written a two-day-old copy over the live record -- see stageTripsyFlyover). Same relay
+// shape and ACL as the trip edits: `{records:[<whole fly-over records>]}`, each one REPLACING
+// the stored record for its trip outright (`force`, since the point is to overrule what is
+// there), one write, the file deleted only after the write landed. Owner-only.
+const TRIPSY_FLYOVER_RESTORE_FILENAME = 'tripsy-flyover-restore.json';
+async function drainTripsyFlyoverRestore() {
+  if (!isOwner) return;
+  await drainTripsyRelayFiles(TRIPSY_FLYOVER_RESTORE_FILENAME, async relay => {
+    const records = (relay && Array.isArray(relay.records)) ? relay.records.filter(r => r && r.tripKey && Array.isArray(r.stops)) : [];
+    if (!records.length) return;
+    for (const r of records) Store.stageTripsyFlyover(r, { force: true });
+    const ok = await Store.persistTripsyFlyovers();
+    if (!ok) throw new Error('fly-over restore: save failed');
+    toast(`Restored the fly-over for ${records.length} trip${records.length === 1 ? '' : 's'} from a Claude session.`);
+    if (currentView === 'tripsytrips') renderTripsyEventsList();
+  });
+}
 const TRIPSY_TRIP_EDIT_KNOWN_TYPES = ['edit_event', 'delete_event', 'create_event', 'edit_trip', 'create_trip', 'delete_trip', 'move_event'];
 // A create_event's replay-dedupe identity. Transportation carries no
 // name/startsAt at all (its fields are departure/arrival), so the old
@@ -6183,6 +6237,8 @@ async function syncTripsyRelays() {
     // also needs the loaded trips, since every entry goes through the live
     // queueTripsyChange path.
     try { await drainTripsyTripEdits(); } catch (e) { console.error('trip-edits drain failed:', e); }
+    // A fly-over record a Claude session relayed to put back (see drainTripsyFlyoverRestore).
+    try { await drainTripsyFlyoverRestore(); } catch (e) { console.error('fly-over restore drain failed:', e); }
     // Hand-entered entry requirements a Claude session relayed. (Research
     // itself never runs here -- only from the trip header's 🛂 button.)
     try { await drainTripsyEntryRequirementsRelay(); } catch (e) { console.error('entry-requirements relay drain failed:', e); }
@@ -19538,14 +19594,25 @@ async function showTripsyFlyover(tripKey) {
   document.addEventListener('visibilitychange', onInboxVisibility);
   // The change is staged in memory AT ONCE (so View, Play, and every other reader see it
   // immediately); only the Drive write waits its turn in the chain.
+  // This page's copy was overtaken by another device's save (stageTripsyFlyover refused it as
+  // stale): show that version and ask for the last change again, rather than write over it.
+  const adoptLiveRecord = () => {
+    Store.takeStaleFlyover(trip.key);
+    const live = Store.getTripsyFlyover(trip.key);
+    if (live) record = live;
+    toast('This fly-over was changed on another device — showing that version. Please redo your last change here.', 'error');
+    if (!closed) render();
+  };
   const save = () => {
     // A photo whose background upload has landed is saved under its Drive id, never the
     // session's pending id.
     record = tripsyFlyoverResolvePendingIds(record);
-    Store.stageTripsyFlyover(record);
+    const staged = Store.stageTripsyFlyover(record);
+    if (!staged) { adoptLiveRecord(); return Promise.resolve(false); }
+    record = staged; // carries this stage's stamp, so the next save is not read as stale
     saveChain = saveChain.then(async () => {
       const ok = await Store.persistTripsyFlyovers();
-      if (!ok) toast('Couldn’t save the fly-over to Drive — try again.', 'error');
+      if (!ok) { if (Store.takeStaleFlyover(trip.key)) adoptLiveRecord(); else toast('Couldn’t save the fly-over to Drive — try again.', 'error'); }
       return ok;
     }, () => false);
     return saveChain;
