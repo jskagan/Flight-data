@@ -2036,7 +2036,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     // complete, can a dialog appear with instructions on how to complete," 2026-10-27) ----
     {
       var esc = typeof esc === 'function' ? esc : (v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]));
-      eval([constLine('TRIPSY_FLYOVER_SHORTCUT_NAME'), constLine('TRIPSY_FLYOVER_SHORTCUT_GRACE_MS'), constLine('DRIVE_FOLDER_NAME'), constLine('TRIPSY_FLYOVER_FOUND_MARKER')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverLastCaptureTime', 'tripsyFlyoverShortcutSince', 'tripsyFlyoverShortcutSinceDefault', 'tripsyFlyoverShortcutInput', 'tripsyFlyoverShortcutUrl', 'tripsyFlyoverShortcutLooksIncomplete', 'tripsyFlyoverShortcutRecipeHtml'].map(extractFn)).join('\n'));
+      eval([constLine('TRIPSY_FLYOVER_SHORTCUT_NAME'), constLine('TRIPSY_FLYOVER_SHORTCUT_GRACE_MS'), constLine('DRIVE_FOLDER_NAME'), constLine('TRIPSY_FLYOVER_FOUND_MARKER')].map(s => s.replace(/^const /, 'var ')).concat(['tripsyFlyoverLastCaptureTime', 'tripsyFlyoverShortcutSince', 'tripsyFlyoverShortcutSinceDefault', 'tripsyFlyoverShortcutSinceText', 'tripsyFlyoverShortcutInput', 'tripsyFlyoverShortcutUrl', 'tripsyFlyoverShortcutLooksIncomplete', 'tripsyFlyoverShortcutRecipeHtml'].map(extractFn)).join('\n'));
       const recS = { stops: [{ photos: [{ driveFileId: 'a', taken: '2026-10-21T09:00:00' }, { driveFileId: 'b', taken: '2026-10-23T18:30:15' }, { driveFileId: 'c' }] }, { photos: [{ driveFileId: 'd', taken: '2026-10-22T08:00:00' }] }] };
       assert(tripsyFlyoverLastCaptureTime(recS) === '2026-10-23T18:30:15' && tripsyFlyoverLastCaptureTime({ stops: [] }) === '', 'the newest capture second on the record, across every destination');
       assert(tripsyFlyoverShortcutSince(recS, '2026-10-06') === '2026-10-23 18:30:15' && tripsyFlyoverShortcutSince({ stops: [] }, '2026-10-06') === '2026-10-06 00:00:00', 'THE ASK: "since" is the last imported photo\'s capture time, else the trip\'s first day');
@@ -2047,7 +2047,10 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         'the dialog pre-fills the later of the typed since and the newest capture, so an import moves it on');
       // "This process is just not working … we need another solution" (2026-10-28): the Shortcut
       // uploads STRAIGHT to Drive, so the input carries the folder's id and a Drive access token.
-      assert(tripsyFlyoverShortcutInput('2026-10-23 18:30:15', 'FOLDER1', 'ya29.tok') === '2026-10-23 18:30:15|FOLDER1|ya29.tok' && tripsyFlyoverShortcutInput('x', 'a|b', 'c|d') === 'x|ab|cd' && tripsyFlyoverShortcutInput('', '', '') === '||',
+      // "Got 0 photos" (2026-10-29): the Shortcut reads "2026-10-28 13:50:48" as UTC, so the since-moment is written as prose, which it reads in local time.
+      assert(tripsyFlyoverShortcutSinceText('2026-10-28 13:50:48') === 'Oct 28, 2026 at 1:50:48 PM' && tripsyFlyoverShortcutSinceText('2026-10-06 00:00:00') === 'Oct 6, 2026 at 12:00:00 AM' && tripsyFlyoverShortcutSinceText('2026-12-01T12:05') === 'Dec 1, 2026 at 12:05:00 PM' && tripsyFlyoverShortcutSinceText('junk') === 'junk' && tripsyFlyoverShortcutSinceText('') === '',
+        'the since-moment goes to the Shortcut as "Oct 28, 2026 at 1:50:48 PM", never the computer-style form it reads as UTC');
+      assert(tripsyFlyoverShortcutInput('2026-10-23 18:30:15', 'FOLDER1', 'ya29.tok') === 'Oct 23, 2026 at 6:30:15 PM|FOLDER1|ya29.tok' && tripsyFlyoverShortcutInput('x', 'a|b', 'c|d') === 'x|ab|cd' && tripsyFlyoverShortcutInput('', '', '') === '||',
         'THE ASK: one text input: date | folder id | token (the separator never appears in either)');
       const tokSrc = extractFn('tripsyFlyoverShortcutToken');
       assert(/await authWorkerGetAccessToken\(\)/.test(tokSrc) && /driveAccessToken = viaWorker\.accessToken;/.test(tokSrc) && /return driveAccessToken \|\| '';/.test(tokSrc),
