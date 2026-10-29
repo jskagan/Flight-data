@@ -19995,7 +19995,8 @@ async function showTripsyFlyover(tripKey) {
       </div>` : ''}
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; font-size:13px;">
         <span>🎵 ${record.music ? `<strong>${esc(tripsyFlyoverMusicLabel(record.music))}</strong>${record.music.license ? ` <span style="color:var(--muted); font-size:11px;">${esc(tripsyFlyoverLicenseLabel(record.music.license))}</span>` : ''}` : '<span style="color:var(--muted);">No music</span>'}</span>
-        ${isOwner ? `<button class="btn" data-flyover-music style="font-size:12px;">${record.music ? 'Change music' : 'Choose music'}</button>` : ''}
+        ${isOwner ? `<button class="btn tfo-sqbtn" data-flyover-music aria-label="Music" title="The fly-over's music">${TRIPSY_FLYOVER_ICON_MUSIC}<span>Music</span></button>` : ''}
+        <button class="btn tfo-sqbtn" data-flyover-preview-all aria-label="Preview" title="Preview the whole fly-over, with the map">${TRIPSY_FLYOVER_ICON_PREVIEW}<span>Preview</span></button>
       </div>
       ${record.stops.map((s, i) => {
         const photos = s.photos || [];
@@ -20066,7 +20067,7 @@ async function showTripsyFlyover(tripKey) {
             ${photos.length ? `<button class="btn tfo-sqbtn${done.photos ? ' tfo-sqbtn--done' : ''}" data-flyover-edit-photos aria-label="Edit photos${done.photos ? ' (complete)' : ''}" title="Edit photos: see every photo for this destination and keep or delete each one">${TRIPSY_FLYOVER_ICON_EDIT_PHOTOS}<span>Edit</span></button>
             <button class="btn tfo-sqbtn${done.slideshow ? ' tfo-sqbtn--done' : ''}" data-flyover-slideshow aria-label="Edit slideshow${done.slideshow ? ' (complete)' : ''}" title="Edit slideshow: this destination's slideshow pages">${TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW}<span>Edit</span></button>` : ''}` : ''}
             <!-- Music from here, as a square tile right of Edit slideshow (2026-10-29). -->
-            <button class="btn tfo-sqbtn" data-flyover-stop-music aria-label="Change music" title="${esc(s.music ? `From here: ${tripsyFlyoverMusicLabel(s.music)}${s.music.license ? ` (${tripsyFlyoverLicenseLabel(s.music.license)})` : ''}` : (i === 0 ? 'The fly-over music plays here' : 'The music carries on from the stop before'))} — choose music for this destination onward">${TRIPSY_FLYOVER_ICON_MUSIC}<span>Change</span></button>${s.music ? `<span data-flyover-stop-music-name style="font-size:12px; color:var(--muted); max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(tripsyFlyoverMusicLabel(s.music))}">${esc(tripsyFlyoverMusicLabel(s.music))}</span>` : ''}
+            <button class="btn tfo-sqbtn" data-flyover-stop-music aria-label="Music" title="${esc(s.music ? `From here: ${tripsyFlyoverMusicLabel(s.music)}${s.music.license ? ` (${tripsyFlyoverLicenseLabel(s.music.license)})` : ''}` : (i === 0 ? 'The fly-over music plays here' : 'The music carries on from the stop before'))} — choose music for this destination onward">${TRIPSY_FLYOVER_ICON_MUSIC}<span>Music</span></button>${s.music ? `<span data-flyover-stop-music-name style="font-size:12px; color:var(--muted); max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(tripsyFlyoverMusicLabel(s.music))}">${esc(tripsyFlyoverMusicLabel(s.music))}</span>` : ''}
             <!-- Preview, right of Change music, as a square tile; the "N pages: …" summary line
                  that sat beside it is gone (2026-10-29). -->
             ${photos.length && tripsyFlyoverStopVisited(s, todayKey) ? `<button class="btn tfo-sqbtn" data-flyover-preview aria-label="Preview" title="Preview this destination's slideshow">${TRIPSY_FLYOVER_ICON_PREVIEW}<span>Preview</span></button>` : ''}
@@ -20084,6 +20085,15 @@ async function showTripsyFlyover(tripKey) {
         </div>`;
       }).join('')}`;
     tripsyDiaryPaintPhotos(body);
+    // Preview, right of Music ("Add a preview button to the right of the music button that
+    // shows a preview of the entire flyover with map," 2026-10-29): the whole journey on the
+    // map straight away -- no range or map-service questions -- started inside the tap so the
+    // music can play on iOS.
+    const previewAll = body.querySelector('[data-flyover-preview-all]');
+    if (previewAll) previewAll.onclick = () => {
+      if (!record || !tripsyFlyoverPlayableStops(record).length) { toast('There are no destinations on the map to play yet.', 'error'); return; }
+      playTripsyFlyover(trip, record, { ...playerHooks });
+    };
     if (!isOwner) return;
     const completeBtn = body.querySelector('[data-flyover-complete]');
     if (completeBtn) completeBtn.onclick = async () => {
@@ -20096,6 +20106,13 @@ async function showTripsyFlyover(tripKey) {
     };
     const musicBtn = body.querySelector('[data-flyover-music]');
     if (musicBtn) musicBtn.onclick = async () => {
+      // The Music page first (2026-10-29); Change opens the full picker.
+      const act = await tripsyFlyoverMusicInfoDialog({
+        heading: 'Fly-over music', playing: record.music || null, own: !!record.music, clearLabel: 'No music',
+        where: record.music ? 'Plays from the start of the fly-over, until a destination with music of its own.' : 'The fly-over plays without music.',
+      });
+      if (closed || !act) return;
+      if (act === 'clear') { record = { ...record, music: null }; save(); render(); return; }
       const m = await tripsyFlyoverMusicPicker(record.music || null);
       if (m === undefined || closed) return;
       record = { ...record, music: m };
@@ -20414,6 +20431,19 @@ async function showTripsyFlyover(tripKey) {
       const stopMusicBtn = card.querySelector('[data-flyover-stop-music]');
       if (stopMusicBtn) stopMusicBtn.onclick = async () => {
         const st = stop();
+        // The Music page first (2026-10-29): what plays here, then Change opens the picker.
+        const shown = record.stops.filter(x => !x.removed);
+        const idx = record.stops.indexOf(record.stops.find(x => x.id === id));
+        const playingHere = tripsyFlyoverMusicAtStop(record, record.stops, idx);
+        const place = st.label || 'this destination';
+        const act = await tripsyFlyoverMusicInfoDialog({
+          heading: `Music — ${place}`, playing: playingHere, own: !!st.music, clearLabel: 'Use the fly-over music',
+          where: st.music ? `Plays from ${place} onward, fading in from the track before.`
+            : playingHere ? (shown[0] && shown[0].id === id ? 'The fly-over music plays here.' : `No music of its own — this carries on from before ${place}.`)
+            : 'No music plays here.',
+        });
+        if (closed || !act) return;
+        if (act === 'clear') { updateStop(id, { music: undefined }); save(); render(); return; }
         const m = await tripsyFlyoverMusicPicker(st.music || null, { place: st.label || 'this destination', suggested: tripsyFlyoverMusicSuggest(st), stopMode: true });
         if (m === undefined || closed) return;
         if (m) { updateStop(id, { music: m }); tripsyFlyoverPrefetchMusic(m); }
@@ -22885,6 +22915,70 @@ async function tripsyFlyoverPrefetchMusic(music) {
     tripsyFlyoverMusicUrlCache.set(music.driveFileId, url);
     return url;
   } catch (e) { console.error('fly-over music download failed:', e); return null; }
+}
+// The Music tile's own page ("Change the change music button to a square icon that just
+// says music. When the user presses it, bring up a page that says what the current selection
+// is and has a description, and has three options: play current music, and change music. If
+// the user selects change, bring up the full music options," 2026-10-29). Shows the music in
+// force (`playing`: the stop's own, else what carries on from before) with title, artist,
+// licence and source, a sentence saying where it plays (`where`), and: ▶ Play current music
+// (the whole song, toggles to ■ Stop), 🎵 Change music, and -- only when there is music of
+// its own to remove -- `clearLabel` (No music / Use the fly-over music). Resolves 'change',
+// 'clear', or null (closed). Audio stops whenever it closes.
+function tripsyFlyoverMusicInfoDialog({ heading, playing = null, own = false, where = '', clearLabel = '' } = {}) {
+  return new Promise(resolve => {
+    let ov = document.getElementById('tripsy-flyover-music-info-overlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-music-info-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+    ov.style.zIndex = '2147483065';
+    const audio = new Audio();
+    let isPlaying = false;
+    const stop = () => { try { audio.pause(); } catch (e) {} isPlaying = false; };
+    const done = v => { stop(); audio.src = ''; ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
+    const setStatus = (t, err) => { const el = ov.querySelector('[data-mi-status]'); if (el) { el.textContent = t || ''; el.style.color = err ? '#E04B3A' : ''; } };
+    const render = () => {
+      const m = playing;
+      ov.innerHTML = `
+        <div class="tw-modal-paper" style="max-width:520px; width:100%;">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+            <h2 style="margin:0; font-size:17px; flex:1;">🎵 ${esc(heading || 'Music')}</h2>
+            <button class="tripsy-close-x" data-mi-close aria-label="Close">✕</button>
+          </div>
+          <div class="tfo-ss-label" style="margin:0 0 4px;">Current selection</div>
+          ${m ? `
+            <div data-mi-current style="font-size:16px; font-weight:700;">${esc(m.title || 'Untitled')}</div>
+            <div style="font-size:13px; color:var(--muted); margin-top:2px;">${esc([m.artist, m.source === 'drive' ? 'Your own song' : 'Internet Archive', m.license ? tripsyFlyoverLicenseLabel(m.license) : ''].filter(Boolean).join(' · '))}${m.page ? ` · <a href="${esc(m.page)}" target="_blank" rel="noopener" style="color:inherit; text-decoration:underline;">source</a>` : ''}</div>`
+          : `<div data-mi-current style="font-size:16px; font-weight:700; color:var(--muted);">No music</div>`}
+          ${where ? `<div data-mi-where style="font-size:13px; margin:10px 0 0;">${esc(where)}</div>` : ''}
+          <div data-mi-status style="font-size:12px; color:var(--muted); min-height:16px; margin:10px 0;"></div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            ${m ? `<button class="btn" data-mi-play style="font-weight:700;">${isPlaying ? '■ Stop' : '▶ Play current music'}</button>` : ''}
+            <button class="btn primary" data-mi-change>🎵 Change music</button>
+            ${own && clearLabel ? `<button class="btn" data-mi-clear>${esc(clearLabel)}</button>` : ''}
+          </div>
+        </div>`;
+      ov.querySelector('[data-mi-close]').onclick = () => done(null);
+      ov.querySelector('[data-mi-change]').onclick = () => done('change');
+      const clr = ov.querySelector('[data-mi-clear]');
+      if (clr) clr.onclick = () => done('clear');
+      const pl = ov.querySelector('[data-mi-play]');
+      if (pl) pl.onclick = () => {
+        if (isPlaying) { stop(); render(); setStatus(''); return; }
+        // Started inside the tap (iOS); an own song was downloaded when the page opened.
+        const src = tripsyFlyoverMusicSrcNow(m);
+        if (!src) { setStatus('That song is still loading — try again in a moment.', true); tripsyFlyoverPrefetchMusic(m); return; }
+        audio.src = src;
+        audio.onended = () => { isPlaying = false; render(); setStatus('Finished.'); };
+        isPlaying = true;
+        const p = audio.play();
+        if (p && p.catch) p.catch(() => { isPlaying = false; render(); setStatus('That song won’t play here right now.', true); });
+        render();
+        setStatus('Playing…');
+      };
+    };
+    render();
+    ov.style.display = 'flex';
+    ov.onclick = e => { if (e.target === ov) done(null); };
+  });
 }
 // Resolves the chosen music, null for "No music", or undefined when closed unchanged.
 // opts.place / opts.suggested / opts.stopMode: picking music for ONE destination (2026-10-24)

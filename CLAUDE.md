@@ -4247,7 +4247,29 @@ WebView's support for recording is unproven.
       a visit), track name beside it; the tile reads **Change** and its icon is a grey speaker
       cabinet with blue-centred cones and a gold note, drawn like the camera/projector icons
       ("Change the change music icon to say 'Change' and make the music icon look more like
-      the other icons on the page," same day). **Preview** is the next tile, right of Change
+      the other icons on the page," same day). **Both music buttons are now square tiles reading
+      "Music" and open a Music PAGE first** ("Change the change music button to a square icon
+      that just says music. When the user presses it, bring up a page that says what the
+      current selection is and has a description, and has three options: play current music,
+      and change music. If the user selects change, bring up the full music options,"
+      2026-10-29): the fly-over-wide `data-flyover-music` (formerly a "Change music"/"Choose
+      music" text button) and each card's `data-flyover-stop-music` call
+      `tripsyFlyoverMusicInfoDialog({heading, playing, own, where, clearLabel})` — the current
+      selection (title; artist · Internet Archive / Your own song · licence · source link; on a
+      card with no music of its own, the track carrying on there via
+      `tripsyFlyoverMusicAtStop`), a sentence on where it plays, and **▶ Play current music**
+      (the whole song, inside the tap; ■ Stop), **🎵 Change music** (resolves 'change' → the
+      caller opens the unchanged `tripsyFlyoverMusicPicker`), and — only when there is music of
+      its own to remove — **No music** / **Use the fly-over music** (resolves 'clear'). The ask
+      named three options but listed two; that third is my reading of it. Music stops when the
+      page closes. e2e scenario K. **A Preview tile sits right of the fly-over Music tile**
+      ("Add a preview button to the right of the music button that shows a preview of the
+      entire flyover with map," same day): `data-flyover-preview-all`, the same
+      `TRIPSY_FLYOVER_ICON_PREVIEW` picture, shown to every viewer, calling
+      `playTripsyFlyover(trip, record, {...playerHooks})` straight from the tap — the whole
+      journey on the map, with no range, single-destination or map-service question (▶ Play
+      still asks those), the map service picked automatically as View does. e2e scenario L
+      (records the call; the sandbox can't load Leaflet). On each card, **Preview** is the next tile, right of Change
       (`data-flyover-preview`, `TRIPSY_FLYOVER_ICON_PREVIEW`: a grey screen case and stand
       holding a picture of sky, hills and a sun; shown with photos on a visited stop), and the
       card's "🎞 N pages: … photos per page" summary line is gone ("Move the preview button …

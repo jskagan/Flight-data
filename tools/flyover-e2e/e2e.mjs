@@ -265,6 +265,45 @@ const fd = (p, expr) => p.evaluate(e => eval(e), expr);
   await p.close();
 }
 
+// ---- K: the Music tiles open a Music page first; Change opens the full picker -------------
+{
+  const p = await boot(`
+    window.Audio = function () { this.play = () => { window._played = this.src; return Promise.resolve(); }; this.pause = () => {}; };
+    const r = freshRecord({ music: { source: 'archive', url: 'https://x/a.mp3', title: 'Opening Song', artist: 'Band', license: 'http://creativecommons.org/licenses/by/4.0/', page: 'https://x' } });
+    r.stops[2].music = { source: 'archive', url: 'https://x/b.mp3', title: 'Beppu Song', artist: 'Trio' };
+    Store._r = r;`);
+  const label = async sel => p.evaluate(s => { const el = document.querySelector(s); return el ? el.textContent.trim() : null; }, sel);
+  check('K: both music buttons are square tiles that say Music', (await label('[data-flyover-music]')) === 'Music' && (await label('[data-flyover-stop="s1"] [data-flyover-stop-music]')) === 'Music');
+  await p.click('[data-flyover-stop="s1"] [data-flyover-stop-music]'); await tick(p, 200);
+  const txt = await p.evaluate(() => document.getElementById('tripsy-flyover-music-info-overlay').innerText);
+  check('K: a destination without its own music shows what carries on, with Play and Change and no remove', /Opening Song/.test(txt) && /carries on/.test(txt) && /Play current music/.test(txt) && /Change music/.test(txt) && !/Use the fly-over music/.test(txt));
+  await p.click('[data-mi-play]'); await tick(p, 100);
+  check('K: Play current music plays that track', (await p.evaluate(() => window._played)) === 'https://x/a.mp3' && /Stop/.test(await label('[data-mi-play]')));
+  await p.click('[data-mi-change]'); await tick(p, 200);
+  check('K: Change closes the Music page and brings up the full music picker', await p.evaluate(() => document.getElementById('tripsy-flyover-music-info-overlay').style.display === 'none'
+    && document.getElementById('tripsy-flyover-music-overlay').style.display !== 'none' && !!document.querySelector('[data-mu-genre]')));
+  await p.click('[data-mu-close]'); await tick(p, 200);
+  await p.click('[data-flyover-stop="s2"] [data-flyover-stop-music]'); await tick(p, 200);
+  check('K: a destination with its own music offers Use the fly-over music', /Beppu Song/.test(await p.evaluate(() => document.getElementById('tripsy-flyover-music-info-overlay').innerText)) && !!(await p.$('[data-mi-clear]')));
+  await p.click('[data-mi-clear]'); await tick(p, 1000);
+  check('K: …which removes its own track', !(await rec(p)).stops[2].music);
+  await p.close();
+}
+
+// ---- L: Preview beside Music plays the whole fly-over on the map, no questions asked -----------
+{
+  // The player needs Leaflet from a CDN the sandbox can't reach, so the call itself is recorded.
+  const p = await boot(`Store._r = freshRecord(); window.playTripsyFlyover = (trip, record, opts) => { window._playArgs = { stops: record.stops.length, opts: Object.keys(opts) }; };`);
+  const order = await p.evaluate(() => [...document.querySelector('[data-flyover-music]').parentElement.querySelectorAll('button')].map(b => b.getAttribute('aria-label')));
+  check('L: a Preview tile sits right after the Music tile', order[order.indexOf('Music') + 1] === 'Preview');
+  await p.click('[data-flyover-preview-all]'); await tick(p, 300);
+  const a = await p.evaluate(() => window._playArgs);
+  check('L: it plays the whole journey with the map at once -- no range, single-destination or map question',
+    !!a && a.stops === 4 && !a.opts.includes('previewStopId') && !a.opts.includes('range') && !a.opts.includes('mapService')
+    && (await p.evaluate(() => !document.getElementById('tripsy-flyover-range-overlay') && !document.getElementById('tripsy-flyover-map-choice-overlay'))));
+  await p.close();
+}
+
 await b.close();
 console.log(failures ? `\n${failures} FAILED` : '\nall scenarios passed');
 process.exit(failures ? 1 : 0);

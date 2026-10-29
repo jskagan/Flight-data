@@ -561,8 +561,32 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   // "Change Music from here button to say 'Change Music'" (2026-10-25).
   // Since 2026-10-29 it is a square tile right of Edit slideshow ("Make the change music
   // button into a square icon similar to the edit icons").
-  assert(/<button class="btn tfo-sqbtn" data-flyover-stop-music aria-label="Change music" [^>]*>\$\{TRIPSY_FLYOVER_ICON_MUSIC\}<span>Change<\/span><\/button>/.test(setup) && /data-flyover-stop-music-name/.test(setup),
-    'THE ASK: the destination music button is a square speaker tile labelled "Change" (2026-10-29); a destination\'s own track is named beside it');
+  assert(/<button class="btn tfo-sqbtn" data-flyover-stop-music aria-label="Music" [^>]*>\$\{TRIPSY_FLYOVER_ICON_MUSIC\}<span>Music<\/span><\/button>/.test(setup) && /data-flyover-stop-music-name/.test(setup),
+    'the destination music button is a square speaker tile labelled "Music" (2026-10-29); a destination\'s own track is named beside it');
+  // "Change the change music button to a square icon that just says music. When the user presses
+  // it, bring up a page that says what the current selection is and has a description, and has
+  // three options: play current music, and change music. If the user selects change, bring up
+  // the full music options" (2026-10-29).
+  assert(/<button class="btn tfo-sqbtn" data-flyover-music aria-label="Music"[^>]*>\$\{TRIPSY_FLYOVER_ICON_MUSIC\}<span>Music<\/span><\/button>/.test(setup) && !/'Change music' : 'Choose music'/.test(setup),
+    'THE ASK: the fly-over music button is a square tile that just says Music');
+  const mi = extractFn('tripsyFlyoverMusicInfoDialog');
+  assert(/Current selection/.test(mi) && /data-mi-current/.test(mi) && /data-mi-where/.test(mi) && /tripsyFlyoverLicenseLabel/.test(mi),
+    'THE ASK: the Music page names the current selection and describes it (artist, source, licence, where it plays)');
+  assert(/▶ Play current music/.test(mi) && /data-mi-change>🎵 Change music/.test(mi) && /own && clearLabel \? `<button class="btn" data-mi-clear>/.test(mi),
+    'THE ASK: Play current music and Change music, plus a remove option only when there is music of its own');
+  assert(/const src = tripsyFlyoverMusicSrcNow\(m\);[\s\S]{0,300}audio\.src = src;[\s\S]{0,200}audio\.play\(\)/.test(mi) && /const done = v => \{ stop\(\);/.test(mi),
+    'Play starts inside the tap, and the music stops whenever the page closes');
+  for (const btn of ['musicBtn', 'stopMusicBtn']) {
+    assert(new RegExp(`${btn}\\.onclick = async \\(\\) => \\{[\\s\\S]{0,900}await tripsyFlyoverMusicInfoDialog\\([\\s\\S]{0,900}if \\(closed \\|\\| !act\\) return;[\\s\\S]{0,200}const m = await tripsyFlyoverMusicPicker\\(`).test(setup),
+      `THE ASK: ${btn} opens the Music page first, and Change brings up the full music picker`);
+  }
+  // "Add a preview button to the right of the music button that shows a preview of the entire
+  // flyover with map" (2026-10-29)
+  assert(/data-flyover-music aria-label="Music"[^\n]*\n\s*<button class="btn tfo-sqbtn" data-flyover-preview-all aria-label="Preview"[^>]*>\$\{TRIPSY_FLYOVER_ICON_PREVIEW\}<span>Preview<\/span><\/button>/.test(setup),
+    'THE ASK: a Preview tile sits right of the fly-over Music tile');
+  assert(/previewAll\.onclick = \(\) => \{[\s\S]{0,250}playTripsyFlyover\(trip, record, \{ \.\.\.playerHooks \}\);\s*\};\s*if \(!isOwner\) return;/.test(setup),
+    'it plays the whole journey with the map at once (no previewStopId, no range or map question), for every viewer');
+  assert(/playingHere = tripsyFlyoverMusicAtStop\(record, record\.stops, idx\)/.test(setup), 'a destination with no music of its own shows the music carrying on there');
   // "When photos are Imported they should say 'No page'" (2026-10-25): the card, the Edit
   // photos page, and every add path.
   assert(/\{ \.\.\.s, \.\.\.tripsyFlyoverClearEditDoneOnAdd\(s, tripsyFlyoverFreezePagesOnAdd\(s, fields\)\) \}/.test(setup) && (setup.match(/updateStop\((id|stopId), \{ photos: \[\.\.\.\(stopNow\(\)\.photos \|\| \[\]\), rec\] \}\)/g) || []).length === 3,
