@@ -5331,7 +5331,28 @@ WebView's support for recording is unproven.
     `TRIPSY_FLYOVER_ROOT_ADOPT_MS` (3 h) after it is PATCHed into the inbox, renamed by
     `tripsyFlyoverRootUploadName` (leading space trimmed, extension from the type), BEFORE the
     inbox is listed, so the same tick counts them and the auto-import follows as before. The
-    Shortcut's own PATCH can stay or go; it no longer matters. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
+    Shortcut's own PATCH can stay or go; it no longer matters.
+    **The inbox lookup never makes a duplicate folder, and one empty listing never ends a
+    hand-off** ("I set the import to run, but it should be done," 2026-10-29 — ~40 Shortcut
+    photos sat un-imported: a single empty listing taken while the page was still moving them
+    in from My Drive showed "No new photos" (whose Close cancels the hand-off), and minutes later
+    a failed check of the remembered folder fell through to a name search that came back empty,
+    so a SECOND same-named, empty folder was created and remembered). `tripsyFlyoverInboxFolder`
+    now leaves the remembered folder only on a real 404 or `trashed` answer
+    (`tripsyFlyoverDriveErrorIsNotFound`) — any other failure throws; the name search sorts by
+    `createdTime` and the OLDEST wins (`tripsyFlyoverOldestFolderId`); and a create needs two
+    empty searches `TRIPSY_FLYOVER_INBOX_RECHECK_MS` (3 s) apart — the data file's rules. The
+    watcher's not-finished box now needs the folder seen empty on two checks
+    `TRIPSY_FLYOVER_SHORTCUT_EMPTY_RECHECK_MS` (30 s) apart with nothing moved in from root in
+    between (`tripsyFlyoverShortcutEmptyConfirmed`; a failed root sweep never confirms). The
+    duplicate folder from that day was trashed by hand. **Same day, the name search itself was
+    the culprit** — a `name='…'` query never returned the two-day-old folder, so a THIRD empty
+    folder was made. Same-named folders are now found by LISTING the app folder's subfolders and
+    matching the name client-side (`tripsyFlyoverSameNamedInboxFolders`), and
+    `tripsyFlyoverGatherStrayInboxFiles` (once per watch, and at the start of every import) moves
+    every photo/video from any OTHER same-named folder into the current inbox and trashes each
+    folder it fully emptied ("Do option 2"), so photos stranded by a duplicate are picked up
+    with no manual moves. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
     note in the slot) → nothing for 105 s → nudge → Run it again → nudge once more after the
     grace → a file lands → uploading → settled → auto-import, launch cleared. NOT verifiable
     here: that the Claude iPad WebView opens a `shortcuts://` link (Safari does), that

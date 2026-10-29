@@ -19547,8 +19547,15 @@ async function showTripsyFlyover(tripKey) {
       try {
         // A Shortcut launch pending: first pull its uploads out of My Drive's root, where they
         // land when the Shortcut's own move does not take (tripsyFlyoverAdoptRootUploads).
+        let adopted = 0;
+        // Once per watch: pull in anything stranded in another folder of the same name.
+        if (!inboxWatch.gathered) {
+          inboxWatch.gathered = true;
+          try { adopted += await tripsyFlyoverGatherStrayInboxFiles(trip, record.inboxFolderId); } catch (e) { console.warn('stray inbox sweep failed:', e); }
+          if (!inboxWatch || closed) return;
+        }
         if (record.shortcutLaunchedAt) {
-          try { await tripsyFlyoverAdoptRootUploads(record.inboxFolderId, record.shortcutLaunchedAt); } catch (e) { console.warn('root upload sweep failed:', e); }
+          try { adopted += await tripsyFlyoverAdoptRootUploads(record.inboxFolderId, record.shortcutLaunchedAt); } catch (e) { adopted = -1; console.warn('root upload sweep failed:', e); }
           if (!inboxWatch || closed) return;
         }
         const files = await tripsyFlyoverListInbox(record.inboxFolderId);
@@ -19589,8 +19596,16 @@ async function showTripsyFlyover(tripKey) {
         inboxWatch.count = fresh;
         inboxWatch.phase = tripsyFlyoverDrivePhase(inboxWatch.phase, r, fresh);
         paintDriveStatus();
+        // An EMPTY folder must be seen empty on two checks at least
+        // TRIPSY_FLYOVER_SHORTCUT_EMPTY_RECHECK_MS apart -- with no photo moved in from My Drive
+        // in between -- before the "No new photos" box (whose Close ends the hand-off) may show.
+        // On 2026-10-29 it showed on one empty listing taken while ~40 photos were still being
+        // moved into the folder, and closing it cancelled their import.
+        if (fresh || adopted) inboxWatch.emptySeenAt = 0;
+        else if (!inboxWatch.emptySeenAt) inboxWatch.emptySeenAt = Date.now();
+        const emptyConfirmed = !!fresh || tripsyFlyoverShortcutEmptyConfirmed(inboxWatch.emptySeenAt, Date.now(), adopted);
         if (inboxWatch.phase === 'complete' && runFinishUpload && !driveImportRunning && freshFiles.some(f => !autoImportTried.has(f.id))) runFinishUpload();
-        else if (!(inboxWatch.expected > 0) && record.shortcutLaunchedAt && record.shortcutNudgedFor !== record.shortcutLaunchedAt && tripsyFlyoverShortcutLooksIncomplete(Date.parse(record.shortcutLaunchedAt), Date.now(), fresh, newestMs)) {
+        else if (!(inboxWatch.expected > 0) && emptyConfirmed && record.shortcutLaunchedAt && record.shortcutNudgedFor !== record.shortcutLaunchedAt && tripsyFlyoverShortcutLooksIncomplete(Date.parse(record.shortcutLaunchedAt), Date.now(), fresh, newestMs)) {
           record = { ...record, shortcutNudgedFor: record.shortcutLaunchedAt };
           save();
           tripsyFlyoverShortcutIncompleteDialog({
@@ -19613,7 +19628,7 @@ async function showTripsyFlyover(tripKey) {
   };
   const startInboxWatch = () => {
     if (inboxWatch || closed || !isOwner || !record || !record.inboxPendingAt || !record.inboxFolderId) return;
-    inboxWatch = { timer: null, state: null, phase: 'waiting', count: 0, busy: false, expected: 0, markerId: '' };
+    inboxWatch = { timer: null, state: null, phase: 'waiting', count: 0, busy: false, expected: 0, markerId: '', emptySeenAt: 0, gathered: false };
     inboxWatchTick();
   };
   // Coming back from the Drive app: check the folder at once rather than on the next tick
@@ -20190,7 +20205,11 @@ async function showTripsyFlyover(tripKey) {
       if (driveImportRunning) { toast('An import from Drive is already running — see the status line at the top of the page.'); paintDriveStatus(); return; }
       setStatus('Checking the Drive folder…');
       let folderId, files;
-      try { folderId = await tripsyFlyoverInboxFolder(trip, record); files = await tripsyFlyoverListInbox(folderId); }
+      try {
+        folderId = await tripsyFlyoverInboxFolder(trip, record);
+        try { await tripsyFlyoverGatherStrayInboxFiles(trip, folderId); } catch (e) { console.warn('stray inbox sweep failed:', e); }
+        files = await tripsyFlyoverListInbox(folderId);
+      }
       catch (e) { console.error(e); setStatus(''); toast('Couldn’t read the Drive folder — check the connection and try again.', 'error'); return; }
       if (closed) return;
       if (folderId !== record.inboxFolderId) { record = { ...record, inboxFolderId: folderId }; save(); }
@@ -21025,21 +21044,46 @@ function tripsyFlyoverDriveNewFiles(files, record) {
 // named for the trip inside the app's own Drive folder (found by name, else created).
 // `create: false` only FINDS the folder (null when there is none), so a lookup made ahead of
 // the owner's choice never leaves an empty folder behind.
+const TRIPSY_FLYOVER_INBOX_RECHECK_MS = 3000;
+// A Drive error that means "this file does not exist" (driveApiFetch puts the status in the
+// message), as opposed to a failure that says nothing about the file.
+function tripsyFlyoverDriveErrorIsNotFound(e) {
+  return !!(e && e.reachedServer && /Drive API error 404\b/.test(String(e.message || '')));
+}
+// Several same-named folders: the OLDEST wins, so every device converges on the original.
+function tripsyFlyoverOldestFolderId(files) {
+  const list = (files || []).filter(f => f && f.id);
+  if (!list.length) return null;
+  list.sort((a, b) => String(a.createdTime || '') < String(b.createdTime || '') ? -1 : String(a.createdTime || '') > String(b.createdTime || '') ? 1 : 0);
+  return list[0].id;
+}
 async function tripsyFlyoverInboxFolder(trip, record, { create = true } = {}) {
-  const name = TRIPSY_FLYOVER_INBOX_PREFIX + String((trip && trip.name) || 'trip').replace(/['\\]/g, ' ').trim();
+  const name = tripsyFlyoverInboxFolderName(trip);
+  // The remembered folder is reused unless Drive says it is GONE (404, or in the trash). Any
+  // other failure -- a network blip, a 5xx, an expired sign-in -- throws instead of falling
+  // through to the name search: on 2026-10-29 a failed check here fell through, the search came
+  // back empty (Drive's search index is eventually consistent), and a second, empty folder of
+  // the same name was created and remembered while the photos sat in the first one.
   if (record && record.inboxFolderId) {
+    let j = null;
     try {
       const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${record.inboxFolderId}?fields=id,trashed`);
-      const j = await r.json();
-      if (j && j.id && !j.trashed) return j.id;
-    } catch (e) { /* fall through to the search */ }
+      j = await r.json();
+    } catch (e) {
+      if (!tripsyFlyoverDriveErrorIsNotFound(e)) throw e;
+    }
+    if (j && j.id && !j.trashed) return j.id;
   }
   const parent = await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
-  const q = encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='${name}' and '${parent}' in parents and trashed=false`);
-  const sr = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
-  const sj = await sr.json();
-  if (sj.files && sj.files.length) return sj.files[0].id;
+  const search = async () => tripsyFlyoverOldestFolderId(await tripsyFlyoverSameNamedInboxFolders(parent, name));
+  let found = await search();
+  if (found) return found;
   if (!create) return null;
+  // Only two agreeing empty answers create (the data file's rule): the index can return
+  // 200-with-nothing for a folder that exists.
+  await new Promise(r => setTimeout(r, TRIPSY_FLYOVER_INBOX_RECHECK_MS));
+  found = await search();
+  if (found) return found;
   const cr = await driveApiFetch('https://www.googleapis.com/drive/v3/files', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parent] }),
@@ -21047,6 +21091,53 @@ async function tripsyFlyoverInboxFolder(trip, record, { create = true } = {}) {
   const cj = await cr.json();
   if (!cj || !cj.id) throw new Error('Drive returned no folder id');
   return cj.id;
+}
+function tripsyFlyoverInboxFolderName(trip) {
+  return TRIPSY_FLYOVER_INBOX_PREFIX + String((trip && trip.name) || 'trip').replace(/['\\]/g, ' ').trim();
+}
+// Every folder of exactly this name directly inside the app folder. It LISTS the app folder's
+// subfolders and matches the name here, rather than asking Drive's search for the name: on
+// 2026-10-29 a `name='…'` search did not return a two-day-old inbox folder at all, twice, and
+// each miss created another empty folder of the same name.
+async function tripsyFlyoverSameNamedInboxFolders(parent, name) {
+  const out = [];
+  let pageToken = '';
+  do {
+    const q = encodeURIComponent(`'${parent}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+    const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=${encodeURIComponent('nextPageToken,files(id,name,createdTime)')}&pageSize=1000${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`);
+    const j = await r.json();
+    for (const f of ((j && j.files) || [])) if (f && f.id && f.name === name) out.push(f);
+    pageToken = (j && j.nextPageToken) || '';
+  } while (pageToken);
+  return out;
+}
+// The folders to empty into the current inbox: every other same-named folder (pure).
+function tripsyFlyoverStrayInboxFolders(folders, currentId) {
+  return (folders || []).filter(f => f && f.id && f.id !== currentId);
+}
+// Gathers the photos and videos from every OTHER same-named inbox folder into the current one,
+// then trashes each folder it emptied ("Do option 2," 2026-10-29: a second and third empty
+// folder had been made, the page watched the newest while ~40 photos sat in the first). Moves
+// only -- no bytes. A file that fails to move keeps its folder out of the trash. Returns how many
+// files were moved.
+async function tripsyFlyoverGatherStrayInboxFiles(trip, folderId) {
+  if (!folderId) return 0;
+  const parent = await findOrCreateDriveFolder(DRIVE_FOLDER_NAME);
+  const strays = tripsyFlyoverStrayInboxFolders(await tripsyFlyoverSameNamedInboxFolders(parent, tripsyFlyoverInboxFolderName(trip)), folderId);
+  let moved = 0;
+  for (const folder of strays) {
+    let files;
+    try { files = await tripsyFlyoverListInbox(folder.id); } catch (e) { console.warn('stray inbox listing failed:', e); continue; }
+    let failed = 0;
+    for (const f of files) {
+      try {
+        const m = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(f.id)}?addParents=${encodeURIComponent(folderId)}&removeParents=${encodeURIComponent(folder.id)}&fields=id`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (m.ok) moved++; else failed++;
+      } catch (e) { failed++; console.warn('stray inbox move failed:', e); }
+    }
+    if (!failed) { try { await tripsyFlyoverTrashDriveFile(folder.id); } catch (e) { console.warn('stray inbox trash failed:', e); } }
+  }
+  return moved;
 }
 // Every photo / video in the inbox folder, with the metadata the routing needs.
 async function tripsyFlyoverListInbox(folderId) {
@@ -21267,6 +21358,13 @@ async function tripsyFlyoverShortcutToken() {
 }
 function tripsyFlyoverShortcutUrl(input, name = TRIPSY_FLYOVER_SHORTCUT_NAME) {
   return `shortcuts://run-shortcut?name=${encodeURIComponent(name)}&input=text&text=${encodeURIComponent(input)}`;
+}
+const TRIPSY_FLYOVER_SHORTCUT_EMPTY_RECHECK_MS = 30000;
+// True once the folder was first seen empty at least the recheck time ago and this tick moved
+// nothing in from My Drive (a failed sweep, -1, says nothing either way, so it never confirms).
+function tripsyFlyoverShortcutEmptyConfirmed(emptySeenAt, nowMs, adopted, recheckMs = TRIPSY_FLYOVER_SHORTCUT_EMPTY_RECHECK_MS) {
+  if (adopted) return false;
+  return !!emptySeenAt && nowMs - emptySeenAt >= recheckMs;
 }
 function tripsyFlyoverShortcutLooksIncomplete(launchedMs, nowMs, count, newestMs, graceMs = TRIPSY_FLYOVER_SHORTCUT_GRACE_MS) {
   if (!isFinite(launchedMs) || nowMs - launchedMs < graceMs) return false;
