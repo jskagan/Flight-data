@@ -5352,7 +5352,11 @@ WebView's support for recording is unproven.
     `tripsyFlyoverGatherStrayInboxFiles` (once per watch, and at the start of every import) moves
     every photo/video from any OTHER same-named folder into the current inbox and trashes each
     folder it fully emptied ("Do option 2"), so photos stranded by a duplicate are picked up
-    with no manual moves. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
+    with no manual moves. **A stray folder is trashed only when it HELD files, every one moved, and a re-listing
+    shows it empty** (same day, later: the original folder, ~33 photos still inside, vanished
+    from every Drive search after the first gather ran — most likely trashed on a listing that
+    came back empty while the photos were still in it; an empty listing is no proof under an
+    eventually-consistent index). Drive's trash keeps it 30 days. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
     note in the slot) → nothing for 105 s → nudge → Run it again → nudge once more after the
     grace → a file lands → uploading → settled → auto-import, launch cleared. NOT verifiable
     here: that the Claude iPad WebView opens a `shortcuts://` link (Safari does), that
