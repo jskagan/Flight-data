@@ -2334,9 +2334,10 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(tripsyFlyoverDriveImportDest(dStops, { mimeType: 'video/quicktime', createdTime: '2026-10-18T01:00:00Z' }, 'auto') === null, 'with no card and no EXIF nothing is guessed from the upload time');
     assert(tripsyFlyoverDriveImportDest(dStops, { imageMediaMetadata: { time: '2026:09:01 10:00:00' } }, 'dn') === 'dn' && tripsyFlyoverDriveImportDest(dStops, { imageMediaMetadata: { time: '2026:09:01 10:00:00' } }, 'auto') === null, 'a dated photo fitting no destination takes the card\'s, else is left out');
     // The folder is temporary: videos moved out, folder trashed, only once everything landed.
-    assert(/if \(!closed && !failed && !unmatched && taken && folderId\) \{[\s\S]*await save\(\);\s*await tripsyFlyoverRetireInbox\(folderId, tripsyFlyoverRecordDriveIds\(record\)\);[\s\S]*record = \{ \.\.\.record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' \};/.test(setup)
+    assert(/const clean = !closed && !failed && !unmatched && taken && folderId;\s*if \(clean && await retireInbox\(folderId, taken\)\) return;\s*if \(!closed\) startInboxWatch\(\);/.test(setup)
+      && /retireInbox = async \(folderId, taken\) => \{[\s\S]*?await save\(\);\s*await tripsyFlyoverRetireInbox\(folderId, tripsyFlyoverRecordDriveIds\(record\)\);[\s\S]*?record = \{ \.\.\.record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' \};/.test(setup)
       && !/tripsyFlyoverWaitForUploads/.test(setup),
-      'THE ASK: after a clean import the folder is retired at once -- there is no upload left to wait for');
+      'THE ASK: after a clean import the folder is retired at once -- there is no upload left to wait for; a failed cleanup leaves the watcher on to retry it');
     const retire = extractFn('tripsyFlyoverRetireInbox');
     assert(/const inFolder = await tripsyFlyoverListInbox\(folderId\);\s*for \(const f of inFolder\) \{\s*if \(!keep\.has\(f\.id\)\) continue;/.test(retire) && /addParents=\$\{encodeURIComponent\(home\)\}&removeParents=\$\{encodeURIComponent\(folderId\)\}/.test(retire) && /JSON\.stringify\(\{ trashed: true \}\)/.test(retire),
       'every referenced file still in the folder is MOVED into the app folder first (the fly-over shows them by id; trashing a folder trashes its contents), then the inbox is trashed, not permanently deleted');
@@ -2452,7 +2453,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(/const onInboxVisibility = \(\) => \{ if \(document\.visibilityState === 'visible' && inboxWatch && !inboxWatch\.busy\) inboxWatchTick\(\); \};\s*document\.addEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'returning to the app checks the folder at once');
     assert(/const close = \(\) => \{[\s\S]{0,200}?closed = true;[^\n]*stopInboxWatch\(\); document\.removeEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'closing the page stops the watcher and drops its listener');
     assert(/save\(\); render\(\);\s*setStatus\(''\);\s*startInboxWatch\(\);/.test(setup) && /askMissingModes\(\);\s*startInboxWatch\(\);/.test(setup), 'the watcher starts on a hand-off and on opening a page with one pending');
-    assert(/driveImportRunning = true;\s*stopInboxWatch\(\);/.test(setup) && /inboxPendingAt: '' \};\s*inboxFolderKnown = '';\s*save\(\);\s*stopInboxWatch\(\);/.test(setup), 'an import stops the watcher, and clearing the hand-off ends it');
+    assert(/driveImportRunning = true;\s*stopInboxWatch\(\);/.test(setup) && /inboxPendingAt: '' \};\s*inboxFolderKnown = '';\s*stopInboxWatch\(\);\s*save\(\);/.test(setup), 'an import stops the watcher, and clearing the hand-off ends it');
     assert(/if \(inboxWatch \|\| closed \|\| !isOwner \|\| !record \|\| !record\.inboxPendingAt \|\| !record\.inboxFolderId\) return;/.test(setup), 'only the owner, with a pending hand-off, watches — and never twice');
     assert(/if \(prevRecord && prevRecord\.inboxPendingAt\) \{ rec\.inboxPendingAt = prevRecord\.inboxPendingAt; rec\.inboxDest = prevRecord\.inboxDest \|\| 'auto';/.test(html), 'a rebuild keeps a pending hand-off');
     const hand = extractFn('tripsyFlyoverDriveHandoffDialog');
@@ -2478,13 +2479,37 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       const e500 = Object.assign(new Error('Drive API error 500: oops'), { reachedServer: true });
       assert(tripsyFlyoverDriveErrorIsNotFound(e404) && !tripsyFlyoverDriveErrorIsNotFound(e500) && !tripsyFlyoverDriveErrorIsNotFound(new TypeError('Load failed')), 'only a 404 from Drive counts as gone');
       eval(['tripsyFlyoverStrayInboxFolders'].map(extractFn).join('\n'));
+      // 2026-10-29: a hand-off waiting on a deleted/trashed folder closes itself.
+      {
+        const fn = extractFn('tripsyFlyoverInboxFolderGone');
+        const mk = (impl) => new Function('driveApiFetch', 'tripsyFlyoverDriveErrorIsNotFound', fn + '; return tripsyFlyoverInboxFolderGone;')(impl, tripsyFlyoverDriveErrorIsNotFound);
+        const ok = j => async () => ({ json: async () => j });
+        const err = m => async () => { throw Object.assign(new Error(m), { reachedServer: true }); };
+        Promise.all([
+          mk(ok({ id: 'f', trashed: true }))('f'), mk(ok({ id: 'f', trashed: false }))('f'),
+          mk(err('Drive API error 404: nope'))('f'), mk(err('Drive API error 500: x'))('f'),
+          mk(async () => { throw new TypeError('Load failed'); })('f'), mk(ok({ trashed: true }))(''),
+        ]).then(r => assert(JSON.stringify(r) === '[true,false,true,false,false,false]', 'a folder is gone only on trashed:true or a 404; any other failure, or no id, is not evidence'));
+        const setupF = extractFn('showTripsyFlyover');
+        assert(/if \(!inboxWatch\.folderChecked\) \{\s*inboxWatch\.folderChecked = true;\s*if \(await tripsyFlyoverInboxFolderGone\(record\.inboxFolderId\)\) \{[\s\S]{0,120}record = \{ \.\.\.record, inboxFolderId: '' \};\s*cancelHandOff\(\);\s*return;/.test(setupF) && setupF.indexOf('inboxWatch.folderChecked = true') < setupF.indexOf('adopted += await tripsyFlyoverGatherStrayInboxFiles'), 'the watcher checks its folder first and closes the hand-off when it is gone');
+      }
       assert(JSON.stringify(tripsyFlyoverStrayInboxFolders([{ id: 'a' }, { id: 'cur' }, { id: 'b' }, null], 'cur').map(f => f.id)) === '["a","b"]', 'every OTHER same-named folder is a stray to empty');
       const same = extractFn('tripsyFlyoverSameNamedInboxFolders');
       assert(/'\$\{parent\}' in parents and mimeType='application\/vnd\.google-apps\.folder' and trashed=false/.test(same) && /f\.name === name/.test(same) && !/name='/.test(same), 'same-named folders are found by LISTING the app folder and matching the name here, not by a name search');
       const gather = extractFn('tripsyFlyoverGatherStrayInboxFiles');
       assert(/addParents=\$\{encodeURIComponent\(folderId\)\}&removeParents=\$\{encodeURIComponent\(folder\.id\)\}/.test(gather) && /if \(!files\.length \|\| failed\) continue;/.test(gather) && /left = await tripsyFlyoverListInbox\(folder\.id\)/.test(gather) && /if \(Array\.isArray\(left\) && !left\.length\) \{ try \{ await tripsyFlyoverTrashDriveFile\(folder\.id\)/.test(gather), 'stray photos are moved into the current inbox; a folder is trashed only when it held files, all moved, and a re-listing shows it empty');
       const setupG = extractFn('showTripsyFlyover');
-      assert(/if \(!inboxWatch\.gathered\) \{\s*inboxWatch\.gathered = true;\s*try \{ adopted \+= await tripsyFlyoverGatherStrayInboxFiles\(trip, record\.inboxFolderId\)/.test(setupG) && /folderId = await tripsyFlyoverInboxFolder\(trip, record\);\s*try \{ await tripsyFlyoverGatherStrayInboxFiles\(trip, folderId\)/.test(setupG), 'THE ASK: the watcher (once per watch) and the import both gather strays first');
+      assert(/try \{ adopted \+= await tripsyFlyoverGatherStrayInboxFiles\(trip, record\.inboxFolderId\)/.test(setupG) && !/inboxWatch\.gathered/.test(setupG) && /folderId = await tripsyFlyoverInboxFolder\(trip, record\);\s*try \{ await tripsyFlyoverGatherStrayInboxFiles\(trip, folderId\)/.test(setupG), 'THE ASK: the watcher (every tick, so a lagging listing is retried) and the import both gather strays first');
+      // 2026-10-29, after the live import: a failed cleanup is RETRIED by the watcher, two
+      // agreeing listings apart; a second import cannot start during a slow folder lookup; the
+      // retire never trashes a folder a fresh listing shows non-empty.
+      assert(/const fullyImported = !fresh && tripsyFlyoverInboxFullyImported\(files, record\);\s*const retireDue = fullyImported && inboxWatch\.lastIds === idsNow && !\(inboxWatch\.retireTriedAt && Date\.now\(\) - inboxWatch\.retireTriedAt < TRIPSY_FLYOVER_INBOX_SETTLE_MS\);/.test(setupG) && /if \(retireDue\) \{\s*inboxWatch\.retireTriedAt = Date\.now\(\);\s*if \(typeof retireInbox === 'function'\) await retireInbox\(record\.inboxFolderId, 0\);\s*return;/.test(setupG), 'the watcher retries a failed cleanup once two consecutive listings agree everything is imported');
+      assert(/runFinishUpload = async \(\) => \{\s*if \(driveImportRunning\) \{[^\n]*\n[\s\S]{0,300}?driveImportRunning = true; paintDriveStatus\(\);/.test(setupG), 'runFinishUpload claims the import flag before its folder lookups, so a tick meanwhile cannot start a second import');
+      const retire = extractFn('tripsyFlyoverRetireInbox');
+      assert(/const left = await tripsyFlyoverListInbox\(folderId\);\s*if \(left\.length\) throw new Error/.test(retire) && retire.indexOf('const left = await') < retire.indexOf('trashed: true'), 'the retire re-lists the folder and refuses to trash it while anything is still inside');
+      eval(['tripsyFlyoverInboxFullyImported', 'tripsyFlyoverRecordDriveIds'].map(extractFn).join('\n'));
+      const recF = { stops: [{ photos: [{ driveFileId: 'a' }, { driveFileId: 'v', posterId: 'pp' }] }] };
+      assert(tripsyFlyoverInboxFullyImported([{ id: 'a', mimeType: 'image/jpeg' }, { id: 'v', mimeType: 'video/mp4' }, { id: 'txt', mimeType: 'text/plain' }], recF) && !tripsyFlyoverInboxFullyImported([{ id: 'a', mimeType: 'image/jpeg' }, { id: 'b', mimeType: 'image/jpeg' }], recF) && !tripsyFlyoverInboxFullyImported([], recF) && !tripsyFlyoverInboxFullyImported([{ id: 'txt', mimeType: 'text/plain' }], recF), 'fully imported = every photo/video listed is on the record; an empty folder is never "fully imported"');
       assert(tripsyFlyoverOldestFolderId([{ id: 'new', createdTime: '2026-10-29T12:59:31Z' }, { id: 'old', createdTime: '2026-10-27T12:35:42Z' }]) === 'old' && tripsyFlyoverOldestFolderId([]) === null, 'with several same-named folders the oldest wins');
     }
     assert(/\{ onPickerInstead: openPicker, opened \}\)/.test(setup) && /opened \? 'The folder has been opened for you in the Drive app' : 'Open the folder'/.test(hand), 'the hand-off dialog says the folder was opened, keeping the link as a fallback');

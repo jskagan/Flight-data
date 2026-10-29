@@ -5356,7 +5356,30 @@ WebView's support for recording is unproven.
     shows it empty** (same day, later: the original folder, ~33 photos still inside, vanished
     from every Drive search after the first gather ran — most likely trashed on a listing that
     came back empty while the photos were still in it; an empty listing is no proof under an
-    eventually-consistent index). Drive's trash keeps it 30 days. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
+    eventually-consistent index). Drive's trash keeps it 30 days. **A hand-off whose folder is GONE closes itself**: once per watch, before the gather,
+    `tripsyFlyoverInboxFolderGone` (true only on `trashed: true` or a 404 — a network/5xx failure is
+    no evidence) and, when it is, the watcher clears `inboxFolderId` and runs `cancelHandOff`, so a
+    folder emptied and trashed outside the app (by hand, 2026-10-29, after its 47 photos were moved
+    into the app folder) never leaves the page on "Waiting for photos" forever. Correction to the
+    note above: those photos were NOT in the trash after all — a search that hides trashed files
+    still found them; only the folder search missed the folder.
+    **The whole import path was then read end to end and exercised in Chromium against a FAKE
+    DRIVE** ("Check the code to make sure the import really works and I never have to go
+    through this again," 2026-10-29) — `tools/flyover-e2e/` (`build.js` + `e2e.mjs`, nine
+    scenarios, see its README; not part of `run_all.js`, it needs Playwright). Four defects it
+    found, all fixed: **(1)** a cleanup that failed was never retried — the status said "the
+    next import will try again" but a next import only happens when NEW photos arrive, so the
+    hand-off sat on "Waiting for photos" forever (the live 40-photo import that afternoon):
+    `retireInbox` is now a page-level function shared by the import and the WATCHER, which runs it
+    whenever `tripsyFlyoverInboxFullyImported` holds on two consecutive agreeing listings
+    (`inboxWatch.lastIds`), backing off `TRIPSY_FLYOVER_INBOX_SETTLE_MS` between tries; **(2)**
+    `tripsyFlyoverRetireInbox` trusted one listing before trashing — it now re-lists after the
+    moves and throws while anything is still inside (a photo must never go to the trash with its
+    folder); **(3)** two imports could start if a folder lookup outlasted a 15 s tick —
+    `runFinishUpload` sets `driveImportRunning` on its first line; **(4)** the gather runs on
+    EVERY tick, so a listing that lagged once is retried rather than given up on for the watch.
+    The import's `finally` no longer restarts the watcher before the retire; it restarts it only
+    when the retire did not close the hand-off. Verified in Chromium: dialog → Run (link recorded, hand-off stamped,
     note in the slot) → nothing for 105 s → nudge → Run it again → nudge once more after the
     grace → a file lands → uploading → settled → auto-import, launch cleared. NOT verifiable
     here: that the Claude iPad WebView opens a `shortcuts://` link (Safari does), that

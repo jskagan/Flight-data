@@ -19494,6 +19494,7 @@ async function showTripsyFlyover(tripKey) {
   // dropped 2026-10-25) is the import, assigned by render and run by the slot's Import button.
   let inboxWatch = null; // { timer, state, phase, count, busy }
   let runFinishUpload = null;
+  let retireInbox = null; // assigned with runFinishUpload below; the watcher retries a failed cleanup through it
   // A settled folder is imported AUTOMATICALLY (2026-10-27 -- nothing in the import needs the
   // owner any more). Files an auto-run already tried are not tried again by a later tick (a
   // file that fits no destination's dates would otherwise re-import every two minutes); a new
@@ -19548,12 +19549,23 @@ async function showTripsyFlyover(tripKey) {
         // A Shortcut launch pending: first pull its uploads out of My Drive's root, where they
         // land when the Shortcut's own move does not take (tripsyFlyoverAdoptRootUploads).
         let adopted = 0;
-        // Once per watch: pull in anything stranded in another folder of the same name.
-        if (!inboxWatch.gathered) {
-          inboxWatch.gathered = true;
-          try { adopted += await tripsyFlyoverGatherStrayInboxFiles(trip, record.inboxFolderId); } catch (e) { console.warn('stray inbox sweep failed:', e); }
+        // Once per watch: a hand-off waiting on a folder that has been deleted or trashed can
+        // never complete, so it is closed here rather than showing "Waiting" forever (2026-10-29:
+        // the folder was emptied and trashed by hand after its photos were imported).
+        if (!inboxWatch.folderChecked) {
+          inboxWatch.folderChecked = true;
+          if (await tripsyFlyoverInboxFolderGone(record.inboxFolderId)) {
+            if (!inboxWatch || closed) return;
+            record = { ...record, inboxFolderId: '' };
+            cancelHandOff();
+            return;
+          }
           if (!inboxWatch || closed) return;
         }
+        // Every tick: pull in anything stranded in another folder of the same name (a listing
+        // that lagged on one tick is simply tried again on the next).
+        try { adopted += await tripsyFlyoverGatherStrayInboxFiles(trip, record.inboxFolderId); } catch (e) { console.warn('stray inbox sweep failed:', e); }
+        if (!inboxWatch || closed) return;
         if (record.shortcutLaunchedAt) {
           try { adopted += await tripsyFlyoverAdoptRootUploads(record.inboxFolderId, record.shortcutLaunchedAt); } catch (e) { adopted = -1; console.warn('root upload sweep failed:', e); }
           if (!inboxWatch || closed) return;
@@ -19586,6 +19598,18 @@ async function showTripsyFlyover(tripKey) {
         }
         const freshFiles = tripsyFlyoverDriveNewFiles(files, record);
         const fresh = freshFiles.length;
+        // Everything in the folder is already on the fly-over (an import whose cleanup failed,
+        // or finished after the page was closed): clear the folder now. Two consecutive
+        // listings must agree first -- a single listing can lag behind Drive (2026-10-29).
+        const idsNow = files.map(f => f.id).sort().join('\n');
+        const fullyImported = !fresh && tripsyFlyoverInboxFullyImported(files, record);
+        const retireDue = fullyImported && inboxWatch.lastIds === idsNow && !(inboxWatch.retireTriedAt && Date.now() - inboxWatch.retireTriedAt < TRIPSY_FLYOVER_INBOX_SETTLE_MS);
+        inboxWatch.lastIds = idsNow;
+        if (retireDue) {
+          inboxWatch.retireTriedAt = Date.now();
+          if (typeof retireInbox === 'function') await retireInbox(record.inboxFolderId, 0);
+          return;
+        }
         const times = freshFiles.map(f => Date.parse(f.createdTime || '')).filter(isFinite);
         if (marker) times.push(Date.parse(marker.modifiedTime || marker.createdTime || ''));
         const newestMs = times.filter(isFinite).length ? Math.max(...times.filter(isFinite)) : NaN;
@@ -19628,7 +19652,7 @@ async function showTripsyFlyover(tripKey) {
   };
   const startInboxWatch = () => {
     if (inboxWatch || closed || !isOwner || !record || !record.inboxPendingAt || !record.inboxFolderId) return;
-    inboxWatch = { timer: null, state: null, phase: 'waiting', count: 0, busy: false, expected: 0, markerId: '', emptySeenAt: 0, gathered: false };
+    inboxWatch = { timer: null, state: null, phase: 'waiting', count: 0, busy: false, expected: 0, markerId: '', emptySeenAt: 0, folderChecked: false, lastIds: null, retireTriedAt: 0 };
     inboxWatchTick();
   };
   // Coming back from the Drive app: check the folder at once rather than on the next tick
@@ -20201,8 +20225,37 @@ async function showTripsyFlyover(tripKey) {
     // Import from the inbox folder: everything new is imported straight away, by capture date
     // (the card the pick was started from is the fallback). Run by the status slot's Import
     // button ("Drop the finish upload button," 2026-10-25 -- there is no separate button).
+    // Retires the inbox once everything in it is on the fly-over: the referenced files move
+    // to the app folder and the (confirmed empty) folder is trashed, then the hand-off is
+    // closed. Returns false when it could not -- the hand-off stays pending and the WATCHER
+    // retries it (2026-10-29: a failed cleanup used to say "the next import will try again",
+    // but a next import only happens when NEW photos arrive, so the page sat on "Waiting for
+    // photos" forever).
+    retireInbox = async (folderId, taken) => {
+      try {
+        setStatus('Clearing the Drive folder…');
+        await save();
+        await tripsyFlyoverRetireInbox(folderId, tripsyFlyoverRecordDriveIds(record));
+        if (closed) { Store.saveTripsyFlyover({ ...(Store.getTripsyFlyover(trip.key) || record), inboxFolderId: '', inboxDest: '', inboxPendingAt: '' }); return true; }
+        record = { ...record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' };
+        inboxFolderKnown = '';
+        stopInboxWatch();
+        save();
+        render();
+        setStatus(taken ? `Imported ${taken} from Drive, and the Drive folder has been moved to the trash.` : 'Everything in the Drive folder was already on the fly-over — the folder has been moved to the trash.');
+        toast('Drive folder cleared — it is in Drive’s trash for 30 days.');
+        return true;
+      } catch (e) {
+        console.error('Drive inbox cleanup failed:', e);
+        if (!closed) setStatus(`${taken ? `Imported ${taken} from Drive. ` : ''}Couldn’t clear the Drive folder yet — it is kept, and this page keeps trying while it is open.`);
+        return false;
+      }
+    };
     runFinishUpload = async () => {
       if (driveImportRunning) { toast('An import from Drive is already running — see the status line at the top of the page.'); paintDriveStatus(); return; }
+      // Claimed from the first line: a watcher tick during the folder lookups below must not
+      // start a second import of the same files.
+      driveImportRunning = true; paintDriveStatus();
       setStatus('Checking the Drive folder…');
       let folderId, files;
       try {
@@ -20210,12 +20263,13 @@ async function showTripsyFlyover(tripKey) {
         try { await tripsyFlyoverGatherStrayInboxFiles(trip, folderId); } catch (e) { console.warn('stray inbox sweep failed:', e); }
         files = await tripsyFlyoverListInbox(folderId);
       }
-      catch (e) { console.error(e); setStatus(''); toast('Couldn’t read the Drive folder — check the connection and try again.', 'error'); return; }
-      if (closed) return;
+      catch (e) { console.error(e); driveImportRunning = false; setStatus(''); paintDriveStatus(); toast('Couldn’t read the Drive folder — check the connection and try again.', 'error'); return; }
+      if (closed) { driveImportRunning = false; return; }
       if (folderId !== record.inboxFolderId) { record = { ...record, inboxFolderId: folderId }; save(); }
       const fresh = tripsyFlyoverDriveNewFiles(files, record);
       setStatus('');
       if (!fresh.length) {
+        driveImportRunning = false; paintDriveStatus();
         tripsyFlyoverDriveHandoffDialog(tripsyFlyoverDriveFolderUrl(folderId), TRIPSY_FLYOVER_INBOX_PREFIX + ((trip && trip.name) || 'trip'), { note: files.length ? `Everything in the folder (${files.length}) is already on the fly-over.` : 'Nothing has arrived in the folder yet — upload the photos and videos with the Google Drive app first; the fly-over page will say when they are in.' });
         return;
       }
@@ -20273,9 +20327,6 @@ async function showTripsyFlyover(tripKey) {
           const msg = `Imported ${taken} from Drive${dupes ? `, ${dupes} already here` : ''}${unmatched ? `, ${unmatched} fell in no destination’s dates` : ''}${failed ? `, ${failed} failed (press Import again to retry)` : ''}.`;
           setStatus(msg);
           toast(msg, failed && !taken ? 'error' : undefined);
-          // An import that left the hand-off pending (something failed or fell outside every
-          // destination's dates) keeps watching the folder for the next batch.
-          startInboxWatch();
         }
       }
       // The folder is temporary ("make sure to delete the temporary drive folder after the
@@ -20283,24 +20334,12 @@ async function showTripsyFlyover(tripKey) {
       // nothing left unmatched -- every file the record refers to (the in-place photos and
       // videos, shown from their Drive id) is MOVED out into the app's own folder and the
       // inbox is trashed. Metadata moves only, so this takes seconds -- there is no upload
-      // left to wait for (2026-10-27).
-      if (!closed && !failed && !unmatched && taken && folderId) {
-        try {
-          setStatus('Clearing the Drive folder…');
-          await save();
-          await tripsyFlyoverRetireInbox(folderId, tripsyFlyoverRecordDriveIds(record));
-          record = { ...record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' };
-          inboxFolderKnown = '';
-          save();
-          stopInboxWatch();
-          if (!closed) render();
-          setStatus(`Imported ${taken} from Drive, and the Drive folder has been moved to the trash.`);
-          toast('Drive folder cleared — it is in Drive’s trash for 30 days.');
-        } catch (e) {
-          console.error('Drive inbox cleanup failed:', e);
-          setStatus(`Imported ${taken} from Drive. Couldn’t clear the Drive folder — it is kept; the next import will try again.`);
-        }
-      }
+      // left to wait for (2026-10-27). An import that left the hand-off pending (something
+      // failed, fell outside every destination's dates, or the cleanup itself failed) keeps
+      // watching the folder: the watcher imports the next batch and retries the cleanup.
+      const clean = !closed && !failed && !unmatched && taken && folderId;
+      if (clean && await retireInbox(folderId, taken)) return;
+      if (!closed) startInboxWatch();
     };
     // Edit destinations: a draft list to rename / move / add / remove / rebuild, applied on
     // its Save only (the old Rebuild button rebuilt and saved in one go).
@@ -21092,6 +21131,18 @@ async function tripsyFlyoverInboxFolder(trip, record, { create = true } = {}) {
   if (!cj || !cj.id) throw new Error('Drive returned no folder id');
   return cj.id;
 }
+// True only when Drive SAYS the folder is gone: a 404, or it is in the trash. Any other failure
+// (network, 5xx, expired sign-in) is no evidence either way and answers false.
+async function tripsyFlyoverInboxFolderGone(folderId) {
+  if (!folderId) return false;
+  try {
+    const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}?fields=id,trashed`);
+    const j = await r.json();
+    return !!(j && j.trashed);
+  } catch (e) {
+    return tripsyFlyoverDriveErrorIsNotFound(e);
+  }
+}
 function tripsyFlyoverInboxFolderName(trip) {
   return TRIPSY_FLYOVER_INBOX_PREFIX + String((trip && trip.name) || 'trip').replace(/['\\]/g, ' ').trim();
 }
@@ -21221,9 +21272,23 @@ async function tripsyFlyoverRetireInbox(folderId, keepIds) {
     const r = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(f.id)}?addParents=${encodeURIComponent(home)}&removeParents=${encodeURIComponent(folderId)}&fields=id,parents`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     if (!r.ok) throw new Error(`could not move ${f.name || f.id} out of the inbox`);
   }
+  // Trashed only once a FRESH listing shows it empty: a file still inside (one that arrived
+  // during the import, one the record does not refer to, or one a lagging listing still shows
+  // there) keeps the folder, and the caller retries later. Trashing a folder trashes its
+  // contents -- the one thing this must never do to a photo (2026-10-29).
+  const left = await tripsyFlyoverListInbox(folderId);
+  if (left.length) throw new Error(`${left.length} file${left.length === 1 ? '' : 's'} still in the inbox folder`);
   const t = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) });
   if (!t.ok) throw new Error('could not trash the inbox folder');
   return true;
+}
+// Every photo/video in the listing is already on the record (pure). False for an empty
+// listing: an empty folder is a hand-off still waiting for its upload, not a finished one.
+function tripsyFlyoverInboxFullyImported(files, record) {
+  const media = (files || []).filter(f => f && f.id && /^(image|video)\//i.test(f.mimeType || ''));
+  if (!media.length) return false;
+  const ids = tripsyFlyoverRecordDriveIds(record);
+  return media.every(f => ids.has(f.id));
 }
 function tripsyFlyoverDriveFolderUrl(folderId) { return `https://drive.google.com/drive/folders/${encodeURIComponent(folderId)}`; }
 // The source question in front of a pick ("automatically route that to drive if the number
