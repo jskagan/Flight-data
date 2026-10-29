@@ -4129,7 +4129,14 @@ WebView's support for recording is unproven.
     settled zoom (10 for a stay, 9 otherwise, `animate:false`), puts up its dot, name and card,
     waits for the tiles, and goes directly into `slideshow` with the veil raised instantly (a stop
     with no pictures just holds the card); the ↺ Replay does the same. Sampled in Chromium every
-    50 ms: no zoom animation and no burst at any point before the first page. `tripsyFlyoverCarryOver` keeps `pages` and `slideshow` across Rebuild
+    50 ms: no zoom animation and no burst at any point before the first page.
+    **Superseded 2026-10-29: a preview is the SLIDESHOW ALONE** ("There preview should only show
+    the slideshow, and nothing related to the map"): the player gets class `tfo-preview`, whose
+    CSS hides `.tfo-map` and keeps `.tfo-veil` opaque (so nothing of the map shows between pages
+    or after the last), the preview branch sets no view, dot, name, card or tiles and goes
+    straight into `slideshow`, it never asks for a Google tile session, and only the closing
+    "Preview finished — press ↺" note appears on the card. Verified in Chromium: map hidden
+    throughout, no dots/labels, zero tile requests. `tripsyFlyoverCarryOver` keeps `pages` and `slideshow` across Rebuild
     (it used to drop `slideshow`).
     - **Every photo shows in the SAME 4:3 frame, cropped to fill it** ("Keep all photos the
       same size on the flyover," 2026-10-21; the owner chose "same frame on every page" over
@@ -4239,7 +4246,12 @@ WebView's support for recording is unproven.
       a visit), track name beside it; the tile reads **Change** and its icon is a grey speaker
       cabinet with blue-centred cones and a gold note, drawn like the camera/projector icons
       ("Change the change music icon to say 'Change' and make the music icon look more like
-      the other icons on the page," same day). This supersedes the line-2 drop-down / "🎵 Change Music" /
+      the other icons on the page," same day). **Preview** is the next tile, right of Change
+      (`data-flyover-preview`, `TRIPSY_FLYOVER_ICON_PREVIEW`: a grey screen case and stand
+      holding a picture of sky, hills and a sun; shown with photos on a visited stop), and the
+      card's "🎞 N pages: … photos per page" summary line is gone ("Move the preview button …
+      to the right of the change music icon … like an image projected on a screen. Delete the
+      line about how many pages and pictures on each page," same day). This supersedes the line-2 drop-down / "🎵 Change Music" /
       "Delete destination" notes above. **The name is edited IN the title** ("Turn the location
       title into a button with editable text … delete the text box on the next line … Include a
       revert option," same day): for the owner the title is a `.tfo-title-input` (same
@@ -4587,6 +4599,21 @@ WebView's support for recording is unproven.
   only its top ✕ — no ✓, no footer. Every change already saves as made; `close` (the ✕ and a
   tap outside) first blurs a field still being edited so its `change` commits the typed name.
   The Edit destinations and Slideshow options dialogs keep their ✕ / ✓ pairs (they edit drafts).
+  **The page's top line is just four square tool tiles** (same day: "Remove the line about when
+  the last import. Delete the line about how many destinations on the map. Change the four icons
+  at the end of that line into ones in the same style as the others on that page. Remove the line
+  about the trip being over"): `data-flyover-tools` holds **Places** (Edit destinations, a folded
+  map with a red pin), **Photos** (Add trip photos, a photo stack with a plus), **Upload** (the
+  Shortcut; its icon is a calendar with the photo tiles' camera in front, "Make the upload icon a
+  combination of a camera and a calendar," same day — it was a phone sending up to a cloud; still not on a phone) and **Complete** (a finish flag;
+  disabled until the trip is over, a green-shaded "Done" tile once completed), all `.tfo-sqbtn`
+  with `TRIPSY_FLYOVER_ICON_DESTINATIONS`/`_TRIP_PHOTOS`/`_UPLOAD`/`_COMPLETE`, then the Drive
+  status slot. The Shortcut and Complete tiles read **Get New Photos** and **Fly-Over Done**
+  (both states) since the same day ("Change text of Upload to Get New Photos and complete to
+  Fly-Over Done"), as wider `.tfo-sqbtn--wide` tiles; the top row stretches its tiles to one
+  height so the two-line labels never squeeze an icon. The "N destinations on the map" sentence, the trip-isn't-over note and the
+  `data-flyover-intake` last-import receipt line are gone (`paintIntake` finds no element and
+  does nothing; the receipt log itself is still written).
 - **The setup page and both editing dialogs are WIDE, and pages reorder by dragging the
   thumbnails on the setup page itself** ("Make the pages for creating and editing the flyover
   view much wider. Also, allow the user to edit the order of pages from the flyover page by

@@ -496,15 +496,25 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   // "remove any zoom in or zoom out on the screen before showing the preview" (2026-10-22):
   // the map is SET on the destination (no flyTo, no arrive/burst) and the pictures start.
   const pv = (player.match(/if \(preview\) \{[\s\S]*?\n      return;\n    \}/) || [''])[0];
-  assert(/map\.setView\(\[s\.lat, s\.lng\], s\.kind === 'stay' \? 10 : 9, \{ animate: false \}\);/.test(pv) && /ensureDot\(s\);\s*showDestLabel\(s\);\s*showCard\(s\.label, stopSub\(s, 0\)\);/.test(pv)
-    && /if \(tripsyFlyoverPages\(s\)\.length\) \{[\s\S]*veilEl\.classList\.add\('tfo-show'\);[\s\S]*await slideshow\(r, s\)/.test(pv)
-    && !/arrive\(/.test(pv) && !/flyTo/.test(pv) && !/startBurst/.test(pv),
-    'a preview sets the map straight on the destination and plays its pictures with no zoom in, zoom out or burst');
+  // "There preview should only show the slideshow, and nothing related to the map" (2026-10-29).
+  assert(/veilEl\.classList\.add\('tfo-show'\);[\s\S]*await slideshow\(r, s\)/.test(pv)
+    && !/setView|ensureDot|showDestLabel|untilTilesLoaded|stopSub/.test(pv) && !/arrive\(/.test(pv) && !/flyTo/.test(pv) && !/startBurst/.test(pv),
+    'THE ASK: a preview plays the slideshow alone — no map view, dot, name, card or tiles, no zoom or burst');
+  assert(/if \(preview\) ov\.classList\.add\('tfo-preview'\);/.test(player) && /#tripsy-flyover-player\.tfo-preview \.tfo-map \{ visibility: hidden; \}/.test(html) && /#tripsy-flyover-player\.tfo-preview \.tfo-veil \{ opacity: 1;/.test(html),
+    'the preview player hides the map and keeps the dark backdrop opaque, even between and after pages');
+  assert(/const googleTilesP = \(opts\.mapService === 'free' \|\| preview\) \? Promise\.resolve\(null\)/.test(player), 'a preview never asks Google for a tile session');
   for (const k of ['slide', 'zoom', 'none']) assert(html.includes(`.tfo-group[data-tr="${k}"]`), `the ${k} transition has its CSS`);
   for (const k of ['pair', 'grid', 'collage']) assert(html.includes(`.tfo-group[data-layout="${k}"]`), `the ${k} layout has its CSS`);
   const setup = extractFn('showTripsyFlyover');
-  assert(/data-flyover-slideshow/.test(setup) && /data-flyover-preview/.test(setup) && /tripsyFlyoverSlideshowSummary\(s\)/.test(setup),
-    'each destination shows how its photos play, with Edit slideshow and Preview buttons');
+  // 2026-10-29: "Move the preview button for each destination to the right of the change music
+  // icon … in the same style as the other icons … like an image projected on a screen. Delete
+  // the line about how many pages and pictures on each page."
+  const btnRow = (/<div data-flyover-photo-buttons[^>]*>([\s\S]*?)<\/div>` : ''\}/.exec(setup) || [])[1] || '';
+  assert(/data-flyover-slideshow/.test(setup) && btnRow.indexOf('data-flyover-stop-music') > 0 && btnRow.indexOf('data-flyover-preview') > btnRow.indexOf('data-flyover-stop-music'),
+    'THE ASK: Preview sits right of the Change music tile on the photo-buttons line');
+  assert(/<button class="btn tfo-sqbtn" data-flyover-preview aria-label="Preview"[^>]*>\$\{TRIPSY_FLYOVER_ICON_PREVIEW\}<span>Preview<\/span><\/button>/.test(setup) && /tfoScrSky/.test(html),
+    'THE ASK: Preview is a square tile with a picture-on-a-screen icon');
+  assert(!/tripsyFlyoverSlideshowSummary\(s\)/.test(setup), 'THE ASK: the "N pages: … photos per page" line is gone from the card');
   // "Change the name of the slideshow options button to edit slideshow" (2026-10-22); its place
   // beside the transport drop-down was superseded by the photo-buttons line (2026-10-25, below).
   assert(/data-flyover-slideshow aria-label="Edit slideshow\$\{/.test(setup) && !/Slideshow options<\/button>/.test(setup), 'the slideshow button is named "Edit slideshow"');
@@ -1873,7 +1883,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   ok(/data-map-choice-cancel\]'\)\.onclick = close;/.test(dlg), 'Cancel plays nothing');
   ok(/\[data-flyover-play\]'\)\.onclick = \(\) => \{[\s\S]*?tripsyFlyoverRangeDialog\(record, range => \{[\s\S]*?tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, /.test(html2),
     'the setup page\'s Play asks whole-or-part, then which map, before playing');
-  ok(/const googleTilesP = opts\.mapService === 'free' \? Promise\.resolve\(null\) : Promise\.race\(\[/.test(html2),
+  ok(/const googleTilesP = \(opts\.mapService === 'free' \|\| preview\) \? Promise\.resolve\(null\) : Promise\.race\(\[/.test(html2),
     'the free map never asks Google for a tile session');
 }
 {
@@ -2174,7 +2184,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       eval(extractFn('tripsyFlyoverDriveStatusHtml'));
       const st = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x', true);
       // "We should remove this option when viewing on an iPhone" (2026-10-29): uploads run from the iPad, whose Photos library already holds the iPhone's photos.
-      assert(/\$\{tripsyIsPhoneDevice\(\) \? '' : `<button class="btn" data-flyover-shortcut /.test(extractFn('showTripsyFlyover')), 'the Upload new photos button is not offered on a phone');
+      assert(/\$\{tripsyIsPhoneDevice\(\) \? '' : `<button class="btn tfo-sqbtn tfo-sqbtn--wide" data-flyover-shortcut /.test(extractFn('showTripsyFlyover')), 'the Upload new photos button is not offered on a phone');
       assert(/data-flyover-shortcut-note/.test(st) && /Keep Shortcuts in front until it says Done/.test(st) && !/data-flyover-shortcut-note/.test(tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x')), 'the status slot repeats the reminder while a Shortcut launch is watched');
       assert(/if \(prevRecord\.shortcutLaunchedAt\) rec\.shortcutLaunchedAt = prevRecord\.shortcutLaunchedAt; if \(prevRecord\.shortcutNudgedFor\) rec\.shortcutNudgedFor = prevRecord\.shortcutNudgedFor;/.test(html), 'a rebuild keeps a pending launch, and the nudge already shown for it');
       assert(/const staged = Store\.stageTripsyFlyover\(record\);\s*if \(!staged\) \{ adoptLiveRecord\(\); return Promise\.resolve\(false\); \}\s*record = staged;/.test(extractFn('showTripsyFlyover')) && /if \(Store\.takeStaleFlyover\(trip\.key\)\) adoptLiveRecord\(\);/.test(extractFn('showTripsyFlyover')),
@@ -2516,5 +2526,24 @@ eval(extractFn('tripsyFlyoverClearEditDoneOnAdd'));
   }
   assert(/close\('complete'\)/.test(ep) && /complete: true/.test(ss), 'Complete returns to the fly-over page reporting completion');
   assert(/editDone: \{ \.\.\.p\.editDone \}/.test(extractFn('tripsyFlyoverCarryOver')), 'a rebuild keeps the marks');
+}
+
+// ---- the setup page's top line (2026-10-29: "Remove the line about when the last import.
+// Delete the line about how many destinations on the map. Change the four icons at the end of
+// that line into ones in the same style as the others on that page. Remove the line about the
+// trip being over.") ----
+{
+  const setup = extractFn('showTripsyFlyover');
+  assert(!/<div data-flyover-intake/.test(setup), 'THE ASK: no last-import receipt line on the page');
+  assert(!/destination\$\{playable === 1/.test(setup) && !/on the map\.\$\{isOwner/.test(setup), 'THE ASK: no "N destinations on the map" line');
+  assert(!/The trip isn’t over yet/.test(setup), 'THE ASK: no "trip isn’t over yet" line');
+  const tools = (/<div data-flyover-tools[^>]*>([\s\S]*?)<\/div>` : ''\}/.exec(setup) || [])[1] || '';
+  for (const [attr, icon, word] of [['data-flyover-edit-dests', 'DESTINATIONS', 'Places'], ['data-flyover-add-trip-photos', 'TRIP_PHOTOS', 'Photos'], ['data-flyover-shortcut', 'UPLOAD', 'Get New Photos']]) {
+    assert(new RegExp(`<button class="btn tfo-sqbtn(?: tfo-sqbtn--wide)?" ${attr} [^>]*>\\$\\{TRIPSY_FLYOVER_ICON_${icon}\\}<span>${word}</span></button>`).test(tools), `THE ASK: ${attr} is a square icon tile reading "${word}"`);
+  }
+  assert(/<button class="btn tfo-sqbtn tfo-sqbtn--wide" data-flyover-complete \$\{tripOver \? '' : 'disabled'\}[^>]*>\$\{TRIPSY_FLYOVER_ICON_COMPLETE\}<span>Fly-Over Done<\/span>/.test(setup)
+    && /tfo-sqbtn--wide tfo-sqbtn--done" disabled aria-label="Fly-over completed"[^>]*>\$\{TRIPSY_FLYOVER_ICON_COMPLETE\}<span>Fly-Over Done<\/span>/.test(setup) && tools.includes('${completeHtml}'),
+    'THE ASK: Complete is a square finish-flag tile on the same line, disabled until the trip is over and shaded green once done');
+  for (const k of ['DESTINATIONS', 'TRIP_PHOTOS', 'UPLOAD', 'COMPLETE']) assert(new RegExp(`const TRIPSY_FLYOVER_ICON_${k} = '<svg viewBox="0 0 32 32"`).test(html), `the ${k} icon is a 32×32 SVG like the others`);
 }
 
