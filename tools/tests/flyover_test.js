@@ -824,7 +824,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(/How many pictures on page/.test(dlg) && /data-ss-count/.test(dlg) && /data-ss-photo/.test(dlg) && /Transition to page \$\{cur \+ 2\}/.test(dlg)
     && /data-ss-seconds/.test(dlg) && /data-ss-next/.test(dlg) && /data-ss-prev/.test(dlg) && /data-ss-preview/.test(dlg),
     'THE ASK: page by page -- how many pictures, which ones, the transition to the next page and the time on screen');
-  assert(/done\(\{ pages: cleaned\(\), photos \}\)/.test(dlg) && /data-ss-cancel[\s\S]*done\(null\)/.test(dlg), 'Save returns the pages, Cancel changes nothing');
+  assert(/done\(\{ pages: cleaned\(\), photos \}\)/.test(dlg) && !/done\(null\)/.test(dlg), 'closing returns the pages; there is no Cancel that throws changes away');
   assert(/slideshow: \{ \.\.\.p\.slideshow \}/.test(extractFn('tripsyFlyoverCarryOver')) && /pages: p\.pages\.map/.test(extractFn('tripsyFlyoverCarryOver')),
     'rebuilding the destinations keeps each one\'s pages and settings');
   const setup = extractFn('showTripsyFlyover');
@@ -1160,13 +1160,23 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
 // no way to save the changes," 2026-10-21 — Save sat below the fold on a phone/iPad) ----
 {
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
-  assert(/<div class="tfo-ss-footer">[\s\S]*data-ss-cancel[\s\S]*data-ss-save/.test(dlg), 'THE ASK: Save and Cancel sit in the pinned footer');
+  assert(/<div class="tfo-ss-footer">[\s\S]*data-ss-complete/.test(dlg), 'the footer (page buttons, Working / Complete) is pinned');
   assert(/\.tfo-ss-footer \{ position: sticky; bottom: 0;/.test(html) && /background: var\(--panel\)/.test((html.match(/\.tfo-ss-footer \{[^}]*\}/) || [''])[0]),
     'the footer is pinned to the bottom of the box and opaque, so it stays on screen while the photos scroll under it');
-  assert(/class="tripsy-close-x tripsy-save-check" data-ss-save data-ss-save-top[^>]*>✓<\/button>\s*<button class="tripsy-close-x" data-ss-cancel/.test(dlg),
-    'THE ASK (2026-10-21): a green ✓ Save box, styled like the ✕, sits next to it at the top');
-  assert(/\.tripsy-close-x\.tripsy-save-check \{ border-color: #3AA76D; color: #3AA76D; \}/.test(html), 'the ✓ box is the ✕ box in green');
-  assert(/querySelectorAll\('\[data-ss-save\]'\)\.forEach/.test(dlg), 'both Save buttons save');
+  // Superseded 2026-10-29: "Remove the red x and green check from the slideshow edit pages save
+  // everything immediately."
+  assert(!/data-ss-save/.test(dlg) && !/data-ss-cancel/.test(dlg) && !/tripsy-save-check/.test(dlg),
+    'THE ASK: no ✓ Save and no ✕ Cancel on the slideshow edit page');
+  assert((dlg.match(/class="tripsy-close-x"/g) || []).length === 1 && /data-ss-close title="Close — every change is already saved"/.test(dlg),
+    'only the top-corner ✕ is left, and it just closes');
+  assert(/const render = \(\) => \{\s*emitChange\(\);/.test(dlg) && /if \(key === lastSent\) return;\s*lastSent = key;\s*onChange\(now\);/.test(dlg),
+    'every change (each repaint follows one) is handed to onChange once');
+  const ssOpen = extractFn('showTripsyFlyover');
+  assert(/onChange: ch => \{\s*apply\(ch\);[\s\S]{0,200}setTimeout\(\(\) => \{ pendingSave = null; save\(\); if \(!closed\) render\(\); \}, TRIPSY_FLYOVER_SLIDESHOW_SAVE_DEBOUNCE_MS\)/.test(ssOpen)
+    && /if \(pendingSave\) \{ clearTimeout\(pendingSave\); pendingSave = null; \}\s*if \(r\) apply\(r\);[\s\S]{0,120}else \{ save\(\); if \(!closed\) render\(\); \}/.test(ssOpen),
+    'the page applies each change at once, writes Drive a moment after the last tap, and writes again on close');
+  assert(/const photos = \[\.\.\.r\.photos, \.\.\.\(cur\.photos \|\| \[\]\)\.filter\(p => !known\.has\(p\.driveFileId\)\)\];/.test(ssOpen),
+    'a photo added to the destination meanwhile is never dropped by a save from the box');
   assert(/max-height:88vh; max-height:88dvh;/.test(dlg), 'the box fits the visible screen (dvh), not the full one under Safari\'s toolbars');
 }
 
@@ -1306,8 +1316,8 @@ eval([extractFn('tripsyFlyoverPhotosInPageOrder'), extractFn('tripsyFlyoverUnpla
   // "Do not show thumbnails on the flyover page" (2026-10-29): the card's page tiles, No-page
   // tiles, their ✕ and drag are gone.
   assert(!/data-flyover-thumb=|data-flyover-page-remove=|data-flyover-nopage/.test(setup), 'the setup card shows no photo thumbnails');
-  assert(/photos: tripsyFlyoverPhotosInPageOrder\(\{ \.\.\.st, pages: r\.pages, photos: r\.photos \}\)\.map\(x => x\.photo\)/.test(setup),
-    'Save stores the photos in the new page order');
+  assert(/photos: tripsyFlyoverPhotosInPageOrder\(\{ \.\.\.cur, pages: r\.pages, photos \}\)\.map\(x => x\.photo\)/.test(setup),
+    'each saved change stores the photos in the new page order');
   assert(/const photos = tripsyFlyoverPhotosInPageOrder\(stop\)\.map/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the page dialog\'s grid opens in play order too');
   // "On a page where there are multiple photos, divide that thumbnail into as many vertical
   // sections as there are photos on that page, and show a vertical segment of that photo"
@@ -1369,7 +1379,7 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), 
   // "Do the same for the edit destinations and slideshow dialogs" (2026-10-22): their footers are
   // glyph-only too, and the wide word-carrying variant is gone.
   assert(!/tripsy-close-x--wide/.test(html), 'no wide word-carrying ✕/✓ variant remains anywhere');
-  for (const [dlg, cancel, save] of [['tripsyFlyoverEditDestinationsDialog', 'data-fe-cancel', 'data-fe-save'], ['tripsyFlyoverSlideshowDialog', 'data-ss-cancel', 'data-ss-save']]) {
+  for (const [dlg, cancel, save] of [['tripsyFlyoverEditDestinationsDialog', 'data-fe-cancel', 'data-fe-save']]) {
     const fn = extractFn(dlg);
     assert(new RegExp(`<div class="tfo-ss-footer"[\\s\\S]*?<button class="tripsy-close-x" ${cancel} title="Cancel" aria-label="Cancel">✕</button>\\s*<button class="tripsy-close-x tripsy-save-check" ${save} title="Save" aria-label="Save">✓</button>`).test(fn),
       `${dlg}'s footer is a word-free ✕ / ✓ pair in the same boxes as its header`);
@@ -1960,7 +1970,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   const v = tripsyFlyoverPlaceAddedPhotos([{ ids: ['v9'], count: 1 }], 0, ['n1'], blank, isV);
   assert(v.pages.map(p => p.ids.join()).join('|') === 'v9|n1', 'nothing joins a video page');
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
-  assert(/page = null, addMedia = null, onStillWorking = null \} = \{\}\) \{/.test(dlg), 'the dialog takes an addMedia callback');
+  assert(/page = null, addMedia = null, onStillWorking = null, onChange = null \} = \{\}\) \{/.test(dlg), 'the dialog takes an addMedia callback');
   assert(/\$\{addMedia \? `<button class="btn" data-ss-add-photos[^`]*>＋ Add photos<\/button>` : ''\}/.test(dlg),
     'an ＋ Add photos button renders beside the grid\'s label (owner-only: the caller passes addMedia only to the owner)');
   assert(/if \(addBtn\) addBtn\.onclick = \(\) => \{ if \(adding\) return; tripsyFlyoverPickMedia\(async files => \{/.test(dlg),
@@ -2563,15 +2573,31 @@ eval(extractFn('tripsyFlyoverClearEditDoneOnAdd'));
     'a completed action\'s button is shaded green on the card');
   assert(/\.tfo-sqbtn\.tfo-sqbtn--done \{[^}]*#3AA76D/.test(html) && !/\.tfo-sqbtn\.tfo-sqbtn--done \{[^}]*(width|height|padding)/.test(html),
     'the green state changes colour and border only, never the size');
-  assert(/if \(res === 'complete' && !closed\) setEditDone\(id, 'photos', true\);/.test(setup) && /if \(r\.complete\) setEditDone\(id, 'slideshow', true\);/.test(setup),
+  assert(/if \(res === 'complete' && !closed\) setEditDone\(id, 'photos', true\);/.test(setup) && /if \(r && r\.complete && !closed\) setEditDone\(id, 'slideshow', true\);/.test(setup),
     'only Complete marks the action done; closing or clicking away does not');
   assert(/onStillWorking: \(\) => setEditDone\(id, 'photos', false\)/.test(setup) && /onStillWorking: \(\) => setEditDone\(id, 'slideshow', false\)/.test(setup),
     'Still Working clears the mark');
   const ep = extractFn('tripsyFlyoverEditPhotosPage'), ss = extractFn('tripsyFlyoverSlideshowDialog');
   for (const [name, src, pre] of [['Edit photos', ep, 'ep'], ['Slideshow', ss, 'ss']]) {
-    assert(new RegExp(`data-${pre}-complete`).test(src) && new RegExp(`data-${pre}-still-working`).test(src) && /tfo-complete-btn/.test(src) && /tfo-working-btn/.test(src) && />Complete</.test(src) && />Still Working</.test(src),
+    assert(new RegExp(`data-${pre}-complete`).test(src) && new RegExp(`data-${pre}-still-working`).test(src) && /tfo-complete-btn/.test(src) && /tfo-working-btn/.test(src) && /<span>Complete<\/span>/.test(src) && /<span>Working<\/span>/.test(src),
       `${name}: a green Complete and a red Still Working button at the bottom`);
+    // 2026-10-29: "make the still working and completed buttons into square icons like those on the flyover page"
+    assert(new RegExp(`class="tfo-sqbtn tfo-working-btn" data-${pre}-still-working aria-label="Still working"[^>]*>\\$\\{TRIPSY_FLYOVER_ICON_WORKING\\}`).test(src)
+      && new RegExp(`class="tfo-sqbtn tfo-complete-btn" data-${pre}-complete aria-label="Complete"[^>]*>\\$\\{TRIPSY_FLYOVER_ICON_COMPLETE\\}`).test(src),
+      `THE ASK: ${name}'s Still Working / Complete are square icon tiles`);
   }
+  assert(/const TRIPSY_FLYOVER_ICON_WORKING = '<svg viewBox="0 0 32 32"/.test(html), 'the Still Working icon is a 32×32 SVG like the others');
+  assert(!/\.tfo-complete-btn, \.tfo-working-btn \{[^}]*(padding|font-size)/.test(html), 'the colour classes no longer size the button, so the tile keeps its square shape');
+  // "…and copy the preview button from the flyover page."
+  assert(/\$\{playPreview \? `<button class="btn tfo-sqbtn" data-ss-preview aria-label="Preview"[^>]*>\$\{TRIPSY_FLYOVER_ICON_PREVIEW\}<span>Preview<\/span><\/button>` : ''\}/.test(ss)
+    && !/▶ Preview/.test(ss) && /<div class="tfo-done-row">\s*\$\{playPreview/.test(ss),
+    'THE ASK: the slideshow edit page has the fly-over page\'s Preview tile, beside Working / Complete, and the old ▶ Preview button is gone');
+  assert(/pv\.onclick = \(\) => playPreview\(draft\(\), dropPhoto, setAudio\)/.test(ss), 'the Preview tile still plays the unsaved draft');
+  assert(/TRIPSY_FLYOVER_ICON_WORKING = [^;]*construction barrier|construction barrier[^\n]*\nconst TRIPSY_FLYOVER_ICON_WORKING = '[^;]*#F28C28/.test(html), 'Working is a striped construction barrier');
+  // "When the preview is done, close the preview window" (2026-10-29)
+  const playerSrc = extractFn('playTripsyFlyover');
+  assert(/else if \(!\(await wait\(r, 1800\)\)\) return;[\s\S]{0,260}if \(!r\.cancelled\) close\(\);\s*return;/.test(playerSrc) && !/Preview finished — press/.test(playerSrc),
+    'THE ASK: a finished preview closes the player instead of waiting on a "press ↺" card');
   assert(/close\('complete'\)/.test(ep) && /complete: true/.test(ss), 'Complete returns to the fly-over page reporting completion');
   assert(/editDone: \{ \.\.\.p\.editDone \}/.test(extractFn('tripsyFlyoverCarryOver')), 'a rebuild keeps the marks');
 }

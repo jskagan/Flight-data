@@ -1324,9 +1324,11 @@
   .tfo-sqbtn.tfo-sqbtn--done { background: rgba(58,167,109,0.30) !important; border-color: #3AA76D !important; box-shadow: inset 0 0 0 1px #3AA76D; }
   /* The edit pages' sign-off pair: green Complete, red Still Working. */
   .tfo-done-row { display: flex; gap: 8px; justify-content: flex-end; flex-basis: 100%; flex-wrap: wrap; }
-  .tfo-complete-btn, .tfo-working-btn { border: 1px solid; border-radius: 8px; padding: 9px 16px; font-size: 14px; font-weight: 700; cursor: pointer; color: #fff; }
-  .tfo-complete-btn { background: #2E8B57; border-color: #3AA76D; }
-  .tfo-working-btn { background: #B63A3A; border-color: #D9534F; }
+  /* Square icon tiles like the fly-over page's (2026-10-29: "make the still working and
+     completed buttons into square icons like those on the flyover page"). */
+  .tfo-complete-btn, .tfo-working-btn { border: 1px solid; border-radius: 8px; font-weight: 700; cursor: pointer; color: #fff; }
+  .tfo-complete-btn { background: rgba(46,139,87,0.85); border-color: #3AA76D; }
+  .tfo-working-btn { background: rgba(182,58,58,0.85); border-color: #D9534F; }
   .tripsy-close-x {
     /* Sized to sit ON the header line rather than tower over it: these headers are an
        18px h2 (~24px line box), so the box is 32px -- a little taller so it stays a
@@ -19889,15 +19891,31 @@ async function showTripsyFlyover(tripKey) {
     return { added, done, queued, skipped, problems };
   };
   // The options box opens by itself right after photos are added, and from each
-  // destination's "Slideshow options" button. Nothing changes until Save -- except photos
-  // added from INSIDE the box, which go on the destination as they are picked (the card's
-  // own button does the same), so Cancel keeps them and discards only the page edits.
+  // destination's "Edit slideshow" button. Every change in it is saved as it is made
+  // (2026-10-29); photos added from INSIDE the box go on the destination as they are picked.
   const openSlideshowOptions = async (id, intro, page) => {
     const st = record.stops.find(x => x.id === id);
     if (!st) return;
+    // Each change lands at once (2026-10-29): in memory straight away, on Drive a moment
+    // after the last tap (a burst of taps is one write), and for certain on close.
+    let pendingSave = null;
+    const apply = r => {
+      const cur = record.stops.find(x => x.id === id);
+      if (!cur) return;
+      // Photos the box doesn't know about (added meanwhile) are kept; the box only ever
+      // removes one through removePhotoFromRecord, which already took it off the record.
+      const known = new Set(r.photos.map(p => p.driveFileId));
+      const photos = [...r.photos, ...(cur.photos || []).filter(p => !known.has(p.driveFileId))];
+      updateStop(id, { pages: r.pages, photos: tripsyFlyoverPhotosInPageOrder({ ...cur, pages: r.pages, photos }).map(x => x.photo) });
+    };
     const r = await tripsyFlyoverSlideshowDialog(st, {
       intro,
       page,
+      onChange: ch => {
+        apply(ch);
+        if (pendingSave) clearTimeout(pendingSave);
+        pendingSave = setTimeout(() => { pendingSave = null; save(); if (!closed) render(); }, TRIPSY_FLYOVER_SLIDESHOW_SAVE_DEBOUNCE_MS);
+      },
       onStillWorking: () => setEditDone(id, 'slideshow', false),
       hasMusic: !!record.music,
       addMedia: isOwner ? (files, setStatusFn) => addMediaToStop(id, files, setStatusFn) : null,
@@ -19913,11 +19931,11 @@ async function showTripsyFlyover(tripKey) {
         });
       },
     });
-    if (!r || closed) return;
-    // The stop's photos are kept in the order they play, so every list of them agrees.
-    updateStop(id, { pages: r.pages, photos: tripsyFlyoverPhotosInPageOrder({ ...st, pages: r.pages, photos: r.photos }).map(x => x.photo) });
-    if (r.complete) setEditDone(id, 'slideshow', true);
-    else { save(); render(); }
+    // Closing writes whatever is still waiting on the timer.
+    if (pendingSave) { clearTimeout(pendingSave); pendingSave = null; }
+    if (r) apply(r);
+    if (r && r.complete && !closed) setEditDone(id, 'slideshow', true);
+    else { save(); if (!closed) render(); }
   };
   // The green "done" mark on a card's Edit photos / Edit slideshow button (2026-10-29).
   const setEditDone = (id, key, on) => {
@@ -22185,10 +22203,11 @@ function tripsyFlyoverTogglePagePhoto(pages, cur, id, isVideo = () => false) {
 }
 // Configures a destination's photos ONE PAGE AT A TIME ("show page 1 of photos, ask how
 // many pictures to display on that page, allow users to select how many and which photos,
-// and ask about the transition to the next page," 2026-10-20). Resolves {pages, photos} on
-// Save, null on Cancel; nothing changes until Save. Photos left on No page don't play
-// (2026-10-25). `playPreview(stopDraft)` plays the draft without saving it.
-function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, hasMusic = true, page = null, addMedia = null, onStillWorking = null } = {}) {
+// and ask about the transition to the next page," 2026-10-20). Every change goes to
+// `onChange({pages, photos})` as it is made, and closing resolves the same (with
+// `complete: true` from Complete) -- there is no Save or Cancel (2026-10-29). Photos left on
+// No page don't play (2026-10-25). `playPreview(stopDraft)` plays the current state.
+function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, hasMusic = true, page = null, addMedia = null, onStillWorking = null, onChange = null } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-slideshow-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-slideshow-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -22218,6 +22237,19 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
     const setStatus = t => { status = t || ''; const el = ov.querySelector('[data-ss-status]'); if (el) el.textContent = status; };
     const cleaned = () => pages.filter(pg => pg.ids.length).map(pg => ({ ...pg, ids: [...pg.ids], count: Math.max(pg.ids.length, 1) }));
     const done = v => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
+    // Every change is saved the moment it is made ("Remove the red x and green check from the
+    // slideshow edit pages save everything immediately," 2026-10-29): each repaint follows a
+    // change, so it hands the caller the current pages + photos whenever they differ from
+    // what was last handed over. There is no Save or Cancel any more.
+    let lastSent = JSON.stringify({ pages: cleaned(), photos });
+    const emitChange = () => {
+      if (!onChange) return;
+      const now = { pages: cleaned(), photos: photos.map(p => ({ ...p })) };
+      const key = JSON.stringify(now);
+      if (key === lastSent) return;
+      lastSent = key;
+      onChange(now);
+    };
     const draft = () => ({ ...stop, photos, pages: cleaned() });
     // A photo removed in the preview's Keep / Remove review leaves the draft too (else Save
     // would put it back) and the grid repaints.
@@ -22234,6 +22266,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
       if (ov.style.display !== 'none') render();
     };
     const render = () => {
+      emitChange();
       if (cur >= pages.length) cur = pages.length - 1;
       const page = pages[cur];
       const where = new Map();
@@ -22248,8 +22281,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
         <div class="tw-modal-paper tw-wide" style="max-width:1140px; max-height:88vh; max-height:88dvh; padding-bottom:0;">
           <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
             <h2 style="margin:0; font-size:17px; flex:1;">🎞 ${esc(stop.label || 'Photos')} — page ${cur + 1} of ${pages.length}</h2>
-            <button class="tripsy-close-x tripsy-save-check" data-ss-save data-ss-save-top title="Save" aria-label="Save">✓</button>
-            <button class="tripsy-close-x" data-ss-cancel title="Cancel" aria-label="Cancel">✕</button>
+            <button class="tripsy-close-x" data-ss-close title="Close — every change is already saved" aria-label="Close">✕</button>
           </div>
           ${intro ? `<div style="font-size:13px; color:var(--muted); margin-bottom:10px;">${esc(intro)}</div>` : ''}
           <div data-ss-strip style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:${pages.length > 1 ? 4 : 12}px;">
@@ -22343,14 +22375,10 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
               <button class="btn" data-ss-next>${cur < pages.length - 1 ? `Page ${cur + 2} ▶` : '＋ Next page ▶'}</button>
               ${pages.length > 1 ? `<button class="btn" data-ss-delete>🗑 Delete page</button>` : ''}
             </div>
-            <div style="display:flex; gap:8px; flex-wrap:wrap;">
-              ${playPreview ? `<button class="btn" data-ss-preview>▶ Preview</button>` : ''}
-              <button class="tripsy-close-x" data-ss-cancel title="Cancel" aria-label="Cancel">✕</button>
-              <button class="tripsy-close-x tripsy-save-check" data-ss-save title="Save" aria-label="Save">✓</button>
-            </div>
             <div class="tfo-done-row">
-              <button class="tfo-working-btn" data-ss-still-working title="Keep working on this slideshow">Still Working</button>
-              <button class="tfo-complete-btn" data-ss-complete title="Save and mark this slideshow as done">Complete</button>
+              ${playPreview ? `<button class="btn tfo-sqbtn" data-ss-preview aria-label="Preview" title="Preview this slideshow">${TRIPSY_FLYOVER_ICON_PREVIEW}<span>Preview</span></button>` : ''}
+              <button class="tfo-sqbtn tfo-working-btn" data-ss-still-working aria-label="Still working" title="Keep working on this slideshow">${TRIPSY_FLYOVER_ICON_WORKING}<span>Working</span></button>
+              <button class="tfo-sqbtn tfo-complete-btn" data-ss-complete aria-label="Complete" title="Save and mark this slideshow as done">${TRIPSY_FLYOVER_ICON_COMPLETE}<span>Complete</span></button>
             </div>
           </div>
         </div>`;
@@ -22462,9 +22490,8 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
       }, { kind: 'all', onWaiting: setStatus, onCancel: () => setStatus('') }); };
       const del = ov.querySelector('[data-ss-delete]');
       if (del) del.onclick = () => { pages = pages.filter((_, k) => k !== cur); cur = Math.max(0, cur - 1); render(); };
-      ov.querySelectorAll('[data-ss-cancel]').forEach(b => b.onclick = () => done(null));
-      ov.querySelectorAll('[data-ss-save]').forEach(b => b.onclick = () => done({ pages: cleaned(), photos }));
-      // Complete saves and marks the button green; Still Working keeps the dialog open and
+      ov.querySelector('[data-ss-close]').onclick = () => done({ pages: cleaned(), photos });
+      // Complete closes and marks the button green; Still Working keeps the dialog open and
       // takes the green off (2026-10-29).
       ov.querySelector('[data-ss-complete]').onclick = () => done({ pages: cleaned(), photos, complete: true });
       ov.querySelector('[data-ss-still-working]').onclick = () => { if (onStillWorking) onStillWorking(); toast('Marked as still being worked on.'); };
@@ -22473,7 +22500,7 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
     };
     render();
     ov.style.display = 'flex';
-    ov.onclick = e => { if (e.target === ov) done(null); };
+    ov.onclick = e => { if (e.target === ov) done({ pages: cleaned(), photos }); };
   });
 }
 
@@ -23292,8 +23319,8 @@ function tripsyFlyoverEditPhotosPage(getStop, { onDelete, onMove = null, moveTar
               </button>`).join('')}
           </div>
           <div class="tfo-ss-footer"><div class="tfo-done-row">
-            <button class="tfo-working-btn" data-ep-still-working title="Keep working on these photos">Still Working</button>
-            <button class="tfo-complete-btn" data-ep-complete title="Mark this destination's photos as done">Complete</button>
+            <button class="tfo-sqbtn tfo-working-btn" data-ep-still-working aria-label="Still working" title="Keep working on these photos">${TRIPSY_FLYOVER_ICON_WORKING}<span>Working</span></button>
+            <button class="tfo-sqbtn tfo-complete-btn" data-ep-complete aria-label="Complete" title="Mark this destination's photos as done">${TRIPSY_FLYOVER_ICON_COMPLETE}<span>Complete</span></button>
           </div></div>
         </div>`;
       ov.querySelector('[data-ep-close]').onclick = () => close();
@@ -24134,7 +24161,9 @@ async function playTripsyFlyover(trip, record, opts = {}) {
       if (tripsyFlyoverPages(s).length) {
         if (!(await slideshow(r, s))) return;
       } else if (!(await wait(r, 1800))) return;
-      showCard(s.label, 'Preview finished — press ↺ to watch again');
+      // A finished preview closes its own window ("When the preview is done, close the preview
+      // window," 2026-10-29), back to the page it was opened from.
+      if (!r.cancelled) close();
       return;
     }
     map.fitBounds(all, { padding: [70, 70], animate: false });
@@ -28268,6 +28297,20 @@ const TRIPSY_FLYOVER_ICON_COMPLETE = '<svg viewBox="0 0 32 32" aria-hidden="true
   + '<path d="M7.2 4.5h4.2v4.2H7.2zM15.6 4.5h4.2v4.2h-4.2zM11.4 8.7h4.2v4.1h-4.2zM19.8 8.7h3.1l-1.1 2 .7 2.1h-2.7zM7.2 12.8h4.2V17H7.2zM15.6 12.8h4.2V17h-4.2z" fill="#1B1F25"/>'
   + '<circle cx="23.5" cy="23.5" r="6" fill="#2E8B57"/>'
   + '<path d="M20.8 23.6l1.9 1.9 3.6-3.8" stroke="#FFFFFF" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+// The slideshow box saves each change a moment after the last tap, so a burst of taps is
+// one Drive write (2026-10-29).
+const TRIPSY_FLYOVER_SLIDESHOW_SAVE_DEBOUNCE_MS = 700;
+// Still Working: an orange-and-white striped construction barrier on two legs, with an amber
+// warning lamp ("Can you make the icon for working a construction barrier," 2026-10-29).
+const TRIPSY_FLYOVER_ICON_WORKING = '<svg viewBox="0 0 32 32" aria-hidden="true">'
+  + '<defs><clipPath id="tfoBarClip"><rect x="2" y="10" width="28" height="8" rx="1.5"/></clipPath></defs>'
+  + '<path d="M7 18v11M25 18v11" stroke="#8A93A0" stroke-width="2.2" stroke-linecap="round"/>'
+  + '<path d="M3.5 29h7M21.5 29h7" stroke="#5B6472" stroke-width="2.2" stroke-linecap="round"/>'
+  + '<rect x="2" y="10" width="28" height="8" rx="1.5" fill="#F2F4F7"/>'
+  + '<g clip-path="url(#tfoBarClip)" fill="#F28C28"><path d="M0 18l8-8h4.5l-8 8zM9 18l8-8h4.5l-8 8zM18 18l8-8h4.5l-8 8zM27 18l8-8h4.5l-8 8z"/></g>'
+  + '<rect x="2" y="10" width="28" height="8" rx="1.5" fill="none" stroke="#C9CED6" stroke-width="0.8"/>'
+  + '<path d="M16 10V7.5" stroke="#8A93A0" stroke-width="1.6"/>'
+  + '<circle cx="16" cy="5.2" r="2.6" fill="#FFD966"/><circle cx="15.2" cy="4.4" r="0.9" fill="#FFF6C9"/></svg>';
 const TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW = '<svg viewBox="0 0 32 32" aria-hidden="true">'
   + '<defs><linearGradient id="tfoProjBody" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5B6472"/><stop offset="1" stop-color="#2E343D"/></linearGradient></defs>'
   + '<path d="M24 17.5L31 13v12l-7-4.5z" fill="#FFD966" opacity="0.85"/>'

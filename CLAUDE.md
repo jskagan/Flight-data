@@ -4134,8 +4134,9 @@ WebView's support for recording is unproven.
     the slideshow, and nothing related to the map"): the player gets class `tfo-preview`, whose
     CSS hides `.tfo-map` and keeps `.tfo-veil` opaque (so nothing of the map shows between pages
     or after the last), the preview branch sets no view, dot, name, card or tiles and goes
-    straight into `slideshow`, it never asks for a Google tile session, and only the closing
-    "Preview finished — press ↺" note appears on the card. Verified in Chromium: map hidden
+    straight into `slideshow`, it never asks for a Google tile session, and when it ends the
+    player CLOSES itself ("When the preview is done, close the preview window," 2026-10-29 —
+    it used to wait on a "Preview finished — press ↺" card), back to the page it came from. Verified in Chromium: map hidden
     throughout, no dots/labels, zero tile requests. `tripsyFlyoverCarryOver` keeps `pages` and `slideshow` across Rebuild
     (it used to drop `slideshow`).
     - **Every photo shows in the SAME 4:3 frame, cropped to fill it** ("Keep all photos the
@@ -4275,6 +4276,18 @@ WebView's support for recording is unproven.
       size). ✕, Esc, Cancel or a click away never mark it. `updateStop` runs the pure
       `tripsyFlyoverClearEditDoneOnAdd`: an update that adds a photo id the stop didn't have
       clears both marks (a reorder or delete doesn't).
+      **Both are square icon tiles now, and the slideshow page has the card's Preview tile**
+      ("On the slideshow edit pages, make the still working and completed buttons into square
+      icons like those on the flyover page, and copy the preview button from the flyover page,"
+      2026-10-29): `.tfo-sqbtn tfo-working-btn` (red, `TRIPSY_FLYOVER_ICON_WORKING` — an
+      orange-and-white construction barrier with a warning lamp ("Can you make the icon for
+      working a construction barrier," same day) — labelled "Working") and `.tfo-sqbtn tfo-complete-btn` (green, the setup page's
+      finish-flag `TRIPSY_FLYOVER_ICON_COMPLETE`, "Complete") on both edit pages; the colour
+      classes no longer set padding or font size, so the tile keeps its 64px square. The
+      Slideshow options dialog's old "▶ Preview" button is replaced by the card's Preview tile
+      (`TRIPSY_FLYOVER_ICON_PREVIEW`), first in the done row; same `data-ss-preview` handler,
+      still playing the unsaved draft. The Edit photos page gets no Preview: it sits ABOVE the
+      player (z 2147483094 vs 2147483090), so a preview from there would play hidden behind it.
       **Edit photos' large view also MOVES a photo to another destination** ("When a user
       selects a photo from the edit photos page, add a button that says 'move' and when the user
       selects it present a drop down menu with other locations from the trip to move the photo
@@ -4494,7 +4507,20 @@ WebView's support for recording is unproven.
         should also be cancel and save buttons at the bottom," same day): `data-ss-save-top`
         in the header, a green ✓ box in the ✕'s own style (`.tripsy-close-x.tripsy-save-check`
         — "a green check box in the same style as the cancel button"); every `[data-ss-save]`
-        is wired, so top and bottom Save do the same.
+        is wired, so top and bottom Save do the same. **SUPERSEDED 2026-10-29** — see the
+        save-as-you-go note below; the box has no Save or Cancel any more.
+      - **The slideshow edit page saves EVERY change as it is made** ("Remove the red x and
+        green check from the slideshow edit pages save everything immediately," 2026-10-29):
+        the top ✓, the footer ✕/✓ pair and Cancel are gone; a single top-corner ✕ (`data-ss-close`)
+        just closes. `tripsyFlyoverSlideshowDialog` calls `emitChange()` at the start of every
+        `render()` (each change is followed by one), handing `onChange({pages, photos})` the
+        current state whenever it differs from what was last handed over. The setup page's
+        `openSlideshowOptions` applies it to the record at once (`apply`, which keeps any photo
+        added to the destination meanwhile, so a save from the box never drops one) and writes
+        Drive `TRIPSY_FLYOVER_SLIDESHOW_SAVE_DEBOUNCE_MS` (700) after the last change — a burst
+        of taps is one write — and again on close. Closing (✕, a tap outside, Complete)
+        resolves the pages instead of `null`; Complete still marks the slideshow done. Preview
+        now plays exactly what is saved. e2e scenario J.
 - **✏️ Edit destinations — a draft list to rename, reorder, add, remove or REBUILD, applied on
   Save only** ("instead of just an option to rebuild the destinations, make the button 'edit
   destinations' and then display a list of destinations that the user can edit. Also give an

@@ -241,6 +241,30 @@ const fd = (p, expr) => p.evaluate(e => eval(e), expr);
   await p.close();
 }
 
+// ---- J: the slideshow edit page saves every change as it is made (no ✓ / ✕ Cancel) -------
+{
+  const p = await boot(`
+    const r = freshRecord(); r.stops[1].photos = [{ driveFileId: 'pa' }, { driveFileId: 'pb' }]; r.stops[1].pages = [{ ids: ['pa'], count: 1 }];
+    Store._r = r;`);
+  await p.click('[data-flyover-stop="s1"] [data-flyover-slideshow]'); await tick(p, 300);
+  check('J: no Save ✓ and no Cancel ✕ on the slideshow page, one Close ✕', await p.evaluate(() => {
+    const ov = document.getElementById('tripsy-flyover-slideshow-overlay');
+    return !ov.querySelector('[data-ss-save], [data-ss-cancel], .tripsy-save-check') && ov.querySelectorAll('.tripsy-close-x').length === 1;
+  }));
+  await p.click('[data-ss-count="2"]'); await tick(p, 100);
+  await p.click('[data-ss-photo="pb"]'); await tick(p, 2000);
+  let r = await rec(p);
+  check('J: the change is saved without pressing anything', JSON.stringify(r.stops[1].pages.map(x => x.ids)) === '[["pa","pb"]]');
+  await p.click('[data-ss-ptr="wipe"]'); await tick(p, 2000);
+  r = await rec(p);
+  check('J: a transition pick is saved too', r.stops[1].pages[0].photoTransition === 'wipe');
+  await p.click('[data-ss-complete]'); await tick(p, 500);
+  r = await rec(p);
+  check('J: Complete closes it and marks the slideshow done, changes kept', r.stops[1].editDone && r.stops[1].editDone.slideshow && r.stops[1].pages[0].ids.length === 2
+    && (await p.evaluate(() => document.getElementById('tripsy-flyover-slideshow-overlay').style.display === 'none')));
+  await p.close();
+}
+
 await b.close();
 console.log(failures ? `\n${failures} FAILED` : '\nall scenarios passed');
 process.exit(failures ? 1 : 0);
