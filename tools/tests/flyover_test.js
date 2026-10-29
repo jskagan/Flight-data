@@ -616,6 +616,27 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
       && /<h2 style="margin:0; font-size:18px; flex:1; min-width:0;">🗺️ Trip Fly-over/.test(html),
       'THE ASK: a Destinations heading, the page title\'s own h2 at 18px, comes right before the destinations');
   }
+  // "add a slight yellow background of each destination card on the flyover page that has not
+  // been completed and a slight green background to ones that have. Leave ones that are
+  // uncompleted as-is" (2026-10-29)
+  {
+    const tripsyDayKey = v => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) ? v.slice(0, 10) : null;
+    eval(extractFn('tripsyFlyoverStopProgress') + '\n' + extractFn('tripsyFlyoverProgressTint') + '\nthis.__p = tripsyFlyoverStopProgress; this.__t = tripsyFlyoverProgressTint;');
+    const P = this.__p, T = this.__t, today = '2026-10-15';
+    assert(P({ editDone: { photos: true, slideshow: true }, start: '2026-10-20' }, today) === 'complete'
+      && P({ editDone: { slideshow: true }, start: '2026-10-20' }, today) === 'partial'
+      && P({ editDone: { photos: true }, start: '2026-10-01', end: '2026-10-03' }, today) === 'partial',
+      'both marks are complete, one mark is partial');
+    assert(P({ start: '2026-10-01', end: '2026-10-03' }, today) === 'partial' && P({ start: '2026-10-01T15:00' }, today) === 'partial',
+      'THE ASK: neither marked but the stop\'s days are over is yellow');
+    assert(P({ start: '2026-10-10', end: '2026-10-15' }, today) === '' && P({ start: '2026-10-20' }, today) === '' && P({}, today) === '',
+      'THE ASK: no tint only while the stop\'s last day has not passed (today counts as not passed; undated never)');
+    assert(P({ kind: 'transit', start: '2026-10-05' }, today) === 'complete' && P({ kind: 'transit', start: '2026-10-20' }, today) === '',
+      'THE ASK: an airport transfer is tinted too — green once passed, as it has nothing to sign off');
+    assert(/rgba\(58,167,109,0\.12\)/.test(T('complete')) && /rgba\(224,163,58,0\.12\)/.test(T('partial')) && T('') === '', 'green / yellow / none');
+    assert((setup.match(/tripsyFlyoverProgressTint\(/g) || []).length === 2 && /const progress = tripsyFlyoverStopProgress\(s, todayKey\);/.test(setup),
+      'both card kinds (destination and airport transfer) render the tint');
+  }
   assert(/playingHere = tripsyFlyoverMusicAtStop\(record, record\.stops, idx\)/.test(setup), 'a destination with no music of its own shows the music carrying on there');
   // "When photos are Imported they should say 'No page'" (2026-10-25): the card, the Edit
   // photos page, and every add path.

@@ -4323,6 +4323,20 @@ WebView's support for recording is unproven.
       size). ✕, Esc, Cancel or a click away never mark it. `updateStop` runs the pure
       `tripsyFlyoverClearEditDoneOnAdd`: an update that adds a photo id the stop didn't have
       clears both marks (a reorder or delete doesn't).
+      **The card itself is tinted by those marks** ("add a slight yellow background of each
+      destination card on the flyover page that has not been completed and a slight green
+      background to ones that have. Leave ones that are uncompleted as-is," 2026-10-29 — read
+      as three states): `tripsyFlyoverStopProgress(stop, todayKey)` (pure) is `'complete'` with
+      both marks (green, `rgba(58,167,109,0.12)`), `'partial'` (yellow, `rgba(224,163,58,0.12)`)
+      with one mark OR with neither once the stop's last day (`end`, else `start`) is before
+      today ("If neither is marked but the time for the segment has passed, should be tinted
+      yellow. No tint should only apply if the date for ending the segment has not passed yet,"
+      same day), and `''` (no tint) only while that day is today or later, or the stop is
+      undated. "Airports should get a tint" (same day): origin/return airport cards follow the
+      same rule, and an airport-TRANSFER card — no edit pages, nothing to sign off — is green
+      once its day has passed, untinted before. `tripsyFlyoverProgressTint` maps the state to
+      the background; both card kinds carry `data-flyover-progress`. (The e2e harness pins
+      today to 2030-06-01.)
       **Both are square icon tiles now, and the slideshow page has the card's Preview tile**
       ("On the slideshow edit pages, make the still working and completed buttons into square
       icons like those on the flyover page, and copy the preview button from the flyover page,"
