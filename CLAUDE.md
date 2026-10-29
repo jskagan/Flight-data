@@ -4236,7 +4236,10 @@ WebView's support for recording is unproven.
       layovers; a viewer's music line); line 3 is Add / Edit / Edit / **Music** — a square
       `.tfo-sqbtn` with `TRIPSY_FLYOVER_ICON_MUSIC`, same `data-flyover-stop-music` wiring,
       shown to the owner whether or not the destination is visited (the photo tiles still need
-      a visit), track name beside it. This supersedes the line-2 drop-down / "🎵 Change Music" /
+      a visit), track name beside it; the tile reads **Change** and its icon is a grey speaker
+      cabinet with blue-centred cones and a gold note, drawn like the camera/projector icons
+      ("Change the change music icon to say 'Change' and make the music icon look more like
+      the other icons on the page," same day). This supersedes the line-2 drop-down / "🎵 Change Music" /
       "Delete destination" notes above. **The name is edited IN the title** ("Turn the location
       title into a button with editable text … delete the text box on the next line … Include a
       revert option," same day): for the owner the title is a `.tfo-title-input` (same

@@ -551,8 +551,8 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   // "Change Music from here button to say 'Change Music'" (2026-10-25).
   // Since 2026-10-29 it is a square tile right of Edit slideshow ("Make the change music
   // button into a square icon similar to the edit icons").
-  assert(/<button class="btn tfo-sqbtn" data-flyover-stop-music aria-label="Change music" [^>]*>\$\{TRIPSY_FLYOVER_ICON_MUSIC\}<span>Music<\/span><\/button>/.test(setup) && /data-flyover-stop-music-name/.test(setup),
-    'THE ASK: the destination music button is a square music tile; a destination\'s own track is named beside it');
+  assert(/<button class="btn tfo-sqbtn" data-flyover-stop-music aria-label="Change music" [^>]*>\$\{TRIPSY_FLYOVER_ICON_MUSIC\}<span>Change<\/span><\/button>/.test(setup) && /data-flyover-stop-music-name/.test(setup),
+    'THE ASK: the destination music button is a square speaker tile labelled "Change" (2026-10-29); a destination\'s own track is named beside it');
   // "When photos are Imported they should say 'No page'" (2026-10-25): the card, the Edit
   // photos page, and every add path.
   assert(/\{ \.\.\.s, \.\.\.tripsyFlyoverClearEditDoneOnAdd\(s, tripsyFlyoverFreezePagesOnAdd\(s, fields\)\) \}/.test(setup) && (setup.match(/updateStop\((id|stopId), \{ photos: \[\.\.\.\(stopNow\(\)\.photos \|\| \[\]\), rec\] \}\)/g) || []).length === 3,
