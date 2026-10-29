@@ -507,14 +507,26 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     'each destination shows how its photos play, with Edit slideshow and Preview buttons');
   // "Change the name of the slideshow options button to edit slideshow" (2026-10-22); its place
   // beside the transport drop-down was superseded by the photo-buttons line (2026-10-25, below).
-  assert(/>🎞 Edit slideshow<\/button>/.test(setup) && !/Slideshow options<\/button>/.test(setup), 'the slideshow button reads "Edit slideshow"');
+  assert(/data-flyover-slideshow aria-label="Edit slideshow"/.test(setup) && !/Slideshow options<\/button>/.test(setup), 'the slideshow button is named "Edit slideshow"');
   // "The third line should be three buttons: add photos, then edit photos, then edit slideshow.
   // Move these buttons from their other locations on the card" (2026-10-25).
   const pbM = /<div data-flyover-photo-buttons [^>]*>([\s\S]*?)<\/div>` : ''\}/.exec(setup);
   const pb = pbM ? pbM[1] : '';
   assert(pbM && pb.indexOf('data-flyover-add-own') >= 0 && pb.indexOf('data-flyover-add-own') < pb.indexOf('data-flyover-edit-photos') && pb.indexOf('data-flyover-edit-photos') < pb.indexOf('data-flyover-slideshow')
-    && />＋ Add photos<\/button>/.test(pb), 'THE ASK: line 3 is Add photos, then Edit photos, then Edit slideshow');
-  assert(['data-flyover-add-own', 'data-flyover-edit-photos', 'data-flyover-slideshow'].every(k => setup.split(k + ' style').length === 2),
+    && /data-flyover-add-own aria-label="Add photos"/.test(pb), 'THE ASK: line 3 is Add photos, then Edit photos, then Edit slideshow');
+  // "Make the add photos, edit photos, and edit slideshow buttons square with icons on top and words below" (2026-10-29).
+  assert(/class="btn tfo-sqbtn" data-flyover-add-own [^>]*>\$\{TRIPSY_FLYOVER_ICON_ADD_PHOTOS\}<span>Add<\/span><\/button>/.test(pb)
+    && /class="btn tfo-sqbtn" data-flyover-edit-photos [^>]*>\$\{TRIPSY_FLYOVER_ICON_EDIT_PHOTOS\}<span>Edit<\/span><\/button>/.test(pb)
+    && /class="btn tfo-sqbtn" data-flyover-slideshow [^>]*>\$\{TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW\}<span>Edit<\/span><\/button>/.test(pb)
+    && /\.tfo-sqbtn \{ width: 64px; height: 64px;[^}]*flex-direction: column;/.test(html),
+    'THE ASK: the three are square tiles, icon above the word: camera-with-plus "Add", camera "Edit", projector "Edit"');
+  {
+    const camPlus = /const TRIPSY_FLYOVER_ICON_ADD_PHOTOS = [^;]*TRIPSY_FLYOVER_ICON_CAMERA_BODY[^;]*M16 15\.6v5\.8M13\.1 18\.5h5\.8/.exec(html);
+    const cam = /const TRIPSY_FLYOVER_ICON_EDIT_PHOTOS = [^;]*TRIPSY_FLYOVER_ICON_CAMERA_BODY/.exec(html);
+    const proj = /const TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW = [^;]*<circle cx="8\.5" cy="7\.5" r="5"\/><circle cx="19\.5" cy="7\.5" r="5"/.exec(html);
+    assert(camPlus && cam && proj, 'the icons: a camera with a plus in its lens, a camera, and a projector with two film reels');
+  }
+  assert(['data-flyover-add-own', 'data-flyover-edit-photos', 'data-flyover-slideshow'].every(k => setup.split(k + ' aria-label').length === 2),
     'THE ASK: each of the three buttons appears once on the card — moved, not copied');
   const ctl2 = (/<div data-flyover-controls [^>]*>([\s\S]*?)<\/div>/.exec(setup) || [])[1] || '';
   assert(!/data-flyover-slideshow/.test(ctl2) && setup.indexOf('data-flyover-controls') < setup.indexOf('data-flyover-photo-buttons') && setup.indexOf('data-flyover-photo-buttons') < setup.indexOf('data-flyover-thumb='),
@@ -523,7 +535,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   // it, show a page with thumbnails of all photos for that destination. When the user selects
   // one, show a large image with the buttons keep and delete" (2026-10-25).
   assert(!/data-flyover-add-suggested|Suggested photos<\/button>/.test(setup), 'THE ASK: the destination card has no Suggested photos button');
-  assert(/\$\{photos\.length \? `<button class="btn" data-flyover-edit-photos [^`]*>✏️ Edit photos<\/button>/.test(setup)
+  assert(/\$\{photos\.length \? `<button class="btn tfo-sqbtn" data-flyover-edit-photos aria-label="Edit photos"/.test(setup)
     && /editPhotos\.onclick = \(\) => tripsyFlyoverEditPhotosPage\(stop, photoHooks\);/.test(setup) && /const photoHooks = \{\s*onDelete: photoId => removePhotoFromRecord\(id, photoId\),/.test(setup),
     'THE ASK: an Edit photos button (when the stop has photos) opens the photos page, and its Delete takes the photo off through the ordinary remove-and-save path');
   const ep = extractFn('tripsyFlyoverEditPhotosPage');

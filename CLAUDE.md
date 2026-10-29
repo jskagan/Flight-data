@@ -4217,7 +4217,13 @@ WebView's support for recording is unproven.
       videos", same `data-flyover-add-own` wiring, videos still accepted), **✏️ Edit photos** and
       **🎞 Edit slideshow** — moved, each appears once on the card (Edit slideshow left line 2,
       superseding the 10-22 "left of the transport" placement). Owner-only and only once the
-      destination is visited, like before; the two edit buttons need photos. The page thumbnails,
+      destination is visited, like before; the two edit buttons need photos. **They are SQUARE icon tiles, icon above
+      one word** ("Make the add photos, edit photos, and edit slideshow buttons square with icons
+      on top and words below," 2026-10-29): `.tfo-sqbtn` (64×64, column flex), coloured inline SVGs
+      with gradients and highlights to sit beside the app's emoji icons ("give the icons a little
+      color and some additional detail," same day) — `TRIPSY_FLYOVER_ICON_ADD_PHOTOS` (a camera with a plus in its lens, "Add"),
+      `TRIPSY_FLYOVER_ICON_EDIT_PHOTOS` (a camera, "Edit"), `TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW` (a
+      film projector with two reels and a light beam, "Edit"); the full names live in `aria-label`/`title`. The page thumbnails,
       upload status and the slideshow summary with ▶ Preview follow below it.
       **Edit photos' large view also MOVES a photo to another destination** ("When a user
       selects a photo from the edit photos page, add a button that says 'move' and when the user
