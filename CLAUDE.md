@@ -1214,7 +1214,7 @@ step 4; git history has it if ever needed.
   ↪️ 🗑️ past the 194px indent) and the header's six icon-label buttons; with it gone they were
   clipped by `.main` with no way to reach them. So below 600px those rows WRAP instead:
   `.tripsy-tl-body`/`.tripsy-tl-actions` (the icons drop under the title, `flex-basis:100%`),
-  `.tripsy-trip-head`/`.tripsy-trip-head-actions` (buttons under the trip name), and
+  `.tripsy-trip-head` (buttons under the trip name — and `.tripsy-trip-head-actions` then SCROLLS sideways on that line rather than wrapping: "I can't see the full list of header icons for a trip … Can you make them scroll horizontally," 2026-10-29; `overflow-x:auto` with a little vertical padding so the buttons' corner ▲/⚠️ badges aren't clipped, and its menus are `position:fixed`, so the scroller never clips them), and
   `.tripsy-tl-row`/`.tripsy-tl-inner` tighten the indent. Wide screens get no wrap rule, so a
   long title still shrinks beside its icons. `phonerowactions_test.js`.
   **The left nav rail is pinned too, on wide screens** ("Also freeze the left side navigation

@@ -7,13 +7,13 @@ const fs = require('fs');
 const html = fs.readFileSync(require('path').join(__dirname, '..', '..', 'index.html'), 'utf8');
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 const css = html.slice(0, html.indexOf('</style>'));
-const phone = css.slice(css.indexOf('.tripsy-tl-row { padding-left: 8px'), css.indexOf('.tripsy-tl-row { padding-left: 8px') + 700);
+const phone = css.slice(css.indexOf('.tripsy-tl-row { padding-left: 8px'), css.indexOf('.tripsy-tl-row { padding-left: 8px') + 1600);
 const before = css.slice(Math.max(0, css.indexOf('.tripsy-tl-row { padding-left: 8px') - 60), css.indexOf('.tripsy-tl-row { padding-left: 8px'));
 assert(/@media \(max-width: 600px\) \{\s*$/.test(before), 'the wrap rules live in the phone (<=600px) block only -- wide screens keep title-beside-icons');
 assert(/\.tripsy-tl-body \{ flex-wrap: wrap; \}/.test(phone) && /\.tripsy-tl-actions \{ flex-wrap: wrap; flex-basis: 100%; \}/.test(phone),
   'THE ASK: on a phone the row\'s action icons (✏️ among them) drop under the title instead of being clipped off the right edge');
-assert(/\.tripsy-trip-head \{ flex-wrap: wrap; \}/.test(phone) && /\.tripsy-trip-head-actions \{ flex-wrap: wrap;/.test(phone),
-  'and the trip header\'s icon-label buttons wrap under the trip name');
+assert(/\.tripsy-trip-head \{ flex-wrap: wrap; \}/.test(phone) && /\.tripsy-trip-head-actions \{ flex: 1 1 100%; flex-wrap: nowrap; max-width: 100%; min-width: 0; overflow-x: auto;[^}]*flex-shrink: 1 !important; \}/.test(phone),
+  'and the trip header\'s icon-label buttons sit on their own line under the trip name, SCROLLING sideways ("make them scroll horizontally," 2026-10-29)');
 assert(/\.tripsy-tl-row \{ padding-left: 8px; gap: 10px; \}/.test(phone) && /\.tripsy-tl-inner \{ gap: 10px !important; \}/.test(phone), 'the row indent tightens on a phone');
 // ---- the markup carries the classes the rules target ----
 assert(/<div class="tripsy-tl-inner" style="display:flex; align-items:flex-start; gap:20px; flex:1; min-width:0;">/.test(html), 'tripsy-tl-inner on the dot+body wrapper');
