@@ -4579,6 +4579,11 @@ WebView's support for recording is unproven.
   word-carrying variant (`.tripsy-close-x--wide`) is gone; don't re-add it. Every change still saves as it is made; Save blurs a name
   still being typed (its `change` saves it), waits for the save chain (`save()` now resolves
   Drive's ok), toasts "Fly-over saved." and closes — a failed save keeps the page open.
+  **SUPERSEDED for the setup page, 2026-10-29** ("Remove the cancel and save buttons from the
+  flyover screen. Save all changes immediately when they are made on the screen"): the page has
+  only its top ✕ — no ✓, no footer. Every change already saves as made; `close` (the ✕ and a
+  tap outside) first blurs a field still being edited so its `change` commits the typed name.
+  The Edit destinations and Slideshow options dialogs keep their ✕ / ✓ pairs (they edit drafts).
 - **The setup page and both editing dialogs are WIDE, and pages reorder by dragging the
   thumbnails on the setup page itself** ("Make the pages for creating and editing the flyover
   view much wider. Also, allow the user to edit the order of pages from the flyover page by

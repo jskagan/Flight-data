@@ -1352,14 +1352,10 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), 
 // 2026-10-21) ----
 {
   const setup = extractFn('showTripsyFlyover');
-  assert(/class="tripsy-close-x tripsy-save-check" data-flyover-save[^>]*>✓<\/button>` : ''\}\s*<button class="tripsy-close-x" data-flyover-close/.test(setup),
-    'THE ASK: a green ✓ Save sits beside the ✕ at the top');
-  // "The cancel and save buttons on the top and bottom of the flyover screen should be
-  // consistent" (2026-10-22), then "The save and close buttons at the bottom of the flyover
-  // menu should not have words in them" (same day): the footer pair is the header pair exactly,
-  // glyph-only, same colours.
-  assert(/<div class="tfo-ss-footer"[^>]*>\s*<button class="tripsy-close-x" data-flyover-close title="Close" aria-label="Close">✕<\/button>\s*<button class="tripsy-close-x tripsy-save-check" data-flyover-save title="Save" aria-label="Save">✓<\/button>/.test(setup),
-    'and ✕ / ✓ sit in a pinned footer at the bottom, as the same word-free red/green boxes as the top');
+  // "Remove the cancel and save buttons from the flyover screen. Save all changes immediately
+  // when they are made on the screen" (2026-10-29): only the top ✕ remains.
+  assert(!/data-flyover-save/.test(setup) && !/tfo-ss-footer/.test(setup) && (setup.match(/data-flyover-close title="Close"/g) || []).length === 1,
+    'THE ASK: the fly-over page has no Save button and no Cancel/Save footer — just the top ✕');
   // "Do the same for the edit destinations and slideshow dialogs" (2026-10-22): their footers are
   // glyph-only too, and the wide word-carrying variant is gone.
   assert(!/tripsy-close-x--wide/.test(html), 'no wide word-carrying ✕/✓ variant remains anywhere');
@@ -1368,9 +1364,8 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), 
     assert(new RegExp(`<div class="tfo-ss-footer"[\\s\\S]*?<button class="tripsy-close-x" ${cancel} title="Cancel" aria-label="Cancel">✕</button>\\s*<button class="tripsy-close-x tripsy-save-check" ${save} title="Save" aria-label="Save">✓</button>`).test(fn),
       `${dlg}'s footer is a word-free ✕ / ✓ pair in the same boxes as its header`);
   }
-  assert(/querySelectorAll\('\[data-flyover-save\]'\)\.forEach\(b => b\.onclick = async/.test(setup) && /a\.blur\(\)/.test(setup)
-    && /const ok = await save\(\);\s*if \(!ok\) throw/.test(setup) && /toast\('Fly-over saved\.'\);\s*close\(\);/.test(setup),
-    'Save commits a name still being typed, waits for Drive, says so, then closes; a failed save keeps the page open');
+  assert(/const close = \(\) => \{\s*const a = document\.activeElement;\s*if \(a && ov\.contains\(a\) && typeof a\.blur === 'function'\) a\.blur\(\);\s*closed = true;/.test(setup),
+    'THE ASK: closing commits (and so saves) a name still being typed before the page goes');
   assert(/return ok;\s*\}, \(\) => false\);/.test(setup), 'save() reports whether Drive took it');
   assert(/querySelectorAll\('\[data-flyover-close\]'\)\.forEach/.test(setup), 'both Close controls close');
 }
@@ -2442,7 +2437,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
       'the slot renders in the header; Import now runs the import; there is no Later');
     assert(/inboxWatch\.timer = setTimeout\(inboxWatchTick, TRIPSY_FLYOVER_INBOX_POLL_MS\);/.test(setup) && /document\.visibilityState !== 'hidden'/.test(setup), 'the watcher polls on a timer and skips the list while the page is hidden');
     assert(/const onInboxVisibility = \(\) => \{ if \(document\.visibilityState === 'visible' && inboxWatch && !inboxWatch\.busy\) inboxWatchTick\(\); \};\s*document\.addEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'returning to the app checks the folder at once');
-    assert(/const close = \(\) => \{ closed = true;[^\n]*stopInboxWatch\(\); document\.removeEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'closing the page stops the watcher and drops its listener');
+    assert(/const close = \(\) => \{[\s\S]{0,200}?closed = true;[^\n]*stopInboxWatch\(\); document\.removeEventListener\('visibilitychange', onInboxVisibility\);/.test(setup), 'closing the page stops the watcher and drops its listener');
     assert(/save\(\); render\(\);\s*setStatus\(''\);\s*startInboxWatch\(\);/.test(setup) && /askMissingModes\(\);\s*startInboxWatch\(\);/.test(setup), 'the watcher starts on a hand-off and on opening a page with one pending');
     assert(/driveImportRunning = true;\s*stopInboxWatch\(\);/.test(setup) && /inboxPendingAt: '' \};\s*inboxFolderKnown = '';\s*save\(\);\s*stopInboxWatch\(\);/.test(setup), 'an import stops the watcher, and clearing the hand-off ends it');
     assert(/if \(inboxWatch \|\| closed \|\| !isOwner \|\| !record \|\| !record\.inboxPendingAt \|\| !record\.inboxFolderId\) return;/.test(setup), 'only the owner, with a pending hand-off, watches — and never twice');
