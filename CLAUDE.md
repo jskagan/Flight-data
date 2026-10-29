@@ -4223,8 +4223,43 @@ WebView's support for recording is unproven.
       with gradients and highlights to sit beside the app's emoji icons ("give the icons a little
       color and some additional detail," same day) — `TRIPSY_FLYOVER_ICON_ADD_PHOTOS` (a camera with a plus in its lens, "Add"),
       `TRIPSY_FLYOVER_ICON_EDIT_PHOTOS` (a camera, "Edit"), `TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW` (a
-      film projector with two reels and a light beam, "Edit"); the full names live in `aria-label`/`title`. The page thumbnails,
-      upload status and the slideshow summary with ▶ Preview follow below it.
+      film projector with two reels and a light beam, "Edit"); the full names live in `aria-label`/`title`. The upload status
+      and the slideshow summary with ▶ Preview follow below it.
+      **Card layout since 2026-10-29** ("Remove the transportation button on the second line …
+      just show the icon for the type of transport to the left of the destination name, but keep
+      the dropdown menu the same … Make the change music button into a square icon … to the
+      right of edit slideshow. Put delete destination on the first line far right in red, and
+      just call it delete"): line 1 is number, transport ICON (`data-flyover-mode-icon`, with ❓
+      while guessed; the owner's same `data-flyover-mode-select` sits over it at opacity 0, so a
+      tap opens the native drop-down), name, lodging, dates, and a red `.tfo-delete-btn`
+      **Delete** (Restore when removed) at the far right; line 2 is just the editable name (+
+      layovers; a viewer's music line); line 3 is Add / Edit / Edit / **Music** — a square
+      `.tfo-sqbtn` with `TRIPSY_FLYOVER_ICON_MUSIC`, same `data-flyover-stop-music` wiring,
+      shown to the owner whether or not the destination is visited (the photo tiles still need
+      a visit), track name beside it. This supersedes the line-2 drop-down / "🎵 Change Music" /
+      "Delete destination" notes above. **The name is edited IN the title** ("Turn the location
+      title into a button with editable text … delete the text box on the next line … Include a
+      revert option," same day): for the owner the title is a `.tfo-title-input` (same
+      `data-flyover-label` handler; Enter saves, Esc cancels; sized to its text) and line 2
+      holds no name box any more; a renamed stop (`labelEdited` with an `autoLabel` that
+      differs) shows **↺ <original name>** (`data-flyover-label-revert`), which restores
+      `autoLabel` and clears `labelEdited`.
+      **The card shows NO thumbnails, and each edit page has Complete / Still Working** ("Do not
+      show thumbnails on the flyover page. On the edit pages for photos and slideshow, add a
+      green button at the bottom that says 'Complete' … a red button 'Still Working' … if a new
+      picture is added to a location, remove the green shading," 2026-10-29). The page tiles,
+      No-page tiles, their ✕ and the tile drag/tap are gone (the notes below about tapping,
+      dragging or ✕-ing a tile on the BOX are superseded; Edit photos and Edit slideshow do all
+      of that); the card shows just "📷 N photos". Each stop may carry `editDone`
+      (`{photos?, slideshow?}`, kept by `tripsyFlyoverCarryOver`): the Edit photos page and the
+      Slideshow options dialog each end in a `.tfo-done-row` with red **Still Working**
+      (`data-ep-still-working` / `data-ss-still-working`: clears that mark via `onStillWorking`,
+      toasts, and STAYS on the edit page) and green **Complete** (`data-ep-complete` → resolves
+      `'complete'`; `data-ss-complete` → `done({…, complete: true})`), and the setup page's
+      `setEditDone` then shades that button `.tfo-sqbtn--done` (green background + border, same
+      size). ✕, Esc, Cancel or a click away never mark it. `updateStop` runs the pure
+      `tripsyFlyoverClearEditDoneOnAdd`: an update that adds a photo id the stop didn't have
+      clears both marks (a reorder or delete doesn't).
       **Edit photos' large view also MOVES a photo to another destination** ("When a user
       selects a photo from the edit photos page, add a button that says 'move' and when the user
       selects it present a drop down menu with other locations from the trip to move the photo

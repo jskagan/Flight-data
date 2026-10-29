@@ -507,7 +507,7 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     'each destination shows how its photos play, with Edit slideshow and Preview buttons');
   // "Change the name of the slideshow options button to edit slideshow" (2026-10-22); its place
   // beside the transport drop-down was superseded by the photo-buttons line (2026-10-25, below).
-  assert(/data-flyover-slideshow aria-label="Edit slideshow"/.test(setup) && !/Slideshow options<\/button>/.test(setup), 'the slideshow button is named "Edit slideshow"');
+  assert(/data-flyover-slideshow aria-label="Edit slideshow\$\{/.test(setup) && !/Slideshow options<\/button>/.test(setup), 'the slideshow button is named "Edit slideshow"');
   // "The third line should be three buttons: add photos, then edit photos, then edit slideshow.
   // Move these buttons from their other locations on the card" (2026-10-25).
   const pbM = /<div data-flyover-photo-buttons [^>]*>([\s\S]*?)<\/div>` : ''\}/.exec(setup);
@@ -516,8 +516,8 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     && /data-flyover-add-own aria-label="Add photos"/.test(pb), 'THE ASK: line 3 is Add photos, then Edit photos, then Edit slideshow');
   // "Make the add photos, edit photos, and edit slideshow buttons square with icons on top and words below" (2026-10-29).
   assert(/class="btn tfo-sqbtn" data-flyover-add-own [^>]*>\$\{TRIPSY_FLYOVER_ICON_ADD_PHOTOS\}<span>Add<\/span><\/button>/.test(pb)
-    && /class="btn tfo-sqbtn" data-flyover-edit-photos [^>]*>\$\{TRIPSY_FLYOVER_ICON_EDIT_PHOTOS\}<span>Edit<\/span><\/button>/.test(pb)
-    && /class="btn tfo-sqbtn" data-flyover-slideshow [^>]*>\$\{TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW\}<span>Edit<\/span><\/button>/.test(pb)
+    && /class="btn tfo-sqbtn\$\{done\.photos \? ' tfo-sqbtn--done' : ''\}" data-flyover-edit-photos [^>]*>\$\{TRIPSY_FLYOVER_ICON_EDIT_PHOTOS\}<span>Edit<\/span><\/button>/.test(pb)
+    && /class="btn tfo-sqbtn\$\{done\.slideshow \? ' tfo-sqbtn--done' : ''\}" data-flyover-slideshow [^>]*>\$\{TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW\}<span>Edit<\/span><\/button>/.test(pb)
     && /\.tfo-sqbtn \{ width: 64px; height: 64px;[^}]*flex-direction: column;/.test(html),
     'THE ASK: the three are square tiles, icon above the word: camera-with-plus "Add", camera "Edit", projector "Edit"');
   {
@@ -529,14 +529,16 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   assert(['data-flyover-add-own', 'data-flyover-edit-photos', 'data-flyover-slideshow'].every(k => setup.split(k + ' aria-label').length === 2),
     'THE ASK: each of the three buttons appears once on the card — moved, not copied');
   const ctl2 = (/<div data-flyover-controls [^>]*>([\s\S]*?)<\/div>/.exec(setup) || [])[1] || '';
-  assert(!/data-flyover-slideshow/.test(ctl2) && setup.indexOf('data-flyover-controls') < setup.indexOf('data-flyover-photo-buttons') && setup.indexOf('data-flyover-photo-buttons') < setup.indexOf('data-flyover-thumb='),
-    'line 2 no longer holds Edit slideshow, and the buttons line sits between line 2 and the page thumbnails');
+  assert(!/data-flyover-slideshow/.test(ctl2) && setup.indexOf('data-flyover-controls') < setup.indexOf('data-flyover-photo-buttons') && !/data-flyover-thumb=|data-flyover-nopage=|tripsyFlyoverPageThumbHtml\(pg/.test(setup),
+    'line 2 no longer holds Edit slideshow, and the buttons line follows it');
+  // "Do not show thumbnails on the flyover page" (2026-10-29): a count instead.
+  assert(/📷 \$\{photos\.length\} photo\$\{photos\.length === 1 \? '' : 's'\}/.test(setup), 'THE ASK: no thumbnails on the fly-over page, just how many photos the destination holds');
   // "Remove the suggested photos button. Have a button that says edit photos. When the user hits
   // it, show a page with thumbnails of all photos for that destination. When the user selects
   // one, show a large image with the buttons keep and delete" (2026-10-25).
   assert(!/data-flyover-add-suggested|Suggested photos<\/button>/.test(setup), 'THE ASK: the destination card has no Suggested photos button');
-  assert(/\$\{photos\.length \? `<button class="btn tfo-sqbtn" data-flyover-edit-photos aria-label="Edit photos"/.test(setup)
-    && /editPhotos\.onclick = \(\) => tripsyFlyoverEditPhotosPage\(stop, photoHooks\);/.test(setup) && /const photoHooks = \{\s*onDelete: photoId => removePhotoFromRecord\(id, photoId\),/.test(setup),
+  assert(/\$\{photos\.length \? `<button class="btn tfo-sqbtn\$\{done\.photos \? ' tfo-sqbtn--done' : ''\}" data-flyover-edit-photos aria-label="Edit photos/.test(setup)
+    && /editPhotos\.onclick = async \(\) => \{\s*const res = await tripsyFlyoverEditPhotosPage\(stop, \{ \.\.\.photoHooks, onStillWorking: \(\) => setEditDone\(id, 'photos', false\) \}\);\s*if \(res === 'complete' && !closed\) setEditDone\(id, 'photos', true\);/.test(setup) && /const photoHooks = \{\s*onDelete: photoId => removePhotoFromRecord\(id, photoId\),/.test(setup),
     'THE ASK: an Edit photos button (when the stop has photos) opens the photos page, and its Delete takes the photo off through the ordinary remove-and-save path');
   const ep = extractFn('tripsyFlyoverEditPhotosPage');
   assert(/tripsyFlyoverPhotosInPageOrder\(stop\)/.test(ep) && /data-ep-photo/.test(ep) && /tripsyFlyoverThumbHtml\(photo, 132, 100/.test(ep) && /tripsyDiaryPaintPhotos\(ov\)/.test(ep),
@@ -547,15 +549,13 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     'THE ASK: a tap shows it large with Keep and Delete; Delete removes it and the grid redraws from what is left');
   assert(/isVideo\s*\? `<video src="\$\{esc\(url\)\}" controls playsinline/.test(extractFn('tripsyFlyoverPhotoReviewDialog')), 'a video opens playable in the same large view');
   // "Change Music from here button to say 'Change Music'" (2026-10-25).
-  assert(/data-flyover-stop-music [^>]*>🎵 Change Music<\/button>/.test(setup) && !/Music from here<\/button>|Change music here/.test(setup) && /data-flyover-stop-music-name/.test(setup),
-    'THE ASK: the destination music button always reads "Change Music"; a destination\'s own track is named beside it');
+  // Since 2026-10-29 it is a square tile right of Edit slideshow ("Make the change music
+  // button into a square icon similar to the edit icons").
+  assert(/<button class="btn tfo-sqbtn" data-flyover-stop-music aria-label="Change music" [^>]*>\$\{TRIPSY_FLYOVER_ICON_MUSIC\}<span>Music<\/span><\/button>/.test(setup) && /data-flyover-stop-music-name/.test(setup),
+    'THE ASK: the destination music button is a square music tile; a destination\'s own track is named beside it');
   // "When photos are Imported they should say 'No page'" (2026-10-25): the card, the Edit
   // photos page, and every add path.
-  assert(/\$\{tripsyFlyoverUnplacedPhotos\(s\)\.map\(ph => `[\s\S]*data-flyover-nopage="\$\{esc\(ph\.driveFileId\)\}"[\s\S]*tripsyFlyoverThumbHtml\(ph, 84, 64,[\s\S]*>No page<\/span>[\s\S]*data-flyover-nopage-remove/.test(setup)
-    && /card\.querySelectorAll\('\[data-flyover-nopage\]'\)\.forEach\(t => t\.onclick = e => \{[\s\S]*?tripsyFlyoverReviewStopPhoto\(stop, t\.getAttribute\('data-flyover-nopage'\), 'No page', photoHooks\);/.test(setup)
-    && /removePhotoFromRecord\(id, b\.getAttribute\('data-flyover-nopage-remove'\)\)\.catch/.test(setup),
-    'THE ASK: every photo on No page shows on the card as its own thumbnail badged "No page" ("Show each photo on the flyover page even they are not on a page," 2026-10-25); a tap opens it large (Delete / Keep / Move), ✕ removes it');
-  assert(/\{ \.\.\.s, \.\.\.tripsyFlyoverFreezePagesOnAdd\(s, fields\) \}/.test(setup) && (setup.match(/updateStop\((id|stopId), \{ photos: \[\.\.\.\(stopNow\(\)\.photos \|\| \[\]\), rec\] \}\)/g) || []).length === 3,
+  assert(/\{ \.\.\.s, \.\.\.tripsyFlyoverClearEditDoneOnAdd\(s, tripsyFlyoverFreezePagesOnAdd\(s, fields\)\) \}/.test(setup) && (setup.match(/updateStop\((id|stopId), \{ photos: \[\.\.\.\(stopNow\(\)\.photos \|\| \[\]\), rec\] \}\)/g) || []).length === 3,
     'every add path (picker photos, picker videos, Drive import) goes through updateStop, which freezes a never-paged destination first');
   const ep2 = extractFn('tripsyFlyoverEditPhotosPage');
   assert(/\$\{page == null \? 'No page' : page\}<\/span>/.test(ep2), 'THE ASK: the Edit photos page badges an unplaced photo "No page"');
@@ -614,12 +614,31 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
     'THE ASK: line 1 is the location, its dates and its lodging, in large type');
   assert(headM && headM[2].indexOf("s.names.join(' · ')") < headM[2].indexOf('tripsyFlyoverDatesLabel(s)') && headM[2].indexOf("esc(s.label || 'Location')") < headM[2].indexOf("s.names.join(' · ')"),
     'THE ASK: the title reads location, then lodging, then dates ("Swap the location of the date and lodging in the card title," 2026-10-25)');
-  const ctlM = /<div data-flyover-controls [^>]*>([\s\S]*?)<\/div>\s*\$\{noPlace && !s\.removed/.exec(setup);
+  const ctlM = /<div data-flyover-controls [^>]*>([\s\S]*?)<\/div>(?:` : ''\})?\s*\$\{noPlace && !s\.removed/.exec(setup);
   const ctl = ctlM ? ctlM[1] : '';
   const at = k => ctl.indexOf(k);
-  assert(ctlM && at('${legHtml}') >= 0 && at('${legHtml}') < at('data-flyover-label') && at('data-flyover-label') < at('data-flyover-stop-music') && at('data-flyover-stop-music') < at('data-flyover-remove'),
-    'THE ASK: line 2 is the transport drop-down, the editable name, the music button and the delete button, in that order');
-  assert(/data-flyover-remove [^>]*>Delete destination<\/button>/.test(ctl) && !/data-flyover-remove [^>]*>Remove<\/button>/.test(ctl), 'THE ASK: the destination\'s Remove button reads "Delete destination"');
+  // 2026-10-29: "Remove the transportation button on the second line … just show the icon
+  // for the type of transport to the left of the destination name … Put delete destination
+  // on the first line far right in red, and just call it delete."
+  assert(ctlM && at('data-flyover-label') < 0 && at('${legHtml}') < 0 && at('data-flyover-stop-music') < 0 && at('data-flyover-remove') < 0,
+    'THE ASK: line 2 has no name box, transport button, music or delete (only layovers / a viewer\'s music line)');
+  // "Turn the location title into a button with editable text … delete the text box on the
+  // next line … Include a revert option" (2026-10-29).
+  const head0 = headM ? headM[2] : '';
+  assert(/<input class="tfo-title-input" data-flyover-label value="\$\{esc\(s\.label\)\}"/.test(head0) && /\.tfo-title-input \{[^}]*font-size: 20px; font-weight: 700;/.test(html),
+    'THE ASK: the owner edits the name in the title itself, an input styled as the large title');
+  assert(/s\.labelEdited && s\.autoLabel && s\.autoLabel !== s\.label \? `<button class="btn" data-flyover-label-revert/.test(head0)
+    && /revert\.onclick = \(\) => \{[\s\S]*?updateStop\(id, \{ label: st\.autoLabel, labelEdited: false \}\);/.test(setup),
+    'THE ASK: a renamed destination offers ↺ back to its original name, which clears the edited flag');
+  assert(/label\.onkeydown = e => \{ if \(e\.key === 'Enter'\)/.test(setup) && /updateStop\(id, \{ label: v, labelEdited: true \}\);\s*save\(\); if \(!closed\) render\(\);/.test(setup),
+    'Enter saves the new name, and the card re-renders so the revert option appears');
+  const head = headM ? headM[2] : '';
+  assert(head.indexOf('${legHtml}') >= 0 && head.indexOf('${legHtml}') < head.indexOf("esc(s.label || 'Location')"), 'THE ASK: the transport icon sits left of the destination name on line 1');
+  assert(/<button class="btn tfo-delete-btn" data-flyover-remove style="margin-left:auto;[^>]*>Delete<\/button>/.test(head) && /\.tfo-delete-btn \{[^}]*#B63A3A/.test(html),
+    'THE ASK: line 1 ends, far right, with a red "Delete"');
+  const btns = /<div data-flyover-photo-buttons[^>]*>([\s\S]*?)<\/div>` : ''\}/.exec(setup);
+  assert(btns && btns[1].indexOf('data-flyover-slideshow') < btns[1].indexOf('data-flyover-stop-music') && btns[1].indexOf('data-flyover-slideshow') > 0,
+    'THE ASK: the music tile is right of Edit slideshow');
   assert(!/data-flyover-label[\s\S]{0,400}<strong style="flex:1/.test(ctl) && !/margin-top:6px; font-size:12px; color:var\(--muted\);">\s*<span>🎵/.test(setup), 'the name is not repeated on line 2 for a viewer, and the old separate music row is gone');
   // "to the left of the last existing page show a button that is the same size as the images
   // of each page with a plus sign in it. If the user selects that, create a new page at the
@@ -1274,12 +1293,9 @@ eval([extractFn('tripsyFlyoverPhotosInPageOrder'), extractFn('tripsyFlyoverUnpla
   const setup = extractFn('showTripsyFlyover');
   // Since 2026-10-22 the setup card shows ONE tile per PAGE, in play order ("show each page
   // as a single thumbnail"), so the photo-per-tile pins became page-per-tile pins.
-  assert(/const pageTiles = tripsyFlyoverPages\(s\);/.test(setup) && /pageTiles\.map\(\(pg, k\)/.test(setup) && />Page \$\{k \+ 1\}\$\{pg\.photos\.length > 1 \? ` · \$\{pg\.photos\.length\}` : ''\}<\/span>/.test(setup)
-    && /<div class="btn" data-flyover-thumb="\$\{k\}" data-flyover-thumb-page="\$\{k \+ 1\}" style="padding:3px; position:relative; cursor:[^\n]*>\s*\$\{tripsyFlyoverPageThumbHtml\(pg, 84, 64, 'border-radius:5px;'\)\}/.test(setup),
-    'the setup page lists each destination\'s PAGES in play order, one framed tile each with a "Page N" badge (and a photo count on a page of several)');
-  assert(/data-flyover-page-remove="\$\{k\}"/.test(setup) && /const fids = new Set\(pg\.photos\.map\(ph => ph\.driveFileId\)\);/.test(setup) && /filter\(ph => !fids\.has\(ph\.driveFileId\)\)/.test(setup)
-    && /if \(fids\.size > 1 && !\(await tripsyConfirmDialog\(`Remove the \$\{fids\.size\} photos on this page\?`/.test(setup),
-    'a tile\'s ✕ removes that page\'s photos by id, asking first when there are several');
+  // "Do not show thumbnails on the flyover page" (2026-10-29): the card's page tiles, No-page
+  // tiles, their ✕ and drag are gone.
+  assert(!/data-flyover-thumb=|data-flyover-page-remove=|data-flyover-nopage/.test(setup), 'the setup card shows no photo thumbnails');
   assert(/photos: tripsyFlyoverPhotosInPageOrder\(\{ \.\.\.st, pages: r\.pages, photos: r\.photos \}\)\.map\(x => x\.photo\)/.test(setup),
     'Save stores the photos in the new page order');
   assert(/const photos = tripsyFlyoverPhotosInPageOrder\(stop\)\.map/.test(extractFn('tripsyFlyoverSlideshowDialog')), 'the page dialog\'s grid opens in play order too');
@@ -1323,13 +1339,7 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), 
   assert(r && r.pages.map(p => p.ids.join('')).join('|') === 'BC|D|A' && tripsyFlyoverMoveStopPage(st, 1, 1) === null && tripsyFlyoverMoveStopPage(st, 0, 5) === null,
     'moving by page index moves the page; the same page, or a missing one, changes nothing');
   const setup = extractFn('showTripsyFlyover');
-  assert(/const tiles = \[\.\.\.card\.querySelectorAll\('\[data-flyover-thumb\]'\)\];\s*tripsyFlyoverWireDrag\(tiles, \(from, to\) => \{\s*const r = tripsyFlyoverMoveStopPage\(stop\(\), from, to\);\s*if \(!r\) return;\s*updateStop\(id, r\);\s*save\(\);\s*\}, \{ holdMs: 280, state: dragState, afterDrop: \(\) => \{ if \(!closed\) render\(\); \} \}\);/.test(setup),
-    'the setup page\'s page tiles drag through the shared mechanism with a press-and-hold, saving the move at once');
-  assert(/if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;[^\n]*\n\s*const pg = tripsyFlyoverPages\(stop\(\)\)\[Number\(b\.getAttribute\('data-flyover-page-remove'\)\)\]/.test(setup),
-    'the release that ended a drag never removes a page');
-  assert(/Tap a photo to see it large\. Drag a page onto another to move it there\./.test(setup), 'the card says its photos can be tapped and its pages dragged');
-  assert(/tiles\.forEach\(t => t\.onclick = async e => \{\s*if \(!isOwner \|\| e\.target\.closest\('button'\)\) return;\s*if \(Date\.now\(\) < dragState\.suppressTapUntil\) return;[^\n]*\n[\s\S]*?let hitIdx = strips\.findIndex\(n => \{ const r = n\.getBoundingClientRect\(\); return e\.clientX >= r\.left && e\.clientX < r\.right; \}\);[\s\S]*?await tripsyFlyoverReviewStopPhoto\(stop, pg\.photos\[idx\]\.driveFileId, `Page \$\{k \+ 1\}`, photoHooks\);/.test(setup),
-    'THE ASK: tapping a photo on a page tile opens THAT photo large, exactly as Edit photos does ("If a user selects a photo directly from the flyover page, treat it as if he had selected that photo from the edit photo page," 2026-10-25); the release that ended a drag is not a tap');
+  assert(!/tripsyFlyoverWireDrag\(tiles/.test(setup) && !/Drag a page onto another/.test(setup), 'no thumbnail drag is wired on the setup page any more (no thumbnails)');
   const wd = extractFn('tripsyFlyoverWireDrag');
   assert(/if \(e\.button \|\| \(btn && btn !== el\)\) return;/.test(wd), 'a tap on the ✕ inside a thumbnail is never the start of a drag (a chip that IS a button still drags)');
   assert(/<div class="tw-modal-paper tw-wide" style="max-width:1240px;/.test(setup)
@@ -1483,9 +1493,9 @@ eval(extractFn('tripsyFlyoverStopsNeedingMode'));
     'opening the setup page asks right away, including for fly-overs saved before the flag');
   assert(/updateStop\(st\.id, \{ mode: m, modeManual: true, modeGuessed: false \}\);/.test(setup) && /if \(!m \|\| closed\) break;/.test(setup),
     'each answer is saved on its stop; Not now stops asking until next time');
-  assert(/<select class="field-input" data-flyover-mode-select/.test(setup) && /❓/.test(setup)
+  assert(/<span data-flyover-mode-icon [^>]*>[\s\S]*?tripsyFlyoverModeGlyphHtml\(s\.mode, 20\)\}<select data-flyover-mode-select aria-label="How you got here" style="position:absolute; inset:0; width:100%; height:100%; opacity:0;/.test(setup) && /❓/.test(setup)
     && /modeSel\.onchange = \(\) => \{[\s\S]*updateStop\(id, \{ mode: m, modeManual: true, modeGuessed: false \}\);/.test(setup),
-    'THE ASK (2026-10-21): each leg\'s transport is a drop-down menu to change it, marked ❓ while it is still a guess');
+    'THE ASK (2026-10-21): each leg\'s transport is a drop-down menu to change it, marked ❓ while it is still a guess — since 2026-10-29 opened by tapping the transport ICON (an invisible select over it)');
   assert(!/data-flyover-mode[^-]/.test(setup), 'the old tap-to-change button is gone');
 }
 
@@ -1544,7 +1554,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     'THE ASK: Bus is one of the transports, shown as 🚌 Bus, ranked with a drive');
   assert(tripsyFlyoverModeOf({ category: 'bus' }) === 'bus' && tripsyFlyoverModeOf({ category: 'coach' }) === 'bus' && tripsyFlyoverModeOf({ category: 'car' }) === 'car'
     && tripsyFlyoverModeOf({ category: 'airplane' }) === 'plane', 'a bus or coach category derives as a bus; a car is still a car');
-  assert(/<select class="field-input" data-flyover-mode-select[^`]*\$\{TRIPSY_FLYOVER_MODES\.map/.test(extractFn('showTripsyFlyover')),
+  assert(/<select data-flyover-mode-select[^`]*\$\{TRIPSY_FLYOVER_MODES\.map/.test(extractFn('showTripsyFlyover')),
     'the leg drop-down offers it');
   assert(/TRIPSY_FLYOVER_MODES\.map/.test(extractFn('tripsyFlyoverAskMode')), 'and so does the "How did you get there?" question');
   assert(tripsyFlyoverModeOf({ category: 'other' }, 'Hike to the summit') === 'hike' && tripsyFlyoverModeOf({ category: 'car' }, 'Car from A to B') === 'car'
@@ -1945,7 +1955,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   const v = tripsyFlyoverPlaceAddedPhotos([{ ids: ['v9'], count: 1 }], 0, ['n1'], blank, isV);
   assert(v.pages.map(p => p.ids.join()).join('|') === 'v9|n1', 'nothing joins a video page');
   const dlg = extractFn('tripsyFlyoverSlideshowDialog');
-  assert(/page = null, addMedia = null \} = \{\}\) \{/.test(dlg), 'the dialog takes an addMedia callback');
+  assert(/page = null, addMedia = null, onStillWorking = null \} = \{\}\) \{/.test(dlg), 'the dialog takes an addMedia callback');
   assert(/\$\{addMedia \? `<button class="btn" data-ss-add-photos[^`]*>＋ Add photos<\/button>` : ''\}/.test(dlg),
     'an ＋ Add photos button renders beside the grid\'s label (owner-only: the caller passes addMedia only to the owner)');
   assert(/if \(addBtn\) addBtn\.onclick = \(\) => \{ if \(adding\) return; tripsyFlyoverPickMedia\(async files => \{/.test(dlg),
@@ -2475,3 +2485,41 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   // ---- Storm tracking was removed ("Remove tracking for the typhoon from flyover," 2026-10-25) ----
   assert(!/TRIPSY_FLYOVER_STORM|showStorms|clearStorms|tfo-storm|data-flyover-storms|tripsyFlyoverLegStorms/.test(html), 'THE ASK: no storm is plotted on the fly-over and the setup page carries no storm note');
 }
+
+// ---- Complete / Still Working on the two edit pages ("On the edit pages for photos and
+// slideshow, add a green button at the bottom that says 'Complete' … a red button 'Still
+// Working' … if a new picture is added to a location, remove the green shading," 2026-10-29) ----
+eval(extractFn('tripsyFlyoverClearEditDoneOnAdd'));
+{
+  const ph = id => ({ driveFileId: id });
+  const st = { photos: [ph('A'), ph('B')], editDone: { photos: true, slideshow: true } };
+  let f = tripsyFlyoverClearEditDoneOnAdd(st, { photos: [ph('A'), ph('B'), ph('C')] });
+  assert(f.editDone && Object.keys(f.editDone).length === 0, 'THE ASK: a new picture on a destination clears both green marks');
+  f = tripsyFlyoverClearEditDoneOnAdd(st, { photos: [ph('B'), ph('A')] });
+  assert(!('editDone' in f), 'a reorder (no new photo) keeps the marks');
+  f = tripsyFlyoverClearEditDoneOnAdd(st, { photos: [ph('A')] });
+  assert(!('editDone' in f), 'a delete keeps the marks');
+  f = tripsyFlyoverClearEditDoneOnAdd({ photos: [] }, { photos: [ph('A')] });
+  assert(!('editDone' in f), 'nothing to clear on an unmarked stop');
+  f = tripsyFlyoverClearEditDoneOnAdd(st, { photos: [ph('A'), ph('B'), ph('C')], editDone: { photos: true } });
+  assert(f.editDone.photos === true, 'an explicit editDone in the same update wins');
+  const setup = extractFn('showTripsyFlyover');
+  assert(/tripsyFlyoverClearEditDoneOnAdd\(s, tripsyFlyoverFreezePagesOnAdd\(s, fields\)\)/.test(setup), 'every photo add goes through updateStop, which clears the marks');
+  assert(/class="btn tfo-sqbtn\$\{done\.photos \? ' tfo-sqbtn--done' : ''\}" data-flyover-edit-photos/.test(setup)
+    && /class="btn tfo-sqbtn\$\{done\.slideshow \? ' tfo-sqbtn--done' : ''\}" data-flyover-slideshow/.test(setup),
+    'a completed action\'s button is shaded green on the card');
+  assert(/\.tfo-sqbtn\.tfo-sqbtn--done \{[^}]*#3AA76D/.test(html) && !/\.tfo-sqbtn\.tfo-sqbtn--done \{[^}]*(width|height|padding)/.test(html),
+    'the green state changes colour and border only, never the size');
+  assert(/if \(res === 'complete' && !closed\) setEditDone\(id, 'photos', true\);/.test(setup) && /if \(r\.complete\) setEditDone\(id, 'slideshow', true\);/.test(setup),
+    'only Complete marks the action done; closing or clicking away does not');
+  assert(/onStillWorking: \(\) => setEditDone\(id, 'photos', false\)/.test(setup) && /onStillWorking: \(\) => setEditDone\(id, 'slideshow', false\)/.test(setup),
+    'Still Working clears the mark');
+  const ep = extractFn('tripsyFlyoverEditPhotosPage'), ss = extractFn('tripsyFlyoverSlideshowDialog');
+  for (const [name, src, pre] of [['Edit photos', ep, 'ep'], ['Slideshow', ss, 'ss']]) {
+    assert(new RegExp(`data-${pre}-complete`).test(src) && new RegExp(`data-${pre}-still-working`).test(src) && /tfo-complete-btn/.test(src) && /tfo-working-btn/.test(src) && />Complete</.test(src) && />Still Working</.test(src),
+      `${name}: a green Complete and a red Still Working button at the bottom`);
+  }
+  assert(/close\('complete'\)/.test(ep) && /complete: true/.test(ss), 'Complete returns to the fly-over page reporting completion');
+  assert(/editDone: \{ \.\.\.p\.editDone \}/.test(extractFn('tripsyFlyoverCarryOver')), 'a rebuild keeps the marks');
+}
+

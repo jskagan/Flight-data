@@ -1312,6 +1312,17 @@
      words below," 2026-10-29). The icons are coloured inline SVGs, like the app's emoji icons. */
   .tfo-sqbtn { width: 64px; height: 64px; padding: 6px 4px 5px !important; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-size: 11px !important; line-height: 1; }
   .tfo-sqbtn svg { width: 32px; height: 32px; display: block; }
+  /* Marked complete on its edit page (2026-10-29): green fill and border, same size. */
+  .tfo-title-input { font: inherit; font-size: 20px; font-weight: 700; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 2px 8px; max-width: 100%; min-width: 0; cursor: text; }
+  .tfo-title-input:hover { border-color: var(--muted); }
+  .tfo-title-input:focus { outline: none; border-color: #2F7FD6; box-shadow: 0 0 0 2px rgba(47,127,214,0.35); }
+  .tfo-delete-btn { background: #B63A3A !important; border: 1px solid #D9534F !important; color: #fff !important; font-size: 12px !important; font-weight: 700; }
+  .tfo-sqbtn.tfo-sqbtn--done { background: rgba(58,167,109,0.30) !important; border-color: #3AA76D !important; box-shadow: inset 0 0 0 1px #3AA76D; }
+  /* The edit pages' sign-off pair: green Complete, red Still Working. */
+  .tfo-done-row { display: flex; gap: 8px; justify-content: flex-end; flex-basis: 100%; flex-wrap: wrap; }
+  .tfo-complete-btn, .tfo-working-btn { border: 1px solid; border-radius: 8px; padding: 9px 16px; font-size: 14px; font-weight: 700; cursor: pointer; color: #fff; }
+  .tfo-complete-btn { background: #2E8B57; border-color: #3AA76D; }
+  .tfo-working-btn { background: #B63A3A; border-color: #D9534F; }
   .tripsy-close-x {
     /* Sized to sit ON the header line rather than tower over it: these headers are an
        18px h2 (~24px line box), so the box is 32px -- a little taller so it stays a
@@ -18453,6 +18464,18 @@ function tripsyFlyoverFreezePagesOnAdd(stop, fields) {
   if (!fields.photos.some(p => p && !had.has(p.driveFileId))) return fields;
   return { ...fields, pages: tripsyFlyoverPages(stop).map(tripsyFlyoverPageRecord) };
 }
+// A new photo on a destination clears its green "done" marks ("if a new picture is added to a
+// location, remove the green shading from any buttons that were green for that location,"
+// 2026-10-29). New = more photos than before AND an id not already there, so a reorder or a
+// pending id resolving to its Drive id never counts. Returns the fields to apply. Pure.
+function tripsyFlyoverClearEditDoneOnAdd(stop, fields) {
+  if (!stop || !fields || !Array.isArray(fields.photos) || fields.editDone !== undefined) return fields;
+  const before = stop.photos || [];
+  if (fields.photos.length <= before.length) return fields;
+  const had = new Set(before.map(p => p && p.driveFileId));
+  if (!fields.photos.some(p => p && !had.has(p.driveFileId))) return fields;
+  return (stop.editDone && Object.keys(stop.editDone).length) ? { ...fields, editDone: {} } : fields;
+}
 // The Slideshow options grid's photos as consecutive runs sharing one page: [{page, photos}],
 // `page` the 0-based page index or null for a photo on no page (each of those is its own run).
 // The grid lists photos in play order, so a page's photos are adjacent, and a run of 2+ is
@@ -18698,6 +18721,7 @@ function tripsyFlyoverCarryOver(stops, prevStops) {
       ...(p.slideshow ? { slideshow: { ...p.slideshow } } : {}),
       // Music chosen for this destination (2026-10-24) survives a rebuild like its photos.
       ...(p.music ? { music: { ...p.music } } : {}),
+      ...(p.editDone ? { editDone: { ...p.editDone } } : {}),
       ...(Array.isArray(p.pages) ? { pages: p.pages.map(pg => ({ ...pg, ids: [...(pg.ids || [])] })) } : {}) };
   });
 }
@@ -19635,7 +19659,7 @@ async function showTripsyFlyover(tripKey) {
     return saveChain;
   };
   const updateStop = (id, fields) => {
-    record = { ...record, stops: record.stops.map(s => s.id === id ? { ...s, ...tripsyFlyoverFreezePagesOnAdd(s, fields) } : s) };
+    record = { ...record, stops: record.stops.map(s => s.id === id ? { ...s, ...tripsyFlyoverClearEditDoneOnAdd(s, tripsyFlyoverFreezePagesOnAdd(s, fields)) } : s) };
   };
   const build = async () => {
     setStatus('Finding the destinations on the map…');
@@ -19848,6 +19872,7 @@ async function showTripsyFlyover(tripKey) {
     const r = await tripsyFlyoverSlideshowDialog(st, {
       intro,
       page,
+      onStillWorking: () => setEditDone(id, 'slideshow', false),
       hasMusic: !!record.music,
       addMedia: isOwner ? (files, setStatusFn) => addMediaToStop(id, files, setStatusFn) : null,
       // onDropped: the dialog takes a removed photo off its own draft too, or Save would
@@ -19865,7 +19890,17 @@ async function showTripsyFlyover(tripKey) {
     if (!r || closed) return;
     // The stop's photos are kept in the order they play, so every list of them agrees.
     updateStop(id, { pages: r.pages, photos: tripsyFlyoverPhotosInPageOrder({ ...st, pages: r.pages, photos: r.photos }).map(x => x.photo) });
-    save(); render();
+    if (r.complete) setEditDone(id, 'slideshow', true);
+    else { save(); render(); }
+  };
+  // The green "done" mark on a card's Edit photos / Edit slideshow button (2026-10-29).
+  const setEditDone = (id, key, on) => {
+    const st = record && record.stops.find(x => x.id === id);
+    if (!st || !!(st.editDone || {})[key] === !!on) return;
+    const next = { ...(st.editDone || {}) };
+    if (on) next[key] = true; else delete next[key];
+    updateStop(id, { editDone: next });
+    save(); if (!closed) render();
   };
   if (record) for (const m of tripsyFlyoverMusicTracks(record, record.stops)) tripsyFlyoverPrefetchMusic(m);
   // Legs a fresh derivation finds no transport for -- covers a fly-over saved before stops
@@ -19918,15 +19953,17 @@ async function showTripsyFlyover(tripKey) {
       </div>
       ${record.stops.map((s, i) => {
         const photos = s.photos || [];
-        // One tile per PAGE, in play order ("show each page as a single thumbnail," 2026-10-22):
-        // a page of several photos is one frame split into vertical strips, one per photo.
-        const pageTiles = tripsyFlyoverPages(s);
+        const done = s.editDone || {};
         const needsMode = needModeIds.has(s.id);
+        // The leg is shown as just its transport ICON, left of the destination name; the owner
+        // taps it to get the same drop-down (an invisible <select> laid over the icon, so the
+        // native menu opens) -- "Remove the transportation button on the second line of the
+        // flyover page. Instead, just show the icon for the type of transport to the left of
+        // the destination name, but keep the dropdown menu the same," 2026-10-29. ❓ while the
+        // mode is still a guess.
         const legHtml = !s.mode ? `<span style="font-size:18px;">📍</span>`
-          // A drop-down to change how the trip got here ("Allow the user to change the mode of
-          // transportation with a drop down menu," 2026-10-21); ❓ while it is still a guess.
-          : isOwner ? `<span style="display:inline-flex; align-items:center; gap:3px;">${needsMode ? '<span title="Nothing on the trip says how you got here — choose it" style="font-size:13px;">❓</span>' : ''}<select class="field-input" data-flyover-mode-select title="How you got here" aria-label="How you got here" style="width:auto; padding:3px 6px; font-size:13px;">${TRIPSY_FLYOVER_MODES.map(m => `<option value="${m}"${m === s.mode ? ' selected' : ''}>${tripsyFlyoverModeGlyphText(m)} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}</select></span>`
-          : `<span title="${esc(TRIPSY_FLYOVER_MODE_LABEL[s.mode] || '')}" style="font-size:18px;">${tripsyFlyoverModeGlyphHtml(s.mode, 18)}</span>`;
+          : isOwner ? `<span data-flyover-mode-icon style="position:relative; display:inline-flex; align-items:center; gap:2px; font-size:20px; line-height:1; cursor:pointer;" title="How you got here: ${esc(TRIPSY_FLYOVER_MODE_LABEL[s.mode] || '')} — tap to change">${needsMode ? '<span style="font-size:13px;">❓</span>' : ''}${tripsyFlyoverModeGlyphHtml(s.mode, 20)}<select data-flyover-mode-select aria-label="How you got here" style="position:absolute; inset:0; width:100%; height:100%; opacity:0; cursor:pointer; font-size:16px;">${TRIPSY_FLYOVER_MODES.map(m => `<option value="${m}"${m === s.mode ? ' selected' : ''}>${tripsyFlyoverModeGlyphText(m)} ${esc(TRIPSY_FLYOVER_MODE_LABEL[m])}</option>`).join('')}</select></span>`
+          : `<span title="${esc(TRIPSY_FLYOVER_MODE_LABEL[s.mode] || '')}" style="font-size:20px; line-height:1;">${tripsyFlyoverModeGlyphHtml(s.mode, 20)}</span>`;
         const noPlace = s.lat == null;
         // An airport transfer stop is passed through (no photos, no slideshow) -- the card
         // just says so, with the leg's drop-down above it.
@@ -19951,49 +19988,46 @@ async function showTripsyFlyover(tripKey) {
                date and lodging in the card title," same day). -->
           <div data-flyover-headline style="display:flex; align-items:baseline; gap:6px 12px; flex-wrap:wrap; font-size:18px; line-height:1.3;">
             <span style="font-family:var(--mono); font-size:13px; color:var(--muted);">${i + 1}</span>
-            <strong style="font-size:20px;">${esc(s.label || 'Location')}</strong>
+            ${legHtml}
+            ${isOwner && !s.removed
+              // The title itself is the name editor ("Turn the location title into a button with
+              // editable text … delete the text box on the next line … Include a revert option,"
+              // 2026-10-29): an input styled as a title button; ↺ returns to the derived name.
+              ? `<span style="display:inline-flex; align-items:center; gap:4px;"><input class="tfo-title-input" data-flyover-label value="${esc(s.label)}" size="${Math.max(6, (s.label || '').length + 1)}" placeholder="Location" aria-label="Destination name" title="The name shown on the map — tap to edit">${s.labelEdited && s.autoLabel && s.autoLabel !== s.label ? `<button class="btn" data-flyover-label-revert style="font-size:12px; padding:3px 8px;" title="Go back to the original name: ${esc(s.autoLabel)}">↺ ${esc(s.autoLabel)}</button>` : ''}</span>`
+              : `<strong style="font-size:20px;">${esc(s.label || 'Location')}</strong>`}
             ${(s.names || []).length ? `<span>${esc(s.names.join(' · '))}</span>` : ''}
             <span style="color:var(--muted);">${esc(tripsyFlyoverDatesLabel(s))}</span>
-          </div>
-          <!-- Line 2: transport drop-down, the editable name, music, Delete destination. -->
-          <div data-flyover-controls style="display:flex; align-items:center; gap:8px 10px; flex-wrap:wrap; margin-top:8px;">
-            ${legHtml}${s.mode === 'plane' && (s.via || []).length ? `<span style="font-size:12px; color:var(--muted);" title="Layovers: the flight is shown through these cities">via ${esc(s.via.map(v => v.label).join(', '))}</span>` : ''}
-            ${isOwner && !s.removed ? `<input class="field-input" data-flyover-label value="${esc(s.label)}" placeholder="Location" aria-label="Destination name" title="The name shown on the map" style="flex:1; min-width:140px; font-weight:700;">` : ''}
-            ${s.removed ? '' : isOwner
-              ? `<button class="btn" data-flyover-stop-music style="font-size:12px; white-space:nowrap;" title="${esc(s.music ? `From here: ${tripsyFlyoverMusicLabel(s.music)}${s.music.license ? ` (${tripsyFlyoverLicenseLabel(s.music.license)})` : ''}` : (i === 0 ? 'The fly-over music plays here' : 'The music carries on from the stop before'))} — choose music for this destination onward">🎵 Change Music</button>${s.music ? `<span data-flyover-stop-music-name style="font-size:12px; color:var(--muted); max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(tripsyFlyoverMusicLabel(s.music))}">${esc(tripsyFlyoverMusicLabel(s.music))}</span>` : ''}`
-              : `<span style="font-size:12px; color:var(--muted);">🎵 ${s.music ? `From here: <strong style="color:var(--text);">${esc(tripsyFlyoverMusicLabel(s.music))}</strong>` : (i === 0 ? 'The fly-over music plays here.' : 'The music carries on from the stop before.')}</span>`}
             ${isOwner ? (s.removed
-              ? `<button class="btn" data-flyover-restore style="font-size:12px;">Restore</button>`
-              : `<button class="btn" data-flyover-remove style="font-size:12px;" title="Leave this destination out of the fly-over (Restore brings it back)">Delete destination</button>`) : ''}
+              ? `<button class="btn" data-flyover-restore style="font-size:12px; margin-left:auto; align-self:center;">Restore</button>`
+              : `<button class="btn tfo-delete-btn" data-flyover-remove style="margin-left:auto; align-self:center;" title="Leave this destination out of the fly-over (Restore brings it back)">Delete</button>`) : ''}
           </div>
+          <!-- Line 2: a flight's layovers (and a viewer's music line). The name is edited in the
+               title, the transport icon and Delete are on line 1, music on the photo buttons
+               (2026-10-29). -->
+          ${(s.mode === 'plane' && (s.via || []).length) || (!isOwner && !s.removed) ? `
+          <div data-flyover-controls style="display:flex; align-items:center; gap:8px 10px; flex-wrap:wrap; margin-top:8px;">
+            ${s.mode === 'plane' && (s.via || []).length ? `<span style="font-size:12px; color:var(--muted);" title="Layovers: the flight is shown through these cities">via ${esc(s.via.map(v => v.label).join(', '))}</span>` : ''}
+            ${!isOwner && !s.removed ? `<span style="font-size:12px; color:var(--muted);">🎵 ${s.music ? `From here: <strong style="color:var(--text);">${esc(tripsyFlyoverMusicLabel(s.music))}</strong>` : (i === 0 ? 'The fly-over music plays here.' : 'The music carries on from the stop before.')}</span>` : ''}
+          </div>` : ''}
           ${noPlace && !s.removed ? `<div style="font-size:12px; color:#E0A33A; margin-top:4px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">⚠️ Not on the map yet — it will be skipped.${isOwner ? ` <button class="btn" data-flyover-set-place style="font-size:12px;">📍 Set location</button>` : ''}</div>` : ''}
           ${s.removed ? '' : `
-          ${isOwner && tripsyFlyoverStopVisited(s, todayKey) ? `
+          ${isOwner ? `
           <!-- Line 3: the photo buttons, together ("The third line should be three buttons: add
                photos, then edit photos, then edit slideshow. Move these buttons from their other
                locations on the card," 2026-10-25). The two edit buttons need photos to edit. -->
           <div data-flyover-photo-buttons style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; align-items:center;">
-            <button class="btn tfo-sqbtn" data-flyover-add-own aria-label="Add photos" title="Add photos and videos from your library (Albums → Shared Albums) or the camera. A few go straight in; many, or a video, go through Drive">${TRIPSY_FLYOVER_ICON_ADD_PHOTOS}<span>Add</span></button>
-            ${photos.length ? `<button class="btn tfo-sqbtn" data-flyover-edit-photos aria-label="Edit photos" title="Edit photos: see every photo for this destination and keep or delete each one">${TRIPSY_FLYOVER_ICON_EDIT_PHOTOS}<span>Edit</span></button>
-            <button class="btn tfo-sqbtn" data-flyover-slideshow aria-label="Edit slideshow" title="Edit slideshow: this destination's slideshow pages">${TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW}<span>Edit</span></button>` : ''}
+            ${tripsyFlyoverStopVisited(s, todayKey) ? `<button class="btn tfo-sqbtn" data-flyover-add-own aria-label="Add photos" title="Add photos and videos from your library (Albums → Shared Albums) or the camera. A few go straight in; many, or a video, go through Drive">${TRIPSY_FLYOVER_ICON_ADD_PHOTOS}<span>Add</span></button>
+            ${photos.length ? `<button class="btn tfo-sqbtn${done.photos ? ' tfo-sqbtn--done' : ''}" data-flyover-edit-photos aria-label="Edit photos${done.photos ? ' (complete)' : ''}" title="Edit photos: see every photo for this destination and keep or delete each one">${TRIPSY_FLYOVER_ICON_EDIT_PHOTOS}<span>Edit</span></button>
+            <button class="btn tfo-sqbtn${done.slideshow ? ' tfo-sqbtn--done' : ''}" data-flyover-slideshow aria-label="Edit slideshow${done.slideshow ? ' (complete)' : ''}" title="Edit slideshow: this destination's slideshow pages">${TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW}<span>Edit</span></button>` : ''}` : ''}
+            <!-- Music from here, as a square tile right of Edit slideshow (2026-10-29). -->
+            <button class="btn tfo-sqbtn" data-flyover-stop-music aria-label="Change music" title="${esc(s.music ? `From here: ${tripsyFlyoverMusicLabel(s.music)}${s.music.license ? ` (${tripsyFlyoverLicenseLabel(s.music.license)})` : ''}` : (i === 0 ? 'The fly-over music plays here' : 'The music carries on from the stop before'))} — choose music for this destination onward">${TRIPSY_FLYOVER_ICON_MUSIC}<span>Music</span></button>${s.music ? `<span data-flyover-stop-music-name style="font-size:12px; color:var(--muted); max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(tripsyFlyoverMusicLabel(s.music))}">${esc(tripsyFlyoverMusicLabel(s.music))}</span>` : ''}
           </div>` : ''}
+          <!-- No thumbnails on the fly-over page ("Do not show thumbnails on the flyover page,"
+               2026-10-29): the photos are seen and changed in Edit photos / Edit slideshow. -->
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center;">
-            ${pageTiles.map((pg, k) => `
-              <div class="btn" data-flyover-thumb="${k}" data-flyover-thumb-page="${k + 1}" style="padding:3px; position:relative; cursor:${isOwner ? 'pointer' : 'default'}; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none;"${isOwner ? ` title="${pageTiles.length > 1 ? 'Tap a photo to see it large; press and hold, then drag onto another page to move this page there' : 'Tap a photo to see it large'}"` : ''}>
-                ${tripsyFlyoverPageThumbHtml(pg, 84, 64, 'border-radius:5px;')}
-                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:rgba(0,0,0,0.65); color:#fff;">Page ${k + 1}${pg.photos.length > 1 ? ` · ${pg.photos.length}` : ''}</span>
-                ${isOwner ? `<button data-flyover-page-remove="${k}" title="Remove ${pg.video ? 'this video' : pg.photos.length > 1 ? `the ${pg.photos.length} photos on this page` : 'this photo'}" style="position:absolute; top:5px; right:5px; width:22px; height:22px; border-radius:50%; border:none; background:rgba(0,0,0,0.65); color:#fff; font-size:12px; cursor:pointer; padding:0;">✕</button>` : ''}
-              </div>`).join('')}
-            ${tripsyFlyoverUnplacedPhotos(s).map(ph => `
-              <div class="btn" data-flyover-nopage="${esc(ph.driveFileId)}" style="padding:3px; position:relative; border-style:dashed; cursor:${isOwner ? 'pointer' : 'default'};" title="${isOwner ? 'No page — it doesn’t play. Tap to see it large; put it on a page in Edit slideshow.' : 'No page — it doesn’t play'}">
-                ${tripsyFlyoverThumbHtml(ph, 84, 64, 'border-radius:5px;')}
-                <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:#8A5A00; color:#fff;">No page</span>
-                ${isOwner ? `<button data-flyover-nopage-remove="${esc(ph.driveFileId)}" title="Remove this ${tripsyFlyoverIsVideo(ph) ? 'video' : 'photo'}" style="position:absolute; top:5px; right:5px; width:22px; height:22px; border-radius:50%; border:none; background:rgba(0,0,0,0.65); color:#fff; font-size:12px; cursor:pointer; padding:0;">✕</button>` : ''}
-              </div>`).join('')}
             ${!tripsyFlyoverStopVisited(s, todayKey)
               ? `<span style="font-size:12px; color:var(--muted);">🔒 Photos open once you get here (${esc(tripsyFlyoverDatesLabel(s))}).</span>`
-              : `${!photos.length ? `<span style="font-size:12px; color:var(--muted);">No photos yet.</span>` : ''}
-            ${isOwner && pageTiles.length > 1 ? `<span style="font-size:11px; color:var(--muted); flex-basis:100%;">Tap a photo to see it large. Drag a page onto another to move it there.</span>` : ''}
+              : `<span style="font-size:12px; color:var(--muted);">${photos.length ? `📷 ${photos.length} photo${photos.length === 1 ? '' : 's'}` : 'No photos yet.'}</span>
             ${(() => { const u = tripsyFlyoverUploadState(s); if (!u.uploading && !u.failed) return '';
               const failedIds = photos.filter(p => tripsyFlyoverPhotoIsPending(p.driveFileId) && tripsyFlyoverFailedUploads.has(p.driveFileId)).map(p => p.driveFileId);
               return `<span style="font-size:12px; color:${u.failed ? '#E0A33A' : 'var(--muted)'}; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;">${u.uploading ? `⬆️ Uploading ${u.uploading} photo${u.uploading === 1 ? '' : 's'} in the background — you can use the rest of the app.` : ''}${u.failed ? ` ⚠️ ${u.failed} upload${u.failed === 1 ? '' : 's'} failed${(() => { const why = failedIds.map(fid => tripsyFlyoverFailedUploadReasons.get(fid)).find(Boolean); return why ? `: ${esc(why)}` : ''; })()}.${isOwner ? failedIds.map(fid => ` <button class="btn" data-flyover-retry-upload="${esc(fid)}" style="font-size:11px; padding:2px 8px;">Retry</button>`).join('') : ''}` : ''}</span>`; })()}`}
@@ -20287,7 +20321,16 @@ async function showTripsyFlyover(tripKey) {
         const v = label.value.trim();
         if (!v || v === stop().label) { label.value = stop().label; return; }
         updateStop(id, { label: v, labelEdited: true });
-        save();
+        save(); if (!closed) render();
+      };
+      if (label) label.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); label.blur(); } else if (e.key === 'Escape') { label.value = stop().label; label.blur(); } };
+      if (label) label.oninput = () => { label.size = Math.max(6, label.value.length + 1); };
+      const revert = card.querySelector('[data-flyover-label-revert]');
+      if (revert) revert.onclick = () => {
+        const st = stop();
+        if (!st.autoLabel) return;
+        updateStop(id, { label: st.autoLabel, labelEdited: false });
+        save(); render();
       };
       const modeSel = card.querySelector('[data-flyover-mode-select]');
       if (modeSel) modeSel.onchange = () => {
@@ -20326,55 +20369,11 @@ async function showTripsyFlyover(tripKey) {
       if (rm) rm.onclick = () => { updateStop(id, { removed: true }); save(); render(); };
       const rs = card.querySelector('[data-flyover-restore]');
       if (rs) rs.onclick = () => { updateStop(id, { removed: false }); save(); render(); };
-      // Drag a thumbnail onto another to move its PAGE there -- the Slideshow options page
-      // strip's own move, from the fly-over page ("allow the user to edit the order of pages
-      // from the flyover page … in the same way he can from the slideshow edit page,"
-      // 2026-10-22). A press-and-hold for a finger, since the page scrolls; a drop on a photo
-      // of the same page changes nothing. Saved at once, like every other change here.
-      // Since 2026-10-22 each tile IS a page, so the indexes are page indexes.
-      const tiles = [...card.querySelectorAll('[data-flyover-thumb]')];
-      tripsyFlyoverWireDrag(tiles, (from, to) => {
-        const r = tripsyFlyoverMoveStopPage(stop(), from, to);
-        if (!r) return;
-        updateStop(id, r);
-        save();
-      }, { holdMs: 280, state: dragState, afterDrop: () => { if (!closed) render(); } });
-      // A tap on a photo on the box is the same as tapping it in Edit photos (2026-10-25): it
-      // opens large with Delete / Keep / Move. On a page tile split into strips, the strip
-      // tapped picks the photo. (Edit slideshow is where a page itself is edited.)
       const photoHooks = {
         onDelete: photoId => removePhotoFromRecord(id, photoId),
         onMove: (photoId, toId) => movePhotoInRecord(id, photoId, toId),
         moveTargets: () => photoMoveTargets(id),
       };
-      tiles.forEach(t => t.onclick = async e => {
-        if (!isOwner || e.target.closest('button')) return;
-        if (Date.now() < dragState.suppressTapUntil) return; // the release that ended a drag
-        const k = Number(t.getAttribute('data-flyover-thumb'));
-        const pg = tripsyFlyoverPages(stop())[k];
-        if (!pg || !pg.photos.length) return;
-        // The drag wiring captures the pointer, so the click lands on the tile itself: the
-        // strip is the one under the tap's x position.
-        const strips = [...t.querySelectorAll('[data-diary-img]')];
-        let hitIdx = strips.findIndex(n => { const r = n.getBoundingClientRect(); return e.clientX >= r.left && e.clientX < r.right; });
-        if (hitIdx < 0) hitIdx = strips.indexOf(e.target.closest('[data-diary-img]'));
-        const idx = Math.max(0, Math.min(pg.photos.length - 1, hitIdx));
-        await tripsyFlyoverReviewStopPhoto(stop, pg.photos[idx].driveFileId, `Page ${k + 1}`, photoHooks);
-      });
-      card.querySelectorAll('[data-flyover-page-remove]').forEach(b => {
-        b.onclick = async e => {
-          e.stopPropagation();
-          if (Date.now() < dragState.suppressTapUntil) return; // the release that ended a drag
-          const pg = tripsyFlyoverPages(stop())[Number(b.getAttribute('data-flyover-page-remove'))];
-          if (!pg) return;
-          const fids = new Set(pg.photos.map(ph => ph.driveFileId));
-          // Several photos go at once, so that is confirmed; one goes as it always did.
-          if (fids.size > 1 && !(await tripsyConfirmDialog(`Remove the ${fids.size} photos on this page?`, { yes: 'Remove', no: 'Keep' }))) return;
-          if (closed) return;
-          updateStop(id, { photos: (stop().photos || []).filter(ph => !fids.has(ph.driveFileId)) });
-          save(); render();
-        };
-      });
       // One picker for photos and videos (a big batch goes through Import from Drive folder
       // instead); everything lands through the one addMediaToStop path.
       const onPicked = async files => {
@@ -20393,20 +20392,13 @@ async function showTripsyFlyover(tripKey) {
         render();
       });
       // ✏️ Edit photos (replaces 🔍 Suggested photos, 2026-10-25): the stop's thumbnails, each
-      // opening large with Keep / Delete. Delete takes it off the stop and its pages and saves.
-      // Each photo on No page is shown on the card ("Show each photo on the flyover page even
-      // they are not on a page," 2026-10-25): a tap opens it large like any photo on the box;
-      // its ✕ takes it off the destination.
-      card.querySelectorAll('[data-flyover-nopage]').forEach(t => t.onclick = e => {
-        if (!isOwner || e.target.closest('[data-flyover-nopage-remove]')) return;
-        tripsyFlyoverReviewStopPhoto(stop, t.getAttribute('data-flyover-nopage'), 'No page', photoHooks);
-      });
-      card.querySelectorAll('[data-flyover-nopage-remove]').forEach(b => b.onclick = e => {
-        e.stopPropagation();
-        removePhotoFromRecord(id, b.getAttribute('data-flyover-nopage-remove')).catch(() => {});
-      });
+      // opening large with Keep / Delete. Complete marks the button green; Still Working, or a
+      // later added photo, clears it; a click away leaves it as it was (2026-10-29).
       const editPhotos = card.querySelector('[data-flyover-edit-photos]');
-      if (editPhotos) editPhotos.onclick = () => tripsyFlyoverEditPhotosPage(stop, photoHooks);
+      if (editPhotos) editPhotos.onclick = async () => {
+        const res = await tripsyFlyoverEditPhotosPage(stop, { ...photoHooks, onStillWorking: () => setEditDone(id, 'photos', false) });
+        if (res === 'complete' && !closed) setEditDone(id, 'photos', true);
+      };
     });
   };
   render();
@@ -22040,7 +22032,7 @@ function tripsyFlyoverTogglePagePhoto(pages, cur, id, isVideo = () => false) {
 // and ask about the transition to the next page," 2026-10-20). Resolves {pages, photos} on
 // Save, null on Cancel; nothing changes until Save. Photos left on No page don't play
 // (2026-10-25). `playPreview(stopDraft)` plays the draft without saving it.
-function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, hasMusic = true, page = null, addMedia = null } = {}) {
+function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, hasMusic = true, page = null, addMedia = null, onStillWorking = null } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-slideshow-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-slideshow-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -22200,6 +22192,10 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
               <button class="tripsy-close-x" data-ss-cancel title="Cancel" aria-label="Cancel">✕</button>
               <button class="tripsy-close-x tripsy-save-check" data-ss-save title="Save" aria-label="Save">✓</button>
             </div>
+            <div class="tfo-done-row">
+              <button class="tfo-working-btn" data-ss-still-working title="Keep working on this slideshow">Still Working</button>
+              <button class="tfo-complete-btn" data-ss-complete title="Save and mark this slideshow as done">Complete</button>
+            </div>
           </div>
         </div>`;
       tripsyDiaryPaintPhotos(ov);
@@ -22312,6 +22308,10 @@ function tripsyFlyoverSlideshowDialog(stop, { intro = '', playPreview = null, ha
       if (del) del.onclick = () => { pages = pages.filter((_, k) => k !== cur); cur = Math.max(0, cur - 1); render(); };
       ov.querySelectorAll('[data-ss-cancel]').forEach(b => b.onclick = () => done(null));
       ov.querySelectorAll('[data-ss-save]').forEach(b => b.onclick = () => done({ pages: cleaned(), photos }));
+      // Complete saves and marks the button green; Still Working keeps the dialog open and
+      // takes the green off (2026-10-29).
+      ov.querySelector('[data-ss-complete]').onclick = () => done({ pages: cleaned(), photos, complete: true });
+      ov.querySelector('[data-ss-still-working]').onclick = () => { if (onStillWorking) onStillWorking(); toast('Marked as still being worked on.'); };
       const pv = ov.querySelector('[data-ss-preview]');
       if (pv) pv.onclick = () => playPreview(draft(), dropPhoto, setAudio);
     };
@@ -23107,14 +23107,15 @@ async function tripsyFlyoverReviewStopPhotoLoop(getStop, id, where, { onDelete, 
 }
 // `moveTargets()` lists the destinations a photo can move to and `onMove(photoId, toId)`
 // moves it (the setup page puts it on the target's No page, 2026-10-25).
-function tripsyFlyoverEditPhotosPage(getStop, { onDelete, onMove = null, moveTargets = null } = {}) {
+function tripsyFlyoverEditPhotosPage(getStop, { onDelete, onMove = null, moveTargets = null, onStillWorking = null } = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tripsy-flyover-photos-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-photos-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
     ov.style.zIndex = '2147483094';
     ov.style.display = 'flex';
     let busy = false;
-    const close = () => { document.removeEventListener('keydown', onKey); ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(); };
+    // Resolves 'complete' from the Complete button; a click away, Esc or ✕ resolves nothing.
+    const close = v => { document.removeEventListener('keydown', onKey); ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; resolve(v); };
     const onKey = e => { if (e.key === 'Escape' && !document.getElementById('tripsy-flyover-review-overlay')) close(); };
     document.addEventListener('keydown', onKey);
     const render = () => {
@@ -23134,8 +23135,14 @@ function tripsyFlyoverEditPhotosPage(getStop, { onDelete, onMove = null, moveTar
                 <span style="position:absolute; left:6px; top:6px; font-size:11px; font-weight:700; padding:1px 5px; border-radius:4px; background:${page == null ? '#8A5A00' : 'rgba(0,0,0,0.65)'}; color:#fff;">${page == null ? 'No page' : page}</span>
               </button>`).join('')}
           </div>
+          <div class="tfo-ss-footer"><div class="tfo-done-row">
+            <button class="tfo-working-btn" data-ep-still-working title="Keep working on these photos">Still Working</button>
+            <button class="tfo-complete-btn" data-ep-complete title="Mark this destination's photos as done">Complete</button>
+          </div></div>
         </div>`;
-      ov.querySelector('[data-ep-close]').onclick = close;
+      ov.querySelector('[data-ep-close]').onclick = () => close();
+      ov.querySelector('[data-ep-complete]').onclick = () => close('complete');
+      ov.querySelector('[data-ep-still-working]').onclick = () => { if (onStillWorking) onStillWorking(); toast('Marked as still being worked on.'); };
       ov.querySelectorAll('[data-ep-photo]').forEach(b => b.onclick = async () => {
         if (busy) return;
         busy = true;
@@ -28037,6 +28044,18 @@ const TRIPSY_FLYOVER_ICON_ADD_PHOTOS = '<svg viewBox="0 0 32 32" aria-hidden="tr
 const TRIPSY_FLYOVER_ICON_EDIT_PHOTOS = '<svg viewBox="0 0 32 32" aria-hidden="true">'
   + TRIPSY_FLYOVER_ICON_CAMERA_BODY
   + '<circle cx="14.6" cy="17" r="1.5" fill="#FFFFFF" opacity="0.85"/></svg>';
+// Music from here: a pair of beamed eighth notes on a purple disc (2026-10-29: "Make the
+// change music button into a square icon similar to the edit icons").
+const TRIPSY_FLYOVER_ICON_MUSIC = '<svg viewBox="0 0 32 32" aria-hidden="true">'
+  + '<defs><linearGradient id="tfoMusicDisc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9B6BF2"/><stop offset="1" stop-color="#5A35B8"/></linearGradient></defs>'
+  + '<circle cx="16" cy="16" r="14.5" fill="url(#tfoMusicDisc)"/>'
+  + '<path d="M6 9.5a12 12 0 0 1 8-5.2" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" fill="none" opacity="0.45"/>'
+  + '<path d="M12.2 9.8l10.6-2.6v3.3l-10.6 2.6z" fill="#FFD966"/>'
+  + '<rect x="12.2" y="9.8" width="1.9" height="11.8" fill="#FFFFFF"/>'
+  + '<rect x="20.9" y="7.6" width="1.9" height="11.8" fill="#FFFFFF"/>'
+  + '<ellipse cx="11.2" cy="21.9" rx="3.2" ry="2.4" transform="rotate(-20 11.2 21.9)" fill="#FFFFFF"/>'
+  + '<ellipse cx="19.9" cy="19.7" rx="3.2" ry="2.4" transform="rotate(-20 19.9 19.7)" fill="#FFFFFF"/>'
+  + '<ellipse cx="10.4" cy="21.3" rx="1" ry="0.6" transform="rotate(-20 10.4 21.3)" fill="#C9B6F5"/></svg>';
 const TRIPSY_FLYOVER_ICON_EDIT_SLIDESHOW = '<svg viewBox="0 0 32 32" aria-hidden="true">'
   + '<defs><linearGradient id="tfoProjBody" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5B6472"/><stop offset="1" stop-color="#2E343D"/></linearGradient></defs>'
   + '<path d="M24 17.5L31 13v12l-7-4.5z" fill="#FFD966" opacity="0.85"/>'
