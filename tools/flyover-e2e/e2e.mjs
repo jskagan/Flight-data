@@ -304,6 +304,21 @@ const fd = (p, expr) => p.evaluate(e => eval(e), expr);
   await p.close();
 }
 
+// ---- M: Segments (right of Preview) offers a part or the animated map only -- no whole-trip button
+{
+  const p = await boot(`Store._r = freshRecord(); window.playTripsyFlyover = (trip, record, opts) => { window._playArgs = opts; };`);
+  const order = await p.evaluate(() => [...document.querySelector('[data-flyover-music]').parentElement.querySelectorAll('button')].map(b => b.getAttribute('aria-label')));
+  check('M: Segments sits right of Preview, and there is no header Play button', order[order.indexOf('Preview') + 1] === 'Segments' && (await p.$$('[data-flyover-play]')).length === 1);
+  await p.click('[data-flyover-play]'); await tick(p, 200);
+  const txt = await p.evaluate(() => document.getElementById('tripsy-flyover-range-overlay').innerText);
+  check('M: the dialog has no whole-trip option, and offers Animated map only', !/Entire journey/.test(txt) && /Animated map only/.test(txt));
+  await p.click('[data-range-map-only]'); await tick(p, 100);
+  await p.click('[data-map-choice="free"]'); await tick(p, 100);
+  const a = await p.evaluate(() => window._playArgs);
+  check('M: Animated map only plays the chosen cities (first to last by default) with mapOnly', !!a && a.mapOnly === true && a.range && a.range.fromId === 'o' && a.range.toId === 'rr' && a.mapService === 'free');
+  await p.close();
+}
+
 await b.close();
 console.log(failures ? `\n${failures} FAILED` : '\nall scenarios passed');
 process.exit(failures ? 1 : 0);

@@ -221,10 +221,26 @@ assert(tripsyFlyoverRangeStops(route, 'c', 'a').map(s => s.id).join('') === 'abc
 assert(tripsyFlyoverRangeStops(route, 'zzz', 'b').map(s => s.id).join('') === 'oab', 'an unknown start falls back to the departure');
 assert(tripsyFlyoverRangeStops(route, 'b', undefined).map(s => s.id).join('') === 'bcr', 'no end plays through to the home airport');
 assert(tripsyFlyoverRangeStops(route, 'b', 'b').length === 1, 'the same city twice is one stop (the dialog refuses it; the player would just land there)');
-assert(/tripsyFlyoverRangeDialog\(record, range =>/.test(html) && /const extra = !range \? \{\} : range\.previewStopId \? \{ previewStopId: range\.previewStopId \} : \{ range \};\s*tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, \.\.\.extra, \.\.\.playerHooks \}\)\)/.test(html),
-  'the setup page\'s Play asks whole / part / one slideshow first, then which map, and passes the range or the one destination to the player');
-assert(/data-range-all/.test(html) && /data-range-from/.test(html) && /data-range-to/.test(html) && /data-range-part/.test(html) && /<ol/.test(extractFn('tripsyFlyoverRangeDialog')),
-  'the dialog lists the cities numbered, with Entire journey and From/To + Play this part');
+assert(/tripsyFlyoverRangeDialog\(record, pick =>/.test(html) && /const extra = pick\.previewStopId \? \{ previewStopId: pick\.previewStopId \}\s*: \{ range: \{ fromId: pick\.fromId, toId: pick\.toId \}, \.\.\.\(pick\.mapOnly \? \{ mapOnly: true \} : \{\}\) \};\s*tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, \.\.\.extra, \.\.\.playerHooks \}\)\)/.test(html),
+  'Segments asks part / map only / one slideshow first, then which map, and passes the range (and map-only) or the one destination to the player');
+// "Make the play button a square tile called Segments to the right of preview. Remove the show
+// whole trip option and add an option to show only the animated map without slideshows from
+// individual destinations" (2026-10-29)
+{
+  const rd = extractFn('tripsyFlyoverRangeDialog');
+  assert(!/data-range-all/.test(html) && !/Entire journey/.test(rd), 'THE ASK: the whole-trip option is gone');
+  assert(/data-range-from/.test(rd) && /data-range-to/.test(rd) && /data-range-part/.test(rd) && /<ol/.test(rd), 'the dialog lists the cities numbered, with From/To + Play this part');
+  assert(/data-range-map-only[^>]*>🗺️ Animated map only/.test(rd) && /\[data-range-map-only\]'\)\.onclick = \(\) => playPart\(true\)/.test(rd) && /mapOnly \? \{ mapOnly: true \}/.test(rd),
+    'THE ASK: an Animated map only option plays the chosen cities without slideshows');
+  const st = extractFn('showTripsyFlyover');
+  assert(!/<button class="btn" data-flyover-play style/.test(html) && /data-flyover-preview-all[^\n]*\n\s*<button class="btn tfo-sqbtn" data-flyover-play aria-label="Segments"[^>]*>\$\{TRIPSY_FLYOVER_ICON_SEGMENTS\}<span>Segments<\/span><\/button>/.test(st),
+    'THE ASK: Play is now a square Segments tile right of Preview (no header Play button)');
+  const pl = extractFn('playTripsyFlyover');
+  assert(/const mapOnly = !!opts\.mapOnly && !preview;/.test(pl) && /const hasSlides = s => !mapOnly && tripsyFlyoverPages\(s\)\.length > 0;/.test(pl)
+    && /const burstWanted = withPhotos && hasSlides\(s\);/.test(pl) && /const openWithPhotos = hasSlides\(first\);/.test(pl) && /const closeWithPhotos = !!last && hasSlides\(last\);/.test(pl)
+    && /if \(!mapOnly\) for \(const s of stops\) for \(const p of/.test(pl),
+    'map only skips every slideshow (opening, each arrival, closing) and downloads no photos');
+}
 assert(/if \(opts\.range\) return tripsyFlyoverRangeStops\(all, opts\.range\.fromId, opts\.range\.toId\)/.test(html) && !/if \(preview\) stops = stops\.filter/.test(html),
   'the player cuts its stops to the range in BOTH places it computes them (one cutStops helper)');
 // Retrofit of a saved fly-over: each derived transfer goes in before the stop that follows
@@ -584,8 +600,22 @@ eval([constLine('TRIPSY_FLYOVER_PHOTO_MS'), constLine('TRIPSY_FLYOVER_SECONDS_MI
   // flyover with map" (2026-10-29)
   assert(/data-flyover-music aria-label="Music"[^\n]*\n\s*<button class="btn tfo-sqbtn" data-flyover-preview-all aria-label="Preview"[^>]*>\$\{TRIPSY_FLYOVER_ICON_PREVIEW\}<span>Preview<\/span><\/button>/.test(setup),
     'THE ASK: a Preview tile sits right of the fly-over Music tile');
-  assert(/previewAll\.onclick = \(\) => \{[\s\S]{0,250}playTripsyFlyover\(trip, record, \{ \.\.\.playerHooks \}\);\s*\};\s*if \(!isOwner\) return;/.test(setup),
+  assert(/previewAll\.onclick = \(\) => \{[\s\S]{0,250}playTripsyFlyover\(trip, record, \{ \.\.\.playerHooks \}\);\s*\};/.test(setup),
     'it plays the whole journey with the map at once (no previewStopId, no range or map question), for every viewer');
+  // "Remove the information about current music from the flyover page, and move the music and
+  // preview buttons to the same line as places and photos. Before the list of locations on the
+  // flyover page, add a heading Destinations in the same font as the page title" (2026-10-29)
+  {
+    const tools = (setup.match(/<div data-flyover-tools[\s\S]*?\n      <\/div>/) || [''])[0];
+    const order = ['data-flyover-edit-dests', 'data-flyover-add-trip-photos', 'data-flyover-music', 'data-flyover-preview-all', 'data-flyover-play', 'data-flyover-shortcut'].map(a => tools.indexOf(a));
+    assert(order.every((x, k) => x > 0 && (k === 0 || x > order[k - 1])), 'THE ASK: Music and Preview (then Segments) sit on the Places / Photos line');
+    assert(!/tripsyFlyoverMusicLabel\(record\.music\)/.test(setup) && !/No music<\/span>/.test(setup), 'THE ASK: the current-music line is gone from the page');
+    assert(/\$\{isOwner \? `<button class="btn tfo-sqbtn" data-flyover-edit-dests/.test(tools) && /<\/button>` : ''\}\s*<button class="btn tfo-sqbtn" data-flyover-preview-all/.test(tools),
+      'a viewer still gets Preview and Segments on that line');
+    assert(/<h2 data-flyover-dests-heading style="margin:4px 0 10px; font-size:18px;">Destinations<\/h2>\s*\$\{record\.stops\.map/.test(setup)
+      && /<h2 style="margin:0; font-size:18px; flex:1; min-width:0;">🗺️ Trip Fly-over/.test(html),
+      'THE ASK: a Destinations heading, the page title\'s own h2 at 18px, comes right before the destinations');
+  }
   assert(/playingHere = tripsyFlyoverMusicAtStop\(record, record\.stops, idx\)/.test(setup), 'a destination with no music of its own shows the music carrying on there');
   // "When photos are Imported they should say 'No page'" (2026-10-25): the card, the Edit
   // photos page, and every add path.
@@ -1915,8 +1945,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
   ok(/b\.onclick = \(\) => \{ close\(\); onPick\(b\.dataset\.mapChoice\); \};/.test(dlg) && !/await/.test(dlg),
     'a choice starts playback synchronously inside its own tap (no await), so iOS music can still start');
   ok(/data-map-choice-cancel\]'\)\.onclick = close;/.test(dlg), 'Cancel plays nothing');
-  ok(/\[data-flyover-play\]'\)\.onclick = \(\) => \{[\s\S]*?tripsyFlyoverRangeDialog\(record, range => \{[\s\S]*?tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, /.test(html2),
-    'the setup page\'s Play asks whole-or-part, then which map, before playing');
+  ok(/const segmentsBtn = body\.querySelector\('\[data-flyover-play\]'\);\s*if \(segmentsBtn\) segmentsBtn\.onclick = \(\) => \{[\s\S]*?tripsyFlyoverRangeDialog\(record, pick => \{[\s\S]*?tripsyFlyoverMapChoiceDialog\(mapService => playTripsyFlyover\(trip, record, \{ mapService, /.test(html2),
+    'Segments asks which part, then which map, before playing');
   ok(/const googleTilesP = \(opts\.mapService === 'free' \|\| preview\) \? Promise\.resolve\(null\) : Promise\.race\(\[/.test(html2),
     'the free map never asks Google for a tile session');
 }

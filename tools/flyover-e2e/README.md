@@ -8,7 +8,7 @@ patterns and pure helpers; this is where the flow itself is exercised.
 
 ```
 node tools/flyover-e2e/build.js   # extracts the fly-over section of index.html into harness.html
-node tools/flyover-e2e/e2e.mjs    # twelve scenarios, Playwright's fake clock skips the waits
+node tools/flyover-e2e/e2e.mjs    # thirteen scenarios, Playwright's fake clock skips the waits
 ```
 
 Needs Playwright with Chromium (pre-installed in the cloud sandbox: `require('playwright')`
@@ -20,4 +20,4 @@ listing never trashes a folder with photos in it; D a failed cleanup is retried 
 E a folder trashed outside the app closes the hand-off; F the Shortcut route (root uploads
 adopted, the "No new photos" box only after the grace); G a slow folder lookup cannot start two
 imports; H an import interrupted by closing the page finishes on the next open; I an empty
-folder just waits, and Cancel closes the hand-off; J the slideshow edit page saves each change with no Save button; K the Music tiles open the Music page, and Change opens the picker; L Preview beside Music plays the whole fly-over.
+folder just waits, and Cancel closes the hand-off; J the slideshow edit page saves each change with no Save button; K the Music tiles open the Music page, and Change opens the picker; L Preview beside Music plays the whole fly-over; M Segments offers a part or the animated map only.

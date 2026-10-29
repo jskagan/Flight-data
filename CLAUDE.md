@@ -4013,6 +4013,31 @@ WebView's support for recording is unproven.
     restrictions, if any, must allow it); free tier 100k tile requests/month. Verified in
     Chromium with Google stubbed (session granted → Google tiles + copyright; 403 → Esri);
     the live API is unreachable from the sandbox.
+  - **ONE line of tools, then a "Destinations" heading** ("Remove the information about current
+    music from the flyover page, and move the music and preview buttons to the same line as
+    places and photos. Before the list of locations on the flyover page, add a heading
+    'Destinations' in the same font as the page title," 2026-10-29): the separate box naming the
+    current music (track + licence, with the Music/Preview/Segments tiles) is gone; the
+    `data-flyover-tools` row now reads Places · Photos · Music · Preview · Segments · Get New
+    Photos · Fly-Over Done (+ the Drive status). It is no longer owner-only as a whole: a viewer
+    gets Preview and Segments in it, the rest stays owner-only. The current track is still on
+    the Music page. `<h2 data-flyover-dests-heading>` (the title's h2 at 18px) sits right before
+    the destination cards.
+  - **▶ Play is now the square "Segments" tile, right of Preview, and offers a part or the
+    animated map alone — no whole-journey button** ("Make the play button a square tile called
+    'Segments' to the right of preview. Remove the show whole trip option and add an option to
+    show only the animated map without slideshows from individual destinations," 2026-10-29).
+    The header ▶ Play is gone; `data-flyover-play` is a `.tfo-sqbtn` (`TRIPSY_FLYOVER_ICON_SEGMENTS`,
+    a map with a highlighted stretch between pins) after `data-flyover-preview-all`, wired in the
+    page's render (viewers too). `tripsyFlyoverRangeDialog` (titled "Segments") lost
+    `data-range-all`; its From/To still open on the first and last cities, so the segment as it
+    opens is the whole trip (Preview plays the whole trip at once). Beside **▶ Play this part**
+    sits **🗺️ Animated map only** (`data-range-map-only`) → `onPick({fromId, toId, mapOnly: true})`
+    → `playTripsyFlyover(…, {range, mapOnly})`. In the player `mapOnly` (ignored in a preview)
+    makes `hasSlides(s)` false everywhere a slideshow could start — the opening first-destination
+    slideshow, every arrival's burst + slideshow (it lands with its card, as a photo-less stop
+    does), and the closing one — and skips the photo preload. The one-destination slideshow
+    option is unchanged. e2e scenario M. What follows describes the dialog before this.
   - **The setup page's ▶ Play asks WHOLE JOURNEY OR A PART first** ("When the user selects
     play from the flyover page, present him with a numbered list of the cities visited and
     ask whether he wants to view the entire journey or allow him to select a starting and
