@@ -5125,7 +5125,7 @@ WebView's support for recording is unproven.
     be edited by the owner. The first live
     run that evening proved the rest: the split, the date parse ("Found 55 photos" after
     Oct 25), and a real "Found 0" once the since-date passed the newest photo on the iPad.
-    The header button (`data-flyover-shortcut`, owner) opens `tripsyFlyoverShortcutDialog`
+    The header button (`data-flyover-shortcut`, owner; NOT shown on a phone, `tripsyIsPhoneDevice()` — "We should remove this option when viewing on an iPhone," 2026-10-29: uploads run from the iPad, whose library holds the iPhone's photos through iCloud Photos) opens `tripsyFlyoverShortcutDialog`
     (the reminder in amber, a Run button disabled until `tripsyFlyoverInboxFolder` has found or
     created the folder — it must exist before the Shortcut asks where to save — the recipe
     under a `<details>`, and the input text with Copy for a device where the `shortcuts://` link

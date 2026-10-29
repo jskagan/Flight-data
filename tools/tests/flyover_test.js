@@ -2156,6 +2156,8 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
         'the watcher nudges once per launch, remembered on the record so a reopened page never re-asks; an import clears the launch');
       eval(extractFn('tripsyFlyoverDriveStatusHtml'));
       const st = tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x', true);
+      // "We should remove this option when viewing on an iPhone" (2026-10-29): uploads run from the iPad, whose Photos library already holds the iPhone's photos.
+      assert(/\$\{tripsyIsPhoneDevice\(\) \? '' : `<button class="btn" data-flyover-shortcut /.test(extractFn('showTripsyFlyover')), 'the Upload new photos button is not offered on a phone');
       assert(/data-flyover-shortcut-note/.test(st) && /Keep Shortcuts in front until it says Done/.test(st) && !/data-flyover-shortcut-note/.test(tripsyFlyoverDriveStatusHtml('waiting', 0, 'https://x')), 'the status slot repeats the reminder while a Shortcut launch is watched');
       assert(/if \(prevRecord\.shortcutLaunchedAt\) rec\.shortcutLaunchedAt = prevRecord\.shortcutLaunchedAt; if \(prevRecord\.shortcutNudgedFor\) rec\.shortcutNudgedFor = prevRecord\.shortcutNudgedFor;/.test(html), 'a rebuild keeps a pending launch, and the nudge already shown for it');
       assert(/const staged = Store\.stageTripsyFlyover\(record\);\s*if \(!staged\) \{ adoptLiveRecord\(\); return Promise\.resolve\(false\); \}\s*record = staged;/.test(extractFn('showTripsyFlyover')) && /if \(Store\.takeStaleFlyover\(trip\.key\)\) adoptLiveRecord\(\);/.test(extractFn('showTripsyFlyover')),
