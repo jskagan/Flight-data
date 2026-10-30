@@ -247,9 +247,9 @@ const fd = (p, expr) => p.evaluate(e => eval(e), expr);
     const r = freshRecord(); r.stops[1].photos = [{ driveFileId: 'pa' }, { driveFileId: 'pb' }]; r.stops[1].pages = [{ ids: ['pa'], count: 1 }];
     Store._r = r;`);
   await p.click('[data-flyover-stop="s1"] [data-flyover-slideshow]'); await tick(p, 300);
-  check('J: no Save ✓ and no Cancel ✕ on the slideshow page, one Close ✕', await p.evaluate(() => {
+  check('J: no Save ✓ and no Cancel ✕ on the slideshow page, one Back', await p.evaluate(() => {
     const ov = document.getElementById('tripsy-flyover-slideshow-overlay');
-    return !ov.querySelector('[data-ss-save], [data-ss-cancel], .tripsy-save-check') && ov.querySelectorAll('.tripsy-close-x').length === 1;
+    return !ov.querySelector('[data-ss-save], [data-ss-cancel], .tripsy-save-check') && ov.querySelectorAll('.tripsy-back-btn').length === 1;
   }));
   await p.click('[data-ss-count="2"]'); await tick(p, 100);
   await p.click('[data-ss-photo="pb"]'); await tick(p, 2000);

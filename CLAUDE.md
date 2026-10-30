@@ -4686,6 +4686,12 @@ WebView's support for recording is unproven.
   only its top ✕ — no ✓, no footer. Every change already saves as made; `close` (the ✕ and a
   tap outside) first blurs a field still being edited so its `change` commits the typed name.
   The Edit destinations and Slideshow options dialogs keep their ✕ / ✓ pairs (they edit drafts).
+  **Every fly-over page's red ✕ is now an orange "‹ Back"** ("Replace the cancel button on the
+  flyover pages with a back button in orange," 2026-10-29): `.tripsy-back-btn` (filled `#E8822A`,
+  white text, 32px tall like the ✓ box), same `data-*` attribute and handler in the same spot —
+  setup page, Edit destinations (both, still discarding the draft beside its ✓ Save), Slideshow
+  options, Edit photos, Music info / picker, Suggested photos, the add-source and Shortcut
+  dialogs. The player's own ✕ (a playback control) and the attire/wardrobe pages' ✕ are unchanged.
   **The page's top line is just four square tool tiles** (same day: "Remove the line about when
   the last import. Delete the line about how many destinations on the map. Change the four icons
   at the end of that line into ones in the same style as the others on that page. Remove the line

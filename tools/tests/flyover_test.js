@@ -1242,8 +1242,8 @@ eval([(html.match(/const TRIPSY_FLYOVER_MUSIC_GENRES = \[[\s\S]*?\];/) || [''])[
   // everything immediately."
   assert(!/data-ss-save/.test(dlg) && !/data-ss-cancel/.test(dlg) && !/tripsy-save-check/.test(dlg),
     'THE ASK: no ✓ Save and no ✕ Cancel on the slideshow edit page');
-  assert((dlg.match(/class="tripsy-close-x"/g) || []).length === 1 && /data-ss-close title="Close — every change is already saved"/.test(dlg),
-    'only the top-corner ✕ is left, and it just closes');
+  assert((dlg.match(/class="tripsy-back-btn"/g) || []).length === 1 && /data-ss-close title="Back — every change is already saved"/.test(dlg),
+    'only the top-corner Back is left, and it just closes');
   assert(/const render = \(\) => \{\s*emitChange\(\);/.test(dlg) && /if \(key === lastSent\) return;\s*lastSent = key;\s*onChange\(now\);/.test(dlg),
     'every change (each repaint follows one) is handed to onChange once');
   const ssOpen = extractFn('showTripsyFlyover');
@@ -1449,20 +1449,28 @@ eval([extractFn('tripsyFlyoverMovePage'), extractFn('tripsyFlyoverPageRecord'), 
   const setup = extractFn('showTripsyFlyover');
   // "Remove the cancel and save buttons from the flyover screen. Save all changes immediately
   // when they are made on the screen" (2026-10-29): only the top ✕ remains.
-  assert(!/data-flyover-save/.test(setup) && !/tfo-ss-footer/.test(setup) && (setup.match(/data-flyover-close title="Close"/g) || []).length === 1,
+  assert(!/data-flyover-save/.test(setup) && !/tfo-ss-footer/.test(setup) && (setup.match(/data-flyover-close title="Back"/g) || []).length === 1,
     'THE ASK: the fly-over page has no Save button and no Cancel/Save footer — just the top ✕');
   // "Do the same for the edit destinations and slideshow dialogs" (2026-10-22): their footers are
   // glyph-only too, and the wide word-carrying variant is gone.
   assert(!/tripsy-close-x--wide/.test(html), 'no wide word-carrying ✕/✓ variant remains anywhere');
   for (const [dlg, cancel, save] of [['tripsyFlyoverEditDestinationsDialog', 'data-fe-cancel', 'data-fe-save']]) {
     const fn = extractFn(dlg);
-    assert(new RegExp(`<div class="tfo-ss-footer"[\\s\\S]*?<button class="tripsy-close-x" ${cancel} title="Cancel" aria-label="Cancel">✕</button>\\s*<button class="tripsy-close-x tripsy-save-check" ${save} title="Save" aria-label="Save">✓</button>`).test(fn),
+    assert(new RegExp(`<div class="tfo-ss-footer"[\\s\\S]*?<button class="tripsy-back-btn" ${cancel} title="Back — discard these edits" aria-label="Back">‹ Back</button>\\s*<button class="tripsy-close-x tripsy-save-check" ${save} title="Save" aria-label="Save">✓</button>`).test(fn),
       `${dlg}'s footer is a word-free ✕ / ✓ pair in the same boxes as its header`);
   }
   assert(/const close = \(\) => \{\s*const a = document\.activeElement;\s*if \(a && ov\.contains\(a\) && typeof a\.blur === 'function'\) a\.blur\(\);\s*closed = true;/.test(setup),
     'THE ASK: closing commits (and so saves) a name still being typed before the page goes');
   assert(/return ok;\s*\}, \(\) => false\);/.test(setup), 'save() reports whether Drive took it');
   assert(/querySelectorAll\('\[data-flyover-close\]'\)\.forEach/.test(setup), 'both Close controls close');
+}
+// "Replace the cancel button on the flyover pages with a back button in orange" (2026-10-29).
+{
+  const fly = html.slice(html.indexOf('function tripsyFlyoverEditDestinationsDialog'), html.indexOf('function playTripsyFlyover'));
+  assert((fly.match(/class="tripsy-back-btn"/g) || []).length >= 9 && !/class="tripsy-close-x"[^>]*>✕<\/button>/.test(fly),
+    'THE ASK: every fly-over page\'s red ✕ is now a Back button');
+  const css = (html.match(/\.tripsy-back-btn \{[\s\S]*?\}/) || [''])[0];
+  assert(/background: #E8822A/.test(css) && /color: #fff/.test(css) && /height: 32px/.test(css), 'Back is orange, the same height as the ✓ box');
 }
 
 // ---- dragging pages to reorder them ("On the slideshow view, allow the user to reorder the
