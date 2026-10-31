@@ -66,7 +66,7 @@ assert(/maybeOfferOfflineMode\(true\);/.test(catchBlock),
 const waitStart = html.indexOf('function waitForGoogleIdentity');
 const waitBlock = html.slice(waitStart, html.indexOf('})();', waitStart) + 5);
 assert(waitBlock.includes('waitForGoogleIdentity'), 'sanity: found the GIS polling IIFE');
-assert(/Could not load Google Sign-In\. Check your connection and reload the page\./.test(waitBlock),
+assert(/Could not load Google Sign-In\. Check your connection — sign-in will continue by itself when it comes back\./.test(waitBlock),
   'sanity: this is the "ran out of tries" branch (GIS never became available)');
 assert(/showSignInStatus\('Could not load Google Sign-In[^;]*;[\s\S]{0,900}maybeOfferOfflineMode\(true\);/.test(waitBlock),
   'THE FIX: the offline fallback is now offered here too -- the gap that actually matters most, since ' +

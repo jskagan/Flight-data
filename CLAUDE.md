@@ -5723,6 +5723,17 @@ pieces:
   `completeSignIn()` ever run, so NEITHER of their fixes is ever reached. This is the FIRST thing
   that fails offline, so it's the one that matters most — a genuinely offline device usually never
   gets as far as case (1) at all.
+  **(2b) Giving up on GIS is no longer final** ("Why am I getting this," 2026-10-31 — hotel
+  Wi-Fi with full bars and nothing getting through): a failed `<script>` never loads again, so
+  the gate stayed stuck until a manual reload even once the connection came back. Both
+  give-up branches now start `tripsyWatchForLateGoogleIdentity`: it re-requests the GIS script
+  at once, every `TRIPSY_GIS_RETRY_MS` (15 s), on `online` and on returning to the page
+  (`visibilitychange` — coming back from Safari after the hotel's login page), for up to
+  `TRIPSY_GIS_WATCH_MS` (1 h). When it arrives, `tripsyGoogleIdentityArrivedLate` removes the
+  offline box (`#signin-offline-box`), clears the error and runs `initGoogleAuth` — a
+  remembered device signs in with no tap; if the saved schedule was already opened offline it
+  only toasts "back online — reload". The red line now says sign-in will continue by itself.
+  Verified in Chromium with the script blocked then let through. `gislate_test.js`.
   **(3) A WEAK signal, not just no signal, needed its own fix too** (the follow-up report: "no WiFi
   or a weak signal"): both (1) and (2) still gated on `navigator.onLine`, which only reports whether
   a network INTERFACE is active, not whether it actually works — a flaky connection reports
