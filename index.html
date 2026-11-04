@@ -19507,7 +19507,8 @@ async function showTripsyFlyover(tripKey) {
   // dropped 2026-10-25) is the import, assigned by render and run by the slot's Import button.
   let inboxWatch = null; // { timer, state, phase, count, busy }
   let runFinishUpload = null;
-  let lastAfterReturn = 0; // the last import's count of photos taken after the return flight (retire's message)
+  let lastAfterReturn = 0;
+  const unplacedDeferred = new Set(); // photos the owner put off in the unplaced-photos dialog // the last import's count of photos taken after the return flight (retire's message)
   let retireInbox = null; // assigned with runFinishUpload below; the watcher retries a failed cleanup through it
   // A settled folder is imported AUTOMATICALLY (2026-10-27 -- nothing in the import needs the
   // owner any more). Files an auto-run already tried are not tried again by a later tick (a
@@ -19610,7 +19611,7 @@ async function showTripsyFlyover(tripKey) {
             return;
           }
         }
-        const freshFiles = tripsyFlyoverDriveNewFiles(files, record);
+        const freshFiles = tripsyFlyoverDriveNewFiles(files, record).filter(f => !unplacedDeferred.has(f.id));
         const fresh = freshFiles.length;
         // Everything in the folder is already on the fly-over (an import whose cleanup failed,
         // or finished after the page was closed): clear the folder now. Two consecutive
@@ -20346,13 +20347,17 @@ async function showTripsyFlyover(tripKey) {
       runDriveImport(fresh, record.inboxDest || 'auto', folderId);
     };
     wireDriveStatus();
-    const runDriveImport = async (files, dest, folderId) => {
+    // `destById` holds the owner's own choice for photos an earlier pass could not place (the
+    // unplaced-photos dialog below); `leftOut` counts the ones they chose to leave out, which
+    // were trashed before this call -- like a post-return photo, it still lets the folder retire.
+    const runDriveImport = async (files, dest, folderId, destById = null, leftOut = 0) => {
       driveImportRunning = true;
       stopInboxWatch(); // the import itself is what the watcher was waiting for
       if (record.shortcutLaunchedAt) record = { ...record, shortcutLaunchedAt: '' }; // the shortcut delivered
       paintDriveStatus();
       const total = files.length;
       let taken = 0, unmatched = 0, failed = 0, dupes = 0, afterReturn = 0;
+      const unmatchedFiles = [];
       const returnCutoff = tripsyFlyoverReturnCutoff(trip);
       const known = tripsyFlyoverKnownSources(record);
       const knownCaptures = tripsyFlyoverKnownCaptures(record);
@@ -20368,8 +20373,9 @@ async function showTripsyFlyover(tripKey) {
           // Taken after the return flight landed: not part of the trip. Its inbox copy goes to
           // Drive's trash (the original is still in Photos), so the folder can still retire.
           if (tripsyFlyoverTakenAfterReturn(tripsyFlyoverDriveMetaInfo(f), returnCutoff)) { known.add(src); afterReturn++; await tripsyFlyoverTrashDriveFile(f.id); continue; }
-          const stopId = tripsyFlyoverDriveImportDest(record.stops, f, dest);
-          if (!stopId) { unmatched++; tripsyFlyoverIntakeNote({ unmatched }); continue; }
+          const chosen = destById && destById.get(f.id);
+          const stopId = chosen || tripsyFlyoverDriveImportDest(record.stops, f, dest);
+          if (!stopId) { unmatched++; unmatchedFiles.push(f); tripsyFlyoverIntakeNote({ unmatched }); continue; }
           try {
             const stopNow = () => record.stops.find(x => x.id === stopId) || {};
             let rec;
@@ -20398,7 +20404,7 @@ async function showTripsyFlyover(tripKey) {
         if (taken) save();
         if (!closed) {
           render();
-          const msg = `Imported ${taken} from Drive${dupes ? `, ${dupes} already here` : ''}${afterReturn ? `, ${afterReturn} taken after the return flight left out` : ''}${unmatched ? `, ${unmatched} fell in no destination’s dates` : ''}${failed ? `, ${failed} failed (press Import again to retry)` : ''}.`;
+          const msg = `Imported ${taken} from Drive${dupes ? `, ${dupes} already here` : ''}${leftOut ? `, ${leftOut} left out` : ''}${afterReturn ? `, ${afterReturn} taken after the return flight left out` : ''}${unmatched ? `, ${unmatched} fell in no destination’s dates` : ''}${failed ? `, ${failed} failed (press Import again to retry)` : ''}.`;
           setStatus(msg);
           toast(msg, failed && !taken ? 'error' : undefined);
         }
@@ -20411,10 +20417,36 @@ async function showTripsyFlyover(tripKey) {
       // left to wait for (2026-10-27). An import that left the hand-off pending (something
       // failed, fell outside every destination's dates, or the cleanup itself failed) keeps
       // watching the folder: the watcher imports the next batch and retries the cleanup.
-      const clean = !closed && !failed && !unmatched && (taken || afterReturn) && folderId;
+      const clean = !closed && !failed && !unmatched && (taken || afterReturn || leftOut) && folderId;
       lastAfterReturn = afterReturn;
       if (clean && await retireInbox(folderId, taken)) return;
-      if (!closed) startInboxWatch();
+      if (closed) return;
+      // Photos that fit no destination's dates used to stay "new" for ever: the watcher offered
+      // Import now for them, each press skipped them again, and the button came straight back
+      // ("I keep pressing the import now button, and it just keeps coming back with a new
+      // import now button," 2026-11-04). Now the owner is shown them and decides: a destination
+      // for each, or leave it out (its Drive copy goes to the trash; the original stays in
+      // Photos). "Decide later" keeps them in the folder without offering Import now again
+      // this visit.
+      if (unmatchedFiles.length) {
+        unplacedDeferred.clear();
+        tripsyFlyoverUnplacedDialog(unmatchedFiles, record.stops, {
+          onApply: async choices => {
+            const destMap = new Map();
+            const out = [];
+            for (const f of unmatchedFiles) {
+              const c = choices.get(f.id);
+              if (c && c !== 'out') destMap.set(f.id, c); else out.push(f);
+            }
+            for (const f of out) await tripsyFlyoverTrashDriveFile(f.id);
+            if (closed) return;
+            const placed = unmatchedFiles.filter(f => destMap.has(f.id));
+            await runDriveImport(placed, 'auto', folderId, destMap, out.length);
+          },
+          onLater: () => { for (const f of unmatchedFiles) unplacedDeferred.add(f.id); },
+        });
+      }
+      startInboxWatch();
     };
     // Edit destinations: a draft list to rename / move / add / remove / rebuild, applied on
     // its Save only (the old Rebuild button rebuilt and saved in one go).
@@ -21422,6 +21454,80 @@ function tripsyFlyoverAddSourceDialog({ onPhotos, onDrive }) {
   ov.querySelector('[data-src-photos]').onclick = () => { close(); onPhotos(); };
   ov.querySelector('[data-src-drive]').onclick = () => { close(); onDrive(); };
   ov.onclick = e => { if (e.target === ov) close(); };
+}
+// Photos a Drive import could not place on any destination's dates (2026-11-04: they used to
+// leave an endless Import now loop). The destinations they can go to: shown, placed stays and
+// endpoints -- never an airport transfer, which carries no photos. Pure.
+function tripsyFlyoverUnplacedTargets(stops) {
+  return (stops || []).filter(s => s && !s.removed && s.kind !== 'transit' && isFinite(s.lat) && isFinite(s.lng));
+}
+// The destination to pre-select for one unplaced photo: with a real capture date, the
+// destination whose dates are nearest that day (a day inside a stay is distance 0); with no
+// date -- a screenshot, a saved image -- '' (left out), since nothing says where it belongs. Pure.
+function tripsyFlyoverUnplacedGuess(stops, info) {
+  if (!info || info.source !== 'exif' || !info.takenAt) return '';
+  const day = String(info.takenAt).slice(0, 10);
+  let best = '', bestD = Infinity;
+  for (const s of tripsyFlyoverUnplacedTargets(stops)) {
+    const a = tripsyDayKey(s.start), b = tripsyDayKey(s.end) || a;
+    if (!a) continue;
+    const d = day < a ? (Date.parse(a) - Date.parse(day)) : day > b ? (Date.parse(day) - Date.parse(b)) : 0;
+    if (isFinite(d) && d < bestD) { bestD = d; best = s.id; }
+  }
+  return best;
+}
+// One row per photo: its picture, when it was taken (or "no date"), and a choice of
+// destination or "Leave out". Apply resolves the choices; Back is "decide later".
+function tripsyFlyoverUnplacedDialog(files, stops, { onApply, onLater }) {
+  let ov = document.getElementById('tripsy-flyover-unplaced-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-flyover-unplaced-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483070';
+  const targets = tripsyFlyoverUnplacedTargets(stops);
+  const when = f => {
+    const info = tripsyFlyoverDriveMetaInfo(f);
+    if (info.source !== 'exif' || !info.takenAt) return 'No date in the photo';
+    const d = new Date(info.takenAt);
+    return isNaN(d) ? 'No date in the photo' : d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  };
+  const opts = guess => `<option value="out"${guess ? '' : ' selected'}>Leave out</option>` + targets.map(t => {
+    const dates = tripsyFlyoverDatesLabel(t);
+    return `<option value="${esc(t.id)}"${t.id === guess ? ' selected' : ''}>${esc(t.label || 'Destination')}${dates ? ` — ${esc(dates)}` : ''}</option>`;
+  }).join('');
+  for (const f of files) if (!/^video\//i.test(f.mimeType || '')) tripsyFlyoverInPlaceIds.add(f.id);
+  ov.innerHTML = `
+    <div class="tw-modal-paper" style="max-width:620px; max-height:88vh; max-height:88dvh; overflow-y:auto;">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+        <h2 style="margin:0; font-size:17px; flex:1;">${files.length} photo${files.length === 1 ? '' : 's'} didn’t fit any destination</h2>
+        <button class="tripsy-back-btn" data-up-later title="Decide later" aria-label="Decide later">‹ Back</button>
+      </div>
+      <p style="margin:0 0 10px; font-size:13px; color:var(--muted);">Their dates fall outside every destination on this trip, or they carry no date at all (a screenshot or a saved image). Choose where each one goes, or leave it out — a left-out photo’s Drive copy goes to the trash; the original stays in Photos.</p>
+      <div style="display:grid; gap:8px;">
+        ${files.map(f => `<div style="display:flex; align-items:center; gap:10px;">
+          ${/^video\//i.test(f.mimeType || '') ? '<div style="width:84px; height:64px; border-radius:6px; background:#111; color:#fff; display:flex; align-items:center; justify-content:center; font-size:22px;">🎬</div>' : `<div style="width:84px; height:64px; border-radius:6px; background:var(--panel-2) center/cover no-repeat; flex-shrink:0;" data-diary-img="${esc(f.id)}"></div>`}
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(f.name || 'Photo')}</div>
+            <div style="font-size:12px; color:var(--muted);">${esc(when(f))}</div>
+            <select data-up-choice="${esc(f.id)}" style="margin-top:4px; max-width:100%;">${opts(tripsyFlyoverUnplacedGuess(stops, tripsyFlyoverDriveMetaInfo(f)))}</select>
+          </div>
+        </div>`).join('')}
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px; flex-wrap:wrap;">
+        <button class="btn" data-up-all-out>Leave all out</button>
+        <button class="btn primary" data-up-apply>Apply</button>
+      </div>
+    </div>`;
+  ov.style.display = 'flex';
+  try { tripsyDiaryPaintPhotos(ov); } catch (e) { /* pictures are a nicety */ }
+  const close = () => { ov.style.display = 'none'; ov.innerHTML = ''; ov.onclick = null; };
+  const read = () => {
+    const m = new Map();
+    ov.querySelectorAll('[data-up-choice]').forEach(sel => m.set(sel.getAttribute('data-up-choice'), sel.value));
+    return m;
+  };
+  ov.querySelector('[data-up-later]').onclick = () => { close(); if (onLater) onLater(); };
+  ov.querySelector('[data-up-all-out]').onclick = () => { ov.querySelectorAll('[data-up-choice]').forEach(sel => { sel.value = 'out'; }); };
+  ov.querySelector('[data-up-apply]').onclick = () => { const m = read(); close(); onApply(m); };
+  ov.onclick = e => { if (e.target === ov) { close(); if (onLater) onLater(); } };
 }
 // A pick that never came back: the picker was opened and neither files nor a cancel arrived
 // (iOS's export stalled or the page was killed) -- the next pick goes through Drive. Pure.

@@ -5281,6 +5281,19 @@ WebView's support for recording is unproven.
     copy is TRASHED (the original is still in Photos), so a batch of only post-return photos
     still counts as clean and the folder retires. The 📷 Add trip photos sort skips them the
     same way. `flyover_test.js`.
+    **Photos that fit no destination are SHOWN and decided — never an endless Import now**
+    ("I keep pressing the import now button, and it just keeps coming back with a new import
+    now button," 2026-11-04 — an `auto` import left its unplaceable photos in the folder as
+    "new", the watcher re-announced them, and each press skipped them again). `runDriveImport`
+    collects them and opens `tripsyFlyoverUnplacedDialog`: one row per photo (its picture,
+    when it was taken or "No date in the photo", and a select of `tripsyFlyoverUnplacedTargets`
+    — shown, placed, non-transfer stops — or Leave out), pre-selected by the pure
+    `tripsyFlyoverUnplacedGuess` (nearest destination by date for a real EXIF date, Leave out
+    with none). Apply trashes the left-out copies and re-runs `runDriveImport(placed, 'auto',
+    folderId, destById, leftOut)` — a chosen destination is used as is, and `leftOut` counts
+    toward a clean import, so the folder retires. Back / a tap outside = Decide later: the ids go
+    into the page's `unplacedDeferred`, which the watcher subtracts from its new-file count, so
+    Import now stops coming back this visit (the next open asks again). e2e scenario N.
     **📲 Upload new photos — an iOS Shortcut saves everything taken since the last imported
     photo into the trip's Drive folder, with a keep-it-open reminder and a how-to-complete
     dialog** ("Is there a way i can have the app upload all new photos taken since the date of

@@ -319,6 +319,34 @@ const fd = (p, expr) => p.evaluate(e => eval(e), expr);
   await p.close();
 }
 
+// ---- N: photos that fit no destination are SHOWN and decided -- no endless Import now ------
+for (const later of [true, false]) {
+  const p = await boot(`
+    const cur = FD.folder('Fly-over photos — Synthetic Asia Trip', 'home');
+    const t = new Date(Date.now() - 3600000).toISOString();
+    FD.photo(cur.id, 'FITS.jpg', '2026:10:03 09:00:00', { createdTime: t });
+    FD.photo(cur.id, 'NODATE.jpg', null, { createdTime: t });
+    FD.photo(cur.id, 'EARLY.jpg', '2026:09:20 09:00:00', { createdTime: t });
+    window.curId = cur.id;
+    Store._r = freshRecord({ inboxFolderId: cur.id, inboxPendingAt: new Date(Date.now() - 600000).toISOString(), inboxDest: 'auto' });`);
+  await tick(p, 5000);
+  const rows = await p.evaluate(() => [...document.querySelectorAll('[data-up-choice]')].map(s => s.closest('div[style*="flex:1"]').firstElementChild.textContent + '=' + s.value));
+  check(`N${later ? '1' : '2'}: the fitting photo imported, the dialog lists the two that fit nowhere`, (await photos(p)).length === 1 && rows.length === 2, rows.join(' '));
+  check(`N${later ? '1' : '2'}: no-date pre-selects Leave out, the early one its nearest destination`, rows.includes('NODATE.jpg=out') && rows.some(r => r.startsWith('EARLY.jpg=') && r !== 'EARLY.jpg=out'), rows.join(' '));
+  if (later) {
+    await p.click('[data-up-later]'); await tick(p, 40000);
+    const ph = await phase(p);
+    check('N1: Decide later stops the Import now prompt coming back', ph !== 'complete' && !(await p.evaluate(() => !!document.querySelector('[data-drive-import-now]'))) && !(await p.evaluate(() => document.getElementById('tripsy-flyover-unplaced-overlay').style.display === 'flex')), ph);
+  } else {
+    await p.evaluate(() => { const s = [...document.querySelectorAll('[data-up-choice]')].find(x => x.closest('div[style*="flex:1"]').firstElementChild.textContent === 'EARLY.jpg'); s.value = 's2'; });
+    await p.click('[data-up-apply]'); await tick(p, 5000);
+    const ph = await photos(p); const r = await rec(p);
+    check('N2: Apply puts the early photo on Beppu and trashes the left-out one', ph.length === 2 && ph.some(x => x.startsWith('Beppu')) && (await fd(p, `FD.trashed([...FD.files.values()].find(f=>f.name==='NODATE.jpg').id)`)), ph.join(' '));
+    check('N2: the folder retires and the hand-off closes', !r.inboxPendingAt && (await fd(p, 'FD.trashed(curId)')));
+  }
+  await p.close();
+}
+
 await b.close();
 console.log(failures ? `\n${failures} FAILED` : '\nall scenarios passed');
 process.exit(failures ? 1 : 0);
