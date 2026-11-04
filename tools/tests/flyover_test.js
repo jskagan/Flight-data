@@ -2427,7 +2427,7 @@ eval([constLine('TRIPSY_FLYOVER_MODES'), extractFn('tripsyFlyoverModeOf')].join(
     assert(tripsyFlyoverDriveImportDest(dStops, { mimeType: 'video/quicktime', createdTime: '2026-10-18T01:00:00Z' }, 'auto') === null, 'with no card and no EXIF nothing is guessed from the upload time');
     assert(tripsyFlyoverDriveImportDest(dStops, { imageMediaMetadata: { time: '2026:09:01 10:00:00' } }, 'dn') === 'dn' && tripsyFlyoverDriveImportDest(dStops, { imageMediaMetadata: { time: '2026:09:01 10:00:00' } }, 'auto') === null, 'a dated photo fitting no destination takes the card\'s, else is left out');
     // The folder is temporary: videos moved out, folder trashed, only once everything landed.
-    assert(/const clean = !closed && !failed && !unmatched && taken && folderId;\s*if \(clean && await retireInbox\(folderId, taken\)\) return;\s*if \(!closed\) startInboxWatch\(\);/.test(setup)
+    assert(/const clean = !closed && !failed && !unmatched && \(taken \|\| afterReturn\) && folderId;\s*lastAfterReturn = afterReturn;\s*if \(clean && await retireInbox\(folderId, taken\)\) return;\s*if \(!closed\) startInboxWatch\(\);/.test(setup)
       && /retireInbox = async \(folderId, taken\) => \{[\s\S]*?await save\(\);\s*await tripsyFlyoverRetireInbox\(folderId, tripsyFlyoverRecordDriveIds\(record\)\);[\s\S]*?record = \{ \.\.\.record, inboxFolderId: '', inboxDest: '', inboxPendingAt: '' \};/.test(setup)
       && !/tripsyFlyoverWaitForUploads/.test(setup),
       'THE ASK: after a clean import the folder is retired at once -- there is no upload left to wait for; a failed cleanup leaves the watcher on to retry it');
@@ -2704,3 +2704,32 @@ eval(extractFn('tripsyFlyoverClearEditDoneOnAdd'));
   for (const k of ['DESTINATIONS', 'TRIP_PHOTOS', 'UPLOAD', 'COMPLETE']) assert(new RegExp(`const TRIPSY_FLYOVER_ICON_${k} = '<svg viewBox="0 0 32 32"`).test(html), `the ${k} icon is a 32×32 SVG like the others`);
 }
 
+
+// ---- Photos taken after the return flight are never imported ("When new photos are imported
+// into photos automatically, do not import any photos with dates after the return flight,"
+// 2026-11-04 -- the last destination's +2-day window and the GPS fallback let photos taken at
+// home after the trip in) ----
+{
+  eval([extractFn('tripsyFlyoverReturnCutoff'), extractFn('tripsyFlyoverTakenAfterReturn')].join('\n'));
+  const rt = { events: [
+    leg(1, 'airplane', 'Flight from LAX to NRT • Air Test AT1', 'LAX', 'NRT', '2030-05-01T18:00:00', '2030-05-02T21:00:00'),
+    leg(2, 'car', 'Car from Home', 'LAX', 'Home', '2030-05-20T20:00:00', '2030-05-20T21:30:00'),
+    leg(3, 'airplane', 'Flight from NRT to LAX • Air Test AT2', 'NRT', 'LAX', '2030-05-20T17:00:00', '2030-05-20T10:30:00'),
+  ] };
+  assert(tripsyFlyoverReturnCutoff(rt) === '2030-05-20T10:30:00', 'the cutoff is the LAST flight\'s arrival (local digits), not a later car home');
+  const bare = { events: [leg(9, 'airplane', 'Flight from NRT to LAX', 'NRT', 'LAX', '2030-05-20', '2030-05-20')] };
+  assert(tripsyFlyoverReturnCutoff(bare) === '2030-05-20T23:59:59', 'a date-only return keeps that whole day');
+  assert(tripsyFlyoverReturnCutoff({ events: [leg(2, 'car', 'Car', 'A', 'B', '2030-05-01T10:00:00', '2030-05-01T11:00:00')] }) === '', 'no flight, no cutoff (nothing is left out)');
+  const hidden = { events: [rt.events[0], { ...rt.events[2], hidden: true }] };
+  assert(tripsyFlyoverReturnCutoff(hidden) === '2030-05-02T21:00:00', 'a hidden flight is not the return');
+  const c = '2030-05-20T10:30:00';
+  assert(tripsyFlyoverTakenAfterReturn({ source: 'exif', takenAt: '2030-05-20T12:00:00' }, c) === true, 'an EXIF time after the landing is left out');
+  assert(tripsyFlyoverTakenAfterReturn({ source: 'exif', takenAt: '2030-05-20T09:00:00' }, c) === false, 'one taken on the return day before landing is kept');
+  assert(tripsyFlyoverTakenAfterReturn({ source: 'file', takenAt: '2030-06-01T09:00:00' }, c) === false, 'a file/upload date never decides it (it is not when the photo was taken)');
+  assert(tripsyFlyoverTakenAfterReturn({ source: 'exif', takenAt: '2030-06-01T09:00:00' }, '') === false, 'no cutoff, nothing left out');
+  const setup = extractFn('showTripsyFlyover');
+  assert(/if \(tripsyFlyoverTakenAfterReturn\(tripsyFlyoverDriveMetaInfo\(f\), returnCutoff\)\) \{ known\.add\(src\); afterReturn\+\+; await tripsyFlyoverTrashDriveFile\(f\.id\); continue; \}\s*const stopId = tripsyFlyoverDriveImportDest/.test(setup),
+    'THE ASK (Drive / Shortcut auto-import): a post-return photo is skipped before routing and its inbox copy trashed, so the folder can still retire');
+  assert(/if \(tripsyFlyoverTakenAfterReturn\(info, returnCutoff\)\) \{ afterReturn\+\+; continue; \}/.test(setup) && /const returnCutoff = tripsyFlyoverReturnCutoff\(trip\);[\s\S]*const returnCutoff = tripsyFlyoverReturnCutoff\(trip\);/.test(setup),
+    'THE ASK (Add trip photos sort): a post-return photo is left out and counted in the message');
+}

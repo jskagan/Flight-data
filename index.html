@@ -19507,6 +19507,7 @@ async function showTripsyFlyover(tripKey) {
   // dropped 2026-10-25) is the import, assigned by render and run by the slot's Import button.
   let inboxWatch = null; // { timer, state, phase, count, busy }
   let runFinishUpload = null;
+  let lastAfterReturn = 0; // the last import's count of photos taken after the return flight (retire's message)
   let retireInbox = null; // assigned with runFinishUpload below; the watcher retries a failed cleanup through it
   // A settled folder is imported AUTOMATICALLY (2026-10-27 -- nothing in the import needs the
   // owner any more). Files an auto-run already tried are not tried again by a later tick (a
@@ -20156,9 +20157,11 @@ async function showTripsyFlyover(tripKey) {
       if (!files || !files.length || closed) return;
       setStatus(`Reading the dates of ${files.length} photo${files.length === 1 ? '' : 's'}…`);
       const byStop = new Map();
-      let unmatched = 0;
+      let unmatched = 0, afterReturn = 0;
+      const returnCutoff = tripsyFlyoverReturnCutoff(trip);
       for (const file of files) {
         const info = await tripsyFlyoverPhotoTakenInfo(file);
+        if (tripsyFlyoverTakenAfterReturn(info, returnCutoff)) { afterReturn++; continue; }
         const sid = tripsyFlyoverRoutePhoto(record.stops, info);
         if (!sid) { unmatched++; continue; }
         if (!byStop.has(sid)) byStop.set(sid, []);
@@ -20174,9 +20177,10 @@ async function showTripsyFlyover(tripKey) {
         parts.push(`${s.label || 'a destination'} ${r.done + r.queued}`);
       }
       const added = [...byStop.values()].reduce((n, g) => n + g.length, 0);
-      const msg = added
+      const lateNote = afterReturn ? ` ${afterReturn} taken after the return flight ${afterReturn === 1 ? 'was' : 'were'} left out.` : '';
+      const msg = (added
         ? `Sorted ${added} photo${added === 1 ? '' : 's'} into ${byStop.size} destination${byStop.size === 1 ? '' : 's'}: ${parts.join(', ')}.${unmatched ? ` ${unmatched} didn’t fall in any destination’s dates and weren’t added — add those from their destination’s own button.` : ''}`
-        : `None of those photos fell in a destination’s dates${unmatched ? ` (${unmatched} checked)` : ''} — add them from a destination’s own ＋ Photos & videos button.`;
+        : `None of those photos fell in a destination’s dates${unmatched ? ` (${unmatched} checked)` : ''} — add them from a destination’s own ＋ Photos & videos button.`) + lateNote;
       setStatus(msg);
       toast(msg, added ? undefined : 'error');
       render();
@@ -20308,7 +20312,7 @@ async function showTripsyFlyover(tripKey) {
         stopInboxWatch();
         save();
         render();
-        setStatus(taken ? `Imported ${taken} from Drive, and the Drive folder has been moved to the trash.` : 'Everything in the Drive folder was already on the fly-over — the folder has been moved to the trash.');
+        setStatus(taken ? `Imported ${taken} from Drive, and the Drive folder has been moved to the trash.` : (lastAfterReturn ? `Nothing to import — ${lastAfterReturn} taken after the return flight ${lastAfterReturn === 1 ? 'was' : 'were'} left out, and the Drive folder has been moved to the trash.` : 'Everything in the Drive folder was already on the fly-over — the folder has been moved to the trash.'));
         toast('Drive folder cleared — it is in Drive’s trash for 30 days.');
         return true;
       } catch (e) {
@@ -20348,7 +20352,8 @@ async function showTripsyFlyover(tripKey) {
       if (record.shortcutLaunchedAt) record = { ...record, shortcutLaunchedAt: '' }; // the shortcut delivered
       paintDriveStatus();
       const total = files.length;
-      let taken = 0, unmatched = 0, failed = 0, dupes = 0;
+      let taken = 0, unmatched = 0, failed = 0, dupes = 0, afterReturn = 0;
+      const returnCutoff = tripsyFlyoverReturnCutoff(trip);
       const known = tripsyFlyoverKnownSources(record);
       const knownCaptures = tripsyFlyoverKnownCaptures(record);
       for (const f of files) autoImportTried.add(f.id);
@@ -20360,6 +20365,9 @@ async function showTripsyFlyover(tripKey) {
           const src = tripsyFlyoverDriveSrc(f.id);
           if (known.has(src)) continue;
           setStatus(`Importing from Drive… ${i + 1} of ${total} (${f.name || 'photo'})`);
+          // Taken after the return flight landed: not part of the trip. Its inbox copy goes to
+          // Drive's trash (the original is still in Photos), so the folder can still retire.
+          if (tripsyFlyoverTakenAfterReturn(tripsyFlyoverDriveMetaInfo(f), returnCutoff)) { known.add(src); afterReturn++; await tripsyFlyoverTrashDriveFile(f.id); continue; }
           const stopId = tripsyFlyoverDriveImportDest(record.stops, f, dest);
           if (!stopId) { unmatched++; tripsyFlyoverIntakeNote({ unmatched }); continue; }
           try {
@@ -20390,7 +20398,7 @@ async function showTripsyFlyover(tripKey) {
         if (taken) save();
         if (!closed) {
           render();
-          const msg = `Imported ${taken} from Drive${dupes ? `, ${dupes} already here` : ''}${unmatched ? `, ${unmatched} fell in no destination’s dates` : ''}${failed ? `, ${failed} failed (press Import again to retry)` : ''}.`;
+          const msg = `Imported ${taken} from Drive${dupes ? `, ${dupes} already here` : ''}${afterReturn ? `, ${afterReturn} taken after the return flight left out` : ''}${unmatched ? `, ${unmatched} fell in no destination’s dates` : ''}${failed ? `, ${failed} failed (press Import again to retry)` : ''}.`;
           setStatus(msg);
           toast(msg, failed && !taken ? 'error' : undefined);
         }
@@ -20403,7 +20411,8 @@ async function showTripsyFlyover(tripKey) {
       // left to wait for (2026-10-27). An import that left the hand-off pending (something
       // failed, fell outside every destination's dates, or the cleanup itself failed) keeps
       // watching the folder: the watcher imports the next batch and retries the cleanup.
-      const clean = !closed && !failed && !unmatched && taken && folderId;
+      const clean = !closed && !failed && !unmatched && (taken || afterReturn) && folderId;
+      lastAfterReturn = afterReturn;
       if (clean && await retireInbox(folderId, taken)) return;
       if (!closed) startInboxWatch();
     };
@@ -21064,6 +21073,34 @@ function tripsyFlyoverDriveMetaInfo(f) {
 // no destination, or carries no EXIF (a video -- Drive extracts none -- or a stripped photo).
 // Drive's `createdTime` is the UPLOAD moment, never the shutter, so a `file`-sourced date is
 // not routed by (it would have put today's uploads on today's destination). Pure.
+// Photos taken AFTER THE RETURN FLIGHT are never imported automatically ("When new photos are
+// imported into photos automatically, do not import any photos with dates after the return
+// flight," 2026-11-04 -- the last destination's date window runs two days past its end, and its
+// GPS fallback covers home, so pictures taken back home after landing were filed under the
+// trip). The cutoff is the trip's LAST flight's landing, as the wall-clock digits the trip
+// stores ("YYYY-MM-DDTHH:MM:SS", the same local-time form an EXIF capture time has, so the two
+// compare as strings); a bare date counts to the end of that day; no flight → no cutoff. Only
+// a real EXIF capture time is judged -- a file date is the upload or copy moment, never the
+// shutter. Both pure.
+function tripsyFlyoverReturnCutoff(trip) {
+  const evs = ((trip && trip.events) || []).filter(ev => ev && !ev._pendingDeleteId && !(typeof isTripsyEventEffectivelyHidden === 'function' && isTripsyEventEffectivelyHidden(ev)));
+  let last = null, lastAt = '';
+  for (const ev of evs) {
+    const raw = ev.tripsyRaw || {};
+    if (raw.resource !== 'transportation' || tripsyFlyoverModeOf(raw, ev.summary) !== 'plane') continue;
+    const at = String(raw.departureAt || ev.start || '');
+    if (at && at > lastAt) { lastAt = at; last = { raw, ev }; }
+  }
+  if (!last) return '';
+  const arr = String(last.raw.arrivalAt || last.ev.end || last.raw.departureAt || last.ev.start || '').replace(' ', 'T');
+  const m = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?/.exec(arr);
+  if (!m) return '';
+  return m[2] ? `${m[1]}T${m[2]}:${m[3]}:${m[4] || '00'}` : `${m[1]}T23:59:59`;
+}
+function tripsyFlyoverTakenAfterReturn(info, cutoff) {
+  if (!cutoff || !info || info.source !== 'exif' || !info.takenAt) return false;
+  return String(info.takenAt).replace(' ', 'T').slice(0, 19) > cutoff;
+}
 function tripsyFlyoverDriveImportDest(stops, f, dest) {
   const info = tripsyFlyoverDriveMetaInfo(f);
   const byDate = info.source === 'exif' ? tripsyFlyoverRoutePhoto(stops, info) : null;

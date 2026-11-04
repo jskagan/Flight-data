@@ -5268,6 +5268,19 @@ WebView's support for recording is unproven.
     only photos imported from now on — nothing can be backfilled for the ones whose originals
     were resized and trashed. Verified in Chromium: a twin with different bytes trashed, a
     burst mate of another size kept. `flyover_test.js`.
+    **Nothing taken after the return flight is imported** ("When new photos are imported into
+    photos automatically, do not import any photos with dates after the return flight,"
+    2026-11-04 — the last destination's window runs to its end day + 2, and the GPS fallback
+    reaches 100 km, so photos taken at home after the trip were landing on the last stop).
+    `tripsyFlyoverReturnCutoff(trip)` (pure) is the arrival of the trip's LAST flight by
+    departure time (visible events only; local wall-clock digits, like capture times; a
+    date-only arrival keeps that whole day; no flight → '' and nothing is left out), and
+    `tripsyFlyoverTakenAfterReturn(info, cutoff)` is true only for an EXIF capture time past it
+    (a file/upload date never decides it). The Drive/Shortcut auto-import checks it BEFORE
+    routing: such a file is counted ("N taken after the return flight left out") and its inbox
+    copy is TRASHED (the original is still in Photos), so a batch of only post-return photos
+    still counts as clean and the folder retires. The 📷 Add trip photos sort skips them the
+    same way. `flyover_test.js`.
     **📲 Upload new photos — an iOS Shortcut saves everything taken since the last imported
     photo into the trip's Drive folder, with a keep-it-open reminder and a how-to-complete
     dialog** ("Is there a way i can have the app upload all new photos taken since the date of
