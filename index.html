@@ -19508,6 +19508,7 @@ async function showTripsyFlyover(tripKey) {
   let inboxWatch = null; // { timer, state, phase, count, busy }
   let runFinishUpload = null;
   let lastAfterReturn = 0;
+  let inboxClearing = false; // the folder retire is running: the slot says so, not "Waiting for photos" (2026-11-04)
   const unplacedDeferred = new Set(); // photos the owner put off in the unplaced-photos dialog // the last import's count of photos taken after the return flight (retire's message)
   let retireInbox = null; // assigned with runFinishUpload below; the watcher retries a failed cleanup through it
   // A settled folder is imported AUTOMATICALLY (2026-10-27 -- nothing in the import needs the
@@ -19521,7 +19522,7 @@ async function showTripsyFlyover(tripKey) {
   // While an import runs the slot says so, with no button ("Nothing happens when I hit the
   // import now button," 2026-10-26 -- it was ignoring the tap because an import was already
   // running, which only the status line said).
-  const driveStatusHtml = () => driveImportRunning ? tripsyFlyoverDriveStatusHtml('importing', 0) : tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'waiting', inboxWatch ? inboxWatch.count : 0, record && record.inboxFolderId ? tripsyFlyoverDriveFolderUrl(record.inboxFolderId) : '', !!(record && record.shortcutLaunchedAt), inboxWatch ? inboxWatch.expected : 0);
+  const driveStatusHtml = () => driveImportRunning ? tripsyFlyoverDriveStatusHtml('importing', 0) : inboxClearing ? tripsyFlyoverDriveStatusHtml('clearing', 0) : tripsyFlyoverDriveStatusHtml(inboxWatch ? inboxWatch.phase : 'waiting', inboxWatch ? inboxWatch.count : 0, record && record.inboxFolderId ? tripsyFlyoverDriveFolderUrl(record.inboxFolderId) : '', !!(record && record.shortcutLaunchedAt), inboxWatch ? inboxWatch.expected : 0);
   // The Shortcut launch's own watchdog (tripsyFlyoverShortcutLooksIncomplete): one nudge per
   // launch, remembered ON THE RECORD (`shortcutNudgedFor` = the launch it was shown for). It was
   // a page-local flag, so every reopen of this page asked again about the same launch ("I am
@@ -20303,6 +20304,8 @@ async function showTripsyFlyover(tripKey) {
     // but a next import only happens when NEW photos arrive, so the page sat on "Waiting for
     // photos" forever).
     retireInbox = async (folderId, taken) => {
+      inboxClearing = true;
+      paintDriveStatus();
       try {
         setStatus('Clearing the Drive folder…');
         await save();
@@ -20320,6 +20323,9 @@ async function showTripsyFlyover(tripKey) {
         console.error('Drive inbox cleanup failed:', e);
         if (!closed) setStatus(`${taken ? `Imported ${taken} from Drive. ` : ''}Couldn’t clear the Drive folder yet — it is kept, and this page keeps trying while it is open.`);
         return false;
+      } finally {
+        inboxClearing = false;
+        if (!closed) paintDriveStatus();
       }
     };
     runFinishUpload = async () => {
@@ -21818,6 +21824,10 @@ function tripsyFlyoverDriveStatusHtml(phase, count, folderUrl = '', shortcut = f
   if (phase === 'complete' && exp && n >= exp) return `<span data-flyover-drive-phase="complete" style="font-size:12px; color:#3AA76D; font-weight:700;">✅ All ${exp} photo${exp === 1 ? '' : 's'} the shortcut found have reached the Drive folder.</span> <button class="btn primary" data-drive-import-now style="font-size:12px; margin-left:4px;">Import now</button>`;
   if (phase === 'uploading' && exp) return `<span class="tripsy-menu-flash" data-flyover-drive-phase="uploading" style="font-size:12px; color:#E0A020; font-weight:700;">⬆️ Uploading Photos to Drive… ${n} of ${exp} arrived.</span>${keep}`;
   if (phase === 'waiting') return `<span data-flyover-drive-phase="waiting" style="font-size:12px; color:var(--muted);">📁 Waiting for photos in the Drive folder.</span>${keep}${folderUrl ? ` <a class="btn" href="${esc(folderUrl)}" target="_blank" rel="noopener" data-drive-open-folder style="font-size:12px; margin-left:4px; text-decoration:none;">Open folder</a>` : ''} <button class="btn" data-drive-cancel title="Stop waiting for a Drive upload" style="font-size:12px;">Cancel</button>`;
+  // Every photo is on the fly-over and the folder is being moved to the trash ("Why does it say it
+  // is waiting for photos?", 2026-11-04 -- the idle Waiting line, with Open folder / Cancel, showed
+  // during the cleanup). No buttons: there is nothing to open or cancel.
+  if (phase === 'clearing') return `<span data-flyover-drive-phase="clearing" style="font-size:12px; color:var(--muted);">🧹 All photos imported — clearing the Drive folder…</span>`;
   if (phase === 'importing') return `<span data-flyover-drive-phase="importing" style="font-size:12px; color:var(--muted);">⏳ Importing from Drive — see the status line above. More files that arrive meanwhile are picked up by the next import.</span>`;
   if (phase === 'complete') return `<span data-flyover-drive-phase="complete" style="font-size:12px; color:#3AA76D; font-weight:700;">✅ Nothing new has reached the Drive folder for 2 minutes — ${files}.</span> <button class="btn primary" data-drive-import-now style="font-size:12px; margin-left:4px;">Import now</button>`;
   return `<span class="tripsy-menu-flash" data-flyover-drive-phase="uploading" style="font-size:12px; color:#E0A020; font-weight:700;">⬆️ Uploading Photos to Drive…</span>${keep}`;

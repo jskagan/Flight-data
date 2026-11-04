@@ -5294,6 +5294,12 @@ WebView's support for recording is unproven.
     toward a clean import, so the folder retires. Back / a tap outside = Decide later: the ids go
     into the page's `unplacedDeferred`, which the watcher subtracts from its new-file count, so
     Import now stops coming back this visit (the next open asks again). e2e scenario N.
+    **While the folder is being cleared, the slot says so** ("Why does it say it is waiting for
+    photos?", same day — with every photo imported the new-file count is 0, so the idle "Waiting
+    for photos" line with Open folder / Cancel showed during the cleanup): `retireInbox` raises the
+    page's `inboxClearing` for its whole run (dropped in a `finally`), and `driveStatusHtml` then
+    renders `tripsyFlyoverDriveStatusHtml('clearing')` — "🧹 All photos imported — clearing the
+    Drive folder…", no buttons. `flyover_test.js`.
     **📲 Upload new photos — an iOS Shortcut saves everything taken since the last imported
     photo into the trip's Drive folder, with a keep-it-open reminder and a how-to-complete
     dialog** ("Is there a way i can have the app upload all new photos taken since the date of

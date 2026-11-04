@@ -2760,3 +2760,16 @@ eval(extractFn('tripsyFlyoverClearEditDoneOnAdd'));
   assert(/tripsyFlyoverDriveNewFiles\(files, record\)\.filter\(f => !unplacedDeferred\.has\(f\.id\)\)/.test(setup),
     '"Decide later" stops the watcher offering Import now for those photos this visit');
 }
+
+// ---- While the folder is being cleared the slot says so ("Why does it say it is waiting for
+// photos?", 2026-11-04) ----
+{
+  eval(extractFn('tripsyFlyoverDriveStatusHtml'));
+  const h = tripsyFlyoverDriveStatusHtml('clearing', 0, 'https://x');
+  assert(/data-flyover-drive-phase="clearing"/.test(h) && /clearing the Drive folder/.test(h) && !/data-drive-open-folder|data-drive-cancel|Waiting for photos/.test(h), 'the clearing slot names the cleanup and offers no Open folder / Cancel');
+  const setup = extractFn('showTripsyFlyover');
+  assert(/: inboxClearing \? tripsyFlyoverDriveStatusHtml\('clearing', 0\) :/.test(setup)
+    && /retireInbox = async \(folderId, taken\) => \{\s*inboxClearing = true;\s*paintDriveStatus\(\);/.test(setup)
+    && /\} finally \{\s*inboxClearing = false;\s*if \(!closed\) paintDriveStatus\(\);\s*\}\s*\};/.test(setup),
+    'THE ASK: the retire raises the clearing phase for its whole run and drops it after, success or failure');
+}
