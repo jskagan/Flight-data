@@ -621,7 +621,12 @@ step 4; git history has it if ever needed.
   to date-match proposals against, so before `trips-data.json` loads the badge can briefly read
   green while a trip card would read yellow — `syncTripsyRelays` loads trips before its badge
   refresh and `renderTripsyEventsList` refreshes the badge after each render to close that gap.
-  Owner-only.
+  Owner-only. **Run Parse Now shows only when a parse is actually outstanding** ("I just ran
+  a parse. Why does this say run parse now?", 2026-11-05 — the forward had been parsed and a
+  conflict for the owner was all that kept the badge yellow): `computeTripsyStatus` returns
+  `parseNeeded` (docs/emails/narrative requests awaiting a run), and the panel shows the button
+  and the "Claude needs to run something" heading only with it (or on a red failed write); a
+  conflict-only yellow reads "Needs your attention". `parsenowgate_test.js`.
   **The panel names WHEN the next scheduled run is, not just that one is coming** (asked
   2026-08-29): the doc/email rows used to read "waiting for the next scheduled parse run", which
   states no time and reads as an unknowable delay. They now pair with one shared row —

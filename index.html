@@ -46314,7 +46314,12 @@ async function computeTripsyStatus() {
     const conflictEventCount = tripsyParseConflictEventCount(proposals, tripsyDecryptedTrips, changes);
     yellow.push({ label: `${conflictEventCount} event${conflictEventCount === 1 ? '' : 's'} with a potential conflict to resolve`, view: 'tripsyparsereview' });
   }
-  if (yellow.length) return { state: 'yellow', reasons: yellow };
+  // Whether a parse step is actually outstanding ("I just ran a parse. Why does this
+  // say run parse now?", 2026-11-05 -- the forward HAD been parsed, and the only thing
+  // keeping the badge yellow was a conflict for the owner to resolve). The panel offers
+  // Run Parse Now and says Claude needs to run something only when it is true.
+  const parseNeeded = !!(docsToParse.length || emailsToParse || narrativeRequests);
+  if (yellow.length) return { state: 'yellow', reasons: yellow, parseNeeded };
 
   // GREEN -- the owner's turn in the app. Keyed off pending proposal events
   // directly (source-agnostic: covers parsed attachments AND, later, emails),
@@ -46388,10 +46393,13 @@ async function updateTripsyDocParseBadge() { return updateTripsyStatusBadge(); }
 async function renderTripsyStatusPanel() {
   const panel = document.getElementById('tripsy-status-panel');
   if (!panel) return;
-  const { state, reasons } = await computeTripsyStatus();
+  const { state, reasons, parseNeeded } = await computeTripsyStatus();
   if (state === 'hidden' || !reasons.length) { panel.style.display = 'none'; return; }
+  // A yellow panel with nothing left to parse (a conflict to resolve, a write in
+  // flight) is the owner's turn, not Claude's: no "Claude needs to run" heading and no
+  // Run Parse Now button, which would only re-run a parse that already happened.
   const heading = state === 'red' ? '🛑 Needs attention'
-    : state === 'yellow' ? '⚠️ Claude needs to run something'
+    : state === 'yellow' ? (parseNeeded ? '⚠️ Claude needs to run something' : '⚠️ Needs your attention')
     : '🟢 Ready for your review';
   const headingColor = state === 'green' ? 'var(--home-green)' : (state === 'red' ? 'var(--red, #c0392b)' : 'var(--amber)');
   panel.innerHTML = `
@@ -46411,7 +46419,7 @@ async function renderTripsyStatusPanel() {
     ` : `
       <div style="padding:8px 6px; border-top:1px solid var(--line); font-size:13px; color:var(--text);">${esc(r.label)}</div>
     `).join('')}
-    ${state !== 'green' ? `
+    ${(state === 'red' || (state === 'yellow' && parseNeeded)) ? `
       <div style="border-top:1px solid var(--line); margin-top:2px; padding:10px 6px 2px;">
         <button class="btn primary" data-tripsy-status-open-routines style="display:block; width:100%; font-size:12px; padding:6px 12px;">Run Parse Now</button>
         <div style="font-size:11px; color:var(--muted); margin-top:5px; text-align:center;">Parses forwarded emails and flagged docs right here in the app (seconds); anything the browser can't handle goes to the cloud parse instead (a few minutes).</div>
