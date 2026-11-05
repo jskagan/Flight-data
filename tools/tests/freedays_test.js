@@ -35,7 +35,7 @@ assert(/const TRIPSY_ATTIRE_FREE_DAY_NAME = 'No events planned';/.test(html),
 const build = extractFn('tripsyAttireBuildDays');
 assert(/tripsyDayKeyRange\(days\[0\]\.dayKey, days\[days\.length - 1\]\.dayKey\)/.test(build),
   'the fill walks the first-to-last EVENT day span (the itinerary\'s own day-range rule), not the drifting trip start/end');
-assert(/have\.get\(k\) \|\| \{ dayKey: k, events: \[tripsyAttireFreeDayEvent\(k\)\] \}/.test(build),
+assert(/have\.get\(k\) \|\| \(nycOnlyDays\.has\(k\) \? null : \{ dayKey: k, events: \[tripsyAttireFreeDayEvent\(k\)\] \}\)/.test(build),
   'THE ASK: every gap day enters the guide with its free-day placeholder, in chronological order');
 const gen = extractFn('generateTripsyAttireGuide');
 assert(/const allGuideEvents = days\.flatMap\(d => d\.events\);\s*\n\s*const currentEventsForPrompt = allGuideEvents\.filter\(e => !e\.freeDay\);/.test(gen),

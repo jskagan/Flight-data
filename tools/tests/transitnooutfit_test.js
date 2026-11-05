@@ -24,6 +24,7 @@ let marked = 0, recomputed = 0;
   'var tripsyAttireApplyRecomputedBlocks = (g, r) => { g.blocks = r.blocks; g.counts = r.counts; };',
   'var tripsyAttireFingerprint = evs => ({ count: evs.length, hash: evs.map(e => e.id).join(",") });',
   extractFn('tripsyAttireOutfitlessTransitIds'), extractFn('tripsyAttireEventBaseId'),
+  extractFn('tripsyAddressIsNyc'), extractFn('tripsyEndpointIsNyc'), extractFn('tripsyAttireNycOmittedIds'), extractFn('tripsyAttireNoOutfitIds'),
   extractFn('tripsyAttireDropOutfitlessTransit'), extractFn('tripsyOutfitDropOutfitlessTransit'),
 ].join('\n'));
 
@@ -89,5 +90,5 @@ assert(/tripsyAttireDropOutfitlessTransit\(guide, trip\)/.test(html) && /tripsyO
   'the guide and outfit getters apply the rule to saved records');
 assert(/if \(noOutfit\.has\(tripsyAttireEventBaseId\(id\)\)\) continue;/.test(extractFn('tripsyOutfitEventPersonsMap')),
   'the My Trips 👔 glyph never appears on outfitless transit');
-assert(/tripsyAttireOutfitlessTransitIds\(t\)\.has\(attireEventId\)\) attireEventId = null;/.test(extractFn('renderTripsyViewPanel')),
+assert(/tripsyAttireNoOutfitIds\(t\)\.has\(attireEventId\)\) attireEventId = null;/.test(extractFn('renderTripsyViewPanel')),
   'the event detail panel offers no Outfit button for outfitless transit');

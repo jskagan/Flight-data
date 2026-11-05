@@ -1868,6 +1868,9 @@
     text-decoration: underline; outline: none;
   }
   .tripsy-attire-dressguide-badge { flex-shrink: 0; }
+  /* An NYC event on a schedule: listed, but dressed for elsewhere (2026-11-05). */
+  .tripsy-attire-omitted-badge { display:inline-block; padding:2px 9px; border-radius:10px; border:1px dashed currentColor; color:var(--muted); font-size:11.5px; font-weight:600; white-space:nowrap; }
+  .tripsy-attire-dressguide-event--omitted { opacity: 0.8; }
 
   /* Generic small modal reused for any Attire drill-down (currently: the
      events behind one Him/Her category row) -- a second, higher-stacked
@@ -14353,7 +14356,7 @@ function tripsyOutfitEventPersonsMap(tripKey) {
   const map = new Map();
   const trip = (typeof tripsyDecryptedTrips !== 'undefined' && Array.isArray(tripsyDecryptedTrips))
     ? tripsyDecryptedTrips.find(t => t.key === tripKey) : null;
-  const noOutfit = trip ? tripsyAttireOutfitlessTransitIds(trip) : new Set();
+  const noOutfit = trip ? tripsyAttireNoOutfitIds(trip) : new Set(); // transit + NYC
   for (const o of (driveData.tripsyTripOutfits || [])) {
     if (o.tripKey !== tripKey) continue;
     const person = o.person || 'him';
@@ -26503,9 +26506,10 @@ function renderTripsyViewPanel(panel, raw, eventSummary, onEdit, tripKey = null)
   let attireEventId = (tripKey && raw && raw.resource && raw.id != null) ? `${raw.resource}-${raw.id}` : null;
   // A car, train or mid-trip flight wears no outfit (only the first and last flight do),
   // so its detail panel offers no Outfit button.
-  if (attireEventId && raw.resource === 'transportation') {
+  // Nor does an event in New York City (omitted from attire, 2026-11-05).
+  if (attireEventId) {
     const t = (tripsyDecryptedTrips || []).find(x => x.key === tripKey);
-    if (t && tripsyAttireOutfitlessTransitIds(t).has(attireEventId)) attireEventId = null;
+    if (t && tripsyAttireNoOutfitIds(t).has(attireEventId)) attireEventId = null;
   }
   panel.innerHTML = `
     <div style="display:flex; flex-direction:column; gap:16px; max-width:640px;">
@@ -39625,9 +39629,22 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
   const dgTodayKey = dgTrip
     ? tripsyTravelViewTodayKey(dgTrip, dgDayKeys[0] || null, dgDayKeys[dgDayKeys.length - 1] || null)
     : null;
-  const dailyDressGuideHtml = (guide.days || []).map(day => {
+  // New York City events are left out of the guide (2026-11-05) but still listed, as
+  // "Omitted", on their days -- read LIVE from the trip, so a guide saved earlier shows
+  // them too. A day with only NYC events gets a section of omitted rows alone.
+  const omittedByDay = (dgTrip && !filterOn) ? tripsyAttireNycOmittedRowsByDay(dgTrip) : new Map();
+  const guideDayByKey = new Map((guide.days || []).map(d => [d.dayKey, d]));
+  const renderDayKeys = [...new Set([...guideDayByKey.keys(), ...omittedByDay.keys()])].sort();
+  const omittedRowsHtml = dayKey => (omittedByDay.get(dayKey) || []).map(o => `
+        <div class="tripsy-attire-dressguide-event tripsy-attire-dressguide-event--omitted" data-tripsy-attire-omitted-row="${esc(o.id)}">
+          <div class="tripsy-attire-col-time">${esc(o.startTime && o.endTime ? `${o.startTime} – ${o.endTime}` : (o.startTime || ''))}</div>
+          <div class="tripsy-attire-dressguide-event-main"><span style="color:var(--muted);">${esc(o.name)}</span></div>
+          <div class="tripsy-attire-dressguide-badge">${TRIPSY_ATTIRE_OMITTED_BADGE_HTML}</div>
+        </div>`).join('');
+  const dailyDressGuideHtml = renderDayKeys.map(k => guideDayByKey.get(k) || { dayKey: k, events: [] }).map(day => {
     const events = (day.events || []).map(ev => ({ ...ev, dayKey: day.dayKey }));
-    if (!events.length) return '';
+    const omittedHtml = omittedRowsHtml(day.dayKey);
+    if (!events.length && !omittedHtml) return '';
     // A day with nothing matching the filter drops out entirely rather than
     // rendering an empty day bar.
     if (filterOn && !events.some(ev => tripsyDressGuideFilter.has(tripsyAttireDisplayCategory(ev)))) return '';
@@ -39737,6 +39754,7 @@ function renderTripsyDressGuideInto(content, guide, renderOpts) {
         ${runOutHtml}
         ${laundryHtml}
         ${rows}
+        ${omittedHtml}
       </div>
     `;
   }).join('');
@@ -40593,6 +40611,92 @@ function tripsyAttireOutfitlessTransitIds(trip) {
   for (const e of evs) if (isTransport(e) && !keep.has(e.id)) out.add(e.id);
   return out;
 }
+// ---- New York City events are OMITTED from attire and packing ----
+// "When preparing any attire schedules or packing lists, omit all events in New York City.
+// When there are events in New York, show them as 'omitted' on any schedules" (2026-11-05).
+// An NYC event gets no dress code, no time block, no occasion count, no outfit and no
+// packing need; the Daily Dress Guide and Travel View's dress-code mode list it as
+// "Omitted — New York City" instead. Where an event is:
+//  - an activity or lodging: its ADDRESS (tripsyAddressIsNyc);
+//  - one with no address (a "venue to be announced" lunch): the nearest LOCATED
+//    activity/lodging in time on the same trip decides;
+//  - transportation: only a ride with BOTH ends in the city (a car from JFK to the
+//    hotel); a flight to or from New York is dressed for where you get dressed.
+// tripsyAddressIsNyc reads an address-like string. It needs the STATE next to the city
+// ("New York, NY", a borough + NY, or an NYC ZIP after NY), so "1201 New York Avenue, NW,
+// Washington, DC" and "Newark, NJ" never match. Pure.
+function tripsyAddressIsNyc(text) {
+  const s = String(text || '');
+  if (!s.trim()) return false;
+  if (/\bNew York,?\s+(NY|New York)\b/i.test(s)) return true;
+  if (/\bNYC\b/.test(s)) return true;
+  if (/\b(Manhattan|Brooklyn|Queens|Bronx|Staten Island|Long Island City|Astoria|Flushing|Jamaica),?\s+(NY|New York)\b/i.test(s)) return true;
+  if (/\bNY,?\s+(10[0-4]\d\d|11[1-4]\d\d|116\d\d)\b/.test(s)) return true;
+  return false;
+}
+// The badge every schedule shows on an omitted NYC event.
+const TRIPSY_ATTIRE_OMITTED_BADGE_HTML = '<span class="tripsy-attire-omitted-badge" title="New York City events are left out of attire and packing">Omitted — New York City</span>';
+// A transport endpoint description is in the city when it reads as an NYC address or
+// names JFK / LaGuardia (both in Queens; Newark is New Jersey).
+function tripsyEndpointIsNyc(text) {
+  const s = String(text || '');
+  return tripsyAddressIsNyc(s) || /\b(JFK|LGA|LaGuardia)\b/i.test(s) || /^\s*New York\s*$/i.test(s);
+}
+// The hyphen-form ids ("activity-123") of a trip's NYC events. Pure over the live trip.
+function tripsyAttireNycOmittedIds(trip) {
+  const out = new Set();
+  if (!trip || !Array.isArray(trip.events)) return out;
+  const evs = trip.events.filter(e => e && e.tripsyRaw && e.id);
+  const placeOf = e => {
+    const r = e.tripsyRaw;
+    if (r.resource !== 'activity' && r.resource !== 'hosting') return null;
+    const addr = [r.address, e.location].filter(Boolean).join(' | ');
+    return addr.trim() ? tripsyAddressIsNyc(addr) : null; // null = no address to judge by
+  };
+  const t = e => Date.parse(e.start || e.end || '') || NaN;
+  const located = evs.map(e => ({ e, nyc: placeOf(e) })).filter(x => x.nyc !== null);
+  for (const e of evs) {
+    const r = e.tripsyRaw;
+    if (r.resource === 'transportation') {
+      const dep = r.departureDescription, arr = r.arrivalDescription;
+      if (dep && arr && tripsyEndpointIsNyc(dep) && tripsyEndpointIsNyc(arr)) out.add(e.id);
+      continue;
+    }
+    let nyc = placeOf(e);
+    if (nyc === null && Number.isFinite(t(e)) && located.length) {
+      let best = null, bestGap = Infinity;
+      for (const x of located) {
+        const gap = Math.abs(t(x.e) - t(e));
+        if (Number.isFinite(gap) && gap < bestGap) { best = x; bestGap = gap; }
+      }
+      nyc = best ? best.nyc : false;
+    }
+    if (nyc) out.add(e.id);
+  }
+  return out;
+}
+// The schedule rows for a trip's omitted NYC events, by day: dayKey -> [{id, name,
+// startTime, endTime}] in time order. A lodging shows on its check-in day. Pure.
+function tripsyAttireNycOmittedRowsByDay(trip) {
+  const ids = tripsyAttireNycOmittedIds(trip);
+  const byDay = new Map();
+  if (!ids.size) return byDay;
+  const evs = trip.events.filter(e => e && ids.has(e.id))
+    .slice().sort((a, b) => String(a.start || '').localeCompare(String(b.start || '')));
+  for (const e of evs) {
+    const dayKey = tripsyDayKey(e.start) || tripsyDayKey(e.end);
+    if (!dayKey) continue;
+    if (!byDay.has(dayKey)) byDay.set(dayKey, []);
+    byDay.get(dayKey).push({ id: e.id, name: e.summary || '', startTime: formatTripTime(e.start), endTime: formatTripTime(e.end) });
+  }
+  return byDay;
+}
+// Every event a trip dresses NOTHING for: outfitless transit plus NYC events.
+function tripsyAttireNoOutfitIds(trip) {
+  const out = tripsyAttireOutfitlessTransitIds(trip);
+  for (const id of tripsyAttireNycOmittedIds(trip)) out.add(id);
+  return out;
+}
 // The guide/outfit side of an id: a multi-day row carries a -begin/-end (or check-in/out) suffix.
 function tripsyAttireEventBaseId(id) {
   return String(id || '').replace(/-(checkin|checkout|begin|end)$/, '');
@@ -40606,16 +40710,23 @@ function tripsyAttireEventBaseId(id) {
 function tripsyAttireDropOutfitlessTransit(guide, trip) {
   if (!guide || !Array.isArray(guide.days) || !trip) return false;
   const drop = tripsyAttireOutfitlessTransitIds(trip);
-  if (!drop.size) return false;
+  // NYC events leave the guide too (2026-11-05); a day left with nothing but NYC events
+  // leaves the guide entirely -- a fresh build gives it no free-day placeholder either.
+  const nyc = tripsyAttireNycOmittedIds(trip);
+  if (!drop.size && !nyc.size) return false;
   let removed = 0;
   const days = guide.days.map(day => {
+    let nycGone = 0;
     const events = (day.events || []).filter(ev => {
-      const gone = ev.resource === 'transportation' && drop.has(tripsyAttireEventBaseId(ev.id));
-      if (gone) removed++;
+      const base = tripsyAttireEventBaseId(ev.id);
+      const isNyc = nyc.has(base);
+      const gone = isNyc || (ev.resource === 'transportation' && drop.has(base));
+      if (gone) { removed++; if (isNyc) nycGone++; }
       return !gone;
     });
+    if (!events.length && nycGone) return null;
     return { ...day, events: events.length ? events : [tripsyAttireFreeDayEvent(day.dayKey)] };
-  });
+  }).filter(Boolean);
   if (!removed) return false;
   days.forEach(d => d.events.forEach(ev => { if (ev.freeDay && !ev.category) ev.category = 'casual'; }));
   guide.days = days;
@@ -40629,7 +40740,7 @@ function tripsyAttireDropOutfitlessTransit(guide, trip) {
 // Mutates in memory; returns whether anything changed.
 function tripsyOutfitDropOutfitlessTransit(outfits, trip) {
   if (!outfits || !Array.isArray(outfits.blocks) || !trip) return false;
-  const drop = tripsyAttireOutfitlessTransitIds(trip);
+  const drop = tripsyAttireNoOutfitIds(trip); // outfitless transit + NYC events
   if (!drop.size) return false;
   let changed = false;
   outfits.blocks = outfits.blocks.map(b => {
@@ -40645,6 +40756,8 @@ function tripsyOutfitDropOutfitlessTransit(outfits, trip) {
 async function tripsyAttireBuildDays(trip) {
   const { effectiveTrip, dayKeys, byDay } = await buildTripsyPrintDayData(trip);
   const outfitlessTransit = tripsyAttireOutfitlessTransitIds(effectiveTrip || trip);
+  const nycOmitted = tripsyAttireNycOmittedIds(effectiveTrip || trip);
+  const nycOnlyDays = new Set(); // days whose every event is in New York City
   const days = [];
   for (const dayKey of dayKeys) {
     if (dayKey === 'undated') continue;
@@ -40668,7 +40781,9 @@ async function tripsyAttireBuildDays(trip) {
       })
       .filter(Boolean)
       .filter(ev => !(ev.resource === 'transportation' && outfitlessTransit.has(tripsyAttireEventBaseId(ev.id))));
-    if (dayEvents.length) days.push({ dayKey, events: dayEvents });
+    const kept = dayEvents.filter(ev => !nycOmitted.has(tripsyAttireEventBaseId(ev.id)));
+    if (kept.length) days.push({ dayKey, events: kept });
+    else if (dayEvents.length) nycOnlyDays.add(dayKey);
   }
   // Fill the gaps: dayKeys above only lists days that HAVE events, so walk
   // the full first-to-last span (the same earliest-event → latest-event rule
@@ -40678,7 +40793,8 @@ async function tripsyAttireBuildDays(trip) {
     const have = new Map(days.map(d => [d.dayKey, d]));
     const range = tripsyDayKeyRange(days[0].dayKey, days[days.length - 1].dayKey);
     if (range.length > days.length) {
-      const filled = range.map(k => have.get(k) || { dayKey: k, events: [tripsyAttireFreeDayEvent(k)] });
+      // A New-York-only day is omitted, not a free day to dress for.
+      const filled = range.map(k => have.get(k) || (nycOnlyDays.has(k) ? null : { dayKey: k, events: [tripsyAttireFreeDayEvent(k)] })).filter(Boolean);
       tripsyAttireMarkInFlightDays(filled, effectiveTrip);
       return { effectiveTrip, days: filled };
     }
@@ -40748,7 +40864,9 @@ async function generateTripsyAttireGuide(tripKey, { onStage, dressOnly } = {}) {
   // event to 'casual', which is exactly the free-day rule.
   const allGuideEvents = days.flatMap(d => d.events);
   const currentEventsForPrompt = allGuideEvents.filter(e => !e.freeDay);
-  if (!currentEventsForPrompt.length) throw new Error('This trip has no events to generate an attire guide for.');
+  if (!currentEventsForPrompt.length) throw new Error(tripsyAttireNycOmittedIds(trip).size
+    ? 'Every event on this trip is in New York City, which is left out of attire and packing lists.'
+    : 'This trip has no events to generate an attire guide for.');
   console.log(`[attire timing] buildDays: ${Math.round(performance.now() - genStart)}ms (${currentEventsForPrompt.length} events)`);
 
   const weatherStart = performance.now();
@@ -48009,6 +48127,8 @@ async function renderTravelView(chosenTripKey) {
   // laundry day(s) drive the red banner. Loaded up front so the toggle is instant
   // (a class flip + colour apply, no refetch). Empty maps when no guide exists.
   const tvAttireCatByEvent = new Map();
+  // NYC events carry no dress code (2026-11-05); dress-code mode labels them "Omitted".
+  const tvNycOmitted = tripsyAttireNycOmittedIds(trip);
   const tvAttireLaundry = new Map();
   let tvHasAttire = false;
   try {
@@ -48179,6 +48299,9 @@ async function renderTravelView(chosenTripKey) {
           : (() => { const ct = formatTripTime(ev.start); return `<div class="tv-attire-leadin">⇄ Change to ${tripsyAttireBadgeHtml(cat)}${ct ? ` before ${esc(ct)}` : ''}</div>`; })();
       }
       if (cat) seenCat = true;
+      const isOmitted = !cat && tvNycOmitted.has(tripsyAttireEventBaseId(ev.id));
+      if (isOmitted && (i === 0 || !tvNycOmitted.has(tripsyAttireEventBaseId(evs[i - 1].id))))
+        cue += `<div class="tv-attire-leadin">${TRIPSY_ATTIRE_OMITTED_BADGE_HTML}</div>`;
       const attire = cat ? { color: TRIPSY_ATTIRE_CATEGORY_COLOR[cat], first: isFirstOfRun, last: isLastOfRun } : null;
       return cue + rowHtml(ev, attire);
     }).join('');

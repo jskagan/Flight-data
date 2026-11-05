@@ -2533,6 +2533,25 @@ step 4; git history has it if ever needed.
   ICN→LAX flight home keep their outfits, 13 legs lose theirs, no day empties, all 31 outfit
   blocks survive, and no block is left uncovered (no new ⚠️). The flight-transfer rules above
   still govern the kept flights (their in-flight days and connecting legs). `transitnooutfit_test.js`.
+- **New York City events are OMITTED from attire and packing, and listed as "Omitted"** ("When
+  preparing any attire schedules or packing lists, omit all events in New York City. When there
+  are events in New York, show them as 'omitted' on any schedules," 2026-11-05).
+  `tripsyAttireNycOmittedIds(trip)` (pure) picks them: an activity/lodging by its ADDRESS
+  (`tripsyAddressIsNyc` needs the state beside the city — "New York, NY", a borough + NY, or an
+  NYC ZIP after NY — so "New York Avenue, … Washington, DC" and Newark never match); one with no
+  address (a "venue to be announced" lunch) goes with the nearest LOCATED activity/lodging in
+  time; transportation only when BOTH ends are in the city (`tripsyEndpointIsNyc`: an NYC address
+  or JFK/LaGuardia) — a flight to or from New York is still dressed for. `tripsyAttireBuildDays`
+  leaves them out of every day (so out of the prompt, dress codes, blocks, counts, packing
+  guidance and outfits), and a day with ONLY NYC events gets no free-day placeholder. The two
+  read retrofits (`tripsyAttireDropOutfitlessTransit`, `tripsyOutfitDropOutfitlessTransit`, via
+  `tripsyAttireNoOutfitIds` = outfitless transit ∪ NYC) correct saved guides/outfits the same way;
+  the 👔 row glyph and the detail panel's Outfit button skip them. Shown: the Daily Dress Guide
+  lists each NYC event on its day with a dashed "Omitted — New York City" badge
+  (`tripsyAttireNycOmittedRowsByDay`, read LIVE from the trip, hidden while a dress-code filter
+  is on; a NYC-only day gets a section of omitted rows alone), and Travel View's dress-code mode
+  puts the same badge before each run of them. A trip whose every event is in NYC refuses to
+  generate with a message saying so. `nycomit_test.js`.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"
   2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day
