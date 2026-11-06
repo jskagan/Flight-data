@@ -24,7 +24,7 @@ let marked = 0, recomputed = 0;
   'var tripsyAttireApplyRecomputedBlocks = (g, r) => { g.blocks = r.blocks; g.counts = r.counts; };',
   'var tripsyAttireFingerprint = evs => ({ count: evs.length, hash: evs.map(e => e.id).join(",") });',
   extractFn('tripsyAttireOutfitlessTransitIds'), extractFn('tripsyAttireEventBaseId'),
-  extractFn('tripsyAddressIsNyc'), extractFn('tripsyEndpointIsNyc'), extractFn('tripsyAttireNycOmittedIds'), extractFn('tripsyAttireNoOutfitIds'),
+  extractFn('tripsyAddressIsNyc'), extractFn('tripsyEndpointIsNyc'), extractFn('tripsyAttireNycOmittedIds'), extractFn('tripsyAttireNoOutfitIds'), extractFn('tripsyNycAreaEndpoint'), extractFn('tripsyAttireNycStayDays'), extractFn('tripsyDayKeyRange'),
   extractFn('tripsyAttireDropOutfitlessTransit'), extractFn('tripsyOutfitDropOutfitlessTransit'),
 ].join('\n'));
 

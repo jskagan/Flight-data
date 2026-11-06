@@ -40691,12 +40691,50 @@ function tripsyAttireNycOmittedIds(trip) {
   }
   return out;
 }
+// Days spent in New York with NOTHING scheduled ("Days in New York are showing up in the
+// daily dress guide," 2026-11-05 -- a trip with only a flight into Newark and the next
+// flight out had every day between filled with Casual "No events planned" days, since no
+// EVENT was in the city for the NYC rule to remove). Between two consecutive events, at
+// least 12 hours apart (a connection is not a stay), where the first ENDS in the New York
+// area and the next STARTS there, every day from the first's end day to the next's start
+// day is a stay day. "New York area" here also counts Newark airport (EWR) -- you land
+// there to be in the city -- though a ride from EWR is still dressed (tripsyEndpointIsNyc).
+// An activity/lodging is placed by tripsyAttireNycOmittedIds. Callers only drop a stay
+// day's free-day placeholder; a day with a real dressed event keeps it. Pure.
+function tripsyNycAreaEndpoint(text) {
+  const s = String(text || '');
+  return tripsyEndpointIsNyc(s) || /\bEWR\b/.test(s);
+}
+function tripsyAttireNycStayDays(trip, omittedIds) {
+  const out = new Set();
+  if (!trip || !Array.isArray(trip.events)) return out;
+  const ids = omittedIds || tripsyAttireNycOmittedIds(trip);
+  const evs = trip.events.filter(e => e && e.tripsyRaw && (e.start || e.end)).map(e => {
+    const r = e.tripsyRaw;
+    const isT = r.resource === 'transportation';
+    const startsNyc = isT ? tripsyNycAreaEndpoint(r.departureDescription) : ids.has(e.id);
+    const endsNyc = isT ? tripsyNycAreaEndpoint(r.arrivalDescription) : ids.has(e.id);
+    const st = String(e.start || e.end), en = String(e.end || e.start);
+    return { st, en, startDay: tripsyDayKey(st), endDay: tripsyDayKey(en), startsNyc, endsNyc };
+  }).sort((a, b) => a.st.localeCompare(b.st));
+  for (let i = 0; i + 1 < evs.length; i++) {
+    const p = evs[i], n = evs[i + 1];
+    if (!p.endsNyc || !n.startsNyc || !p.endDay || !n.startDay) continue;
+    const gap = Date.parse(n.st) - Date.parse(p.en);
+    if (!(gap >= 12 * 3600 * 1000)) continue;
+    for (const k of tripsyDayKeyRange(p.endDay, n.startDay)) out.add(k);
+  }
+  return out;
+}
 // The schedule rows for a trip's omitted NYC events, by day: dayKey -> [{id, name,
-// startTime, endTime}] in time order. A lodging shows on its check-in day. Pure.
+// startTime, endTime}] in time order. A lodging shows on its check-in day. A stay day
+// (tripsyAttireNycStayDays) with no omitted event of its own gets one "In New York City"
+// row, so the day reads as omitted rather than vanishing from the schedule. Pure.
 function tripsyAttireNycOmittedRowsByDay(trip) {
   const ids = tripsyAttireNycOmittedIds(trip);
   const byDay = new Map();
-  if (!ids.size) return byDay;
+  const stays = tripsyAttireNycStayDays(trip, ids);
+  if (!ids.size && !stays.size) return byDay;
   const evs = trip.events.filter(e => e && ids.has(e.id))
     .slice().sort((a, b) => String(a.start || '').localeCompare(String(b.start || '')));
   for (const e of evs) {
@@ -40704,6 +40742,9 @@ function tripsyAttireNycOmittedRowsByDay(trip) {
     if (!dayKey) continue;
     if (!byDay.has(dayKey)) byDay.set(dayKey, []);
     byDay.get(dayKey).push({ id: e.id, name: e.summary || '', startTime: formatTripTime(e.start), endTime: formatTripTime(e.end) });
+  }
+  for (const k of [...stays].sort()) {
+    if (!byDay.has(k)) byDay.set(k, [{ id: `nycstay-${k}`, name: 'In New York City', startTime: '', endTime: '' }]);
   }
   return byDay;
 }
@@ -40729,7 +40770,8 @@ function tripsyAttireDropOutfitlessTransit(guide, trip) {
   // NYC events leave the guide too (2026-11-05); a day left with nothing but NYC events
   // leaves the guide entirely -- a fresh build gives it no free-day placeholder either.
   const nyc = tripsyAttireNycOmittedIds(trip);
-  if (!drop.size && !nyc.size) return false;
+  const stays = tripsyAttireNycStayDays(trip, nyc); // empty days spent in New York
+  if (!drop.size && !nyc.size && !stays.size) return false;
   let removed = 0;
   const days = guide.days.map(day => {
     let nycGone = 0;
@@ -40741,6 +40783,10 @@ function tripsyAttireDropOutfitlessTransit(guide, trip) {
       return !gone;
     });
     if (!events.length && nycGone) return null;
+    if (stays.has(day.dayKey) && events.every(ev => ev.freeDay)) {
+      if (events.length) removed++;
+      return null;
+    }
     return { ...day, events: events.length ? events : [tripsyAttireFreeDayEvent(day.dayKey)] };
   }).filter(Boolean);
   if (!removed) return false;
@@ -40773,7 +40819,7 @@ async function tripsyAttireBuildDays(trip) {
   const { effectiveTrip, dayKeys, byDay } = await buildTripsyPrintDayData(trip);
   const outfitlessTransit = tripsyAttireOutfitlessTransitIds(effectiveTrip || trip);
   const nycOmitted = tripsyAttireNycOmittedIds(effectiveTrip || trip);
-  const nycOnlyDays = new Set(); // days whose every event is in New York City
+  const nycOnlyDays = tripsyAttireNycStayDays(effectiveTrip || trip, nycOmitted); // + days whose every event is in New York City
   const days = [];
   for (const dayKey of dayKeys) {
     if (dayKey === 'undated') continue;
@@ -40809,7 +40855,7 @@ async function tripsyAttireBuildDays(trip) {
     const have = new Map(days.map(d => [d.dayKey, d]));
     const range = tripsyDayKeyRange(days[0].dayKey, days[days.length - 1].dayKey);
     if (range.length > days.length) {
-      // A New-York-only day is omitted, not a free day to dress for.
+      // A New-York-only day (or an empty day spent in New York) is omitted, not a free day to dress for.
       const filled = range.map(k => have.get(k) || (nycOnlyDays.has(k) ? null : { dayKey: k, events: [tripsyAttireFreeDayEvent(k)] })).filter(Boolean);
       tripsyAttireMarkInFlightDays(filled, effectiveTrip);
       return { effectiveTrip, days: filled };

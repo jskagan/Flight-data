@@ -24,7 +24,9 @@ const extractFn = n => {
   'var tripsyAttireApplyRecomputedBlocks = (g, r) => { g.counts = r.counts; };',
   'var tripsyAttireFingerprint = evs => ({ count: evs.length, hash: evs.map(e => e.id).join(",") });',
   extractFn('tripsyAttireOutfitlessTransitIds'), extractFn('tripsyAttireEventBaseId'),
+  extractFn('tripsyDayKeyRange'),
   extractFn('tripsyAddressIsNyc'), extractFn('tripsyEndpointIsNyc'), extractFn('tripsyAttireNycOmittedIds'),
+  extractFn('tripsyNycAreaEndpoint'), extractFn('tripsyAttireNycStayDays'),
   extractFn('tripsyAttireNycOmittedRowsByDay'), extractFn('tripsyAttireNoOutfitIds'),
   extractFn('tripsyAttireDropOutfitlessTransit'), extractFn('tripsyOutfitDropOutfitlessTransit'),
 ].join('\n'));
@@ -81,11 +83,37 @@ const outfits = { blocks: [{ eventIds: ['activity-3'] }, { eventIds: ['activity-
 assert(tripsyOutfitDropOutfitlessTransit(outfits, trip) && outfits.blocks.length === 1 && outfits.blocks[0].eventIds[0] === 'activity-7',
   'an outfit dressing only an NYC event is dropped');
 
+// ---- empty days spent in New York ----
+const stayTrip = { key: 'S', events: [
+  leg(1, '2030-03-01T08:00:00', 'Los Angeles (LAX)', 'Newark (EWR)', 'airplane'),
+  leg(2, '2030-03-05T21:00:00', 'Newark, NJ/New York, NY, US (EWR)', 'London, GB (LHR)', 'airplane'),
+  act(3, '2030-03-07T19:00:00', 'Covent Garden, London WC2E 9DD', 'Opera'),
+  leg(4, '2030-03-09T10:00:00', 'LHR', 'EWR', 'airplane'),
+  leg(5, '2030-03-09T15:00:00', 'EWR', 'LAX', 'airplane'),
+] };
+stayTrip.events[0].end = '2030-03-01T16:00:00';
+stayTrip.events[1].end = '2030-03-06T09:00:00';
+const stays = tripsyAttireNycStayDays(stayTrip);
+assert([...stays].join(',') === '2030-03-01,2030-03-02,2030-03-03,2030-03-04,2030-03-05',
+  'THE ASK: the days between landing at Newark and flying out are New York days');
+assert(!stays.has('2030-03-06') && !stays.has('2030-03-09'), 'London days, and a same-day connection through EWR, are not');
+const stayRows = tripsyAttireNycOmittedRowsByDay(stayTrip);
+assert(stayRows.get('2030-03-03')[0].name === 'In New York City', 'a stay day is listed as an omitted "In New York City" row');
+const stayGuide = { tripKey: 'S', days: [
+  { dayKey: '2030-03-01', events: [{ id: 'transportation-1', resource: 'transportation' }] },
+  { dayKey: '2030-03-02', events: [{ id: 'freeday-2030-03-02', freeDay: true, resource: 'activity' }] },
+  { dayKey: '2030-03-06', events: [{ id: 'freeday-2030-03-06', freeDay: true, resource: 'activity' }] },
+] };
+assert(tripsyAttireDropOutfitlessTransit(stayGuide, stayTrip) === true
+  && stayGuide.days.map(d => d.dayKey).join(',') === '2030-03-01,2030-03-06',
+  "a saved guide's free day in New York leaves it; a dressed day and a London free day stay");
+
 // ---- source pins ----
 const build = extractFn('tripsyAttireBuildDays');
 assert(/const kept = dayEvents\.filter\(ev => !nycOmitted\.has\(tripsyAttireEventBaseId\(ev\.id\)\)\);/.test(build),
   'a fresh build leaves NYC events out of every day (so out of the prompt, counts, packing and outfits)');
 assert(/nycOnlyDays\.has\(k\) \? null/.test(build), 'and gives a NYC-only day no free-day placeholder');
+assert(/const nycOnlyDays = tripsyAttireNycStayDays\(/.test(build), 'nor an empty day spent in New York');
 const dg = extractFn('renderTripsyDressGuideInto');
 assert(/tripsyAttireNycOmittedRowsByDay\(dgTrip\)/.test(dg) && /\$\{omittedHtml\}/.test(dg) && /TRIPSY_ATTIRE_OMITTED_BADGE_HTML/.test(dg),
   'THE ASK: the Daily Dress Guide lists NYC events as Omitted, read live from the trip');

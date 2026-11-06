@@ -2568,7 +2568,17 @@ step 4; git history has it if ever needed.
   (`tripsyAttireNycOmittedRowsByDay`, read LIVE from the trip, hidden while a dress-code filter
   is on; a NYC-only day gets a section of omitted rows alone), and Travel View's dress-code mode
   puts the same badge before each run of them. A trip whose every event is in NYC refuses to
-  generate with a message saying so. `nycomit_test.js`.
+  generate with a message saying so. **An EMPTY day spent in New York is omitted too** ("Days in
+  New York are showing up in the daily dress guide," same day — Jon's trip had only the flight
+  into Newark and the next one out, so no EVENT was in the city and the gap filler dressed every
+  day between as Casual "No events planned"): `tripsyAttireNycStayDays(trip)` (pure) takes each
+  pair of consecutive events ≥12h apart (a connection is not a stay) where the first ENDS and the
+  next STARTS in the New York area (`tripsyNycAreaEndpoint` = `tripsyEndpointIsNyc` plus EWR —
+  for presence only; a ride from EWR is still dressed) and marks every day from the first's end
+  day to the next's start day. `tripsyAttireBuildDays` gives those days no free-day placeholder,
+  the saved-guide retrofit drops a stay day holding only placeholders, and
+  `tripsyAttireNycOmittedRowsByDay` lists each as one "In New York City" omitted row.
+  `nycomit_test.js`.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"
   2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day
