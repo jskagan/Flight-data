@@ -585,6 +585,18 @@ step 4; git history has it if ever needed.
   `eventChanges` by their per-entry `proposalId` (top-level `proposalId` kept only as a fallback),
   finishing any proposal left with nothing pending — still one write. The old per-card
   `tripsyParseFindCluster` is kept but unused by the page. `newtripdates_test.js`.
+  **The default destination prefers the trip holding the SAME confirmation number** ("Mo's NY
+  Trip" was the default for Jon's UA904 — it started first and covered Nov 11 — though Jon's
+  trip held the rest of booking ON36SQ, 2026-11-05): `tripsyParseMatchTrips(dayKey, trips,
+  fields)` moves date-matched trips that already hold an event with that confirmation
+  (case-insensitive) to the front; it never pulls in a trip outside the date range. And a trip's
+  range is first the days its EVENTS cover (`tripsyItineraryStartDayKey`/`EndDayKey` — Mo's trip
+  was stored as Nov 6–11 though her flight home was Nov 10); only when no trip's events cover the
+  day does the stored range count, so a return flight a day past a trip's last event still finds
+  it. Every caller
+  that takes `[0]` as the destination passes the fields — the card's dropdown and conflict box,
+  `tripsyRefreshTripSelect`, `tripsyLiveConflicts`, `tripsyParseConflictEventCount` — so the
+  default and the conflict check judge the same trip. `parseconfirmtrip_test.js`.
 - **Every row-ENDING action on the review page is optimistic — the conflict box's Import and
   Delete Existing Event were the last two holdouts** ("when I delete the existing event there is a
   delay," 2026-09-10): both awaited their writes in the foreground — two full-file Drive PATCHes

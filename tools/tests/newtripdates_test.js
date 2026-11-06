@@ -51,10 +51,10 @@ assert(/ov\.onclick = e => \{ if \(e\.target === ov\) done\(null\); \};/.test(di
 assert(/ov\.style\.zIndex = '2147483100';/.test(dialogFn), 'same z-index tier as the other small dialogs, so it cannot open behind the page');
 
 // ---- (2) the destination dropdown offers every trip, date-matched first ----
-assert(/select\.innerHTML = tripsyParseTripOptionsHtml\(day, tripsyDecryptedTrips\);/.test(extractFn('tripsyRefreshTripSelect')),
+assert(/select\.innerHTML = tripsyParseTripOptionsHtml\(day, tripsyDecryptedTrips, ctx\.newFields\);/.test(extractFn('tripsyRefreshTripSelect')),
   'tripsyRefreshTripSelect (after a Modify changes the date) uses the shared option builder');
 const cardFn = extractFn('tripsyParseReviewCardHtml');
-assert(/const selectOptions = tripsyParseTripOptionsHtml\(dayKey, tripsyDecryptedTrips\);/.test(cardFn),
+assert(/const selectOptions = tripsyParseTripOptionsHtml\(dayKey, tripsyDecryptedTrips, ev\.fields\);/.test(cardFn),
   'the review card\'s first render uses the same builder, so the two can never disagree');
 assert(!cardFn.includes('data-parse-cluster-box') && !cardFn.includes('tripsyParseFindCluster('),
   'the per-card cluster box is gone -- clustering moved to the page level');
@@ -63,6 +63,9 @@ assert(!cardFn.includes('data-parse-cluster-box') && !cardFn.includes('tripsyPar
   global.tripsyDayKey = s => (s ? String(s).slice(0, 10) : null);
   global.esc = s => String(s);
   global.formatTripDateRange = (a, b) => `${a}–${b}`;
+  global.isTripsyEventEffectivelyHidden = () => false;
+  eval(extractFn('tripsyItineraryStartDayKey').replace(/^function tripsyItineraryStartDayKey/, 'global.tripsyItineraryStartDayKey = function'));
+  eval(extractFn('tripsyItineraryEndDayKey').replace(/^function tripsyItineraryEndDayKey/, 'global.tripsyItineraryEndDayKey = function'));
   eval(extractFn('tripsyParseMatchTrips').replace(/^function tripsyParseMatchTrips/, 'var tripsyParseMatchTrips = function'));
   eval(extractFn('tripsyParseTripOptionsHtml').replace(/^function tripsyParseTripOptionsHtml/, 'var tripsyParseTripOptionsHtml = function'));
 

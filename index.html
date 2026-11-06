@@ -27870,13 +27870,29 @@ const TRIPSY_PARSE_CLUSTER_MAX_SPAN_DAYS = 45;
 // string comparison works since tripsyDayKey/trip.start/trip.end all share
 // the same YYYY-MM-DD-prefixed ISO shape. Multiple trips can legitimately
 // overlap, so this returns every match, not just the first.
-function tripsyParseMatchTrips(dayKey, trips) {
+// `fields` (optional, the parsed event's fields) puts a trip that already holds
+// an event with the SAME confirmation number first -- the same booking belongs
+// on the same trip ("Mo's NY Trip" was the default for Jon's UA904 because it
+// started first and covered Nov 11, though Jon's trip held the rest of
+// confirmation ON36SQ, 2026-11-05). Every caller that takes [0] as the
+// destination passes it, so the dropdown default and the conflict check agree.
+// A trip is judged first by the days its EVENTS cover (the itinerary's own
+// tripsyItineraryStartDayKey/EndDayKey rule), not its stored dates: "Mo's NY
+// Trip" was stored as Nov 6-11 though Mo flew home Nov 10, so a Nov 11 flight
+// matched it. Only when no trip's events cover the day does the stored range
+// count -- a parsed return flight a day past a trip's last event must still
+// find the trip whose dates were set to include it.
+function tripsyParseMatchTrips(dayKey, trips, fields) {
   if (!dayKey) return [];
-  return trips.filter(t => {
-    const start = tripsyDayKey(t.start);
-    const end = tripsyDayKey(t.end) || start;
-    return start && dayKey >= start && dayKey <= end;
-  });
+  const within = (start, end) => !!start && dayKey >= start && dayKey <= (end || start);
+  const byEvents = trips.filter(t => within(tripsyItineraryStartDayKey(t), tripsyItineraryEndDayKey(t)));
+  const matches = byEvents.length ? byEvents
+    : trips.filter(t => within(tripsyDayKey(t.start), tripsyDayKey(t.end)));
+  const conf = String((fields && fields.confirmation) || '').trim().toUpperCase();
+  if (!conf || matches.length < 2) return matches;
+  const holds = t => (t.events || []).some(e =>
+    String((e.tripsyRaw && e.tripsyRaw.confirmation) || '').trim().toUpperCase() === conf);
+  return [...matches.filter(holds), ...matches.filter(t => !holds(t))];
 }
 
 // A parsed proposal event that is IDENTICAL to an event already being tracked
@@ -28249,7 +28265,7 @@ function tripsyLiveConflicts(ctx) {
   const ne = ctx.newFields.endsAt || ctx.newFields.arrivalAt;
   const day = tripsyDayKey(ns) || tripsyDayKey(ne);
   if (!day) return { noDate: true, conflicts: [] };
-  const destTrip = tripsyParseMatchTrips(day, tripsyDecryptedTrips)[0] || null;
+  const destTrip = tripsyParseMatchTrips(day, tripsyDecryptedTrips, ctx.newFields)[0] || null;
   if (!destTrip) return { noDate: false, conflicts: [] };
   const conflicts = tripsyParseFindConflicts({ fields: ctx.newFields, tripsyResource: ctx.resource }, destTrip, ctx.pendingChanges)
     .map(c => {
@@ -28294,9 +28310,9 @@ function tripsyParseFindCluster(unmatchedPendingEvents) {
 // that range (reported 2026-09-08). `selected` is stamped explicitly -- with
 // the extra group present, the browser's "first option" default would land on
 // an unrelated trip whenever nothing matches.
-function tripsyParseTripOptionsHtml(dayKey, trips) {
+function tripsyParseTripOptionsHtml(dayKey, trips, fields) {
   const all = trips || [];
-  const matches = tripsyParseMatchTrips(dayKey, all);
+  const matches = tripsyParseMatchTrips(dayKey, all, fields);
   const matched = new Set(matches.map(t => t.key));
   const others = all.filter(t => !matched.has(t.key))
     .sort((a, b) => ((a.start || '') < (b.start || '') ? 1 : ((a.start || '') > (b.start || '') ? -1 : 0)));
@@ -46146,7 +46162,7 @@ function tripsyParseConflictEventCount(proposals, trips, pendingChanges) {
   (proposals || []).forEach(p => {
     p.events.filter(e => e.resolution === 'pending').forEach(ev => {
       const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
-      const destTrip = tripsyParseMatchTrips(dayKey, trips || [])[0] || null;
+      const destTrip = tripsyParseMatchTrips(dayKey, trips || [], ev.fields)[0] || null;
       const conflicts = destTrip ? tripsyParseFindConflicts(ev, destTrip, pendingChanges) : [];
       const evDay = dayKey || tripsyDayKey(ev.fields.endsAt || ev.fields.arrivalAt);
       if (conflicts.length || !evDay) count++;
@@ -46627,9 +46643,9 @@ function tripsyRefreshTripSelect(ctx) {
   const ns = ctx.newFields.startsAt || ctx.newFields.departureAt;
   const ne = ctx.newFields.endsAt || ctx.newFields.arrivalAt;
   const day = tripsyDayKey(ns) || tripsyDayKey(ne);
-  const matches = day ? tripsyParseMatchTrips(day, tripsyDecryptedTrips) : [];
+  const matches = day ? tripsyParseMatchTrips(day, tripsyDecryptedTrips, ctx.newFields) : [];
   const prev = select.value;
-  select.innerHTML = tripsyParseTripOptionsHtml(day, tripsyDecryptedTrips);
+  select.innerHTML = tripsyParseTripOptionsHtml(day, tripsyDecryptedTrips, ctx.newFields);
   if (prev && [...select.options].some(o => o.value === prev)) select.value = prev;
   else if (matches.length) select.value = matches[0].key;
   else select.value = '__new__';
@@ -46971,8 +46987,8 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
 
   const eventRowHtml = ev => {
     const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
-    const matches = tripsyParseMatchTrips(dayKey, tripsyDecryptedTrips);
-    const selectOptions = tripsyParseTripOptionsHtml(dayKey, tripsyDecryptedTrips);
+    const matches = tripsyParseMatchTrips(dayKey, tripsyDecryptedTrips, ev.fields);
+    const selectOptions = tripsyParseTripOptionsHtml(dayKey, tripsyDecryptedTrips, ev.fields);
     const destTrip = matches[0] || null;
     const conflicts = destTrip ? tripsyParseFindConflicts(ev, destTrip, pendingChanges) : [];
     // A proposed event with no date at all is itself a potential conflict (it
