@@ -39997,9 +39997,9 @@ function getOrCreateTripsyDressGuideOverlay() {
       <div class="tripsy-attire-toolbar-title" data-tripsy-dressguide-title></div>
       <div class="tripsy-attire-toolbar-actions">
         <span class="tripsy-dg-scale" title="Text size">
-          <button class="tripsy-update-btn" data-tripsy-dg-scale-down aria-label="Smaller text">A&minus;</button>
+          <button class="tripsy-update-btn" data-tripsy-dg-scale-down aria-label="Smaller text">Zoom &minus;</button>
           <span class="tripsy-dg-scale-label" data-tripsy-dg-scale-label>100%</span>
-          <button class="tripsy-update-btn" data-tripsy-dg-scale-up aria-label="Larger text">A+</button>
+          <button class="tripsy-update-btn" data-tripsy-dg-scale-up aria-label="Larger text">Zoom +</button>
         </span>
         <button class="tripsy-update-btn" id="tripsy-attire-dressguide-filter-btn">Filter</button>
         <span id="tripsy-attire-dressguide-person"></span>
@@ -40592,7 +40592,7 @@ function tripsyAttireMarkInFlightDays(days, trip) {
   }
   return changed;
 }
-// ---- Transportation gets no outfit, except the trip's first and last flight ----
+// ---- Ground transportation gets no outfit; flights do (middle ones since 2026-11-06) ----
 // "For transportation events, there should not be an outfit associated with them, except
 // for the initial and final flight of each trip" (2026-10-22). A car, train, ferry, taxi
 // or mid-trip flight is time spent in whatever you already have on, so it is no
@@ -40602,18 +40602,21 @@ function tripsyAttireMarkInFlightDays(days, trip) {
 // are worth planning, and the flight-worn packing lines hang off the departing flight --
 // each with its CONNECTING legs (the next flight with nothing but transportation between
 // and at most two days later, the same journey in the same clothes).
-// Returns the Set of hyphen-form event ids ("transportation-123") that get no outfit.
-// Pure over the live trip.
-function tripsyAttireOutfitlessTransitIds(trip) {
-  const out = new Set();
-  if (!trip || !Array.isArray(trip.events)) return out;
+// MIDDLE flights are shown again (2026-11-06: "Let's show middle flights with a default dress
+// code of events that are before and after them if there are such events and, if not,
+// casual"): only ground transport and the like is outfitless now; every flight is in the
+// guide, and a mid-trip one gets its dress code from tripsyAttireDefaultMiddleFlightCategories.
+// tripsyAttireFlightRoles splits a trip's flights into the ends (first/last + connecting legs)
+// and the middle; all three readers below share it.
+function tripsyAttireFlightRoles(trip) {
+  const ends = new Set(), middle = new Set(), transport = new Set();
+  if (!trip || !Array.isArray(trip.events)) return { ends, middle, transport };
   const evs = trip.events.filter(e => e && e.tripsyRaw && e.id)
     .slice().sort((a, b) => String(a.start || a.end || '').localeCompare(String(b.start || b.end || '')));
   const isTransport = e => e.tripsyRaw.resource === 'transportation';
   const isFlight = e => isTransport(e) && (e.tripsyRaw.category === 'airplane'
     || (!e.tripsyRaw.category && /^\s*flight\b/i.test(String(e.summary || ''))));
   const flights = evs.map((e, i) => (isFlight(e) ? i : -1)).filter(i => i >= 0);
-  const keep = new Set();
   const dayMs = e => Date.parse(tripsyDayKey(e.start) || tripsyDayKey(e.end) || '');
   const connects = (i, j) => {
     const a = Math.min(i, j), b = Math.max(i, j);
@@ -40622,13 +40625,46 @@ function tripsyAttireOutfitlessTransitIds(trip) {
     return Number.isFinite(gap) && gap <= 2;
   };
   if (flights.length) {
-    let cur = flights[0]; keep.add(evs[cur].id);
-    for (const j of flights.slice(1)) { if (!connects(cur, j)) break; keep.add(evs[j].id); cur = j; }
-    cur = flights[flights.length - 1]; keep.add(evs[cur].id);
-    for (const j of flights.slice(0, -1).reverse()) { if (!connects(j, cur)) break; keep.add(evs[j].id); cur = j; }
+    let cur = flights[0]; ends.add(evs[cur].id);
+    for (const j of flights.slice(1)) { if (!connects(cur, j)) break; ends.add(evs[j].id); cur = j; }
+    cur = flights[flights.length - 1]; ends.add(evs[cur].id);
+    for (const j of flights.slice(0, -1).reverse()) { if (!connects(j, cur)) break; ends.add(evs[j].id); cur = j; }
   }
-  for (const e of evs) if (isTransport(e) && !keep.has(e.id)) out.add(e.id);
-  return out;
+  for (const i of flights) if (!ends.has(evs[i].id)) middle.add(evs[i].id);
+  for (const e of evs) if (isTransport(e) && !isFlight(e)) transport.add(e.id);
+  return { ends, middle, transport };
+}
+// Returns the Set of hyphen-form event ids ("transportation-123") that get no outfit:
+// every non-flight transportation leg. Pure over the live trip.
+function tripsyAttireOutfitlessTransitIds(trip) {
+  return tripsyAttireFlightRoles(trip).transport;
+}
+// The mid-trip flights (not the first or last flight, nor their connecting legs).
+function tripsyAttireMiddleFlightIds(trip) {
+  return tripsyAttireFlightRoles(trip).middle;
+}
+// A middle flight's DEFAULT dress code: the nearest real event before it on the same day
+// (free-day placeholders and other flights skipped), else the nearest after it, else
+// Casual. An owner override always wins. Runs over the guide's own day list (so NYC and
+// outfitless events are already out of it). Mutates; returns how many it set.
+function tripsyAttireDefaultMiddleFlightCategories(days, middleIds) {
+  let set = 0;
+  if (!middleIds || !middleIds.size) return set;
+  const isFlightRow = ev => ev && ev.resource === 'transportation' && /^\s*flight\b/i.test(String(ev.name || ''));
+  for (const day of (days || [])) {
+    const evs = day.events || [];
+    evs.forEach((ev, i) => {
+      if (!middleIds.has(tripsyAttireEventBaseId(ev.id)) || ev.categoryOverridden) return;
+      const usable = e => e && !e.freeDay && !isFlightRow(e) && e.category;
+      let cat = null;
+      for (let j = i - 1; j >= 0 && !cat; j--) if (usable(evs[j])) cat = evs[j].category;
+      for (let j = i + 1; j < evs.length && !cat; j++) if (usable(evs[j])) cat = evs[j].category;
+      ev.category = cat || 'casual';
+      ev.alternateCategory = '';
+      set++;
+    });
+  }
+  return set;
 }
 // ---- New York City events are OMITTED from attire and packing ----
 // "When preparing any attire schedules or packing lists, omit all events in New York City.
@@ -41090,6 +41126,7 @@ async function generateTripsyAttireGuide(tripKey, { onStage, dressOnly } = {}) {
     // guidance call; also stamps displayCategory on each event for the id-linking
     // reconciliation below. The athletic rule runs first so a guide saved
     // before the rule existed picks it up on any refresh (overrides still win).
+    tripsyAttireDefaultMiddleFlightCategories(days, tripsyAttireMiddleFlightIds(effectiveTrip || trip));
     tripsyAttireForceAthleticCategories(days);
     const authCounts = computeTripsyAttireBlocks(days).counts;
     const tierCounts = {};
@@ -41137,6 +41174,7 @@ async function generateTripsyAttireGuide(tripKey, { onStage, dressOnly } = {}) {
     // call authoritatively -- same as the eventsUnchanged branch above. The
     // athletic rule runs BEFORE the counts so a forced hike/ride/run is
     // athletic in the guidance sizing too, not just on the badges.
+    tripsyAttireDefaultMiddleFlightCategories(days, tripsyAttireMiddleFlightIds(effectiveTrip || trip));
     tripsyAttireForceAthleticCategories(days);
     const authCounts = computeTripsyAttireBlocks(days).counts;
     const tierCounts = {};

@@ -23,7 +23,7 @@ const extractFn = n => {
   'var computeTripsyAttireBlocks = days => ({ blocks: [], counts: { n: days.length } });',
   'var tripsyAttireApplyRecomputedBlocks = (g, r) => { g.counts = r.counts; };',
   'var tripsyAttireFingerprint = evs => ({ count: evs.length, hash: evs.map(e => e.id).join(",") });',
-  extractFn('tripsyAttireOutfitlessTransitIds'), extractFn('tripsyAttireEventBaseId'),
+  extractFn('tripsyAttireFlightRoles'), extractFn('tripsyAttireOutfitlessTransitIds'), extractFn('tripsyAttireEventBaseId'),
   extractFn('tripsyDayKeyRange'),
   extractFn('tripsyAddressIsNyc'), extractFn('tripsyEndpointIsNyc'), extractFn('tripsyAttireNycOmittedIds'),
   extractFn('tripsyNycAreaEndpoint'), extractFn('tripsyAttireNycStayDays'),

@@ -82,6 +82,8 @@ const build = (store) => {
   const create = fnSource('getOrCreateTripsyDressGuideOverlay');
   assert(/<span class="tripsy-dg-scale" title="Text size">[\s\S]*data-tripsy-dg-scale-down[\s\S]*data-tripsy-dg-scale-label[\s\S]*data-tripsy-dg-scale-up[\s\S]*<\/span>\n\s*<button class="tripsy-update-btn" id="tripsy-attire-dressguide-filter-btn">/.test(create),
     'THE ASK: the A− / % / A+ control sits in the guide toolbar, before Filter');
+  assert(/data-tripsy-dg-scale-down[^>]*>Zoom &minus;</.test(create) && /data-tripsy-dg-scale-up[^>]*>Zoom \+</.test(create),
+    'the buttons read "Zoom −" / "Zoom +" (2026-11-06: "Say zoom instead of a")');
   assert(/const bumpScale = dir => \{\n\s*const v = tripsyDgScaleStep\(tripsyDgScaleLoad\(\), dir\);\n\s*tripsyDgScaleSave\(v\);\n\s*tripsyDgScaleApply\(overlay, v\);/.test(create)
     && /\[data-tripsy-dg-scale-down\]'\)\.addEventListener\('click', \(\) => bumpScale\(-1\)\)/.test(create) && /\[data-tripsy-dg-scale-up\]'\)\.addEventListener\('click', \(\) => bumpScale\(1\)\)/.test(create),
     'a tap steps, stores and applies');

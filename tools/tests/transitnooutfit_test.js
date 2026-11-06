@@ -23,7 +23,7 @@ let marked = 0, recomputed = 0;
   'var computeTripsyAttireBlocks = days => ({ blocks: days.map(d => d.dayKey), counts: { n: days.length } });',
   'var tripsyAttireApplyRecomputedBlocks = (g, r) => { g.blocks = r.blocks; g.counts = r.counts; };',
   'var tripsyAttireFingerprint = evs => ({ count: evs.length, hash: evs.map(e => e.id).join(",") });',
-  extractFn('tripsyAttireOutfitlessTransitIds'), extractFn('tripsyAttireEventBaseId'),
+  extractFn('tripsyAttireFlightRoles'), extractFn('tripsyAttireOutfitlessTransitIds'), extractFn('tripsyAttireMiddleFlightIds'), extractFn('tripsyAttireDefaultMiddleFlightCategories'), extractFn('tripsyAttireEventBaseId'),
   extractFn('tripsyAddressIsNyc'), extractFn('tripsyEndpointIsNyc'), extractFn('tripsyAttireNycOmittedIds'), extractFn('tripsyAttireNoOutfitIds'), extractFn('tripsyNycAreaEndpoint'), extractFn('tripsyAttireNycStayDays'), extractFn('tripsyDayKeyRange'),
   extractFn('tripsyAttireDropOutfitlessTransit'), extractFn('tripsyOutfitDropOutfitlessTransit'),
 ].join('\n'));
@@ -46,8 +46,37 @@ const trip = { key: 'T', events: [
 const drop = tripsyAttireOutfitlessTransitIds(trip);
 assert(!drop.has('transportation-2') && !drop.has('transportation-11'), 'the first and last flight keep their outfits');
 assert(!drop.has('transportation-3'), 'the first flight\'s connecting leg (only transportation between, same day) keeps it too');
-assert(['transportation-1', 'transportation-4', 'transportation-6', 'transportation-8', 'transportation-10'].every(id => drop.has(id)) && drop.size === 5,
-  'every car, train, taxi and mid-trip flight gets no outfit');
+assert(['transportation-1', 'transportation-4', 'transportation-6', 'transportation-10'].every(id => drop.has(id)) && drop.size === 4,
+  'every car, train and taxi gets no outfit');
+assert(!drop.has('transportation-8'), 'THE 2026-11-06 ASK: a mid-trip flight is shown again');
+const middle = tripsyAttireMiddleFlightIds(trip);
+assert(middle.size === 1 && middle.has('transportation-8'), 'only the mid-trip flight is a "middle" flight');
+// Its default dress code: the nearest real event before it that day, else after, else Casual.
+{
+  const mk = (id, extra) => ({ id, resource: 'transportation', name: 'Flight from A to B', ...extra });
+  const days = [
+    { dayKey: 'd1', events: [{ id: 'activity-1', category: 'cocktail' }, mk('transportation-8', { category: 'formal' }), { id: 'hosting-9', category: 'casual' }] },
+    { dayKey: 'd2', events: [mk('transportation-8b'), { id: 'activity-2', category: 'smart_casual' }] },
+    { dayKey: 'd3', events: [{ id: 'freeday-d3', freeDay: true, category: 'casual' }, mk('transportation-8c', { category: 'formal' })] },
+    { dayKey: 'd4', events: [mk('transportation-8d', { category: 'athletic', categoryOverridden: true }), { id: 'activity-4', category: 'formal' }] },
+    { dayKey: 'd5', events: [mk('transportation-8e'), mk('transportation-8f'), { id: 'activity-5', category: 'semi_formal' }] },
+  ];
+  const ids = new Set(['transportation-8', 'transportation-8b', 'transportation-8c', 'transportation-8d', 'transportation-8e', 'transportation-8f']);
+  tripsyAttireDefaultMiddleFlightCategories(days, ids);
+  assert(days[0].events[1].category === 'cocktail', 'the event BEFORE it that day sets the default');
+  assert(days[1].events[0].category === 'smart_casual', 'with nothing before, the event AFTER it sets it');
+  assert(days[2].events[1].category === 'casual', 'with no real event that day, Casual (a free-day placeholder is not an event)');
+  assert(days[3].events[0].category === 'athletic', 'an owner override always wins');
+  assert(days[4].events[0].category === 'semi_formal' && days[4].events[1].category === 'semi_formal',
+    'connecting legs skip each other and take the same neighbor');
+}
+const gen = (() => { // its parameter list holds a `= {}` default, so start counting at the body
+  const i = html.indexOf('function generateTripsyAttireGuide(');
+  let d = 0;
+  for (let k = html.indexOf(') {', i) + 2; ; k++) { if (html[k] === '{') d++; else if (html[k] === '}' && --d === 0) return html.slice(i, k + 1); }
+})();
+assert((gen.match(/tripsyAttireDefaultMiddleFlightCategories\(days, tripsyAttireMiddleFlightIds\(effectiveTrip \|\| trip\)\);\n\s*tripsyAttireForceAthleticCategories\(days\);/g) || []).length === 2,
+  'both generate branches apply the default before the counts are taken');
 assert(!drop.has('hosting-5') && !drop.has('activity-7'), 'non-transportation events are never affected');
 const oneFlight = { key: 'X', events: [ev(1, 'transportation', 'airplane', '2030-01-01T09:00:00'), ev(2, 'transportation', 'car', '2030-01-01T13:00:00')] };
 assert(tripsyAttireOutfitlessTransitIds(oneFlight).size === 1 && !tripsyAttireOutfitlessTransitIds(oneFlight).has('transportation-1'),

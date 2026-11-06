@@ -2378,7 +2378,8 @@ step 4; git history has it if ever needed.
   `TRIPSY_DG_SCALE_KEY` like the other display preferences — 100% is stored as nothing) scales
   the paper (`#tripsy-attire-dressguide-content`) with CSS **`zoom`**, not a font-size, because
   the rows carry inline px sizes (day bar, badges, chips) and zoom scales type, padding and
-  layout as one piece; applied on every open, end buttons disabled at the limits. The fixed
+  layout as one piece; applied on every open, end buttons disabled at the limits. The buttons
+  read **Zoom − / Zoom +** ("Say zoom instead of a," 2026-11-06). The fixed
   menus/dialogs are appended to `body` outside the zoomed node, and the scroll helpers use
   `getBoundingClientRect`, which WebKit reports in zoomed coordinates, so neither needs to know.
   **(2)** a `@media (max-width: 600px)` block drops the overlay's 32px padding and the paper's
@@ -2565,6 +2566,19 @@ step 4; git history has it if ever needed.
   ICN→LAX flight home keep their outfits, 13 legs lose theirs, no day empties, all 31 outfit
   blocks survive, and no block is left uncovered (no new ⚠️). The flight-transfer rules above
   still govern the kept flights (their in-flight days and connecting legs). `transitnooutfit_test.js`.
+  **MIDDLE flights are back in the guide, with a default dress code** ("Let's show middle
+  flights with a default dress code of events that are before and after them if there are
+  such events and, if not, casual," 2026-11-06). `tripsyAttireFlightRoles(trip)` (pure) splits
+  a trip's legs into `ends` (first/last flight + connecting legs), `middle` (every other flight)
+  and `transport` (every non-flight leg); `tripsyAttireOutfitlessTransitIds` is now just
+  `transport`, so cars, trains, taxis and airport rides stay outfitless while every flight is
+  dressed. `tripsyAttireDefaultMiddleFlightCategories(days, tripsyAttireMiddleFlightIds(trip))`
+  runs in BOTH generate branches right before the athletic rule (so the counts see it): a
+  middle flight takes the category of the nearest real event BEFORE it on the same day
+  (free-day placeholders and other flights skipped, so connecting legs share a neighbor),
+  else the nearest AFTER it, else Casual — replacing the model's pick; an owner override
+  wins. A saved guide simply lacks these flights, so it reads stale and the update's
+  new-events dialog asks for them, pre-suggested from the same-day neighbors.
 - **New York City events are OMITTED from attire and packing, and listed as "Omitted"** ("When
   preparing any attire schedules or packing lists, omit all events in New York City. When there
   are events in New York, show them as 'omitted' on any schedules," 2026-11-05).
