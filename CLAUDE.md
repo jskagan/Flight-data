@@ -2386,6 +2386,16 @@ step 4; git history has it if ever needed.
   bar (now carrying class `tripsy-attire-daybar`; its sizes are inline, so `!important`), event
   rows and instruction bars, and lets the toolbar wrap so the extra control never pushes the ✕
   off-screen. `dgtextsize_test.js`.
+- **Every Daily Dress Guide heading names the day's CITY beside its date, and carries weather
+  on every day** ("In the headings in the daily dress guide, show the city name and weather,"
+  2026-11-05). `tripsyAttireDayBarHtml` adds "· <city>" (`data-tripsy-dg-city`,
+  `tripsyAttireDayBarCityLabel`: each distinct city of the day, up to three, "London /
+  Stuttgart" on a moving day) from the same targets the weather chip uses.
+  `tripsyAttireLoadWeatherBar` now builds targets for the guide's days PLUS the omitted New York
+  days it lists from the live trip (which are not in `guide.days`, so they had no weather), and
+  `tripsyAttireFillWeatherTargets` gives a day with no lodging or located event New York on a
+  New York stay day (`tripsyAttireNycStayDays`), else the previous day's city; a day spent in
+  the air gets none. `dgdaycity_test.js`.
 - **The Daily Dress Guide has a multi-select dress-code filter** (`Filter` in its toolbar;
   `tripsyDressGuideFilter`, a Set, empty = show everything). The dropdown
   (`tripsyDressGuideOpenFilterMenu`, same `positionTripsyFixedMenu` shell as every other Tripsy

@@ -39397,7 +39397,10 @@ function tripsyAttireDayBarHtml(dayKey, weatherTargetsByDay, tripStartDayKey) {
   const wxRec = wxArr && wxArr.length ? tripsyGetWeather(wxArr[0].city, wxArr[0].country, dayKey) : null;
   const wxBox = wxRec && wxRec.kind === 'typical' ? ' border:1px solid var(--muted); border-radius:5px; padding:1px 6px;' : '';
   const wxHtml = wxRec ? tripsyWeatherChipHtml(wxRec, wxArr[0].city, wxArr[0].country, dayKey, `color:var(--text); font-weight:600; font-size:12px; letter-spacing:0;${wxBox}`) : '';
-  return `<div class="tripsy-attire-daybar" style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}</span>${wxHtml}${dayNumHtml}</div>`;
+  // The day's city beside its date (2026-11-05), from the same targets the weather uses.
+  const cityLabel = tripsyAttireDayBarCityLabel(wxArr);
+  const cityHtml = cityLabel ? ` <span data-tripsy-dg-city style="color:var(--text); font-family:var(--sans); font-weight:600; letter-spacing:0; margin-left:6px;">· ${esc(cityLabel)}</span>` : '';
+  return `<div class="tripsy-attire-daybar" style="position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; gap:8px; background:var(--panel-2); color:var(--muted); padding:6px 12px; border-radius:6px; font-family:var(--mono); font-size:14px; font-weight:700; letter-spacing:0.04em; margin:14px 0 8px;"><span>${esc(tripsyDayHeaderLabel(dayKey))}${cityHtml}</span>${wxHtml}${dayNumHtml}</div>`;
 }
 function renderTripsyAttireOverlayContent(guide, renderOpts) {
   const { stale, weatherTargetsByDay, tripStartDayKey } = renderOpts || {};
@@ -40870,12 +40873,46 @@ async function tripsyAttireBuildDays(trip) {
 // as the weather folded into the Claude prompt during generation -- see
 // generateTripsyAttireGuide below). A failed fetch degrades to day bars
 // with no weather chip rather than blocking the render.
+// Every day the Daily Dress Guide can show gets a city for its heading ("In the headings in
+// the daily dress guide, show the city name and weather," 2026-11-05): the guide's own days
+// PLUS the omitted New York days it lists from the live trip (tripsyAttireNycOmittedRowsByDay,
+// which are not in guide.days and so used to get no weather at all). A day with no lodging
+// or located event of its own takes New York when it is a New York stay day
+// (tripsyAttireNycStayDays), else the previous day's city -- you are where you were -- and a
+// day spent entirely in the air (tripsyInFlightInfoForDay) gets none. Pure over its inputs;
+// mutates and returns `targetsByDay`.
+function tripsyAttireFillWeatherTargets(targetsByDay, dayKeys, trip) {
+  const out = targetsByDay || new Map();
+  let nycStays = new Set();
+  try { nycStays = tripsyAttireNycStayDays(trip); } catch (e) { /* best-effort */ }
+  const nyc = { city: 'New York', country: tripsyCanonicalCountryName(tripsyGuessCountryFromAddress('New York, NY')) };
+  let prev = null;
+  for (const k of [...new Set(dayKeys || [])].filter(k => k && k !== 'undated').sort()) {
+    const have = out.get(k);
+    if (have && have.length) { prev = have[have.length - 1]; continue; }
+    let inFlight = null;
+    try { inFlight = tripsyInFlightInfoForDay(k, trip); } catch (e) { /* best-effort */ }
+    if (inFlight) continue;
+    const t = nycStays.has(k) ? nyc : prev;
+    if (t) { out.set(k, [t]); prev = t; }
+  }
+  return out;
+}
+// The heading's city label: every distinct city of the day, in order ("New York", or
+// "London / Stuttgart" on a moving day), at most three.
+function tripsyAttireDayBarCityLabel(wxArr) {
+  return [...new Set((wxArr || []).map(t => t && t.city).filter(Boolean))].slice(0, 3).join(' / ');
+}
 async function tripsyAttireLoadWeatherBar(trip, guide) {
   const dayKeys = (guide.days || []).map(d => d.dayKey);
   const tripStartDayKey = tripsyDayKey(trip.start) || (dayKeys.length ? dayKeys[0] : null);
   try {
     const { placesByDay, placeEvents } = await buildTripsyPrintDayData(trip);
-    const weatherTargetsByDay = tripsyWeatherTargetsByDay(placeEvents, placesByDay, dayKeys);
+    let omittedDays = [];
+    try { omittedDays = [...tripsyAttireNycOmittedRowsByDay(trip).keys()]; } catch (e) { /* best-effort */ }
+    const allDayKeys = [...new Set([...dayKeys, ...omittedDays])].sort();
+    const weatherTargetsByDay = tripsyAttireFillWeatherTargets(
+      tripsyWeatherTargetsByDay(placeEvents, placesByDay, allDayKeys), allDayKeys, trip);
     await tripsyLoadWeather(tripsyWeatherTargetList(weatherTargetsByDay));
     return { weatherTargetsByDay, tripStartDayKey };
   } catch (e) {
