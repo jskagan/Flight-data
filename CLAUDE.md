@@ -2682,7 +2682,9 @@ step 4; git history has it if ever needed.
   stage. On finish `runTripsyAttireGeneration` opens the Daily Dress Guide directly (every badge
   there is the owner's tier picker), skipping the summary and review dialog; and while the guide
   is dress-only the 👔 menu holds exactly one item, **Daily Dress Guide**. The stale-⚠️ refresh
-  prompt has its own dress-only wording. **The guide's sign-off is a green "Approved" button**
+  prompt has its own dress-only wording, and that one row carries the ⚠️ slot too (it didn't until
+  2026-11-06, so a dress-only guide missing two new flights was never flagged, on the row or the 👔
+  glyph). **The guide's sign-off is a green "Approved" button**
   at its foot (owner-only, dress-only guides only; same day: "When the user selects that
   button, create the clothing summary, and then make that option available on the attire menu
   under the daily dress guide"): `tripsyApproveDressCodes` closes the guide, opens the Clothing

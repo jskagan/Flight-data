@@ -33,8 +33,8 @@ const dressBranch = run.slice(run.indexOf('if (tripsyAttireGuideIsDressOnly(guid
 assert(/showTripsyDailyDressGuide\(tripKey\)/.test(dressBranch.slice(0, 600)) && dressBranch.indexOf('return;') < dressBranch.indexOf('showTripsyAttireReviewDialog'),
   'THE ASK: after building, the suggestions are presented in the Daily Dress Guide (not the summary/review dialog)');
 
-assert(/const attireMenuItems = attireDressOnly\s*\n\s*\? menuListButtonHtml\(`data-tripsy-attire-nav="dressguide"[^\n]*'Daily Dress Guide'\)\s*\n\s*: \[/.test(html),
-  'THE ASK: once built, the Daily Dress Guide is the only attire menu option');
+assert(/const attireMenuItems = attireDressOnly\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? menuListButtonHtml\(`data-tripsy-attire-nav="dressguide"[^\n]*'Daily Dress Guide', attireStaleWarnHtml\)\s*\n\s*: \[/.test(html),
+  'THE ASK: once built, the Daily Dress Guide is the only attire menu option -- and it carries the stale ⚠️ slot (2026-11-06)');
 
 const toggleAt = html.indexOf('wireTripsyHeaderMenuToggle("[data-tripsy-attire-menu-toggle]"');
 const toggle = html.slice(toggleAt, toggleAt + 2500);
