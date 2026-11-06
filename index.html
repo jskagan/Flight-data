@@ -40886,15 +40886,37 @@ function tripsyAttireFillWeatherTargets(targetsByDay, dayKeys, trip) {
   let nycStays = new Set();
   try { nycStays = tripsyAttireNycStayDays(trip); } catch (e) { /* best-effort */ }
   const nyc = { city: 'New York', country: tripsyCanonicalCountryName(tripsyGuessCountryFromAddress('New York, NY')) };
-  let prev = null;
+  // Where each leg LANDED (2026-11-06: "Why are November 12 and later dates saying in New
+  // York" -- Jon flew EWR→LHR on the 11th with no London hotel booked, so the carry-forward
+  // kept New York for four days in London). A day with no city of its own takes the city of
+  // a leg that landed since the last day that had one, before the plain carry-forward.
+  const arrivals = [];
+  for (const ev of ((trip && trip.events) || [])) {
+    const raw = ev && ev.tripsyRaw;
+    if (!raw || raw.resource !== 'transportation' || raw.hidden) continue;
+    const day = tripsyDayKey(raw.arrivalAt || ev.end || '');
+    const desc = String(raw.arrivalDescription || '');
+    if (!day || !desc) continue;
+    let city = '';
+    try { city = tripsyFlyoverAirportCity(desc) || ''; } catch (e) { /* best-effort */ }
+    if (!city && desc.includes(',')) { try { city = tripsyPrimaryCityFromAddress(desc) || ''; } catch (e) { /* best-effort */ } }
+    if (!city) continue;
+    let country = '';
+    try { country = tripsyCanonicalCountryName(tripsyGuessCountryFromAddress(desc)); } catch (e) { /* best-effort */ }
+    arrivals.push({ day, at: String(raw.arrivalAt || ev.end || ''), city, country });
+  }
+  arrivals.sort((a, b) => a.at.localeCompare(b.at));
+  let prev = null, prevDay = '';
   for (const k of [...new Set(dayKeys || [])].filter(k => k && k !== 'undated').sort()) {
     const have = out.get(k);
-    if (have && have.length) { prev = have[have.length - 1]; continue; }
+    if (have && have.length) { prev = have[have.length - 1]; prevDay = k; continue; }
     let inFlight = null;
     try { inFlight = tripsyInFlightInfoForDay(k, trip); } catch (e) { /* best-effort */ }
     if (inFlight) continue;
-    const t = nycStays.has(k) ? nyc : prev;
-    if (t) { out.set(k, [t]); prev = t; }
+    let landed = null;
+    for (const a of arrivals) if (a.day <= k && a.day > prevDay) landed = a;
+    const t = nycStays.has(k) ? nyc : (landed ? { city: landed.city, country: landed.country } : prev);
+    if (t) { out.set(k, [t]); prev = t; prevDay = k; }
   }
   return out;
 }

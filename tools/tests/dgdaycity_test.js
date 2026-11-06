@@ -18,6 +18,10 @@ const extractFn = n => {
   'var tripsyGuessCountryFromAddress = a => /NY/.test(a) ? "United States" : "";',
   'var IN_FLIGHT = new Set(); var tripsyInFlightInfoForDay = k => IN_FLIGHT.has(k) ? {} : null;',
   'var STAYS = new Set(); var tripsyAttireNycStayDays = () => STAYS;',
+  'var tripsyDayKey = iso => (String(iso || "").match(/^\\d{4}-\\d{2}-\\d{2}/) || [null])[0];',
+  'var tripsyPrimaryCityFromAddress = a => String(a).split(",")[0].trim();',
+  extractFn('tripsyFlyoverAirportCity'),
+  'var TRIPSY_AIRPORT_CITIES = { LHR: "London", EWR: "Newark" };',
   extractFn('tripsyAttireFillWeatherTargets'), extractFn('tripsyAttireDayBarCityLabel'),
 ].join('\n'));
 STAYS = new Set(['2030-03-02', '2030-03-03']);
@@ -31,6 +35,19 @@ assert(!t.has('2030-03-05'), 'a day spent in the air gets none');
 assert(t.get('2030-03-07')[0].city === 'London', 'the carry-forward resumes after a day with its own city');
 assert(tripsyAttireDayBarCityLabel([{ city: 'London' }, { city: 'Stuttgart' }, { city: 'London' }]) === 'London / Stuttgart', 'a moving day names each city once');
 assert(tripsyAttireDayBarCityLabel(null) === '', 'no targets, no label');
+// THE 2026-11-06 ASK: a flight out of New York with no hotel booked where it lands must not
+// keep the empty days after it in New York.
+STAYS = new Set(['2030-04-01', '2030-04-02']); IN_FLIGHT = new Set();
+const flyTrip = { events: [
+  { tripsyRaw: { resource: 'transportation', departureAt: '2030-04-02T21:05:00', arrivalAt: '2030-04-03T09:10:00',
+    departureDescription: 'Newark, NJ/New York, NY, US (EWR)', arrivalDescription: 'London, GB (LHR)' } },
+] };
+const t2 = new Map([['2030-04-07', [{ city: 'Stuttgart', country: 'Germany' }]]]);
+tripsyAttireFillWeatherTargets(t2, ['2030-04-01', '2030-04-02', '2030-04-03', '2030-04-04', '2030-04-05', '2030-04-06', '2030-04-07', '2030-04-08'], flyTrip);
+assert(t2.get('2030-04-02')[0].city === 'New York', 'the departure day is still a New York stay day');
+assert(t2.get('2030-04-03')[0].city === 'London' && t2.get('2030-04-06')[0].city === 'London',
+  'THE ASK: the days after landing read the city the flight landed in, not New York');
+assert(t2.get('2030-04-08')[0].city === 'Stuttgart', 'a later day with its own city carries that city forward again');
 const bar = extractFn('tripsyAttireDayBarHtml');
 assert(/tripsyAttireDayBarCityLabel\(wxArr\)/.test(bar) && /data-tripsy-dg-city/.test(bar), 'the heading renders the city beside the date');
 const load = extractFn('tripsyAttireLoadWeatherBar');

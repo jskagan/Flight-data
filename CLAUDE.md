@@ -2395,7 +2395,12 @@ step 4; git history has it if ever needed.
   days it lists from the live trip (which are not in `guide.days`, so they had no weather), and
   `tripsyAttireFillWeatherTargets` gives a day with no lodging or located event New York on a
   New York stay day (`tripsyAttireNycStayDays`), else the previous day's city; a day spent in
-  the air gets none. `dgdaycity_test.js`.
+  the air gets none. **A leg that LANDS since the last day with a city wins over that carry-forward**
+  ("Why are November 12 and later dates saying in New York," 2026-11-06 — Jon's EWR→LHR flight
+  with no London hotel booked left Nov 12–15 reading New York): the fill takes the arrival city
+  of the latest transportation leg landing after the last day that had a city, on or before this
+  day (`tripsyFlyoverAirportCity`, else the description's city), before falling back to the
+  previous day's. `dgdaycity_test.js`.
 - **The Daily Dress Guide has a multi-select dress-code filter** (`Filter` in its toolbar;
   `tripsyDressGuideFilter`, a Set, empty = show everything). The dropdown
   (`tripsyDressGuideOpenFilterMenu`, same `positionTripsyFixedMenu` shell as every other Tripsy
