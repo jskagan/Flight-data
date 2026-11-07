@@ -3034,7 +3034,10 @@ would overwrite the glyph with the word.
   same device-local today): first event day ≤ today ≤ last event day
   (`tripsyItineraryStartDayKey`/`EndDayKey`, both ends inclusive; no dated events → never),
   judged once per card render as `attireTripUnderway` and ANDed into just those two rows'
-  gates. Everything else — Daily Dress Guide, Packing Status, outfits, Garment Location,
+  gates. **On the departure day it counts only once the first event has STARTED** ("The trip
+  does not begin until tonight at 11:00 pm," 2026-11-06): the card passes the device's local
+  time (`tripsyNowHm()`), so an 11 PM flight leaves both rows up until 11 PM; an untimed first
+  day keeps the whole-day rule. Everything else — Daily Dress Guide, Packing Status, outfits, Garment Location,
   Laundry, Refresh — stays, and both rows return once the trip's last event day is past.
   The dress-only menu (one item) is untouched. `ontripmenu_test.js`.
 - **👔 → Buy Clothes (on-trip only): a garment bought mid-trip joins the Wardrobe, the

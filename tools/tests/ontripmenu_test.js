@@ -29,12 +29,20 @@ assert(inProgress(trip, '2026-10-21') === false, 'the day after the last EVENT d
 assert(inProgress(trip, '2026-10-24') === false, 'a hidden event does not extend the trip');
 assert(inProgress({ key: 't2', events: [] }, '2026-10-15') === false, 'a trip with no dated events is never in progress');
 assert(inProgress({ key: 't3', events: [{ start: '2026-10-15T09:00' }] }, '2026-10-15') === true, 'a one-day trip is in progress on its day');
+{
+  const night = { key: 't4', events: [{ start: '2026-11-06T23:00:00' }, { start: '2026-11-07T10:30:00' }] };
+  assert(inProgress(night, '2026-11-06', '18:00') === false, 'THE ASK (2026-11-06): an 11 PM departure is not underway at 6 PM that day');
+  assert(inProgress(night, '2026-11-06', '23:00') === true && inProgress(night, '2026-11-06', '23:30') === true, 'it is once the first event has started');
+  assert(inProgress(night, '2026-11-07', '01:00') === true, 'the next day it is underway at any hour');
+  assert(inProgress(night, '2026-11-06') === true, 'no time given keeps the whole-day rule');
+  assert(inProgress({ key: 't5', events: [{ start: '2026-11-06' }] }, '2026-11-06', '06:00') === true, 'an untimed first day keeps the whole-day rule');
+}
 
 // ---- the menu gates ----
 {
   const start = html.indexOf('const attireMenuItems = attireDressOnly');
   const menu = html.slice(start, html.indexOf('].join', start));
-  assert(/const attireTripUnderway = tripsyTripInProgress\(trip\);/.test(html.slice(start - 1500, start)), 'the card builder judges the trip once per render');
+  assert(/const attireTripUnderway = tripsyTripInProgress\(trip, tripsyTodayDayKey\(\), tripsyNowHm\(\)\);/.test(html.slice(start - 1500, start)), 'the card builder judges the trip once per render');
   assert(/attireHasGuide && !attireTripUnderway \? menuListButtonHtml\(`data-tripsy-attire-nav="summary"/.test(menu), 'THE ASK: Clothing Summary is hidden while the trip is underway');
   assert(/isOwner && attireHasGuide && !attireTripUnderway \? menuListButtonHtml\(`data-tripsy-attire-nav="pack"/.test(menu), 'THE ASK: Packing List is hidden while the trip is underway');
   for (const nav of ['dressguide', 'packlist', 'outfits', 'location', 'laundry', 'refresh']) {

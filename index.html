@@ -27852,11 +27852,33 @@ function tripsyTripHasStarted(trip) {
 // items on the clothes menu," 2026-10-20: the bag is packed, so those two pages
 // are planning tools with nothing left to plan.) Both ends inclusive; a trip with
 // no dated events is never in progress. Device-local today, like tripsyTripHasStarted.
-function tripsyTripInProgress(trip, todayKey = tripsyTodayDayKey()) {
+function tripsyTripInProgress(trip, todayKey = tripsyTodayDayKey(), nowHm = null) {
   const start = tripsyItineraryStartDayKey(trip);
   if (!start) return false;
   const end = tripsyItineraryEndDayKey(trip) || start;
-  return start <= todayKey && todayKey <= end;
+  if (!(start <= todayKey && todayKey <= end)) return false;
+  // On the departure day the trip is underway only once its first event has
+  // STARTED ("The trip does not begin until tonight at 11:00 pm," 2026-11-06 --
+  // an 11 PM flight hid the Packing List all day). nowHm is the device's local
+  // 'HH:MM'; event times are stored as local wall-clock digits. No nowHm, or
+  // no timed event that day, keeps the whole-day rule.
+  if (todayKey === start && nowHm) {
+    let first = null;
+    for (const ev of ((trip && trip.events) || [])) {
+      if (ev._pendingDeleteId || isTripsyEventEffectivelyHidden(ev)) continue;
+      const st = typeof ev.start === 'string' ? ev.start : '';
+      if (st.slice(0, 10) !== start || !/^\d{2}:\d{2}/.test(st.slice(11, 16))) continue;
+      const hm = st.slice(11, 16);
+      if (first === null || hm < first) first = hm;
+    }
+    if (first !== null && nowHm < first) return false;
+  }
+  return true;
+}
+
+// The device's local time as 'HH:MM' (for tripsyTripInProgress' departure-day check).
+function tripsyNowHm(d = new Date()) {
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
 // Cluster heuristic for the doc-parse review page: how tightly a doc's
@@ -44535,7 +44557,7 @@ async function renderTripsyEventsListImpl() {
     // the clothes menu," 2026-10-20) -- the bag is packed, so both are planning pages
     // with nothing left to plan; Packing Status, the guide, outfits, location and laundry
     // are the on-trip pages and stay. They return once the trip is over.
-    const attireTripUnderway = tripsyTripInProgress(trip);
+    const attireTripUnderway = tripsyTripInProgress(trip, tripsyTodayDayKey(), tripsyNowHm());
     const attireMenuItems = attireDressOnly
       // The row carries the ⚠️ slot too (2026-11-06: a dress-only guide missing two new
       // flights never flagged -- without the slot neither the row nor the 👔 glyph could).
