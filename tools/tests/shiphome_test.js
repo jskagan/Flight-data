@@ -38,6 +38,8 @@ const tripsyOutfitBlockLiveTier = (g, b) => b.category || null;
 const TRIPSY_ATTIRE_PACKING_GROUP_LABEL = { tops: 'Tops', pants: 'Bottoms', footwear: 'Shoes' };
 const TRIPSY_ATTIRE_CATEGORY_LABEL = { casual: 'Casual', formal: 'Formal' };
 const tripsyNormalizeTripSelection = sel => sel;
+const TRIPSY_FLIGHT_WORN_ROLE_LABEL = { tops: 'Top', pants: 'Bottoms', footwear: 'Shoes' }; const TRIPSY_FLIGHT_WORN_SUFFIX = ' — wearing on the flight';
+eval(extractFn('tripsyWardrobeLineIsFlightShoes')); eval(extractFn('tripsyWardrobePhysicalQtyById'));
 const tripsyWardrobeWearDays = async (t, id) => ({ days: (wearByGarment[id] || []).map(d => ({ dayKey: d })) });
 const tripsyWardrobeWearDaysFromLines = (g, p, lines) => ({ days: (wearByLine[lines[0].line] || []).map(d => ({ dayKey: d })) });
 const limitByName = { 'Blue shirt': 1, 'Chinos': 10, 'Loafers': Infinity, 'Grey tee': 1 };

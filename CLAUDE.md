@@ -3548,6 +3548,16 @@ would overwrite the glyph with the word.
   stays a plain location) when the trip has no flight-worn line for that role, the garment has
   no role (a tie, a jacket), or the entry already is the companion line. Toasts "X is now the
   garment you wear on the flight." `flightwornadopt_test.js`.
+  **The flight SHOES may also fill any other line** ("Yes, let flight shoes count for other
+  lines," 2026-11-07 — Jon's only pair of Chelsea boots sat on Smart Casual shoes, so the
+  one-copy-per-line rule hid them from "Shoes — wearing on the flight"). Shoes you fly in are
+  with you all trip, so `tripsyWardrobeAllocationsShareCopy(lineA, lineB)` (true when exactly
+  one side is `tripsyWardrobeLineIsFlightShoes`) lets both pickers' `allocElsewhere` skip that
+  pair; the flight Top/Bottoms still take their own copy. Every reader that counts a garment's
+  copies across lines (Ship Home, its consolidation and swap options, laundry, both run-out
+  walks) goes through `tripsyWardrobePhysicalQtyById`, which takes the LARGER of the
+  flight-shoes side and the rest instead of their sum, so the pair is never counted as two.
+  The other line's entry still has its own packed flag on Packing Status. `flightshoes_test.js`.
   `composeTripsyOutfits` reads the
   selection's stored line name through `tripsyWardrobeLineIsFlightWorn` to label those garments
   `WORN ON THE DEPARTING FLIGHT` in the prompt, and the re-wear rules say the flight counts as one

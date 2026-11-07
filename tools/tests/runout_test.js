@@ -27,6 +27,9 @@ const Store = {
   listLaundryNotDirty: () => notDirty,
 };
 const tripsyNormalizeTripSelection = sel => sel;
+const TRIPSY_FLIGHT_WORN_ROLE_LABEL = { tops: 'Top', pants: 'Bottoms', footwear: 'Shoes' }; const TRIPSY_FLIGHT_WORN_SUFFIX = ' — wearing on the flight';
+${extractFn('tripsyWardrobeLineIsFlightShoes')}
+${extractFn('tripsyWardrobePhysicalQtyById')}
 const tripsyWardrobeWearDays = async (t, id) => ({ days: (wearByGarment[id] || []).map(d => ({ dayKey: d })) });
 const tripsyWardrobeWearDaysFromLines = (g, p, lines) => ({ days: (wearByLine[lines[0].line] || []).map(d => ({ dayKey: d })) });
 // Real wear limits by name, defaulting to 1 (a plain shirt) so every EXISTING

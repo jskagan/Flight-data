@@ -116,6 +116,8 @@ assert(/opts\.confirmedReturn = true;/.test(washedDay) && /if \(opts\.confirmedR
     getTripWardrobe: async () => [{ id: 'polo1', qty: 1 }],
   };
   const tripsyNormalizeTripSelection = sel => sel;
+  const TRIPSY_FLIGHT_WORN_ROLE_LABEL = { tops: 'Top', pants: 'Bottoms', footwear: 'Shoes' }; const TRIPSY_FLIGHT_WORN_SUFFIX = ' — wearing on the flight';
+  for (const h of ['tripsyWardrobeLineIsFlightShoes', 'tripsyWardrobePhysicalQtyById']) eval(extractFn(h).replace(new RegExp('^function ' + h), 'var ' + h + ' = function'));
   const tripsyWearsBeforeWash = () => 1; // a top: one wearing before dirty
   const tripsyWardrobeWearDays = async (tripKey, id) => ({ days: (wearDaysFor[id] || []).map(dayKey => ({ dayKey })) });
   const tripsyOutfitBlockLiveTier = () => 'casual';

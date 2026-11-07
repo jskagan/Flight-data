@@ -10952,6 +10952,27 @@ const TRIPSY_FLIGHT_WORN_SUFFIX = ' — wearing on the flight';
 // and footwear once each, and essentials are deducted without one.
 const TRIPSY_FLIGHT_WORN_ROLE_LABEL = { tops: 'Top', pants: 'Bottoms', footwear: 'Shoes' };
 function tripsyWardrobeLineIsFlightWorn(name) { return String(name || '').endsWith(TRIPSY_FLIGHT_WORN_SUFFIX); }
+// The shoes you FLY in are on your feet for the whole trip, so the pair picked for
+// "Shoes — wearing on the flight" may also fill any other line ("Yes, let flight shoes
+// count for other lines," 2026-11-07 -- the only pair of Chelsea boots, already on Smart
+// Casual shoes, could not be the flight pair). Every other allocation still takes its own
+// copy: a copy on the flight-shoes line never counts against another line, and vice versa.
+function tripsyWardrobeLineIsFlightShoes(name) { return name === `${TRIPSY_FLIGHT_WORN_ROLE_LABEL.footwear}${TRIPSY_FLIGHT_WORN_SUFFIX}`; }
+function tripsyWardrobeAllocationsShareCopy(lineA, lineB) { return tripsyWardrobeLineIsFlightShoes(lineA) !== tripsyWardrobeLineIsFlightShoes(lineB); }
+// Physical copies of each garment on the trip (id -> count). A pair on the flight-shoes
+// line can be the same pair as one on another line, so the two sides overlap: the
+// garment's copies are the LARGER side, never the sum. `keep(e)` filters entries.
+function tripsyWardrobePhysicalQtyById(entries, keep) {
+  const flight = new Map(), other = new Map();
+  for (const e of (entries || [])) {
+    if (keep && !keep(e)) continue;
+    const m = tripsyWardrobeLineIsFlightShoes(e.line) ? flight : other;
+    m.set(e.id, (m.get(e.id) || 0) + e.qty);
+  }
+  const out = new Map(other);
+  for (const [id, q] of flight) out.set(id, Math.max(q, out.get(id) || 0));
+  return out;
+}
 // The need lines MINUS the "wearing on the flight" companions -- i.e. what actually goes
 // IN THE BAG. Packing Status is a checklist of things to physically pack, and the flight
 // outfit is on your body, so it has nothing to tick there; Plan Packing List keeps them,
@@ -12233,7 +12254,7 @@ async function tripsyShipHomeCandidates(tripKey, dayKey, person) {
   const qtyById = new Map();
   // Gym Clothes allocations are left out: the gym is on no itinerary, so their wear days
   // are unknown and every one of them would otherwise read as "never worn again -- ship".
-  for (const e of tripsyNormalizeTripSelection(selectedRaw)) { if (e.category === TRIPSY_WARDROBE_GYM_TIER) continue; qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty); }
+  for (const [id, q] of tripsyWardrobePhysicalQtyById(tripsyNormalizeTripSelection(selectedRaw), e => e.category !== TRIPSY_WARDROBE_GYM_TIER)) qtyById.set(id, q);
   const out = [];
   const push = (base, qtyPacked, days, limit) => {
     const qty = qtyPacked - tripsyShipHomeQtyBefore(records, person, base.key, dayKey);
@@ -12286,7 +12307,7 @@ async function tripsyShipHomeConsolidationPlan(tripKey, dayKey, person, excludeK
   const byId = new Map((garments || []).map(g => [g.id, g]));
   const shipRecords = Store.listTripsyShipHome(tripKey);
   const qtyById = new Map();
-  for (const e of tripsyNormalizeTripSelection(selectedRaw)) qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
+  for (const [id, q] of tripsyWardrobePhysicalQtyById(tripsyNormalizeTripSelection(selectedRaw))) qtyById.set(id, q);
   const qtyLeft = id => (qtyById.get(id) || 0) - tripsyShipHomeQtyBefore(shipRecords, person, 'g:' + id, dayKey) - (excludeKeys.has('g:' + id) ? Infinity : 0);
   const returnCredits = tripsyLaundryReturnCredits(Store.listTripsyLaundry(tripKey), person);
   const lastWashFor = id => tripsyLaundryLastReturnDay(returnCredits, 'g:' + id, null);
@@ -12362,7 +12383,7 @@ async function tripsyShipHomeSwapOptions(tripKey, block, currentGarmentId, perso
   }
   const shipRecords = Store.listTripsyShipHome(tripKey);
   const qtyById = new Map();
-  for (const e of tripsyNormalizeTripSelection(selectedRaw)) qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
+  for (const [id, q] of tripsyWardrobePhysicalQtyById(tripsyNormalizeTripSelection(selectedRaw))) qtyById.set(id, q);
   const returnCredits = tripsyLaundryReturnCredits(Store.listTripsyLaundry(tripKey), person);
   const lastWashFor = id => tripsyLaundryLastReturnDay(returnCredits, 'g:' + id, null);
   const wearDaysOf = id => { const s = new Set(); for (const b of ((outfits && outfits.blocks) || [])) if ((b.garmentIds || []).includes(id) && (b.wornFromFlightDayKey || b.dayKey)) s.add(b.wornFromFlightDayKey || b.dayKey); return s; };
@@ -12530,7 +12551,7 @@ function tripsyShipHomeGoneIds(tripKey, person, dayKey) {
   const records = Store.listTripsyShipHome(tripKey).filter(r => (r.person || 'him') === person && r.dayKey && dayKey && r.dayKey < dayKey);
   if (!records.length) return gone;
   const qtyById = new Map();
-  for (const e of tripsyNormalizeTripSelection((driveData.tripsyTripWardrobe || {})[tripKey] || [])) qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
+  for (const [id, q] of tripsyWardrobePhysicalQtyById(tripsyNormalizeTripSelection((driveData.tripsyTripWardrobe || {})[tripKey] || []))) qtyById.set(id, q);
   for (const [id, qty] of qtyById) {
     const shipped = records.reduce((n, r) => n + ((r.box || {})['g:' + id] || 0), 0);
     if (shipped >= qty) gone.set(id, records.filter(r => (r.box || {})['g:' + id]).map(r => r.dayKey).sort().pop());
@@ -12554,9 +12575,7 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
   const isPerson = g => (g.person || 'him') === person;
   const byId = new Map((garments || []).map(g => [g.id, g]));
   const qtyById = new Map();
-  for (const e of tripsyNormalizeTripSelection(selectedRaw)) {
-    qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
-  }
+  for (const [id, q] of tripsyWardrobePhysicalQtyById(tripsyNormalizeTripSelection(selectedRaw))) qtyById.set(id, q);
   // A garment is only dirty for the wears SINCE the last wash that included it -- washing
   // resets its clock, and per garment rather than globally, since a wash is a specific
   // bagful and not everything you own.
@@ -12837,7 +12856,7 @@ async function tripsyLaundryRunOutByDay(tripKey, person, guide) {
   };
   const byId = new Map((garments || []).map(g => [g.id, g]));
   const qtyById = new Map();
-  for (const e of tripsyNormalizeTripSelection(selectedRaw)) qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
+  for (const [id, q] of tripsyWardrobePhysicalQtyById(tripsyNormalizeTripSelection(selectedRaw))) qtyById.set(id, q);
   for (const [id, qty] of qtyById) {
     const g = byId.get(id);
     if (!g || (g.person || 'him') !== person) continue;
@@ -12886,7 +12905,7 @@ async function tripsyLaundryFindAdjustments(tripKey, person, guide, opts = {}) {
     .reduce((n, r) => n + (r.count || 0), 0);
   const byId = new Map((garments || []).map(g => [g.id, g]));
   const qtyById = new Map();
-  for (const e of tripsyNormalizeTripSelection(selectedRaw)) qtyById.set(e.id, (qtyById.get(e.id) || 0) + e.qty);
+  for (const [id, q] of tripsyWardrobePhysicalQtyById(tripsyNormalizeTripSelection(selectedRaw))) qtyById.set(id, q);
   // A garment already picked as another proposal's replacement this pass is spoken for
   // -- offering it again for a second short garment the same day would double-book it.
   const claimed = new Set();
@@ -14990,7 +15009,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   }
   // Copies of a garment allocated to any OTHER line (in this tier or another) --
   // available for `line` in `cat` = owned qty minus those.
-  const allocElsewhere = (id, cat, line) => { const self = selKey(id, cat, line); let s = 0; for (const [k, q] of sel) { if (k !== self && parseSelKey(k).id === id) s += q; } return s; };
+  const allocElsewhere = (id, cat, line) => { const self = selKey(id, cat, line); let s = 0; for (const [k, q] of sel) { if (k === self) continue; const o = parseSelKey(k); if (o.id === id && !tripsyWardrobeAllocationsShareCopy(line, o.line)) s += q; } return s; };
   const availableFor = (g, cat, line) => (g.quantity || 1) - allocElsewhere(g.id, cat, line);
   // Per-person: His (default) and Hers each draw from that person's packing-list
   // need lines (guide.packingList[person]) and only that person's garments. The
@@ -38907,7 +38926,7 @@ async function showTripsyAttireCategoryEvents(guide, category, person = 'him') {
     packedByKey.set(k, e.packed);
     cubesByKey.set(k, e.cubes || []);
   }
-  const allocElsewhere = (id, cat, line) => { const self = selKey(id, cat, line); let s = 0; for (const [k, q] of sel) { if (k !== self && parseSelKey(k).id === id) s += q; } return s; };
+  const allocElsewhere = (id, cat, line) => { const self = selKey(id, cat, line); let s = 0; for (const [k, q] of sel) { if (k === self) continue; const o = parseSelKey(k); if (o.id === id && !tripsyWardrobeAllocationsShareCopy(line, o.line)) s += q; } return s; };
   const availableFor = (g, cat, line) => (g.quantity || 1) - allocElsewhere(g.id, cat, line);
   // Person-scoped (His default / Hers): this person's need lines for the tier and
   // only this person's garments. A toggle in the pack header switches without

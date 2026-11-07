@@ -147,6 +147,6 @@ const api = new Function('driveData', [
     'THE ASK: a tap packs EXACTLY that entry, so the gym socks go into their own cube beside the General socks');
   assert(/from Gym Clothes<\/div>/.test(status), 'the card says it is the Gym Clothes pick');
   assert(/\$\{selected\}\/\$\{ln\.open \? 'any' : need\}/.test(status), 'the open line\'s header reads N/any');
-  assert(/if \(e\.category === TRIPSY_WARDROBE_GYM_TIER\) continue; qtyById\.set/.test(extractFn('tripsyShipHomeCandidates')), 'Ship Home never recommends gym clothes (their wear days are unknown)');
+  assert(/tripsyWardrobePhysicalQtyById\(tripsyNormalizeTripSelection\(selectedRaw\), e => e\.category !== TRIPSY_WARDROBE_GYM_TIER\)/.test(extractFn('tripsyShipHomeCandidates')), 'Ship Home never recommends gym clothes (their wear days are unknown)');
   assert(/for \(const tier of TRIPSY_ATTIRE_CATEGORY_ORDER\) \{ \/\/ dress codes only -- General excluded/.test(extractFn('tripsyPlanPackingIsComplete')), 'an empty gym section never holds the Packing List back from "complete"');
 }

@@ -26,6 +26,9 @@ const Store = {
   getTripsyAttireGuide: async () => ({ tripKey: 'T1', days: [] }),
 };
 const tripsyNormalizeTripSelection = sel => sel;
+const TRIPSY_FLIGHT_WORN_ROLE_LABEL = { tops: 'Top', pants: 'Bottoms', footwear: 'Shoes' }; const TRIPSY_FLIGHT_WORN_SUFFIX = ' — wearing on the flight';
+${extractFn('tripsyWardrobeLineIsFlightShoes')}
+${extractFn('tripsyWardrobePhysicalQtyById')}
 let washes = [], notDirty = [];
 Store.listTripsyLaundry = () => washes;
 Store.listTripsyShipHome = () => [];
