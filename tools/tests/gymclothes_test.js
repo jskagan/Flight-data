@@ -36,16 +36,16 @@ const consts = ['TRIPSY_ATTIRE_CATEGORY_ORDER', 'TRIPSY_ATTIRE_CATEGORY_LABEL', 
 const fns = ['tripsyGarmentTypeKey', 'tripsyAttirePackingGroupOf', 'tripsyAttireIsExcludedPackingItem',
   'tripsyAttireDisplayCategory', 'tripsyWardrobeFlightDepartureEvent', 'tripsyWardrobeFirstFlightBlockTier', 'tripsyWardrobeFlightWornClaimer',
   'tripsyWardrobeLineIsFlightWorn', 'tripsyWardrobePackedNeedLines', 'tripsyWardrobeGymLines', 'tripsyWardrobeNeedByTier',
-  'tripsyWardrobeTierLabel', 'tripsyWardrobeGarmentEligibleForTier', 'tripsyWardrobeGarmentFillsGymLine', 'tripsyWardrobeGymEssentialTarget',
-  'tripsyWardrobeGymEssentialsForGeneral', 'tripsyGarmentLineMatchType', 'tripsyWardrobeGarmentFillsLine', 'tripsyWardrobeLosesAccessoryLine',
+  'tripsyWardrobeTierLabel', 'tripsyWardrobeGarmentEligibleForTier', 'tripsyWardrobeGarmentFillsGymLine',
+  'tripsyGarmentLineMatchType', 'tripsyWardrobeGarmentFillsLine', 'tripsyWardrobeLosesAccessoryLine',
   'tripsyWardrobeNameMatchesLine', 'tripsyGarmentNameTokens', 'tripsyGarmentNameSingular', 'tripsyWardrobeAssignGarments',
   'tripsyWardrobeLineIsNeverPhotographed', 'tripsyWearDaysGroupByDay', 'tripsyWardrobeWearDaysFromLines'].map(extractFn).join('\n');
 const api = new Function('driveData', [
   "const TRIPSY_GARMENT_NAME_STOPWORDS = new Set(['for', 'and', 'the', 'with', 'set', 'pair']);",
   consts, fns,
   `return { needByTier: tripsyWardrobeNeedByTier, gymLines: tripsyWardrobeGymLines, label: tripsyWardrobeTierLabel,
-    eligible: tripsyWardrobeGarmentEligibleForTier, fillsGym: tripsyWardrobeGarmentFillsGymLine, target: tripsyWardrobeGymEssentialTarget,
-    forGeneral: tripsyWardrobeGymEssentialsForGeneral, fills: tripsyWardrobeGarmentFillsLine, assign: tripsyWardrobeAssignGarments,
+    eligible: tripsyWardrobeGarmentEligibleForTier, fillsGym: tripsyWardrobeGarmentFillsGymLine,
+    fills: tripsyWardrobeGarmentFillsLine, assign: tripsyWardrobeAssignGarments,
     neverPhoto: tripsyWardrobeLineIsNeverPhotographed, wearDays: tripsyWardrobeWearDaysFromLines, GYM: TRIPSY_WARDROBE_GYM_TIER, GENERAL: TRIPSY_WARDROBE_GENERAL_TIER };`,
 ].join('\n'))({ tripsyTripCustomLines: {}, tripsyWardrobe: [], tripsyTripWardrobe: {} });
 
@@ -90,25 +90,13 @@ const api = new Function('driveData', [
   assert(api.eligible(casTee, api.GYM) && api.eligible(casTee, api.GENERAL) && !api.eligible(casTee, 'formal'), 'the tier gate is open for Gym Clothes (the line rule does the filtering), as for General');
   assert(api.neverPhoto(sock) && api.neverPhoto(under) && !api.neverPhoto(tops), 'the socks/underwear lines count as never-photographed, so no duplicate No Picture card');
 }
-// ---- socks/underwear: counted on General, kept as their own entries ----
+// ---- socks/underwear: counted in Gym Clothes ONLY (2026-11-07, "Separate counts") ----
 {
-  const general = [{ name: 'casual socks', typeKey: 'socks', group: 'essentials', need: 6 }, { name: 'dress socks', typeKey: 'dress-socks', group: 'dress_wear', need: 2 }, { name: 'underwear', typeKey: 'underwear', group: 'essentials', need: 6 }];
-  assert(api.target(general, 'Socks').name === 'casual socks', 'gym Socks count toward General\'s socks line (never the dress-socks line)');
-  assert(api.target(general, 'Underwear').name === 'underwear', 'gym Underwear toward General\'s underwear line');
-  assert(api.target(general, 'Gym Tops') === null && api.target([], 'Socks') === null, 'tops never cross over; no General line -> the pick stays in the gym section alone');
-  const entries = [
-    { id: 'S', category: 'gym', line: 'Socks', qty: 2, packed: 2, cubes: ['cubeB', 'cubeB'] },
-    { id: 'S', category: 'general', line: 'casual socks', qty: 4, packed: 4, cubes: ['cubeA', 'cubeA', 'cubeA', 'cubeA'] },
-    { id: 'T', category: 'gym', line: 'Gym Tops', qty: 1, packed: 0, cubes: [] },
-  ];
-  const extra = api.forGeneral(entries, general);
-  assert(extra.length === 1 && extra[0].id === 'S' && extra[0].line === 'casual socks' && extra[0].gymLine === 'Socks' && extra[0].category === 'gym', 'THE ASK: the gym sock pick is re-addressed to General\'s line but keeps its gym identity');
-  assert(extra[0].cubes.join(',') === 'cubeB,cubeB', 'THE ASK: …and its OWN cubes -- a different cube from the General pick is simply a different entry');
-  // The fill math, as both packing pages run it for General: own picks + the gym extras.
-  const socks = { id: 'S', name: 'Socks', group: 'essentials', quantity: 10 };
-  const items = [{ g: socks, qty: 4, line: 'casual socks' }, ...extra.map(e => ({ g: socks, qty: e.qty, line: e.line }))];
-  const { fill } = api.assign(general, items);
-  assert(fill[0] === 6, 'THE ASK: General\'s socks Selected = 4 general + 2 gym = 6 ("combine the number")');
+  // "The casual socks count seems to include the gym socks - which double counts them."
+  const general = [{ name: 'casual socks', typeKey: 'socks', group: 'essentials', need: 9 }];
+  const socks = { id: 'S', name: 'Socks', group: 'essentials', quantity: 13 };
+  const { fill } = api.assign(general, [{ g: socks, qty: 10, line: 'casual socks' }]);
+  assert(fill[0] === 10, 'THE ASK: General\'s socks Selected counts General picks only (10 vs the guide\'s 9)');
 }
 // ---- wear days: the gym is on no itinerary ----
 {
@@ -121,22 +109,16 @@ const api = new Function('driveData', [
   const plan = extractFn('tripsyWardrobePackForTrip');
   assert(/if \(\(needLines\[TRIPSY_WARDROBE_GYM_TIER\] \|\| \[\]\)\.length > 0\) t\.push\(TRIPSY_WARDROBE_GYM_TIER\);\n\s*if \(\(needLines\[TRIPSY_WARDROBE_GENERAL_TIER\] \|\| \[\]\)\.length > 0\) t\.push\(TRIPSY_WARDROBE_GENERAL_TIER\);/.test(plan),
     'THE ASK: on the Packing List the Gym Clothes section comes directly before General');
-  assert(/packedForTier\.push\(\.\.\.tripsyWardrobeGymEssentialsForGeneral\(allEntries, lines\)/.test(plan), 'the Packing List counts gym socks/underwear on General\'s lines');
+  assert(!/GymEssentials|gymExtraFor|gymCounted/.test(plan), 'THE ASK: the Packing List no longer adds gym socks/underwear to General');
   assert(/tripsyWardrobeGarmentEligibleForTier\(x\.g, tier\)/.test(plan) && /tripsyWardrobeGarmentEligibleForTier\(g, tier\) && tripsyWardrobeGarmentFillsLine\(g, ln, lines\)/.test(plan), 'the tier gate goes through the shared helper on both the fill math and the garment page');
   assert(/const neededCell = ln\.open \? '<span style="color:var\(--muted\); font-weight:600;">any<\/span>'/.test(plan) && /pick as many as you like/.test(plan), 'THE ASK: an open line reads "any" and invites any number');
   assert(/if \(ln\.open\) return; totSel \+= ln\.selected;/.test(plan), 'open lines never count toward the trip-wide Selected/Needed');
-  assert(/incl\. \$\{gymCounted\} from Gym Clothes \(needed \+\$\{gymCounted\}\)/.test(plan), 'General\'s socks/underwear page says how many came from Gym Clothes');
-  // "for each socks and underwear that the user selects from the gym clothes section, add 1
-  // to the 'needed' column for that garment" (2026-10-19, same day).
-  assert(/const effectiveNeed = Math\.max\(0, ln\.need - skipped\) \+ gymExtraFor\(tier, ln\);/.test(plan), 'THE ASK: each gym sock/underwear pick adds 1 to General\'s Needed on the Packing List');
-  assert(/const gymExtraFor = \(tier, ln\) => \{\n\s*if \(tier !== TRIPSY_WARDROBE_GENERAL_TIER\) return 0;/.test(plan), 'only General lines are raised');
-  assert(/const effectiveNeed = \(tier, ln\) => Math\.max\(0, ln\.need - tripsyAttireSkippedFor\(skips, person, tier, ln\)\) \+ gymExtraFor\(tier, ln\);/.test(extractFn('tripsyWardrobePackingList')),
-    'Packing Status raises Needed the same way, so the two pages agree');
+  assert(/const effectiveNeed = \(tier, ln\) => Math\.max\(0, ln\.need - tripsyAttireSkippedFor\(skips, person, tier, ln\)\);/.test(extractFn('tripsyWardrobePackingList'))
+    && /const effectiveNeed = Math\.max\(0, ln\.need - skipped\);/.test(plan), 'neither page raises General\'s Needed for gym picks, so the two agree');
   assert(/lnHere\.open \? TRIPSY_WARDROBE_OPEN_LINE_PLACEHOLDER_CAP : tripsyWardrobePlaceholderCap\(lnHere\.need\)/.test(plan), 'a placeholder on an open line is not capped by a need of zero');
   const status = extractFn('tripsyWardrobePackingList');
   assert(/const TIER_ROWS = \[\.\.\.TRIPSY_ATTIRE_CATEGORY_ORDER\.slice\(\)\.reverse\(\), TRIPSY_WARDROBE_GYM_TIER, TRIPSY_WARDROBE_GENERAL_TIER\];/.test(status), 'Packing Status lists Gym Clothes before General too');
-  assert(/items\.push\(\.\.\.tripsyWardrobeGymEssentialsForGeneral\(selEntries, needLines\[tier\] \|\| \[\]\)/.test(status) && /entryLine: e\.gymLine, fromGym: true/.test(status),
-    'Packing Status shows the gym socks/underwear picks on General\'s pages as their own entries');
+  assert(!/GymEssentials|fromGym|gymExtraFor/.test(status), 'THE ASK: Packing Status no longer lists gym socks/underwear on General\'s pages');
   // "The packing status page layout for gym clothes should match the packing list page"
   // (2026-10-20): all five gym rows list on Packing Status too (the first cut hid the gym
   // Socks/Underwear rows there).
@@ -144,8 +126,7 @@ const api = new Function('driveData', [
   assert(/data-tw-entry-cat="\$\{esc\(entryCategory \|\| ''\)\}" data-tw-entry-line="\$\{esc\(entryLine \|\| ''\)\}"/.test(status)
     && /markGarmentPacked\(gEl\.getAttribute\('data-tw-detail-garment'\), gEl\.getAttribute\('data-tw-entry-cat'\), gEl\.getAttribute\('data-tw-entry-line'\)\)/.test(status)
     && /const exact = selEntries\.find\(x => x\.id === id && x\.category === entryCategory && x\.line === entryLine\);/.test(status),
-    'THE ASK: a tap packs EXACTLY that entry, so the gym socks go into their own cube beside the General socks');
-  assert(/from Gym Clothes<\/div>/.test(status), 'the card says it is the Gym Clothes pick');
+    'THE ASK: a tap packs EXACTLY that entry, so the gym socks pack into their own cube');
   assert(/\$\{selected\}\/\$\{ln\.open \? 'any' : need\}/.test(status), 'the open line\'s header reads N/any');
   assert(/tripsyWardrobePhysicalQtyById\(tripsyNormalizeTripSelection\(selectedRaw\), e => e\.category !== TRIPSY_WARDROBE_GYM_TIER\)/.test(extractFn('tripsyShipHomeCandidates')), 'Ship Home never recommends gym clothes (their wear days are unknown)');
   assert(/for \(const tier of TRIPSY_ATTIRE_CATEGORY_ORDER\) \{ \/\/ dress codes only -- General excluded/.test(extractFn('tripsyPlanPackingIsComplete')), 'an empty gym section never holds the Packing List back from "complete"');

@@ -10440,11 +10440,11 @@ function tripsyCubeById(id) {
 // selHtml in showTripsyCubeForm), so nothing has to be migrated.
 const TRIPSY_CUBE_BRANDS = ['Briggs & Riley', 'Eagle Creek Reveal', 'Eagle Creek Pack-It'];
 const TRIPSY_CUBE_SIZES = ['Large', 'Medium', 'Small', 'Extra small'];
-const TRIPSY_CUBE_COLORS = ['Black', 'Blue', 'Purple', 'Orange', 'Yellow', 'Gray', 'Brown', 'Zebra'];
+const TRIPSY_CUBE_COLORS = ['Black', 'Blue', 'Red', 'Purple', 'Orange', 'Yellow', 'Gray', 'Brown', 'Zebra'];
 // Swatch for the picker tile when a cube has no photo yet. Zebra is a PATTERN, not a
 // colour, so it gets stripes -- a flat grey would make it indistinguishable from Gray.
 const TRIPSY_CUBE_COLOR_CSS = {
-  Black: '#23262B', Blue: '#2E62C8', Purple: '#7B4BC9', Orange: '#E07A28',
+  Black: '#23262B', Blue: '#2E62C8', Red: '#C8302E', Purple: '#7B4BC9', Orange: '#E07A28',
   Yellow: '#E3C22B', Gray: '#8A9099', Brown: '#7A5230',
   Zebra: 'repeating-linear-gradient(135deg,#F2F2F2 0 7px,#1B1B1B 7px 14px)',
 };
@@ -10886,9 +10886,9 @@ function tripsyWardrobeNeedByTier(guide, person = 'him') {
 // pants lines offer only garments TAGGED athletic (`gym: 'tops'|'shorts'|'pants'`), the
 // socks/underwear lines offer those types untagged (essentials carry no dress-code tag).
 // A gym Socks/Underwear pick is stored on its own gym line -- its own selection entry,
-// so it packs into its OWN cube on Packing Status -- and is ALSO counted toward General's
-// socks/underwear line (tripsyWardrobeGymEssentialsForGeneral), which is where "combine
-// the number" shows: General's Selected/Packed include the gym picks.
+// so it packs into its OWN cube on Packing Status -- and is counted in Gym Clothes ONLY
+// ("The casual socks count seems to include the gym socks - which double counts them,"
+// 2026-11-07: the original rule also added it to General's line, Selected AND Needed).
 const TRIPSY_WARDROBE_GYM_TIER = 'gym';
 const TRIPSY_WARDROBE_GYM_LINES = [
   { name: 'Gym Tops', gym: 'tops', typeKey: '', group: 'tops' },
@@ -10921,27 +10921,6 @@ function tripsyWardrobeGarmentFillsGymLine(g, ln) {
     case 'underwear': return gType === 'underwear';
     default: return false;
   }
-}
-// Which General line a gym Socks/Underwear pick ALSO counts toward: the General line of
-// the same type ('socks' / 'underwear'), or null when General has none (the pick then
-// lives in the gym section alone). Dress socks are a different type and never involved.
-function tripsyWardrobeGymEssentialTarget(generalLines, gymLineName) {
-  const gymLn = TRIPSY_WARDROBE_GYM_LINES.find(l => l.name === gymLineName);
-  if (!gymLn || !['socks', 'underwear'].includes(gymLn.gym)) return null;
-  return (generalLines || []).find(ln => (ln.typeKey || tripsyGarmentTypeKey(ln.name)) === gymLn.gym) || null;
-}
-// Gym socks/underwear selection entries re-addressed to the General lines they count
-// toward -- the items both packing pages append to General's own picks. Each keeps its
-// gym identity (`gymLine`, and `category` stays 'gym') so a tap on its card on Packing
-// Status finds and packs the GYM entry, into whatever cube the owner picks there.
-function tripsyWardrobeGymEssentialsForGeneral(entries, generalLines) {
-  const out = [];
-  for (const e of (entries || [])) {
-    if (!e || e.category !== TRIPSY_WARDROBE_GYM_TIER) continue;
-    const target = tripsyWardrobeGymEssentialTarget(generalLines, e.line);
-    if (target) out.push({ ...e, line: target.name, gymLine: e.line });
-  }
-  return out;
 }
 // The suffix that marks a companion need line as the garment you FLY IN rather than pack.
 // One constant because three surfaces key off it: the line builder below, Packing Status
@@ -15047,16 +15026,9 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
   const persistGenerics = () => Store.setTripGenericGarments(tripKey, generics);
 
   const genericFilledFor = (tier, ln) => generics.filter(x => (x.person || 'him') === person && x.category === tier && x.name === ln.name).reduce((a, x) => a + x.qty, 0);
-  // How many Gym Clothes socks/underwear picks land on this General line. They are added
-  // to the line's SELECTED (combined, 2026-10-19) AND to its NEEDED ("for each socks and
-  // underwear that the user selects from the gym clothes section, add 1 to the 'needed'
-  // column for that garment," same day) -- the gym pairs are extra, so the General need
-  // itself is still to be filled by General picks.
-  const gymExtraFor = (tier, ln) => {
-    if (tier !== TRIPSY_WARDROBE_GENERAL_TIER) return 0;
-    return tripsyWardrobeGymEssentialsForGeneral([...sel].map(([k, qty]) => ({ ...parseSelKey(k), qty })), needLines[tier] || [])
-      .filter(x => { const xg = garmentById.get(x.id); return x.line === ln.name && xg && isPerson(xg); }).reduce((a, x) => a + x.qty, 0);
-  };
+  // Gym Clothes socks/underwear picks are counted in Gym Clothes ONLY, never on General's
+  // lines ("The casual socks count seems to include the gym socks - which double counts
+  // them," 2026-11-07, replacing the 2026-10-19 combine rule).
   // Per-line remaining in a tier = need − real-garment fill − no-picture fill.
   const remainingLinesFor = tier => {
     const lines = needLines[tier] || [];
@@ -15065,12 +15037,6 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const allEntries = [...sel].map(([k, qty]) => { const { id, category, line } = parseSelKey(k); return { g: garmentById.get(id), id, qty, category, line }; });
     const packedForTier = allEntries
       .filter(x => x.g && x.category === tier && isPerson(x.g) && tripsyWardrobeGarmentEligibleForTier(x.g, tier));
-    // General's socks/underwear lines ALSO count the Gym Clothes picks of those types
-    // ("combine the number of each selected in the gym clothes section with those
-    // selected in general," 2026-10-19).
-    if (tier === TRIPSY_WARDROBE_GENERAL_TIER) {
-      packedForTier.push(...tripsyWardrobeGymEssentialsForGeneral(allEntries, lines).filter(x => x.g && isPerson(x.g)));
-    }
     const filled = tripsyWardrobeAssignFill(lines, packedForTier);
     return lines.map((ln, i) => {
       // Skipped items come off the need before anything else is counted against it.
@@ -15079,7 +15045,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
       // `effectiveNeed` is the need AFTER skips -- the number the columns show, and the
       // same one Packing Status displays, so the two pages can't quote different totals.
       // `need` stays the guide's raw figure; other callers still read it.
-      const effectiveNeed = Math.max(0, ln.need - skipped) + gymExtraFor(tier, ln);
+      const effectiveNeed = Math.max(0, ln.need - skipped);
       return { ...ln, remaining: Math.max(0, effectiveNeed - selected), skipped, selected, effectiveNeed };
     });
   };
@@ -15184,11 +15150,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const skipped = ln.skipped || 0;
     const status = ln.open ? `${ln.selected} selected · pick as many as you like` : (met ? '✓ all set' : `${ln.remaining} needed`);
     const skipNote = skipped ? ` · <span style="color:var(--muted);">${skipped} skipped</span>` : '';
-    // General's socks/underwear line counts the Gym Clothes picks of that type too -- say
-    // how many came from there, since they don't show as selected cards on THIS page.
-    const gymCounted = gymExtraFor(tier, ln);
-    const gymNote = gymCounted ? ` · <span style="color:var(--muted);">incl. ${gymCounted} from Gym Clothes (needed +${gymCounted})</span>` : '';
-    countEl.innerHTML = `<div style="font-weight:700; font-size:14px;">${esc(tripsyWardrobeTierLabel(tier))} › ${esc(tripsyStripCategoryParen(ln.name))}</div><div style="margin-top:2px; color:${(met || ln.open) ? 'var(--home-green)' : 'var(--amber)'};">${status}${skipNote}${gymNote}</div>${met ? `<button type="button" data-tw-line-done style="margin-top:8px; display:block; width:100%; background:var(--home-green); color:#04210F; border:none; border-radius:8px; padding:10px 18px; font-weight:700; font-size:13px; cursor:pointer;">Done</button>` : ''}`;
+    countEl.innerHTML = `<div style="font-weight:700; font-size:14px;">${esc(tripsyWardrobeTierLabel(tier))} › ${esc(tripsyStripCategoryParen(ln.name))}</div><div style="margin-top:2px; color:${(met || ln.open) ? 'var(--home-green)' : 'var(--amber)'};">${status}${skipNote}</div>${met ? `<button type="button" data-tw-line-done style="margin-top:8px; display:block; width:100%; background:var(--home-green); color:#04210F; border:none; border-radius:8px; padding:10px 18px; font-weight:700; font-size:13px; cursor:pointer;">Done</button>` : ''}`;
     // A line the owner added can be removed again, from the line itself -- the only place
     // it is unambiguous WHICH line is meant. Guide lines have no such button: they come
     // back on the next generation, so removing one would only look broken.
@@ -15578,12 +15540,10 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   // two pages disagreed outright -- the Plan showed a trimmed cocktail tie line as
   // complete while this one still read 1/2.
   // `person` flips with the His/Hers toggle, so resolve the key at render time.
-  // Plus the Gym Clothes socks/underwear picks landing on a General line: they raise its
-  // Needed as well as its Selected (the Packing List's gymExtraFor rule, mirrored here so
-  // the two pages quote the same Needed).
-  const gymExtraFor = (tier, ln) => tier !== TRIPSY_WARDROBE_GENERAL_TIER ? 0
-    : tripsyWardrobeGymEssentialsForGeneral(selEntries, needLines[tier] || []).filter(x => { const xg = garmentById.get(x.id); return x.line === ln.name && xg && isPerson(xg); }).reduce((a, x) => a + x.qty, 0);
-  const effectiveNeed = (tier, ln) => Math.max(0, ln.need - tripsyAttireSkippedFor(skips, person, tier, ln)) + gymExtraFor(tier, ln);
+  // Gym Clothes socks/underwear count in Gym Clothes ONLY ("The casual socks count seems to
+  // include the gym socks - which double counts them," 2026-11-07): General's lines show
+  // their own picks against the guide's need, on both pages.
+  const effectiveNeed = (tier, ln) => Math.max(0, ln.need - tripsyAttireSkippedFor(skips, person, tier, ln));
   // Per-CATEGORY store entries kept intact (for persist + the per-tier "needs" math),
   // but shown COMBINED per garment (sum qty + packed across the tiers it's allocated
   // to). Legacy category-less picks are ignored, matching the Plan Packing List.
@@ -15630,27 +15590,16 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   // Selected wardrobe pieces for a tier as {g, qty, packed} -- same filter the fill
   // math uses; `packed` (this tier's entry) rides along so the Packed column can sum it.
   // Each item also keeps WHICH entry it is (category + the entry's own line), so a card
-  // on a detail page can pack exactly that entry: General's socks/underwear pages also
-  // list the Gym Clothes picks of those types (counted there, "combine the number…",
-  // 2026-10-19), and those keep their own entry -- and so their own cube -- while the
-  // same placeholder garment may sit on the page twice, once from each section.
+  // on a detail page packs exactly that entry -- the same placeholder garment can be on
+  // General's socks line and Gym Clothes' Socks line as two entries with their own cubes.
   const selectedForTier = tier => {
     const items = selEntries.filter(e => e.category === tier).map(e => ({ g: garmentById.get(e.id), qty: e.qty, packed: Math.min(e.packed, e.qty), cubes: e.cubes || [], line: e.line, entryCategory: e.category, entryLine: e.line }))
       .filter(x => x.g && isPerson(x.g) && tripsyWardrobeGarmentEligibleForTier(x.g, tier));
-    if (tier === TRIPSY_WARDROBE_GENERAL_TIER) {
-      items.push(...tripsyWardrobeGymEssentialsForGeneral(selEntries, needLines[tier] || [])
-        .map(e => ({ g: garmentById.get(e.id), qty: e.qty, packed: Math.min(e.packed, e.qty), cubes: e.cubes || [], line: e.line, entryCategory: e.category, entryLine: e.gymLine, fromGym: true }))
-        .filter(x => x.g && isPerson(x.g)));
-    }
     return items;
   };
-  // The Gym Clothes rows shown HERE: a gym Socks/Underwear line whose picks are counted on
-  // a General line is listed there (with its own cube), not twice.
   // The Gym Clothes section lists all five of its lines here, exactly as the Packing List
   // does ("The packing status page layout for gym clothes should match the packing list
-  // page," 2026-10-20) -- the first cut hid the gym Socks/Underwear rows because their picks
-  // are also counted on General's lines; they are now packable from EITHER row (one entry,
-  // one cube), and General's page still lists them as "from Gym Clothes" cards.
+  // page," 2026-10-20); since 2026-11-07 its socks/underwear picks appear only there.
   // Generics selected for a tier+line, carrying their ORIGINAL array index (for packed toggling).
   const genericsForLine = (tier, ln) => generics.map((x, i) => ({ x, i })).filter(({ x }) => (x.person || 'him') === person && x.category === tier && x.name === ln.name);
   // Mark packed from the detail view. A single copy (qty 1) just toggles packed<->
@@ -15909,17 +15858,14 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
           </div>`;
         }).join('')}
       </div>`;
-    const garmentCards = garmentItems.map(({ g, qty, packed, cubes, entryCategory, entryLine, fromGym }) => {
+    const garmentCards = garmentItems.map(({ g, qty, packed, cubes, entryCategory, entryLine }) => {
       const gType = tripsyGarmentTypeKey(g.name);
       const uncubed = tripsyGarmentSkipsCube(g.name, gType);
       const b = cardPackedBits(packed, qty, uncubed);
-      // A Gym Clothes pick listed on General's socks/underwear page says so: it is its own
-      // entry, packed into its own cube, beside the General pick of the same garment.
-      const gymNote = fromGym ? `<div class="tw-meta" style="color:var(--amber); font-weight:600;">from Gym Clothes</div>` : '';
       return `<div class="tw-card" data-tw-detail-garment="${esc(g.id)}" data-tw-entry-cat="${esc(entryCategory || '')}" data-tw-entry-line="${esc(entryLine || '')}" style="cursor:pointer; position:relative;">
           <div class="tw-actions tw-actions-top"><button class="btn" data-tw-wear-days="${esc(g.id)}">Wear Days</button></div>
           <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}"${g.driveFileId ? ` data-tw-photo="${esc(g.driveFileId)}"` : ''}>${g.driveFileId ? '' : tripsyGarmentGlyph(gType, g.group, g.name)}</div>
-          <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div>${gymNote}<div class="tw-meta" style="color:${b.color};">${b.meta}</div>${uncubed ? uncubedLineHtml(packed, gType) : (pageCubesSplit ? cubeLineHtml(cubes) : '')}</div>
+          <div class="tw-info"><div class="tw-name">${esc(g.name || 'Untitled')}${qty > 1 ? ` <span style="color:var(--muted);">×${qty}</span>` : ''}</div><div class="tw-meta" style="color:${b.color};">${b.meta}</div>${uncubed ? uncubedLineHtml(packed, gType) : (pageCubesSplit ? cubeLineHtml(cubes) : '')}</div>
           ${b.badge}
         </div>`;
     }).join('');

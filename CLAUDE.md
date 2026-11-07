@@ -2814,7 +2814,7 @@ would overwrite the glyph with the word.
   garments go into, identified by three traits rather than a typed-in name — **brand** (Briggs &
   Riley, Eagle Creek Reveal, Eagle Creek Pack-It — split by LINE, since two Eagle Creek lines
   look nothing alike and telling same-colour/same-size cubes apart is the whole point of
-  recording a brand), **size** (Large/Medium/Small/Extra small) and **color** (Black, Blue, Purple,
+  recording a brand), **size** (Large/Medium/Small/Extra small) and **color** (Black, Blue, Red, Purple,
   Orange, Yellow, Gray, Brown, Zebra), as fixed lists (`TRIPSY_CUBE_BRANDS`/`_SIZES`/`_COLORS`;
   extend them when a cube is bought and nothing else needs changing — a cube saved under a value
   since removed from one of these lists keeps it, because `showTripsyCubeForm`'s `selHtml` appends
@@ -2980,23 +2980,19 @@ would overwrite the glyph with the word.
   cannot write the wardrobe. The
   tier gate is the new `tripsyWardrobeGarmentEligibleForTier` (General and Gym open, a dress
   code wants its tag), used by both pages' fill math and garment pages. **Socks/underwear
-  combine**: a gym Socks/Underwear pick is its own selection entry (`id::gym::Socks`) — so on
-  Packing Status it packs into its OWN cube — and `tripsyWardrobeGymEssentialsForGeneral`
-  re-addresses those entries to General's same-type line (`tripsyWardrobeGymEssentialTarget`:
-  typeKey `socks`/`underwear`; no such General line → the pick lives in the gym section alone)
-  so General's Selected/Packed INCLUDE them — **and each adds 1 to that line's NEEDED too**
-  ("for each socks and underwear that the user selects from the gym clothes section, add 1
-  to the 'needed' column for that garment," same day: the gym pairs are extra, so General's
-  own need is still to be filled by General picks; `gymExtraFor` on both pages, so Needed
-  agrees); the Packing List's General page notes "incl. N from Gym Clothes (needed +N)", and
-  Packing Status lists them on General's page as "from Gym Clothes"
-  cards (each card now carries `data-tw-entry-cat`/`data-tw-entry-line`, and `entryFor`/
-  `markGarmentPacked` pack EXACTLY that entry — the same placeholder garment can sit on the
-  page twice, once per section). Packing Status lists ALL FIVE gym rows, like the Packing
+  are counted SEPARATELY** ("The casual socks count seems to include the gym socks - which
+  double counts them," 2026-11-07 — this replaced the 2026-10-19 rule that ALSO added each gym
+  pick to General's same-type line, Selected and Needed alike, which made General read e.g.
+  13 / 12 when it held 10 of its own against a need of 9): a gym Socks/Underwear pick is its
+  own selection entry (`id::gym::Socks`), packs into its OWN cube on Packing Status, and counts
+  ONLY on its Gym Clothes row; General's lines show General picks against the guide's need.
+  The combine helpers (`tripsyWardrobeGymEssentialTarget`/`…EssentialsForGeneral`,
+  `gymExtraFor`, the "from Gym Clothes" card note) are gone — don't re-add them. Cards still
+  carry `data-tw-entry-cat`/`data-tw-entry-line`, and `entryFor`/`markGarmentPacked` pack
+  EXACTLY that entry. Packing Status lists ALL FIVE gym rows, like the Packing
   List ("The packing status page layout for gym clothes should match the packing list page,"
   2026-10-20 — the first cut hid the gym Socks/Underwear rows there as already counted on
-  General; a gym sock entry is now packable from either its gym row or General's page, one
-  entry and one cube either way). Wear days: a gym allocation has NONE
+  General). Wear days: a gym allocation has NONE
   (`tripsyWardrobeWearDaysFromLines` basis `'gym'` — the gym is on no itinerary; rule 4 would
   wrongly call gym socks "worn every day"), and Ship Home skips gym allocations for the same
   reason (they would all read "never worn again"). The three scaffolds that extract
