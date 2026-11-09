@@ -904,6 +904,15 @@ step 4; git history has it if ever needed.
   creates as before -- and note `tools/tests/offline_test.js`'s fake defines the store-name
   consts by hand, so a new store means updating its `consts` line or its generated half crashes
   at upgrade). `photoblobcache_test.js`.
+- **A flight's seat line carries its flight time** ("For all flights, in the same line you
+  list the seat, say 'Flight time:' and the length of the flight in hours and minutes,"
+  2026-11-09): `tripsySeatAndFlightTimeLabel(raw)` — "Seat: … • Flight time: 7h 5m", the time
+  alone when no seat is known — on the My Trips row (the old separate "Flight Time:" line is
+  gone), both itinerary card builders and `tripsyExtra`. `tripsyFlightDurationLabel` falls
+  back from the leg's own zones to the airport code's (`TRIPSY_AIRPORT_ZONES`, built from
+  `TRIPSY_AIRPORT_ZONE_GROUPS`, one zone for every code in `TRIPSY_AIRPORT_CITIES`), since
+  flights added in the app carry no zone; an unknown airport shows no time rather than a wrong
+  one. `flighttime_test.js`.
 - **Categories**: flight / transportation / hotel / dining / concert / tour / spa / reception /
   cooking / other — each event's display `type`, derived from its `tripsyRaw.category` slug
   (`TRIPSY_ACTIVITY_CATEGORY_TO_TYPE`, mirrored in `tools/build_tripsy_snapshot.py`), including the
