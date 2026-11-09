@@ -2657,6 +2657,25 @@ step 4; git history has it if ever needed.
   is running, and a dialog answered after the owner switched trips writes nothing
   (`tripsyAttireOverlayTripKey` re-check). The full Refresh path is unchanged and still
   available. `neweventtiers_test.js`.
+- **MID-TRIP, a stale guide updates ITSELF and only speaks up when the bag falls short**
+  ("When an attire guide needs to be re-generated mid-trip, do it automatically trying to
+  make sure that no new clothes will be needed. If none are, don't do anything. If the
+  current clothes are not sufficient, present a dialog explaining what else is needed and
+  why," 2026-11-09). `tripsyAttireAutoUpdateMidTrip(trip)` — owner, online, trip
+  `tripsyTripInProgress`, once per session per itinerary fingerprint
+  (`tripsyAttireAutoUpdatedStates`) — is fired by the My Trips staleness pass
+  (`tripsyFlagStaleAttireButtons`) and by the Clothing Summary in place of the new-events
+  dialog. It merges with NO prompt: new events take `tripsyAttireFindNewGuideEvents`' suggested
+  tier via `tripsyAttireApplyNewEvents(…, {confirmed:false})` (not marked overridden, so a later
+  Refresh may re-judge), folds them into existing outfits, and never runs the packing guidance
+  (the bag is packed). Then `tripsyAttireMidTripShortfalls`: per person, each block no outfit
+  covers (or, with no outfits yet, each block holding a new event) needs a top, bottoms and
+  shoes from that person's PACKED, not-shipped-home garments tagged for the block's tier
+  (`tripsyAttireBlockShortfall`, pure, `tripsyOutfitGarmentRoles`). A person fully covered gets
+  `tripsyGenerateOutfitsInBackground(key, {persons, silent:true})` (incremental — only the new
+  blocks); any shortfall shows one `tripsyConfirmDialog` (`tripsyAttireShortfallText`) naming
+  person, day, dress code, events and the missing piece, with the remedies (Buy Clothes, tag a
+  packed garment, change the dress code). `midtripattire_test.js`.
 - **Physical-activity events are always Athletic** ("for events that involve hikes, biking,
   climbing, running, jogging or anything similar, set the dress category as 'athletic',"
   2026-09-15). Two layers: the events-categorization prompt states the rule (nuance lives with the
@@ -5763,6 +5782,23 @@ WebView's support for recording is unproven.
   the `.tfo-storm*` styles and the note. Git history (`939cf2e`) has it if ever wanted again.
 - **Testing:** verified in Chromium against a synthetic trip, with Leaflet served from npm
   because the sandbox can't reach cdnjs or the tile host. `flyover_test.js`.
+
+### Watch feed (auth Worker, `tools/auth-worker/`)
+
+A read-only Apple Watch feed lives in the auth Worker, not in `index.html` ("Can we make a
+watch app to display some of the data" → a calendar subscription + a Shortcut that shows
+"events for the current day, next day, and select a particular day from any upcoming trip,"
+2026-11-08 — a watch has no browser, so the web app itself can never run there). GET
+`/feed/<FEED_TOKEN>/calendar.ics | day?date= | trips?from= | days?trip=`; the secret is in
+the PATH because a calendar subscription can't send headers, so a link IS read access to the
+schedule (rotate by changing the secret). Drive is read with the stored refresh token of the
+most recently used device whose account is `OWNER_EMAIL` (verified via userinfo; access
+token cached 50 min, trips 5 min in KV). The pure helpers (`feedDayText`, `feedIcs`, …) are
+pinned by `tools/tests/watchfeed_test.js`; setup + the Shortcut recipe are in the Worker's
+README. Deploys from the Cloudflare dashboard on an iPad — no Mac needed. Hotels are a
+check-in + a check-out (never a multi-day block), flights show on departure and arrival
+days, and calendar times convert to UTC via each event's zone or the trip's nearest known
+zone (floating when none).
 
 ### Home's Upcoming Trips box
 

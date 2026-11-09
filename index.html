@@ -35074,6 +35074,9 @@ async function tripsyFlagStaleAttireButtons(container, trips) {
   for (const trip of trips) {
     const guide = guides.find(g => g.tripKey === trip.key);
     const stale = await tripsyAttireGuideIsStale(trip, guide);
+    // Mid-trip, a stale guide is updated automatically (no prompt) -- see
+    // tripsyAttireAutoUpdateMidTrip; its re-render clears this flag.
+    if (stale && isOwner && tripsyTripInProgress(trip)) tripsyAttireAutoUpdateMidTrip(trip);
     // The menu's Daily Dress Guide / Clothing Summary rows carry the verdict; the 👔 glyph
     // then mirrors whatever rows are flagged (a run in flight still wins there).
     container.querySelectorAll(`[data-tripsy-attire-stale-warning="${CSS.escape(trip.key)}"]`)
@@ -38499,7 +38502,7 @@ function showTripsyAttireNewEventsDialog(newEvents) {
 // / laundryDays / guidanceFingerprint are deliberately untouched (a changed
 // per-tier count is exactly what makes the NEXT real Refresh re-run the
 // guidance sizing). Rolls back in memory on a failed save.
-async function tripsyAttireApplyNewEvents(guide, currentDays, picks) {
+async function tripsyAttireApplyNewEvents(guide, currentDays, picks, { confirmed = true } = {}) {
   const prior = new Map();
   (guide.days || []).forEach(d => (d.events || []).forEach(e => prior.set(e.id, e)));
   const snapshot = { days: guide.days, blocks: guide.blocks, counts: guide.counts, eventFingerprint: guide.eventFingerprint };
@@ -38509,7 +38512,8 @@ async function tripsyAttireApplyNewEvents(guide, currentDays, picks) {
       const p = prior.get(ev.id);
       if (p) return { ...ev, category: p.category, categoryOverridden: !!p.categoryOverridden, alternateCategory: p.alternateCategory || '' };
       if (ev.freeDay) return { ...ev, category: 'casual', categoryOverridden: false, alternateCategory: '' };
-      return { ...ev, category: picks.get(ev.id) || 'casual', categoryOverridden: picks.has(ev.id), alternateCategory: '' };
+      // An automatic (unconfirmed) pick is NOT an override, so a later Refresh may re-judge it.
+      return { ...ev, category: picks.get(ev.id) || 'casual', categoryOverridden: confirmed && picks.has(ev.id), alternateCategory: '' };
     }),
   }));
   guide.days = mergedDays;
@@ -38561,6 +38565,106 @@ async function tripsyAttireAdoptNewEventsIntoOutfits(tripKey, guide) {
     if (tripsyOutfitsUncoveredBlocks(guide, outfits).length) needRecompose.push(person);
   }
   return needRecompose;
+}
+// ===== MID-TRIP AUTOMATIC ATTIRE UPDATE (2026-11-09) =====
+// "When an attire guide needs to be re-generated mid-trip, do it automatically trying to
+// make sure that no new clothes will be needed. If none are, don't do anything. If the
+// current clothes are not sufficient, present a dialog explaining what else is needed and
+// why." Once the trip is underway the bag is packed, so a stale guide is updated with NO
+// prompt: new events take the suggested dress code (athletic rule, else the neighbor
+// before/after, else Casual -- the same suggestion the new-events dialog pre-fills, NOT
+// marked overridden), the mechanical merge runs, folded-in events join the existing
+// outfits, and the packing guidance is never re-sized (packingFrozen). Then each time-block
+// still without an outfit (or, for a person with no outfits yet, each block holding a new
+// event) is checked against what that person PACKED: a top, bottoms and shoes tagged for
+// the block's dress code, not shipped home before that day. All covered -> the incremental
+// outfit composer dresses the new blocks in the background, nothing asked. Anything short
+// -> one dialog naming each block, the dress code, the events and the missing piece.
+//
+// The roles nothing in `garments` (already filtered to this person's packed, available
+// pieces) can fill at `block.category`. Pure.
+function tripsyAttireBlockShortfall(block, garments) {
+  const tier = block && block.category;
+  return TRIPSY_OUTFIT_ROLES.filter(role => !(garments || []).some(g =>
+    tripsyOutfitGarmentRoles(g).includes(role) && (!tier || (g.tiers || []).includes(tier))));
+}
+// The dialog text for the shortfalls ({person, block, missing}[]). Pure.
+function tripsyAttireShortfallText(shortfalls) {
+  const lines = shortfalls.map(s => {
+    const who = s.person === 'her' ? 'Hers' : 'His';
+    const tier = TRIPSY_ATTIRE_CATEGORY_LABEL[s.block.category] || s.block.category;
+    const what = s.missing.map(r => (TRIPSY_FLIGHT_WORN_ROLE_LABEL[r] || r).toLowerCase()).join(', ');
+    return `• ${who}: ${tripsyDayHeaderLabel(s.block.dayKey)} — ${tier}${s.block.label ? ` (${s.block.label})` : ''}: no ${what} packed for ${tier}.`;
+  });
+  return `The itinerary changed, and the updated dress codes call for clothes that aren’t in the bag:\n${lines.join('\n')}\n\n`
+    + 'Each of these time-blocks needs a top, bottoms and shoes tagged for its dress code, and nothing packed fills the missing piece. '
+    + 'You can buy something (👔 Clothes → Buy Clothes), tag a packed garment for that dress code in the Wardrobe, or change the event’s dress code in the Daily Dress Guide. '
+    + 'Every other change was applied automatically.';
+}
+// Per person, the blocks to check and what each lacks. Persons = anyone with composed
+// outfits or a packing selection on this trip.
+async function tripsyAttireMidTripShortfalls(tripKey, guide, newEventIds) {
+  const garmentById = new Map((driveData.tripsyWardrobe || []).map(g => [g.id, g]));
+  const selection = tripsyNormalizeTripSelection((driveData.tripsyTripWardrobe || {})[tripKey] || []);
+  const packedIds = [...new Set(selection.map(e => e.id))];
+  const shortfalls = []; const dressable = [];
+  for (const person of ['him', 'her']) {
+    const packed = packedIds.map(id => garmentById.get(id))
+      .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g));
+    const outfits = await Store.getTripsyTripOutfits(tripKey, person);
+    const hasOutfits = !!(outfits && (outfits.blocks || []).some(b => (b.garmentIds || []).length));
+    if (!hasOutfits && !packed.length) continue;
+    const blocks = hasOutfits
+      ? tripsyOutfitsUncoveredBlocks(guide, outfits)
+      : tripsyEnumerateAttireBlocks(guide).filter(b => (b.eventIds || []).some(id => newEventIds.has(id)));
+    let short = false;
+    for (const b of blocks) {
+      const gone = tripsyShipHomeGoneIds(tripKey, person, b.dayKey);
+      const missing = tripsyAttireBlockShortfall(b, packed.filter(g => !gone.has(g.id)));
+      if (missing.length) { short = true; shortfalls.push({ person, block: b, missing }); }
+    }
+    if (hasOutfits && blocks.length && !short) dressable.push(person);
+  }
+  return { shortfalls, dressable };
+}
+// Itinerary states already handled this session (tripKey|fingerprint), so a re-render
+// never re-runs the update or re-shows the dialog for the same change.
+const tripsyAttireAutoUpdatedStates = new Set();
+async function tripsyAttireAutoUpdateMidTrip(trip) {
+  if (!isOwner || !trip || appOfflineMode || tripsyTripsAreOffline) return;
+  const guide = (driveData.tripsyAttireGuides || []).find(g => g.tripKey === trip.key);
+  if (!guide || tripsyAttireGeneratingKeys.has(trip.key) || tripsyOutfitComposingKeys.has(trip.key)) return;
+  if (!tripsyTripInProgress(trip)) return;
+  let currentDays;
+  try { ({ days: currentDays } = await tripsyAttireBuildDays(trip)); } catch (e) { console.error('Mid-trip attire update: could not build days:', e); return; }
+  const fp = tripsyAttireFingerprint(currentDays.flatMap(d => d.events));
+  const stateKey = `${trip.key}|${fp.hash}|${fp.count}`;
+  if (tripsyAttireAutoUpdatedStates.has(stateKey)) return;
+  tripsyAttireAutoUpdatedStates.add(stateKey);
+  tripsyAttireGeneratingKeys.add(trip.key);
+  try {
+    const newEvents = tripsyAttireFindNewGuideEvents(guide, currentDays);
+    const picks = new Map(newEvents.map(n => [n.ev.id, n.suggested]));
+    const saved = await tripsyAttireApplyNewEvents(guide, currentDays, picks, { confirmed: false });
+    if (!saved) { tripsyAttireAutoUpdatedStates.delete(stateKey); console.error('Mid-trip attire update: save failed'); return; }
+    try { await tripsyAttireAdoptNewEventsIntoOutfits(trip.key, guide); } catch (e) { console.error('Outfit adoption failed (non-fatal):', e); }
+    const { shortfalls, dressable } = await tripsyAttireMidTripShortfalls(trip.key, guide, new Set(newEvents.map(n => n.ev.id)));
+    tripsyAttireGeneratingKeys.delete(trip.key);
+    const dg = document.getElementById('tripsy-attire-dressguide-overlay');
+    if (dg && dg.style.display !== 'none') await showTripsyDailyDressGuide(trip.key);
+    const ov = document.getElementById('tripsy-attire-overlay');
+    if (ov && ov.style.display !== 'none' && tripsyAttireOverlayTripKey === trip.key) await showTripsyAttireOverlay(trip.key);
+    if (currentView === 'tripsytrips') renderTripsyEventsList();
+    if (dressable.length) tripsyGenerateOutfitsInBackground(trip.key, { persons: dressable, silent: true });
+    if (shortfalls.length) {
+      await tripsyConfirmDialog(tripsyAttireShortfallText(shortfalls),
+        { title: `👔 ${trip.name || 'This trip'}: more clothes needed`, yes: 'OK', no: null });
+    }
+  } catch (e) {
+    console.error('Mid-trip attire update failed:', e);
+  } finally {
+    tripsyAttireGeneratingKeys.delete(trip.key);
+  }
 }
 // Once per session per (trip, itinerary state) -- declining must not re-nag
 // on every overlay open, while genuinely NEWER additions prompt again.
@@ -39184,7 +39288,10 @@ async function showTripsyAttireOverlay(tripKey) {
     // whole guide via Claude). Once per session per itinerary state -- a
     // declined dialog stays declined until the itinerary actually changes
     // again -- and never while a generation is already running for this trip.
-    if (isOwner && stale && currentDays && !tripsyAttireGeneratingKeys.has(tripKey)) {
+    // Mid-trip there is no question: the automatic update handles it (and repaints).
+    if (isOwner && stale && currentDays && tripsyTripInProgress(trip)) {
+      tripsyAttireAutoUpdateMidTrip(trip);
+    } else if (isOwner && stale && currentDays && !tripsyAttireGeneratingKeys.has(tripKey)) {
       const promptKey = `${tripKey}::${currentFingerprint ? currentFingerprint.hash : ''}`;
       const newEvents = tripsyAttireFindNewGuideEvents(saved, currentDays);
       if (newEvents.length && !tripsyAttireNewEventsPrompted.has(promptKey)) {
@@ -41631,15 +41738,17 @@ const tripsyOutfitComposingKeys = new Set();
 // to refresh) is composed in turn, with no blocking spinner -- the menu item flashes ⏳
 // for the duration and flips to View Outfits on the re-render that ends the run.
 // Fire-and-forget; one run per trip at a time.
-function tripsyGenerateOutfitsInBackground(tripKey) {
-  if (tripsyOutfitComposingKeys.has(tripKey)) { toast('Outfits are already being generated for this trip…'); return; }
+// opts.persons limits the run (the mid-trip auto-update dresses only the people whose
+// packed clothes cover their new blocks); opts.silent drops the start toast.
+function tripsyGenerateOutfitsInBackground(tripKey, opts = {}) {
+  if (tripsyOutfitComposingKeys.has(tripKey)) { if (!opts.silent) toast('Outfits are already being generated for this trip…'); return; }
   const guide = (driveData.tripsyAttireGuides || []).find(g => g.tripKey === tripKey) || null;
   const hasFor = p => !!(driveData.tripsyTripOutfits || []).find(o => o.tripKey === tripKey && (o.person || 'him') === p && (o.blocks || []).some(b => b.garmentIds && b.garmentIds.length));
-  const persons = ['him', 'her'].filter(p => hasFor(p) || tripsyPlanPackingIsComplete(guide, tripKey, p));
-  if (!persons.length) { toast('Complete a Packing List first — outfits are composed from the garments you pick.', 'error'); return; }
+  const persons = (opts.persons || ['him', 'her']).filter(p => hasFor(p) || tripsyPlanPackingIsComplete(guide, tripKey, p));
+  if (!persons.length) { if (!opts.silent) toast('Complete a Packing List first — outfits are composed from the garments you pick.', 'error'); return; }
   tripsyOutfitComposingKeys.add(tripKey);
   tripsyRefreshOutfitGeneratingBadges();
-  toast('Generating outfits in the background — you can keep using the app.');
+  if (!opts.silent) toast('Generating outfits in the background — you can keep using the app.');
   (async () => {
     try {
       for (const p of persons) await runTripsyOutfitComposition(tripKey, p, { quiet: true });
