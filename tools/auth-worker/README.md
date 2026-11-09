@@ -110,3 +110,71 @@ is revoked. It is 32 random bytes from the platform CSPRNG, stored in that brows
 
 This is the ordinary "keep me signed in" tradeoff: real persistence means a long-lived
 credential exists somewhere. The alternative is the hourly re-login this replaces.
+
+## Watch feed (calendar + Shortcut)
+
+The same Worker also serves a **read-only** feed of the trip schedule for an Apple Watch:
+a calendar subscription, and three small endpoints a Shortcut calls. Everything is a
+`GET` under `/feed/<FEED_TOKEN>/`, where `FEED_TOKEN` is a long random secret. A
+calendar subscription can't send headers, so the secret has to be in the URL: **anyone
+with one of these links can read the schedule** (never write, never anything but trips).
+Change the `FEED_TOKEN` secret to cut every old link off.
+
+To read Drive the feed borrows a sign-in this Worker already stores: the most recently
+used device whose Google account is `OWNER_EMAIL`. It keeps working as long as the owner
+stays signed in on at least one device; after signing out everywhere it answers `503`
+until the next sign-in. Trip data is cached for five minutes.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /feed/<t>/calendar.ics` | iCalendar of every current and upcoming trip (and the last week) |
+| `GET /feed/<t>/day?date=2026-11-12` | that day's events as readable text, across every trip |
+| `GET /feed/<t>/trips?from=2026-11-08` | one line per trip not yet over on that date |
+| `GET /feed/<t>/days?trip=<a line from /trips>` | one line per day of that trip, e.g. `Thu, Nov 12 2026` |
+
+`day` also accepts a line from `/days` as its `date`. Hotels show as a check-in and a
+check-out (and "Staying at …" on the nights between), flights on their departure day and
+again on their arrival day. Calendar times are converted to UTC from each event's own time
+zone, or the trip's nearest known zone; an event on a trip with no zone at all is a
+"floating" time, which shows in whatever zone the phone is in.
+
+### Turning it on (iPad is fine, no Mac needed)
+
+1. Cloudflare dashboard → **Workers & Pages** → `travel-tracker-auth` → **Edit code**.
+   Replace `worker.js` with this folder's file and press **Deploy**.
+2. **Settings → Variables and secrets**: add a **Secret** `FEED_TOKEN` (40+ random
+   letters and digits) and a **Text** variable `OWNER_EMAIL` = the owner's Google email.
+3. **Deploy once more** (a new secret is not live until the next deploy — see above).
+4. Check: `https://travel-tracker-auth.jskagan.workers.dev/feed/<FEED_TOKEN>/trips` lists
+   your upcoming trips.
+
+### Calendar on the watch
+
+iPhone: **Settings → Apps → Calendar → Calendar Accounts → Add Account → Other → Add
+Subscribed Calendar**, server
+`https://travel-tracker-auth.jskagan.workers.dev/feed/<FEED_TOKEN>/calendar.ics`. The
+watch's Calendar app and its complications show the events.
+
+### The Shortcut ("Trip Day")
+
+Build it in the Shortcuts app on the iPhone. `BASE` below means
+`https://travel-tracker-auth.jskagan.workers.dev/feed/<FEED_TOKEN>`.
+
+1. **Choose from Menu** with three items: *Today*, *Tomorrow*, *Pick a day*.
+2. Under **Today**:
+   - **Date** (Current Date) → **Format Date**: Custom, `yyyy-MM-dd`.
+   - **Text**: `BASE/day?date=` + Formatted Date.
+3. Under **Tomorrow**:
+   - **Date** (Current Date) → **Adjust Date**: Add 1 day → **Format Date**: Custom, `yyyy-MM-dd`.
+   - **Text**: `BASE/day?date=` + Formatted Date.
+4. Under **Pick a day**:
+   - **Date** → **Format Date** `yyyy-MM-dd`.
+   - **Get Contents of URL**: `BASE/trips?from=` + Formatted Date.
+   - **Split Text** by New Lines → **Choose from List** (prompt "Trip").
+   - **URL Encode** the chosen item → **Get Contents of URL**: `BASE/days?trip=` + URL Encoded Text.
+   - **Split Text** by New Lines → **Choose from List** (prompt "Day").
+   - **URL Encode** the chosen item → **Text**: `BASE/day?date=` + URL Encoded Text.
+5. After **End Menu**: **Get Contents of URL** with the menu's result → **Show Result**.
+6. Shortcut details (ⓘ): turn on **Show on Apple Watch**.
+
+On the watch, run it from the Shortcuts app or add it as a complication.
