@@ -121,3 +121,13 @@ assert(/Omitted — New York City/.test(html.slice(html.indexOf('const TRIPSY_AT
   'the badge reads "Omitted — New York City"');
 assert(/const tvNycOmitted = tripsyAttireNycOmittedIds\(trip\);/.test(html) && /isOmitted && \(i === 0/.test(html),
   'Travel View\'s dress-code mode labels NYC events Omitted too');
+
+// ---- an outfit composed for an empty New York day is dropped (2026-11-10) ----
+{
+  const stay = [...tripsyAttireNycStayDays(trip)].sort();
+  const nyDay = stay.find(k => true);
+  const o = { blocks: [{ dayKey: nyDay, eventIds: ['freeday-' + nyDay], garmentIds: ['g1'] },
+    { dayKey: '2030-03-01', eventIds: ['freeday-2030-03-01'], garmentIds: ['g2'] }] };
+  assert(stay.length > 0 && tripsyOutfitDropOutfitlessTransit(o, trip) && o.blocks.length === 1 && o.blocks[0].garmentIds[0] === 'g2',
+    'a free-day outfit on a New York stay day is dropped (so it is never counted as worn); a free day elsewhere keeps its outfit');
+}

@@ -2686,6 +2686,23 @@ step 4; git history has it if ever needed.
   the saved-guide retrofit drops a stay day holding only placeholders, and
   `tripsyAttireNycOmittedRowsByDay` lists each as one "In New York City" omitted row.
   `nycomit_test.js`.
+  **An outfit composed for an empty New York day is dropped on read** ("I am in New York and so
+  none of the packed clothes could be dirty," 2026-11-10): `tripsyOutfitDropOutfitlessTransit`
+  also removes a `freeday-<day>` id whose day is a `tripsyAttireNycStayDays` day, so a block
+  saved before the stay-day rule no longer counts as a wearing there (laundry, run-out, wear
+  days). Wearings BEFORE New York — the flight in included — still count as dirty; a first cut
+  that reset all laundry at New York was rejected the same day. Don't re-add it.
+  **The real cause was the TIER fallback, and it is fixed there** ("The app was showing
+  multiple sets of dirty clothes when there should have been one set at most for the flight,"
+  same day, with a screenshot of four casual tops dirty): with no outfits composed,
+  `tripsyWardrobeWearDaysFromLines`' rule 3 counted EVERY garment on a tier's line as worn at
+  EVERY event of that tier, so the one casual flight dirtied all four casual tops. Rule 3 now
+  (a) never counts the departing flight (`tripsyWardrobeFlightDepartureEvent`) for an ordinary
+  line — the flight-worn lines' garments wear it — and (b) takes an optional fifth arg
+  `opts.share(e)` → `{total, mine}`: `tripsyWardrobeWearDays` passes each garment its slots
+  among the copies picked for the same tier+line (selection order, one slot per copy), and the
+  tier's days are handed out in turn, one garment a day. Generic "No Picture" lines pass no
+  share and keep every day. `flightworndays_test.js`.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"
   2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day

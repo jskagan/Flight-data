@@ -12147,7 +12147,7 @@ function tripsyWearDaysGroupByDay(evs) {
 // has no wardrobe record and therefore no garment id, only the line it was added
 // to, so it can never take that function's outfit-based path -- but everything
 // from step 2 down is keyed by line, not by garment.
-function tripsyWardrobeWearDaysFromLines(guide, person, lines, nameHint) {
+function tripsyWardrobeWearDaysFromLines(guide, person, lines, nameHint, opts) {
   if (!guide || !lines || !lines.length) return { days: [], basis: 'none', outfitLinked: false };
   const evById = new Map();
   const allDays = [];
@@ -12180,12 +12180,25 @@ function tripsyWardrobeWearDaysFromLines(guide, person, lines, nameHint) {
     const linked = ((item && item.eventIds) || []).map(id => evById.get(id)).filter(Boolean);
     if (linked.length) { evs.push(...linked); continue; }
     // 3. No links: a dress-code tier means "whenever you're dressed at that level".
+    // Two limits on that ("The app was showing multiple sets of dirty clothes when there
+    // should have been one set at most for the flight," 2026-11-10 -- with no outfits
+    // composed, all four casual tops counted as worn on the one casual flight):
+    //  - the DEPARTING FLIGHT is worn in the flight-worn lines' garments, never an
+    //    ordinary line's, so it is not one of this line's occasions;
+    //  - the garments sharing a line take the tier's days IN TURN (opts.share: this
+    //    garment's slots among the line's copies) -- one top a day, not every top every day.
     if (e.category !== TRIPSY_WARDROBE_GENERAL_TIER) {
       basis = 'tier';
+      const dep = tripsyWardrobeFlightDepartureEvent(guide);
+      const share = (opts && typeof opts.share === 'function') ? opts.share(e) : null;
+      let dayIndex = 0;
       for (const day of allDays) {
-        for (const ev of (day.events || [])) {
-          if ((ev.displayCategory || ev.category) === e.category) evs.push({ ...ev, dayKey: day.dayKey });
-        }
+        const mine = (day.events || []).filter(ev => (ev.displayCategory || ev.category) === e.category
+          && !(dep && dep.id === ev.id && dep.dayKey === day.dayKey));
+        if (!mine.length) continue;
+        const turn = dayIndex++;
+        if (share && share.total > 1 && !share.mine.includes(turn % share.total)) continue;
+        for (const ev of mine) evs.push({ ...ev, dayKey: day.dayKey });
       }
       continue;
     }
@@ -12240,10 +12253,22 @@ async function tripsyWardrobeWearDays(tripKey, garmentId, person) {
   // back to where the garment is ALLOCATED: the line it was picked for.
   const byId = new Map((garments || []).map(g => [g.id, g]));
   const garment = byId.get(garmentId);
-  const sel = tripsyWardrobeResolveSelectionLines(tripsyNormalizeTripSelection(selectedRaw), guide, byId)
-    .filter(e => e.id === garmentId && e.category);
+  const resolved = tripsyWardrobeResolveSelectionLines(tripsyNormalizeTripSelection(selectedRaw), guide, byId);
+  const sel = resolved.filter(e => e.id === garmentId && e.category);
   if (!sel.length || !guide) return { days: [], basis: 'none', outfitLinked: false };
-  return tripsyWardrobeWearDaysFromLines(guide, person, sel, (garment && garment.name) || '');
+  // This garment's turns among the copies picked for the same line (selection order, one
+  // slot per copy), so the tier rule hands each day to ONE of them.
+  const share = e => {
+    const slots = [];
+    for (const x of resolved) {
+      if (x.category !== e.category || x.line !== e.line) continue;
+      const g = byId.get(x.id);
+      if (!g || (g.person || 'him') !== person) continue;
+      for (let i = 0; i < Math.max(1, x.qty || 1); i++) slots.push(x.id);
+    }
+    return { total: slots.length, mine: slots.map((id, i) => id === garmentId ? i : -1).filter(i => i >= 0) };
+  };
+  return tripsyWardrobeWearDaysFromLines(guide, person, sel, (garment && garment.name) || '', { share });
 }
 // The "Wear Days" screen: one amber day header per date, that day's events beneath it,
 // each tappable to open the full outfit for it (showTripsyOutfitModal -- the same view
@@ -13748,7 +13773,7 @@ async function showTripsyWearDaysOverlay(tripKey, garment, person) {
   const note = {
     outfits: 'From your composed outfits — the exact blocks this piece is worn in.',
     line: 'From the events the attire guide links to the line you picked this for.',
-    tier: 'Every occasion at this dress code — outfits haven’t been composed for it.',
+    tier: 'Its turn among the garments picked for this line, on days at this dress code — outfits haven’t been composed for it.',
     dressy: 'Every dressy occasion — worn under formal, semi-formal and cocktail clothes.',
     daily: 'Every day of the trip.',
   }[basis] || '';
@@ -41211,10 +41236,17 @@ function tripsyAttireDropOutfitlessTransit(guide, trip) {
 function tripsyOutfitDropOutfitlessTransit(outfits, trip) {
   if (!outfits || !Array.isArray(outfits.blocks) || !trip) return false;
   const drop = tripsyAttireNoOutfitIds(trip); // outfitless transit + NYC events
-  if (!drop.size) return false;
+  // An empty day spent in New York dresses nothing either ("I am in New York and so none
+  // of the packed clothes could be dirty," 2026-11-10): an outfit composed for its "No
+  // events planned" placeholder before the stay-day rule would otherwise still count as
+  // worn there, and show on the laundry list as dirty.
+  let stays = new Set();
+  try { stays = tripsyAttireNycStayDays(trip); } catch (e) { /* best-effort */ }
+  if (!drop.size && !stays.size) return false;
+  const gone = id => drop.has(tripsyAttireEventBaseId(id)) || (/^freeday-/.test(String(id)) && stays.has(String(id).slice(8)));
   let changed = false;
   outfits.blocks = outfits.blocks.map(b => {
-    const ids = (b.eventIds || []).filter(id => !drop.has(tripsyAttireEventBaseId(id)));
+    const ids = (b.eventIds || []).filter(id => !gone(id));
     if (ids.length !== (b.eventIds || []).length) { changed = true; return { ...b, eventIds: ids }; }
     return b;
   }).filter(b => {

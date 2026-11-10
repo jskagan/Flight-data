@@ -74,7 +74,14 @@ assert(!result.days.some(d => d.dayKey === '2026-08-19'), '8/19 is NOT a wear da
 const ordinaryLine = [{ category: 'casual', line: 'Casual tops' }];
 const ordinary = tripsyWardrobeWearDaysFromLines(guide, 'him', ordinaryLine, 'Blue Polo');
 assert(ordinary.basis === 'tier', 'an ordinary line still uses the tier rule -> ' + ordinary.basis);
-assert(ordinary.days.length === 4, 'and correctly spans every casual day on the trip -> ' + ordinary.days.length);
+assert(ordinary.days.length === 3 && !ordinary.days.some(d => d.dayKey === '2026-08-14'), 'and spans every casual day EXCEPT the departing flight, which the flight-worn garments wear (2026-11-10) -> ' + ordinary.days.length);
+// Garments sharing a line take the tier's days in turn ("multiple sets of dirty clothes when
+// there should have been one set at most for the flight," 2026-11-10).
+const turnA = tripsyWardrobeWearDaysFromLines(guide, 'him', ordinaryLine, 'Blue Polo', { share: () => ({ total: 2, mine: [0] }) });
+const turnB = tripsyWardrobeWearDaysFromLines(guide, 'him', ordinaryLine, 'Green Polo', { share: () => ({ total: 2, mine: [1] }) });
+assert(turnA.days.length === 2 && turnB.days.length === 1 && !turnA.days.some(d => turnB.days.some(x => x.dayKey === d.dayKey)),
+  'two tops on one line split the casual days between them, never both on one day -> ' + turnA.days.length + '/' + turnB.days.length);
+assert(/const share = e => \{[\s\S]*?slots\.push\(x\.id\)[\s\S]*?\{ share \}\);/.test(html), 'a real garment is given its turns among the copies picked for the same line');
 
 // No departing flight at all -> the flight-worn line resolves to zero wear days
 // rather than throwing or silently falling back to the tier-wide behavior.
