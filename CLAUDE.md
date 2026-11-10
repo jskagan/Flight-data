@@ -16,6 +16,13 @@ nothing to install or compile. The file **must** be named `index.html`, not some
 descriptive — this repo is deployed via GitHub Pages (`jskagan.github.io/Flight-data`, repo
 `jskagan/Flight-data`), which requires that exact filename as the served entry point.
 
+**Two images ARE served at runtime: `fopbp-photo.jpg` and `hats-photo.jpg`** (2026-11-10, "Do the
+three low-risk ones" of an efficiency review). They are the logo-tap overlay photos, formerly the
+embedded `FOPBP_PHOTO_B64`/`HATS_PHOTO_B64` (~300 KB of every page load for pictures shown only on
+a tap); `showOverlayPhoto(url, …)` now loads `FOPBP_PHOTO_URL`/`HATS_PHOTO_URL` on the tap and
+shows the overlay only once the image has loaded (a failed load shows nothing). Deleting either
+file breaks its easter egg. Every other image is still embedded.
+
 The repo also has a few source image assets (`Interior.jpeg`, `Home.png`, etc.) sitting alongside
 `index.html` — these are **not** served/referenced at runtime. They exist only as the originals
 behind base64 constants embedded directly in the JS (e.g. `FOPBP_PHOTO_B64`,
@@ -331,6 +338,16 @@ Cached data always shows immediately on load; syncing happens invisibly behind i
 (stale-while-revalidate). Failures are logged, not surfaced to the user, since this runs
 unattended on every open. Tripsy Trips does not fit this shape at all — see below for how it
 actually refreshes.
+
+**The startup syncs' timestamps go up in ONE save** (2026-11-10): each sync used to end with
+`Store.setSyncTimestamp` → a whole-file upload, three on every open even when nothing changed.
+While `runBackgroundSyncs` runs (`_syncTimestampBatching`), `setSyncTimestamp` only records the
+value in memory and in `_deferredSyncTimestamps`; any real save meanwhile carries it (a successful
+`persistDriveData` clears the map), and `flushDeferredSyncTimestamps` in the function's `finally`
+writes what is left through the conflict-retrying save. Only timestamps are held back — they are
+re-derivable; real data writes (merged reservations, drained relays) still save at once, since a
+relay file is deleted on the strength of its save. Outside the batch (Force Sync, relay polls) a
+timestamp saves immediately as before. `efficiency_test.js`.
 
 **There is deliberately no "Refresh All" catch-all** (a Utilities menu item + `refreshAllReports()`,
 removed 2026-08-29 as fully redundant — don't re-add it). Its three sync pipelines (reservations,
@@ -1271,6 +1288,12 @@ step 4; git history has it if ever needed.
   place — deliberately NOT a full re-render, which would tear down open panels and yank the
   scroll mid-read. A slot that still resolves nothing keeps what it shows (a background pass
   never blanks a chip). `mytripsweather_test.js`.
+- **My Trips renders that are still WAITING share one render** (2026-11-10):
+  `renderTripsyEventsList` already ran its renders one after another; now a call made while a
+  render is queued but not started (several in one tick, or any number behind a render in
+  progress) returns that queued render's promise (`_tripsyEventsListQueuedRender`) instead of
+  queuing another full rebuild — it has not started, so it paints the latest state anyway.
+  `efficiency_test.js`.
 - **ONE shared IndexedDB connection per page, and the My Trips render never waits long on it**
   ("The buttons to select individual trips from the my trips page are reacting very slowly,"
   2026-10-03): every trip tap re-runs `renderTripsyEventsListImpl`, which awaited
