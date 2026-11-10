@@ -19,8 +19,8 @@ assert(/confirm\(`Delete "\$\{row\.tripsy_summary\}"\? This can't be undone\.`\)
   'THE BUG: the Update-page delete confirm no longer mentions Tripsy or a sync delay');
 assert(/confirm\(`Delete the entire "\$\{name\}" trip\? This can't be undone\.`\)/.test(html),
   'the whole-trip delete confirm too');
-assert(/confirm\(`Delete "\$\{summary\}"\? This can't be undone\.`\)/.test(html),
-  'and the single-event delete confirm from the timeline');
+assert(/toastUndo\(`Deleted “\$\{summary\}”\.`/.test(html) && !/Delete "\$\{summary\}"[^`]*sync/.test(html),
+  'and the single-event delete from the timeline (an Undo toast since 2026-11-10)');
 assert(!/from Tripsy\? This can't be undone once it syncs/.test(html),
   'sanity: the old wording is gone everywhere, not just patched in one spot');
 

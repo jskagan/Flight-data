@@ -95,7 +95,7 @@ const generics = [{ category: 'general', typeKey: 'socks', name: 'Socks', qty: 3
     'Laundry uses the Daily Dress Guide\'s own dirty-garment judgement, for both people');
   assert(/tripsyTravelViewTodayKey\(trip, /.test(page), 'today is the TRIP\'s local today');
   assert(/view\.mode !== 'list'\) \{ view = \{ mode: 'list' \}; render\(\); return; \}/.test(page), 'Close is contextual: a drill-down goes back to the list');
-  assert(/class="tripsy-close-x" data-tw-location-close/.test(page), 'the red ✕ close box, like every attire page');
+  assert(/tripsyBackOrCloseHtml\('data-tw-location-close', !!back\)/.test(page), 'the list closes with the red ✕; a drill-down shows ‹ Back');
   assert(/data-tw-photo=/.test(page) && /tripsyWardrobeLoadPhotos\(ov\)/.test(page), 'garments are shown as photo cards');
   const menuAt = html.indexOf(`data-tripsy-attire-nav="location"`);
   const refreshAt = html.indexOf(`data-tripsy-attire-nav="refresh"`);

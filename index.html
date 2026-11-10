@@ -655,6 +655,9 @@
   .back-link:hover { color: var(--text); }
 
   .parse-summary { display: flex; gap: 20px; align-items: center; margin: 16px 0; }
+  /* A row of the timeline's "⋯" menu: a full-width, labelled, comfortably tall tap target. */
+  .tripsy-row-menu-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font-size: 14px; padding: 10px 12px; border: none; background: none; border-radius: 6px; }
+  .tripsy-row-menu-item:hover { background: var(--panel); }
   .toast {
     position: fixed; bottom: 24px; right: 24px; background: var(--panel-2); border: 1px solid var(--line);
     border-radius: 8px; padding: 12px 18px; font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
@@ -6915,6 +6918,73 @@ function toast(msg, type = "success") {
   setTimeout(() => el.remove(), 4200);
 }
 
+// UNDO INSTEAD OF CONFIRM (2026-11-10): a toast with an Undo button for a delete that is
+// easy to take back. The action is DELAYED, not reversed: the caller hides the thing at once,
+// and onCommit (the real delete) runs only when the toast times out -- Undo just calls onUndo
+// to show it again, so nothing ever has to be re-created. One at a time: starting another
+// commits the one still showing, and so does the page going to the background (a delete the
+// owner saw happen must not be lost because they switched apps).
+let _tripsyUndoToast = null;
+function toastUndo(msg, { onUndo, onCommit, ms = 6000 } = {}) {
+  if (_tripsyUndoToast) _tripsyUndoToast.commitNow();
+  const root = document.getElementById('toast-root');
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.style.cssText = 'display:flex; align-items:center; gap:14px; bottom:84px;';
+  const text = document.createElement('span');
+  text.textContent = msg;
+  const btn = document.createElement('button');
+  btn.className = 'btn';
+  btn.textContent = 'Undo';
+  btn.style.cssText = 'flex-shrink:0; font-size:13px; padding:5px 12px; font-weight:700;';
+  el.append(text, btn);
+  root.appendChild(el);
+  let settled = false;
+  const finish = undo => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    el.remove();
+    if (_tripsyUndoToast === handle) _tripsyUndoToast = null;
+    try { const fn = undo ? onUndo : onCommit; if (fn) fn(); } catch (e) { console.error('toastUndo action failed:', e); }
+  };
+  const timer = setTimeout(() => finish(false), ms);
+  btn.onclick = () => finish(true);
+  const handle = { commitNow: () => finish(false) };
+  _tripsyUndoToast = handle;
+  return handle;
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden && _tripsyUndoToast) _tripsyUndoToast.commitNow(); });
+// BACK vs CLOSE, one rule (2026-11-10): a button that returns ONE LEVEL is the orange
+// "‹ Back"; a button that closes the whole page is the red ✕. The packing screens' single
+// contextual button used to wear the ✕ in both roles. Same element, same handler -- only
+// what it looks like follows what it will do.
+function tripsySetBackOrClose(btn, isBack) {
+  if (!btn) return;
+  btn.className = isBack ? 'tripsy-back-btn' : 'tripsy-close-x';
+  btn.innerHTML = isBack ? '‹ Back' : '&#10005;';
+  btn.title = isBack ? 'Back' : 'Close';
+  btn.setAttribute('aria-label', btn.title);
+}
+function tripsyBackOrCloseHtml(attrs, isBack) {
+  return isBack
+    ? `<button class="tripsy-back-btn" ${attrs} aria-label="Back" title="Back">‹ Back</button>`
+    : `<button class="tripsy-close-x" ${attrs} aria-label="Close" title="Close">&#10005;</button>`;
+}
+// Event rows whose Delete is waiting out its Undo toast: hidden, not yet deleted.
+const tripsyPendingDeleteEventKeys = new Set();
+function tripsyHidePendingDeleteRows(container) {
+  if (!container || !tripsyPendingDeleteEventKeys.size) return;
+  container.querySelectorAll('[data-tripsy-delete-event]').forEach(b => {
+    if (!tripsyPendingDeleteEventKeys.has(b.dataset.key)) return;
+    // Removed, not hidden: the connector pass measures every row's dot still in the page,
+    // and a hidden row's measures as (0,0), drawing a line up to the top of the card.
+    // Undo re-renders the list, which brings the row back.
+    const row = b.closest('.tripsy-tl-row');
+    if (row) row.remove();
+  });
+}
+
 function legsNeedingReviewCount(inv) {
   return (inv.flight_legs || []).filter(l => l._warnings && l._warnings.length).length;
 }
@@ -12511,7 +12581,7 @@ async function showTripsyShipHomeGarmentDays(tripKey, dayKey, person, item, opts
       <div class="tw-modal-paper tw-wide">
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;">
           <h2 style="margin:0; font-size:18px; min-width:0; overflow:hidden; text-overflow:ellipsis;">${esc(item.name)} — after ${esc(tripsyDayHeaderLabel(dayKey))}</h2>
-          <button class="tripsy-close-x" data-ship-garment-back aria-label="Back" title="Back to Ship Home">&#10005;</button>
+          <button class="tripsy-back-btn" data-ship-garment-back aria-label="Back" title="Back to Ship Home">‹ Back</button>
         </div>
         <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">${blocks.length
           ? `Still worn in ${blocks.length} outfit${blocks.length === 1 ? '' : 's'} after the ship day. Swap it out of each one and it can go home.`
@@ -15078,7 +15148,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
 
   const renderList = () => {
     closeBtn.style.display = 'inline-flex'; // .tripsy-close-x centres its glyph with flex
-    // No textContent: the button is the red-X box, whose glyph is in the static markup.
+    tripsySetBackOrClose(closeBtn, false); // on the list it closes the page
     setListOnlyButtons(true);
     countEl.innerHTML = '';
     if (!tiers.length) {
@@ -15144,7 +15214,7 @@ async function tripsyWardrobePackForTrip(tripKey, tripName, initialPerson = 'him
     const ln = lines[lineIndex];
     if (!ln) { view = { mode: 'list' }; renderList(); return; }
     closeBtn.style.display = 'inline-flex'; // .tripsy-close-x centres its glyph with flex
-    // No textContent: the button is the red-X box, whose glyph is in the static markup.
+    tripsySetBackOrClose(closeBtn, true); // on a garment page it goes back to the list
     setListOnlyButtons(false);
     // The header tally follows the page: on a garment page it is THIS LINE's own
     // selected/needed, not the trip-wide total the list shows. Left alone it kept
@@ -15723,6 +15793,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
   const partialBadge = n => `<div style="position:absolute; top:6px; right:6px; background:var(--amber); color:#04210F; border-radius:11px; min-width:22px; height:22px; padding:0 6px; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:12px;">${n}</div>`;
 
   const renderList = () => {
+    tripsySetBackOrClose(ov.querySelector('#tw-packlist-done'), false);
     setListOnlyButtons(true);
     // Overall physical-packing progress across every selected piece for this person.
     const chosenSel = [...chosen].map(([id, v]) => ({ g: garmentById.get(id), ...v })).filter(x => x.g && isPerson(x.g));
@@ -15789,6 +15860,7 @@ async function tripsyWardrobePackingList(tripKey, tripName, initialPerson = 'him
     const lines = needLines[tier] || [];
     const ln = lines[lineIndex];
     if (!ln) { statusView = { mode: 'list' }; renderList(); return; }
+    tripsySetBackOrClose(ov.querySelector('#tw-packlist-done'), true);
     setListOnlyButtons(false);
     const { byLine } = tripsyWardrobeAssignGarments(lines, selectedForTier(tier));
     const garmentItems = byLine[lineIndex] || [];       // {g, qty}
@@ -16128,10 +16200,11 @@ async function showTripsyGarmentLocation(tripKey, tripName) {
   ov.style.zIndex = '2147483140';
   const title = `Garment Location${tripName ? ` — ${tripName}` : ''}`;
   const shell = inner => `<div class="tw-modal-paper" style="max-width:560px;">${inner}</div>`;
-  const header = (h, sub) => `
+  // `back`: a drill-down's button returns to the list (‹ Back); the list's closes the page (✕).
+  const header = (h, sub, back) => `
     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px;">
       <div style="min-width:0;"><h2 style="margin:0; font-size:18px; overflow:hidden; text-overflow:ellipsis;">${h}</h2>${sub ? `<div style="font-size:12px; color:var(--muted);">${sub}</div>` : ''}</div>
-      <button class="tripsy-close-x" data-tw-location-close aria-label="Close" title="Close">&#10005;</button>
+      ${tripsyBackOrCloseHtml('data-tw-location-close', !!back)}
     </div>`;
   ov.innerHTML = shell(header(esc(title)) + `<div style="padding:16px 0; color:var(--muted);">Loading…</div>`);
   ov.style.display = 'flex';
@@ -16180,14 +16253,14 @@ async function showTripsyGarmentLocation(tripKey, tripName) {
       const items = [...(contents.get(view.id) || new Map()).values()];
       ov.innerHTML = shell(header(
         `<span style="display:inline-flex; align-items:center; gap:10px;">${row ? tile(row) : ''}<span>${esc(row ? row.label : 'Cube')}</span></span>`,
-        `${items.reduce((n, it) => n + it.count, 0)} item${items.length === 1 && items[0].count === 1 ? '' : 's'}`)
+        `${items.reduce((n, it) => n + it.count, 0)} item${items.length === 1 && items[0].count === 1 ? '' : 's'}`, true)
         + (items.length ? `<div class="tw-grid">${items.map(cardHtml).join('')}</div>` : `<div class="empty-state" style="margin-top:12px;">Nothing packed here.</div>`));
       tripsyPaintCubePhotos(ov);
       tripsyWardrobeLoadPhotos(ov);
       return;
     }
     if (view.mode === 'laundry') {
-      ov.innerHTML = shell(header('🧺 Laundry', 'Garments that need cleaning') + `<div style="padding:16px 0; color:var(--muted);">Checking what has been worn…</div>`);
+      ov.innerHTML = shell(header('🧺 Laundry', 'Garments that need cleaning', true) + `<div style="padding:16px 0; color:var(--muted);">Checking what has been worn…</div>`);
       const { dayKey, perPerson } = await loadLaundry();
       if (view.mode !== 'laundry' || ov.style.display === 'none') return;
       let body;
@@ -16200,7 +16273,7 @@ async function showTripsyGarmentLocation(tripKey, tripName) {
         }).join('');
         body = sections || `<div class="empty-state" style="margin-top:12px;">Nothing needs cleaning as of ${esc(formatTripDateRange(dayKey, dayKey))}.</div>`;
       }
-      ov.innerHTML = shell(header('🧺 Laundry', dayKey ? `Needing cleaning as of ${esc(formatTripDateRange(dayKey, dayKey))}` : '') + body);
+      ov.innerHTML = shell(header('🧺 Laundry', dayKey ? `Needing cleaning as of ${esc(formatTripDateRange(dayKey, dayKey))}` : '', true) + body);
       tripsyWardrobeLoadPhotos(ov);
       return;
     }
@@ -16279,7 +16352,7 @@ function showTripsyCubeContents(getState, onChanged) {
                 <div style="font-size:12px; color:var(--muted);">${total} item${total === 1 ? '' : 's'}${cube && cube.brand ? ` · ${esc(cube.brand)}` : ''}</div>
               </div>
             </div>
-            <button class="tripsy-close-x" data-tw-cubes-close aria-label="Close" title="Close">&#10005;</button>
+            ${tripsyBackOrCloseHtml('data-tw-cubes-close', true)}
           </div>
           ${cards ? `<div class="tw-grid">${cards}</div>` : `<div class="empty-state" style="margin-top:12px;">Nothing packed in this cube yet.</div>`}
         </div>`;
@@ -35126,6 +35199,132 @@ function tripsyItineraryProgressDialog(tripKey) {
     ov.onclick = e => { if (e.target === ov || e.target.closest('[data-itin-progress-ok]')) done(); };
   });
 }
+// ===== "NEEDS ATTENTION" LINE + TODAY STRIP (2026-11-10) =====
+// "One 'needs attention' place per trip": the warnings a trip can carry live in four
+// places (the ▲ on the itinerary glyph, the ⚠️ rows of the Clothes menu for the dress
+// guide and the outfits, the review badge beside the trip name). This line, directly
+// under the trip header, lists whichever of them are up, each with a button that runs
+// the SAME handler its own flag runs -- nothing here decides anything; it mirrors the
+// flags the existing passes set, so it can never disagree with them. Owner-only: every
+// fix writes. Pure: the items for a set of raised flags.
+function tripsyTripAttentionItems({ itinerary, guide, outfits, parseCount, parseConflict } = {}) {
+  const items = [];
+  if (parseCount) {
+    items.push(parseConflict
+      ? { kind: 'parse', text: `${parseCount} parsed item${parseCount === 1 ? '' : 's'} awaiting review — a possible conflict with an existing event`, action: 'Review' }
+      : { kind: 'parse', text: `${parseCount} parsed item${parseCount === 1 ? '' : 's'} from a document or email awaiting your review`, action: 'Review' });
+  }
+  if (itinerary) items.push({ kind: 'itinerary', text: 'Itinerary write-up: events were added or changed since it was written', action: 'Review changes' });
+  if (guide) items.push({ kind: 'guide', text: 'Dress guide: the itinerary changed since it was built', action: 'See what changed' });
+  if (outfits) items.push({ kind: 'outfits', text: 'Outfits: one or more outfits need fixing', action: 'Show outfits' });
+  return items;
+}
+// Trips whose attention list is open (kept across re-renders; session only).
+const tripsyAttentionOpenKeys = new Set();
+function tripsyTripAttentionHtml(tripKey, items, open) {
+  if (!items.length) return '';
+  const n = items.length;
+  return `
+    <button type="button" data-tripsy-attention-toggle="${esc(tripKey)}" style="background:none; border:none; padding:0; cursor:pointer; color:var(--amber); font-size:13px; font-weight:600; display:inline-flex; align-items:center; gap:6px;">
+      <span>⚠️</span><span>${n} thing${n === 1 ? '' : 's'} need${n === 1 ? 's' : ''} attention</span><span style="font-size:11px;">${open ? '▾' : '▸'}</span>
+    </button>
+    ${open ? `<div style="margin-top:8px; display:flex; flex-direction:column; gap:6px;">${items.map(it => `
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; background:var(--panel-2); border-radius:6px; padding:7px 10px;">
+        <span style="font-size:13px; line-height:1.4;">${esc(it.text)}</span>
+        <button type="button" class="btn" data-tripsy-attention-fix="${esc(it.kind)}" data-key="${esc(tripKey)}" style="flex-shrink:0; font-size:12px; padding:4px 10px;">${esc(it.action)}</button>
+      </div>`).join('')}</div>` : ''}`;
+}
+// Re-reads this trip's flags from the rendered card and repaints its attention line.
+// Called after the render and by every pass that sets a flag.
+function tripsyTripAttentionSync(container, tripKey) {
+  if (!container || !isOwner) return;
+  const slot = [...container.querySelectorAll('[data-tripsy-attention]')].find(el => el.getAttribute('data-tripsy-attention') === tripKey);
+  if (!slot) return;
+  const k = CSS.escape(tripKey);
+  const shown = sel => [...container.querySelectorAll(sel)].some(el => el.style.display !== 'none');
+  const parseBtn = container.querySelector(`[data-tripsy-review-proposals][data-key="${k}"]`);
+  const items = tripsyTripAttentionItems({
+    itinerary: shown(`[data-tripsy-itin-warning="${k}"]`) && !tripsyItineraryGeneratingKeys.has(tripKey),
+    guide: shown(`[data-tripsy-attire-stale-warning="${k}"]`) && !tripsyAttireGeneratingKeys.has(tripKey),
+    outfits: shown(`[data-tripsy-outfits-warning="${k}"]`),
+    parseCount: parseBtn ? (Number(parseBtn.dataset.count) || 1) : 0,
+    parseConflict: !!parseBtn && parseBtn.dataset.conflict === '1',
+  });
+  slot.innerHTML = tripsyTripAttentionHtml(tripKey, items, tripsyAttentionOpenKeys.has(tripKey));
+  slot.style.display = items.length ? 'block' : 'none';
+}
+// One delegated listener on the persistent My Trips container (it survives every
+// innerHTML re-render): the attention line's toggle and fix buttons, and the Today
+// strip's own two buttons. Each fix runs the flag's existing handler.
+function tripsyWireAttentionAndToday(container) {
+  if (!container || container._tripsyAttentionWired) return;
+  container._tripsyAttentionWired = true;
+  container.addEventListener('click', e => {
+    const byKey = (sel, key) => [...container.querySelectorAll(sel)].find(b => b.dataset.key === key);
+    const toggle = e.target.closest('[data-tripsy-attention-toggle]');
+    if (toggle) {
+      e.stopPropagation();
+      const key = toggle.getAttribute('data-tripsy-attention-toggle');
+      if (tripsyAttentionOpenKeys.has(key)) tripsyAttentionOpenKeys.delete(key); else tripsyAttentionOpenKeys.add(key);
+      tripsyTripAttentionSync(container, key);
+      return;
+    }
+    const fix = e.target.closest('[data-tripsy-attention-fix]');
+    if (fix) {
+      e.stopPropagation();
+      const key = fix.dataset.key, kind = fix.getAttribute('data-tripsy-attention-fix');
+      if (kind === 'guide') { tripsyAttireStalePrompt(key); return; }
+      const target = kind === 'parse' ? byKey('[data-tripsy-review-proposals]', key)
+        : kind === 'itinerary' ? byKey('[data-tripsy-itinerary-menu-toggle]', key)
+        : kind === 'outfits' ? byKey('[data-tripsy-attire-nav="outfits"]', key) : null;
+      if (target) target.click();
+      return;
+    }
+    const outfit = e.target.closest('[data-tripsy-today-outfit]');
+    if (outfit) {
+      e.stopPropagation();
+      showTripsyOutfitModal(outfit.dataset.key, outfit.dataset.event, outfit.dataset.person === 'her' ? 'her' : 'him');
+      return;
+    }
+    if (e.target.closest('[data-tripsy-today-travelview]')) { e.stopPropagation(); navigate('travelview'); }
+  });
+}
+// TODAY STRIP: while a trip is underway, one row of today's links sits right under
+// today's day bar on My Trips -- today's outfit(s), Laundry (and "Laundry back" while a
+// wash is out), the Daily Dress Guide and Travel View -- instead of four different menus.
+// The buttons carry the Clothes menu's own data-tripsy-attire-nav attributes where one
+// exists, so the menu's handler serves them. `hasEvents` false = a free day (the strip
+// then stands before the next day's block and says so).
+function tripsyTodayStripHtml(trip, todayKey, hasEvents) {
+  if (!trip || !todayKey) return '';
+  const guide = (driveData.tripsyAttireGuides || []).find(g => g.tripKey === trip.key) || null;
+  const noOutfit = guide ? tripsyAttireNoOutfitIds(trip) : new Set();
+  const blocksFor = person => {
+    const o = (driveData.tripsyTripOutfits || []).find(x => x.tripKey === trip.key && (x.person || 'him') === person);
+    return tripsyTodayOutfitBlocks(o, todayKey)
+      .map(b => ({ b, eventId: (b.eventIds || []).find(id => !noOutfit.has(tripsyAttireEventBaseId(id))) }))
+      .filter(x => x.eventId);
+  };
+  const first = tripsyDressGuidePerson === 'her' ? 'her' : 'him';
+  const person = blocksFor(first).length ? first : (first === 'him' ? 'her' : 'him');
+  const blocks = blocksFor(person);
+  const btn = (attrs, label) => `<button type="button" class="btn" ${attrs} style="font-size:12.5px; padding:5px 10px;">${label}</button>`;
+  const k = esc(trip.key);
+  const parts = blocks.map(({ b, eventId }) => btn(
+    `data-tripsy-today-outfit data-key="${k}" data-event="${esc(eventId)}" data-person="${person}"`,
+    `👔 ${blocks.length > 1 ? `Outfit · ${esc(TRIPSY_ATTIRE_CATEGORY_LABEL[b.category] || b.category || '')}` : 'Today’s outfit'}`));
+  if (isOwner && guide && !tripsyAttireGuideIsDressOnly(guide)) {
+    const { outstanding } = tripsyAttireMenuLaundry(guide, trip, Store.listTripsyLaundry(trip.key), tripsyDressGuidePerson);
+    parts.push(btn(`data-tripsy-attire-nav="laundry" data-key="${k}" data-day="${esc(todayKey)}"`, '🧺 Laundry'));
+    for (const o of outstanding) parts.push(btn(`data-tripsy-attire-nav="laundryback" data-key="${k}" data-day="${esc(todayKey)}" data-wash="${esc(o.washDayKey)}"`, `🧺 Laundry back · ${o.total} out`));
+  }
+  if (guide) parts.push(btn(`data-tripsy-attire-nav="dressguide" data-key="${k}"`, '📖 Dress guide'));
+  parts.push(btn('data-tripsy-today-travelview', '🧳 Travel View'));
+  return `<div class="tripsy-today-strip" data-tripsy-today-strip="${k}" style="position:relative; z-index:2; display:flex; flex-wrap:wrap; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--home-green); border-radius:8px; padding:8px 12px; margin:0 0 10px;">
+    <span style="font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:0.06em; color:var(--home-green);">TODAY${hasEvents ? '' : ` · ${esc(tripsyDayHeaderLabel(todayKey))} · NO EVENTS`}</span>
+    ${parts.join('')}
+  </div>`;
+}
 // Fire-and-forget pass over the rendered trip cards: for each trip whose saved
 // attire guide is now out of date, flag its 👔 button with a ⚠️. Re-queries the
 // live card node per trip (container = the persistent #tripsy-card), so a
@@ -35136,6 +35335,7 @@ function tripsyItineraryProgressDialog(tripKey) {
 // still wins with the blinking "generating" badge. Both flagging passes call this after
 // setting their rows, so neither can clear a badge the other raised.
 function tripsyAttireMenuWarningSync(container, tripKey) {
+  tripsyTripAttentionSync(container, tripKey); // the trip's "needs attention" line mirrors the same rows
   const btn = [...container.querySelectorAll('[data-tripsy-attire-menu-toggle]')].find(b => b.dataset.key === tripKey);
   if (!btn) return;
   if (tripsyAttireGeneratingKeys.has(tripKey)) { tripsySetAttireStaleBadge(btn, 'generating'); return; }
@@ -43828,6 +44028,7 @@ const TRIPSY_TRIP_PANEL_SELECTORS = [
   '[data-tripsy-edit-trip-panel]',
   '[data-tripsy-attach-panel]',
   '[data-tripsy-attachments-menu]',
+  '[data-tripsy-row-menu]',
   '[data-tripsy-document-menu]',
   '[data-tripsy-itinerary-menu]',
   '[data-tripsy-generate-panel]',
@@ -43863,7 +44064,7 @@ function closeAllTripsyTripPanels() {
   // render would recreate anyway, so only panels that get their innerHTML
   // freshly rendered on open (add-item menu, edit-trip panel, attach
   // panel) need clearing here.
-  const freshlyRenderedEachTime = new Set(['[data-tripsy-attachments-menu]', '[data-tripsy-document-menu]', '[data-tripsy-itinerary-menu]', '[data-tripsy-generate-panel]', '[data-tripsy-partial-panel]', '[data-tripsy-trip-menu]', '[data-tripsy-attire-menu]', '[data-tripsy-sort-menu]']);
+  const freshlyRenderedEachTime = new Set(['[data-tripsy-attachments-menu]', '[data-tripsy-row-menu]', '[data-tripsy-document-menu]', '[data-tripsy-itinerary-menu]', '[data-tripsy-generate-panel]', '[data-tripsy-partial-panel]', '[data-tripsy-trip-menu]', '[data-tripsy-attire-menu]', '[data-tripsy-sort-menu]']);
   TRIPSY_TRIP_PANEL_SELECTORS.forEach(sel => {
     card.querySelectorAll(sel).forEach(el => {
       el.style.display = "none";
@@ -44398,11 +44599,20 @@ async function renderTripsyEventsListImpl() {
         : '';
       const ownerIconsHtml = !canEditDelete ? '' : isPendingDelete
         ? `<button class="btn" data-tripsy-undo-delete-event data-change-id="${esc(ev._pendingDeleteId)}" style="font-size:11px; padding:3px 8px;">Undo</button>`
+        // ONE "⋯" button per row (2026-11-10): Edit / Attach / Move / Delete used to be four
+        // small icons side by side -- easy to mis-tap, and on a phone they wrapped under the
+        // title. They are the SAME four buttons (same attributes, same handlers), now
+        // labelled rows inside a fixed-position menu the ⋯ opens.
         : `${docIconHtml}
-            <button class="btn" data-tripsy-edit-event data-key="${esc(eventKey)}" style="font-size:17px; padding:4px 10px;" title="Edit">✏️</button>
-            <button class="btn" data-tripsy-attach-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" style="font-size:17px; padding:4px 10px;" title="Attach Doc">📎</button>
-            <button class="btn" data-tripsy-move-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" style="font-size:17px; padding:4px 10px;" title="Move to another trip">↪️</button>
-            <button class="btn" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="font-size:17px; padding:4px 10px;" title="Delete">🗑️</button>`;
+          <div style="position:relative;">
+            <button class="btn" data-tripsy-row-menu-toggle data-key="${esc(eventKey)}" style="font-size:20px; line-height:1; padding:5px 14px; font-weight:800;" title="Edit, attach, move or delete" aria-label="More actions">⋯</button>
+            <div data-tripsy-row-menu="${esc(eventKey)}" style="display:none; position:fixed; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:6px; z-index:20; min-width:220px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+              <button class="btn tripsy-row-menu-item" data-tripsy-edit-event data-key="${esc(eventKey)}"><span>✏️</span><span>Edit</span></button>
+              <button class="btn tripsy-row-menu-item" data-tripsy-attach-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}"><span>📎</span><span>Attach a document</span></button>
+              <button class="btn tripsy-row-menu-item" data-tripsy-move-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}"><span>↪️</span><span>Move to another trip</span></button>
+              <button class="btn tripsy-row-menu-item" data-tripsy-delete-event data-key="${esc(eventKey)}" data-trip-key="${esc(trip.key)}" data-trip-name="${esc(trip.name)}" data-summary="${esc(ev.summary)}" data-resource="${esc(ev.tripsyRaw.resource)}" data-tripsy-id="${esc(String(ev.tripsyRaw.id))}" style="color:#E04B3A;"><span>🗑️</span><span>Delete</span></button>
+            </div>
+          </div>`;
       const actionsHtml = (entryBtnHtml || outfitGlyphHtml || ownerIconsHtml)
         ? `<div class="tripsy-tl-actions" style="display:flex; gap:6px; flex-shrink:0;">${entryBtnHtml}${outfitGlyphHtml}${ownerIconsHtml}</div>`
         : '';
@@ -44546,8 +44756,15 @@ async function renderTripsyEventsListImpl() {
     const tlTodayKey = tripsyTravelViewTodayKey(trip,
       dayGroups.length ? dayGroups[0].dayKey : null,
       dayGroups.length ? dayGroups[dayGroups.length - 1].dayKey : null);
+    // TODAY STRIP (see tripsyTodayStripHtml): only while today falls inside the trip's own
+    // days. On a day with events it sits under that day's bar, inside the block the
+    // open-on-today jump lands on; on a free day it stands before the next day's block.
+    const tlTripUnderway = !!tlTodayKey && dayGroups.length > 0 && !isPendingCreateTrip
+      && dayGroups[0].dayKey <= tlTodayKey && tlTodayKey <= dayGroups[dayGroups.length - 1].dayKey;
+    const tlTodayHasEvents = tlTripUnderway && dayGroups.some(g => g.dayKey === tlTodayKey);
+    const tlStripBeforeDay = tlTripUnderway && !tlTodayHasEvents ? (dayGroups.find(g => tlTodayKey < g.dayKey) || {}).dayKey : null;
     const timelineHtml = collapsed ? '' : `<div class="tripsy-tl-trip" data-tripsy-connector-trip="${esc(trip.key)}">${[
-      ...dayGroups.map(g => `<div class="tripsy-day-block${(tlTodayKey && g.dayKey < tlTodayKey) ? ' tripsy-day-past' : ''}"${g.dayKey === tlTodayKey ? ` data-tripsy-today-day="${esc(trip.key)}"` : ''}>${dayHeaderHtml(g.dayKey)}${renderTimelineGroup(g.items)}</div>`),
+      ...dayGroups.map(g => `${g.dayKey === tlStripBeforeDay ? tripsyTodayStripHtml(trip, tlTodayKey, false) : ''}<div class="tripsy-day-block${(tlTodayKey && g.dayKey < tlTodayKey) ? ' tripsy-day-past' : ''}"${g.dayKey === tlTodayKey ? ` data-tripsy-today-day="${esc(trip.key)}"` : ''}>${dayHeaderHtml(g.dayKey)}${tlTodayHasEvents && g.dayKey === tlTodayKey ? tripsyTodayStripHtml(trip, tlTodayKey, true) : ''}${renderTimelineGroup(g.items)}</div>`),
       undatedItems.length ? renderTimelineGroup(undatedItems) : '',
     ].join('')}</div>`;
     // The add-item + button only makes sense once the card is expanded --
@@ -44917,9 +45134,9 @@ async function renderTripsyEventsListImpl() {
     // Yellow state renders as a bare ⚠️ triangle (no circular chip); the green
     // "ready to review" state stays a green ✓ circle.
     const parseReviewBadgeHtml = pendingParseCount ? (hasParseConflict ? `
-      <button data-tripsy-review-proposals data-key="${esc(trip.key)}" title="${pendingParseCount} item${pendingParseCount === 1 ? '' : 's'} awaiting review — potential conflict to resolve" style="background:none; border:none; padding:0; font-size:17px; line-height:1; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">⚠️</button>
+      <button data-tripsy-review-proposals data-count="${pendingParseCount}" data-conflict="1" data-key="${esc(trip.key)}" title="${pendingParseCount} item${pendingParseCount === 1 ? '' : 's'} awaiting review — potential conflict to resolve" style="background:none; border:none; padding:0; font-size:17px; line-height:1; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">⚠️</button>
     ` : `
-      <button data-tripsy-review-proposals data-key="${esc(trip.key)}" title="${pendingParseCount} item${pendingParseCount === 1 ? '' : 's'} from a parsed doc or email awaiting your review for this trip" style="background:var(--home-green); color:#04210F; border:none; border-radius:50%; width:22px; height:22px; padding:0; font-size:13px; font-weight:800; line-height:1; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">✓</button>
+      <button data-tripsy-review-proposals data-count="${pendingParseCount}" data-key="${esc(trip.key)}" title="${pendingParseCount} item${pendingParseCount === 1 ? '' : 's'} from a parsed doc or email awaiting your review for this trip" style="background:var(--home-green); color:#04210F; border:none; border-radius:50%; width:22px; height:22px; padding:0; font-size:13px; font-weight:800; line-height:1; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0;">✓</button>
     `) : '';
     return `
       <div class="card tripsy-trip-card" style="margin-bottom:14px;">
@@ -44945,6 +45162,7 @@ async function renderTripsyEventsListImpl() {
             `}
           </div>
         </div>
+        ${isOwner && !isPendingCreateTrip ? `<div data-tripsy-attention="${esc(trip.key)}" style="display:none; margin-top:10px;"></div>` : ''}
         ${showAddButton ? `<div data-tripsy-add-item-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${isOwner ? `<div data-tripsy-edit-trip-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
         ${isOwner ? `<div data-tripsy-attach-panel="${esc(trip.key)}" style="display:none; margin-top:12px; padding:12px; background:var(--panel-2); border-radius:8px;"></div>` : ''}
@@ -44994,6 +45212,9 @@ async function renderTripsyEventsListImpl() {
   container.innerHTML = [...currentTrips, ...pendingCreateTripPlaceholders].map(tripCardHtml).join('')
     + (pastYears.length ? `<div style="margin:18px 0 8px; font-size:12px; letter-spacing:1px; text-transform:uppercase; color:var(--muted);">Past Trips</div>${pastSectionsHtml}` : '');
 
+  tripsyHidePendingDeleteRows(container); // a Delete still inside its Undo window stays hidden
+  tripsyWireAttentionAndToday(container);
+  container.querySelectorAll('[data-tripsy-attention]').forEach(el => tripsyTripAttentionSync(container, el.getAttribute('data-tripsy-attention')));
   positionTripsyTimelineConnectors();
   // Click-outside-to-collapse for open event detail panels. Wired once on
   // document (survives re-renders; queries live DOM each click).
@@ -45550,6 +45771,7 @@ async function renderTripsyEventsListImpl() {
       const warnEl = container.querySelector(`[data-tripsy-itin-warning="${CSS.escape(tripKey)}"]`);
       if (warnEl) warnEl.style.display = 'none';
       tripsySetItineraryGlyphBadge(btn, '');
+      tripsyTripAttentionSync(container, tripKey);
       return false;
     }
     // A rewrite already handed to the cloud routine (the changes dialog's
@@ -45666,6 +45888,7 @@ async function renderTripsyEventsListImpl() {
           // the blink with the steady ▲ or drop it.
           const glyphBtn = [...container.querySelectorAll('[data-tripsy-itinerary-menu-toggle]')].find(b => b.dataset.key === trip.key);
           tripsySetItineraryGlyphBadge(glyphBtn, tripsyItineraryGeneratingKeys.has(trip.key) ? 'generating' : (changed.length ? 'changed' : ''));
+          tripsyTripAttentionSync(container, trip.key);
         } catch (e) { /* leave hidden */ }
       }
     })();
@@ -45869,6 +46092,21 @@ async function renderTripsyEventsListImpl() {
     });
   });
 
+  // The timeline row's "⋯" menu: same fixed-position dropdown pattern. The menu is the
+  // toggle's own sibling (a split Check-in/Check-out pair shares one event key). A pick
+  // closes it -- in the capture phase, since the items' own handlers stop the click.
+  container.querySelectorAll("[data-tripsy-row-menu-toggle]").forEach(btn => {
+    const menu = btn.parentElement.querySelector('[data-tripsy-row-menu]');
+    if (!menu) return;
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const wasOpen = menu.style.display !== "none";
+      closeAllTripsyTripPanels();
+      if (!wasOpen) positionTripsyFixedMenu(btn, menu);
+    });
+    menu.addEventListener("click", () => { setTimeout(() => { menu.style.display = "none"; }, 0); }, true);
+  });
+
   // Same fixed-position dropdown pattern as the Docs button above, for the
   // Sort menu's event-type checklist.
   container.querySelectorAll("[data-tripsy-sort-toggle]").forEach(btn => {
@@ -46057,13 +46295,20 @@ async function renderTripsyEventsListImpl() {
 
   container.querySelectorAll("[data-tripsy-delete-attachment]").forEach(btn => {
     btn.addEventListener("click", async () => {
-      if (!confirm("Remove this attachment? This only removes it from the app -- the file stays in Google Drive.")) return;
-      btn.disabled = true;
-      const ok = await Store.deleteTripsyAttachment(btn.dataset.attachmentId);
-      if (!ok) toast("Could not remove — storage error. Please try again.", "error");
-      else deleteTripsyOfflineDoc(btn.dataset.driveFileId);
-      renderTripsyEventsList();
-      updateTripsyDocParseBadge();
+      // Undo instead of a confirm (see toastUndo): the row hides now, the removal is made
+      // when the toast times out. The file itself always stays in Google Drive.
+      const row = btn.parentElement && btn.parentElement.parentElement;
+      if (row) row.style.display = 'none';
+      toastUndo('Removed the attachment (the file stays in Google Drive).', {
+        onUndo: () => { if (row && row.isConnected) row.style.display = 'flex'; else renderTripsyEventsList(); },
+        onCommit: async () => {
+          const ok = await Store.deleteTripsyAttachment(btn.dataset.attachmentId);
+          if (!ok) toast("Could not remove — storage error. Please try again.", "error");
+          else deleteTripsyOfflineDoc(btn.dataset.driveFileId);
+          renderTripsyEventsList();
+          updateTripsyDocParseBadge();
+        },
+      });
     });
   });
 
@@ -46256,27 +46501,38 @@ async function renderTripsyEventsListImpl() {
   container.querySelectorAll("[data-tripsy-delete-event]").forEach(btn => {
     btn.addEventListener("click", async () => {
       const summary = btn.dataset.summary;
-      // The native confirm() dialog is the only "confirmation screen" here
-      // -- once it resolves (either answer), clear the button's own focus
-      // so no lingering browser focus ring stays visible afterward.
-      const confirmed = confirm(`Delete "${summary}"? This can't be undone.`);
+      // No "are you sure?" (2026-11-10): the row disappears at once and an Undo toast
+      // stands for a few seconds. The delete itself -- the same change as ever -- is made
+      // only when the toast times out, so Undo has nothing to put back: it just shows the
+      // row again. tripsyPendingDeleteEventKeys keeps the row hidden across any re-render
+      // that lands in the meantime.
       btn.blur();
-      if (!confirmed) return;
-      btn.disabled = true;
-      const pending = Store.queueTripsyChange({
+      const eventKey = btn.dataset.key;
+      if (tripsyPendingDeleteEventKeys.has(eventKey)) return;
+      const change = {
         id: crypto.randomUUID(),
         type: 'delete_event',
         createdAt: new Date().toISOString(),
         tripKey: btn.dataset.tripKey,
         tripName: btn.dataset.tripName,
-        eventKey: btn.dataset.key,
+        eventKey,
         eventSummary: summary,
         tripsyResource: btn.dataset.resource,
         tripsyId: Number(btn.dataset.tripsyId),
+      };
+      tripsyPendingDeleteEventKeys.add(eventKey);
+      tripsyHidePendingDeleteRows(container);
+      positionTripsyTimelineConnectors();
+      toastUndo(`Deleted “${summary}”.`, {
+        onUndo: () => { tripsyPendingDeleteEventKeys.delete(eventKey); renderTripsyEventsList(); },
+        onCommit: async () => {
+          const pending = Store.queueTripsyChange(change);
+          tripsyPendingDeleteEventKeys.delete(eventKey);
+          renderTripsyEventsList();
+          updateTripsyPendingWarningBadge();
+          if (!(await pending)) toast("Could not delete — storage error. Please try again.", "error");
+        },
       });
-      renderTripsyEventsList();
-      updateTripsyPendingWarningBadge();
-      if (!(await pending)) toast("Could not queue deletion — storage error. Please try again.", "error");
     });
   });
 

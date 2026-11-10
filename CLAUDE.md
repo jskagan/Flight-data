@@ -1273,6 +1273,52 @@ step 4; git history has it if ever needed.
   at the scroller's top edge with its border and corners intact and no row pixel above it, and
   the today jump lands the day bar 8px under the pinned header. `stickytriphead_test.js`,
   `expandtoday_test.js`, `mytripstoday_test.js`.
+- **Each trip card has ONE "needs attention" line, and an in-progress trip has a TODAY strip**
+  ("Do 2 and 3" of a UI review, 2026-11-10). **Attention**: an owner-only slot under the trip
+  header (`data-tripsy-attention`) reads "⚠️ N things need attention" and opens a list with a fix
+  button per item. It decides NOTHING: `tripsyTripAttentionSync(container, tripKey)` mirrors the
+  four existing flags as rendered — the itinerary ▲ (`data-tripsy-itin-warning`), the dress
+  guide's and outfits' ⚠️ menu rows, the review badge (which now carries `data-count` /
+  `data-conflict`) — through the pure `tripsyTripAttentionItems`, skipping a run in progress.
+  It is called after every render and by each pass that sets a flag
+  (`tripsyAttireMenuWarningSync`, the itinerary pass). A fix button runs the flag's own handler
+  (`tripsyAttireStalePrompt`, or a `.click()` on the itinerary glyph / View Outfits row / review
+  badge), via one delegated listener on the persistent `#tripsy-card`
+  (`tripsyWireAttentionAndToday`). Open state is `tripsyAttentionOpenKeys` (session). The
+  original glyph/menu flags are unchanged. **Today strip**: `tripsyTodayStripHtml(trip, todayKey,
+  hasEvents)` — while the trip's today (`tlTodayKey`) is inside its own days — sits under
+  today's day bar INSIDE the `data-tripsy-today-day` block (so the open-on-today jump shows it;
+  `position:relative; z-index:2` and opaque like a day bar, so the connector passes behind), or
+  before the next day's block on a free day ("TODAY · … · NO EVENTS"). Buttons: one per composed
+  outfit block today (`data-tripsy-today-outfit`, the Daily Dress Guide's person, else the
+  other; "Today's outfit", or "Outfit · <dress code>" when there are several), Laundry and
+  "Laundry back · N out" (owner, full guide) and Dress guide — these three carry the Clothes
+  menu's `data-tripsy-attire-nav` attributes, so that menu's handler serves them — and Travel
+  View. Verified in Chromium against a synthetic trip. `attentiontoday_test.js`.
+- **Three interface rules from a UI review** ("Do 4, 5 and 6," 2026-11-10; `uitidy_test.js`):
+  **(a) Back vs Close.** A button that returns ONE LEVEL is the orange "‹ Back"
+  (`.tripsy-back-btn`); one that closes the whole page is the red ✕ (`.tripsy-close-x`). The
+  packing screens' single contextual button used to be a ✕ in both roles; it is the same
+  element and handler, restyled per view by `tripsySetBackOrClose(btn, isBack)` (Packing List,
+  Packing Status) or built by `tripsyBackOrCloseHtml(attrs, isBack)` (Cubes and Garment Location
+  drill-downs; the Ship Home garment view is always Back). The fly-over pages already used
+  ‹ Back. Small dialogs' worded Cancel/Close buttons are unchanged.
+  **(b) Undo instead of confirm, for deletes that are easy to take back.** `toastUndo(msg,
+  {onUndo, onCommit, ms})` shows a toast with an Undo button for 6 s. The action is DELAYED,
+  never reversed: the caller removes the thing from view at once and `onCommit` (the real,
+  unchanged delete) runs when the toast times out, so Undo only has to show it again. One at a
+  time — starting another, or the page going to the background, commits the one showing. Used by
+  the timeline's event Delete (`tripsyPendingDeleteEventKeys` + `tripsyHidePendingDeleteRows`
+  keep the row out across a re-render; the row is REMOVED, not hidden, because the connector
+  pass measures a hidden row's dot at (0,0)) and by removing an attachment. Deleting a whole
+  trip, a wardrobe garment or a generated itinerary still asks first.
+  **(c) One "⋯" per timeline row.** Edit / Attach / Move / Delete are the same four buttons
+  (same data attributes and handlers) as labelled `.tripsy-row-menu-item` rows inside a
+  fixed-position `data-tripsy-row-menu` the `data-tripsy-row-menu-toggle` opens — its own
+  sibling, since a split Check-in/Check-out pair shares an event key. It is registered in
+  `TRIPSY_TRIP_PANEL_SELECTORS` and the keep-markup set, and a pick closes it in the capture
+  phase (the items' handlers stop the click). The 👔 outfit glyph, 📄 docs and Entry
+  Requirements buttons stay on the row. Verified in Chromium against a synthetic trip.
 - **The My Trips render never waits on weather — chips paint from cache and heal in place**
   ("Sometimes when I open the app and select my trips there is a delay when I select a trip to
   open," 2026-09-28): expanding/collapsing a trip re-runs `renderTripsyEventsListImpl`, which

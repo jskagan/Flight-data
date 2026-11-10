@@ -17,7 +17,7 @@ function extractFn(name) {
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 // ---- today is the TRIP's today, shared by the graying and the scroll ----
-const impl = html.slice(html.indexOf('const tlTodayKey = tripsyTravelViewTodayKey'), html.indexOf('const tlTodayKey = tripsyTravelViewTodayKey') + 900);
+const impl = html.slice(html.indexOf('const tlTodayKey = tripsyTravelViewTodayKey'), html.indexOf('const tlTodayKey = tripsyTravelViewTodayKey') + 2400);
 assert(/tripsyTravelViewTodayKey\(trip,/.test(impl),
   'today comes from the timezone-aware helper, not the device date');
 assert(/g\.dayKey < tlTodayKey\) \? ' tripsy-day-past'/.test(impl), 'days before it are dimmed');

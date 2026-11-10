@@ -52,7 +52,10 @@ for (const [sel, label] of packing) {
 }
 // Both Cubes closes (the list AND the per-cube drill-down) were converted, or the
 // drill-down would still show a worded button beside the same-shaped list one.
-assert((html.match(/class="tripsy-close-x" data-tw-cubes-close/g) || []).length === 2,
+// (2026-11-10: the drill-down's button returns a level, so it is the orange "‹ Back";
+// the list's still closes the page with the red ✕.)
+assert((html.match(/class="tripsy-close-x" data-tw-cubes-close/g) || []).length === 1
+  && /tripsyBackOrCloseHtml\('data-tw-cubes-close', true\)/.test(html),
   'both Cubes closes converted');
 // BEHAVIOUR MUST BE UNCHANGED: the contextual handlers key off the same id/attribute,
 // and the two genuinely contextual screens still branch on their detail mode.

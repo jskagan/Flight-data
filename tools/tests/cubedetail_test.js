@@ -56,7 +56,7 @@ ${extractConst('TRIPSY_GARMENT_TYPE_GLYPH')}
 ${extractConst('TRIPSY_ATTIRE_GROUP_GLYPH')}
 ${extractConst('TRIPSY_CUBE_NONE')}
 ${extractConst('TRIPSY_CUBE_FLIGHT_WORN')}
-${['tripsyGarmentTypeKey','tripsyGarmentSkipsCube','tripsyGarmentGlyph','tripsyCubeById',
+${['tripsyBackOrCloseHtml','tripsyGarmentTypeKey','tripsyGarmentSkipsCube','tripsyGarmentGlyph','tripsyCubeById',
    'tripsyCubeName','tripsyCubesSorted','tripsyCubeTileHtml','tripsyCubeSlotLabel','tripsyCubeSlotGlyph',
    'tripsyCubeContentsMap', 'showTripsyCubeContents'].map(extractFn).join('\n')}
 
