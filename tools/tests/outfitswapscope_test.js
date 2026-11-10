@@ -20,6 +20,11 @@ function extractFn(name) {
     else if (html[j] === '}') { depth--; if (!depth) return html.slice(start, j + 1); }
   }
 }
+
+// tripsyGarmentWearableAtTier (2026-11-10: a dressier garment may stand in) is a dependency
+// of the functions extracted below; as globals, every eval / new Function scaffold sees it.
+global.TRIPSY_ATTIRE_CATEGORY_ORDER = ['athletic', 'casual', 'smart_casual', 'semi_formal', 'cocktail', 'formal', 'black_tie'];
+global.tripsyGarmentWearableAtTier = eval('(' + extractFn('tripsyGarmentWearableAtTier') + ')');
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 // ---- wiring: the outfit modal computes the LIVE tier and threads it through ----
@@ -108,8 +113,8 @@ assert(tripsyOutfitBlockLiveTier(guideFixture, { eventIds: [], category: 'casual
 
     // Changing the tier changes the offer -- the whole point of the fix.
     got = await run(wardrobe, 'current-shirt', 'him', 'casual', ['current-shirt']);
-    assert(got.includes('casual-polo') && !got.includes('cocktail-shirt'),
-      'switching the live tier to casual now offers the casual polo instead');
+    assert(got.includes('casual-polo') && got.includes('cocktail-shirt'),
+      'switching the live tier to casual offers the casual polo, and the dressier cocktail shirt may stand in (2026-11-10)');
   })();
 }
 

@@ -19,6 +19,11 @@ function extractFn(name) {
     else if (html[j] === '}') { depth--; if (!depth) return html.slice(start, j + 1); }
   }
 }
+
+// tripsyGarmentWearableAtTier (2026-11-10: a dressier garment may stand in) is a dependency
+// of the functions extracted below; as globals, every eval / new Function scaffold sees it.
+global.TRIPSY_ATTIRE_CATEGORY_ORDER = ['athletic', 'casual', 'smart_casual', 'semi_formal', 'cocktail', 'formal', 'black_tie'];
+global.tripsyGarmentWearableAtTier = eval('(' + extractFn('tripsyGarmentWearableAtTier') + ')');
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 
 // ---- the pure shortfall check ----

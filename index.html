@@ -12142,6 +12142,82 @@ function tripsyWearDaysGroupByDay(evs) {
   }
   return days;
 }
+// "Allow a dressier item to substitute for a less dressy item" (2026-11-10): a garment is
+// wearable at a dress code when it is tagged for it OR for any DRESSIER one -- a smart
+// casual shirt on a casual day. Athletic is the exception: nothing dressier stands in for
+// gym or hiking clothes. Used wherever an outfit garment is judged against a block's dress
+// code (Swap, Add, the mid-trip shortfall, Ship Home's swap reasons); the Packing List's
+// need lines still match a line's own tag. Pure.
+function tripsyGarmentWearableAtTier(g, tier) {
+  const tiers = (g && g.tiers) || [];
+  if (!tier || tiers.includes(tier)) return true;
+  const at = TRIPSY_ATTIRE_CATEGORY_ORDER.indexOf(tier);
+  if (at < 0 || tier === 'athletic') return false;
+  return tiers.some(t => TRIPSY_ATTIRE_CATEGORY_ORDER.indexOf(t) > at);
+}
+// Who wears what on which day when NO outfits are composed: each dress-code line's copies
+// take that dress code's days in turn until each has had its wearings before a wash
+// (tripsyWearsBeforeWash); a day left over goes to a spare copy on a DRESSIER line that
+// fills the same body role and is free that day; only when nothing is spare does the
+// line's own rotation re-wear a piece. Flight-worn, General, Gym and event-linked lines
+// are not part of it. Returns Map `${id}::${category}::${line}` -> [{dayKey, category}]
+// (category = the dress code of the day being dressed). Pure.
+function tripsyWardrobeTierTurns(guide, person, resolved, byId) {
+  const turns = new Map();
+  if (!guide) return turns;
+  const dep = tripsyWardrobeFlightDepartureEvent(guide);
+  const items = (guide.packingList && guide.packingList[person]) || [];
+  const order = TRIPSY_ATTIRE_CATEGORY_ORDER;
+  const daysOf = cat => (guide.days || []).filter(day => (day.events || []).some(ev =>
+    (ev.displayCategory || ev.category) === cat && !(dep && dep.id === ev.id && dep.dayKey === day.dayKey))).map(d => d.dayKey);
+  const lines = new Map();
+  for (const x of (resolved || [])) {
+    if (!x.category || x.category === TRIPSY_WARDROBE_GENERAL_TIER || x.category === TRIPSY_WARDROBE_GYM_TIER) continue;
+    if (tripsyWardrobeLineIsFlightWorn(x.line)) continue;
+    const g = byId.get(x.id);
+    if (!g || (g.person || 'him') !== person) continue;
+    const item = items.find(it => it && it.name === x.line);
+    if (item && (item.eventIds || []).length) continue;
+    const key = `${x.category}::${x.line}`;
+    if (!lines.has(key)) lines.set(key, { category: x.category, line: x.line, slots: [], next: 0 });
+    const limit = tripsyWearsBeforeWash(g.name, null, g.group);
+    for (let i = 0; i < Math.max(1, x.qty || 1); i++) lines.get(key).slots.push({ id: x.id, left: (limit > 0) ? limit : Infinity, roles: tripsyOutfitGarmentRoles(g) });
+  }
+  const used = new Set();
+  const give = (slot, L, dayKey, category) => {
+    const k = `${slot.id}::${L.category}::${L.line}`;
+    if (!turns.has(k)) turns.set(k, []);
+    turns.get(k).push({ dayKey, category });
+    slot.left--; used.add(`${slot.id}|${dayKey}`);
+  };
+  const overflow = [];
+  for (const L of lines.values()) {
+    for (const dayKey of daysOf(L.category)) {
+      let pick = null;
+      for (let k = 0; k < L.slots.length; k++) {
+        const sl = L.slots[(L.next + k) % L.slots.length];
+        if (sl.left > 0) { pick = sl; L.next = (L.next + k + 1) % L.slots.length; break; }
+      }
+      if (pick) give(pick, L, dayKey, L.category); else overflow.push({ L, dayKey });
+    }
+  }
+  overflow.sort((a, b) => a.dayKey.localeCompare(b.dayKey));
+  for (const o of overflow) {
+    const at = order.indexOf(o.L.category);
+    const want = (o.L.slots[0] && o.L.slots[0].roles) || [];
+    let done = false;
+    if (at >= 0 && o.L.category !== 'athletic' && want.length) {
+      const dressier = [...lines.values()].filter(M => order.indexOf(M.category) > at)
+        .sort((a, b) => order.indexOf(a.category) - order.indexOf(b.category));
+      for (const M of dressier) {
+        const sl = M.slots.find(x => x.left > 0 && !used.has(`${x.id}|${o.dayKey}`) && x.roles.some(r => want.includes(r)));
+        if (sl) { give(sl, M, o.dayKey, o.L.category); done = true; break; }
+      }
+    }
+    if (!done) { const sl = o.L.slots[o.L.next % o.L.slots.length]; o.L.next = (o.L.next + 1) % o.L.slots.length; give(sl, o.L, o.dayKey, o.L.category); }
+  }
+  return turns;
+}
 // The days a set of {category, line} ALLOCATIONS is worn on. Split out of
 // tripsyWardrobeWearDays so a "No Picture" generic can use the identical rules: it
 // has no wardrobe record and therefore no garment id, only the line it was added
@@ -12185,20 +12261,19 @@ function tripsyWardrobeWearDaysFromLines(guide, person, lines, nameHint, opts) {
     // composed, all four casual tops counted as worn on the one casual flight):
     //  - the DEPARTING FLIGHT is worn in the flight-worn lines' garments, never an
     //    ordinary line's, so it is not one of this line's occasions;
-    //  - the garments sharing a line take the tier's days IN TURN (opts.share: this
-    //    garment's slots among the line's copies) -- one top a day, not every top every day.
+    //  - the garments sharing a line take the tier's days IN TURN, and a day the line
+    //    cannot cover goes to a spare DRESSIER garment (opts.turns: this garment's
+    //    {dayKey, category} turns from tripsyWardrobeTierTurns) -- one top a day.
     if (e.category !== TRIPSY_WARDROBE_GENERAL_TIER) {
       basis = 'tier';
       const dep = tripsyWardrobeFlightDepartureEvent(guide);
-      const share = (opts && typeof opts.share === 'function') ? opts.share(e) : null;
-      let dayIndex = 0;
+      const turns = (opts && typeof opts.turns === 'function') ? opts.turns(e) : null;
       for (const day of allDays) {
-        const mine = (day.events || []).filter(ev => (ev.displayCategory || ev.category) === e.category
-          && !(dep && dep.id === ev.id && dep.dayKey === day.dayKey));
-        if (!mine.length) continue;
-        const turn = dayIndex++;
-        if (share && share.total > 1 && !share.mine.includes(turn % share.total)) continue;
-        for (const ev of mine) evs.push({ ...ev, dayKey: day.dayKey });
+        const cats = turns ? turns.filter(t => t.dayKey === day.dayKey).map(t => t.category) : [e.category];
+        if (!cats.length) continue;
+        for (const ev of (day.events || [])) {
+          if (cats.includes(ev.displayCategory || ev.category) && !(dep && dep.id === ev.id && dep.dayKey === day.dayKey)) evs.push({ ...ev, dayKey: day.dayKey });
+        }
       }
       continue;
     }
@@ -12256,19 +12331,11 @@ async function tripsyWardrobeWearDays(tripKey, garmentId, person) {
   const resolved = tripsyWardrobeResolveSelectionLines(tripsyNormalizeTripSelection(selectedRaw), guide, byId);
   const sel = resolved.filter(e => e.id === garmentId && e.category);
   if (!sel.length || !guide) return { days: [], basis: 'none', outfitLinked: false };
-  // This garment's turns among the copies picked for the same line (selection order, one
-  // slot per copy), so the tier rule hands each day to ONE of them.
-  const share = e => {
-    const slots = [];
-    for (const x of resolved) {
-      if (x.category !== e.category || x.line !== e.line) continue;
-      const g = byId.get(x.id);
-      if (!g || (g.person || 'him') !== person) continue;
-      for (let i = 0; i < Math.max(1, x.qty || 1); i++) slots.push(x.id);
-    }
-    return { total: slots.length, mine: slots.map((id, i) => id === garmentId ? i : -1).filter(i => i >= 0) };
-  };
-  return tripsyWardrobeWearDaysFromLines(guide, person, sel, (garment && garment.name) || '', { share });
+  // This garment's turns among everything picked (tripsyWardrobeTierTurns), so the tier
+  // rule hands each day to ONE garment and lets a dressier spare cover a short line.
+  const allTurns = tripsyWardrobeTierTurns(guide, person, resolved, byId);
+  const turns = e => allTurns.get(`${garmentId}::${e.category}::${e.line}`) || [];
+  return tripsyWardrobeWearDaysFromLines(guide, person, sel, (garment && garment.name) || '', { turns });
 }
 // The "Wear Days" screen: one amber day header per date, that day's events beneath it,
 // each tappable to open the full outfit for it (showTripsyOutfitModal -- the same view
@@ -12507,7 +12574,7 @@ async function tripsyShipHomeSwapOptions(tripKey, block, currentGarmentId, perso
     if (!isMixAndMatch && bucketKey && tripsyGarmentTypeBucket(g).key !== bucketKey) {
       reasons.push(`A different type (${tripsyGarmentTypeBucket(g).label}, not ${tripsyGarmentTypeBucket(current).label}).`);
     }
-    if (liveTier && !(g.tiers || []).includes(liveTier)) reasons.push(`Not tagged for ${tierLabel(liveTier)} in your wardrobe${(g.tiers || []).length ? ` (tagged ${(g.tiers || []).map(tierLabel).join(', ')})` : ''}.`);
+    if (liveTier && !tripsyGarmentWearableAtTier(g, liveTier)) reasons.push(`Not tagged for ${tierLabel(liveTier)} in your wardrobe${(g.tiers || []).length ? ` (tagged ${(g.tiers || []).map(tierLabel).join(', ')})` : ''}.`);
     // Wear capacity -- the consolidation plan's rule, here as a warning the owner can override.
     const limit = tripsyWearsBeforeWash(g.name, null, g.group);
     let capacityNote = '';
@@ -13773,7 +13840,7 @@ async function showTripsyWearDaysOverlay(tripKey, garment, person) {
   const note = {
     outfits: 'From your composed outfits — the exact blocks this piece is worn in.',
     line: 'From the events the attire guide links to the line you picked this for.',
-    tier: 'Its turn among the garments picked for this line, on days at this dress code — outfits haven’t been composed for it.',
+    tier: 'Its turn among the garments picked for this line, plus any less dressy day it covers — outfits haven’t been composed for it.',
     dressy: 'Every dressy occasion — worn under formal, semi-formal and cocktail clothes.',
     daily: 'Every day of the trip.',
   }[basis] || '';
@@ -14548,7 +14615,7 @@ async function tripsyOutfitSwapCandidates(tripKey, block, currentGarmentId, pers
       // not every same-type garment regardless of formality. Same (g.tiers||[])
       // convention the Pack-for-tier screens already use -- an untagged garment
       // (empty tiers) is excluded here exactly like it is there, not let through.
-      && (!liveTier || (g.tiers || []).includes(liveTier)));
+      && (!liveTier || tripsyGarmentWearableAtTier(g, liveTier)));
   return { candidates, current, isMixAndMatch, bucketKey, currentGroup };
 }
 async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person = 'him', liveTier = null) {
@@ -14822,7 +14889,7 @@ async function tripsyOutfitAddCandidates(tripKey, block, role, person, liveTier)
     .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g)
       && !inBlock.has(g.id) && !wornSameDay.has(g.id) && !shippedGone.has(g.id)
       && tripsyOutfitGarmentRoles(g).includes(role)
-      && (!liveTier || (g.tiers || []).includes(liveTier)));
+      && (!liveTier || tripsyGarmentWearableAtTier(g, liveTier)));
   return { candidates };
 }
 // The Add picker: the Swap picker's shell for a MISSING role -- no "Remove" (there is
@@ -38886,7 +38953,7 @@ async function tripsyAttireAdoptNewEventsIntoOutfits(tripKey, guide) {
 function tripsyAttireBlockShortfall(block, garments) {
   const tier = block && block.category;
   return TRIPSY_OUTFIT_ROLES.filter(role => !(garments || []).some(g =>
-    tripsyOutfitGarmentRoles(g).includes(role) && (!tier || (g.tiers || []).includes(tier))));
+    tripsyOutfitGarmentRoles(g).includes(role) && (!tier || tripsyGarmentWearableAtTier(g, tier))));
 }
 // The dialog text for the shortfalls ({person, block, missing}[]). Pure.
 function tripsyAttireShortfallText(shortfalls) {
@@ -41109,6 +41176,10 @@ function tripsyAttireNycOmittedIds(trip) {
     if (r.resource === 'transportation') {
       const dep = r.departureDescription, arr = r.arrivalDescription;
       if (dep && arr && tripsyEndpointIsNyc(dep) && tripsyEndpointIsNyc(arr)) out.add(e.id);
+      // A leg that LEAVES New York (Newark included) is dressed there, from clothes that
+      // are not in the bag ("Nov 11 should not count as a packed-clothes day," 2026-11-10
+      // -- the 9 PM flight to London). A leg INTO New York is still dressed from the bag.
+      else if (dep && tripsyNycAreaEndpoint(dep)) out.add(e.id);
       continue;
     }
     let nyc = placeOf(e);

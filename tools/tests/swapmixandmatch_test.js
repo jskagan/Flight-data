@@ -25,6 +25,11 @@ function extractFn(name) {
     else if (html[j] === '}') { depth--; if (!depth) return html.slice(start, j + 1); }
   }
 }
+
+// tripsyGarmentWearableAtTier (2026-11-10: a dressier garment may stand in) is a dependency
+// of the functions extracted below; as globals, every eval / new Function scaffold sees it.
+global.TRIPSY_ATTIRE_CATEGORY_ORDER = ['athletic', 'casual', 'smart_casual', 'semi_formal', 'cocktail', 'formal', 'black_tie'];
+global.tripsyGarmentWearableAtTier = eval('(' + extractFn('tripsyGarmentWearableAtTier') + ')');
 function extractConst(name) {
   const m = html.match(new RegExp(`const ${name} = `));
   const start = m.index;
@@ -89,7 +94,7 @@ assert(/const \{ candidates, current, isMixAndMatch, currentGroup \} =\s*\n\s*aw
     { id: 'jacket', name: 'Casual Jacket', person: 'him', group: 'outerwear', __type: 'jacket', tiers: ['casual'] },
     { id: 'shoes', name: 'Sneakers', person: 'him', group: 'footwear', __type: 'sneaker', tiers: ['casual'] },
     { id: 'her-shirt', name: 'Her Casual Shirt', person: 'her', group: 'tops', __type: 'shirt', tiers: ['casual'] },
-    { id: 'cocktail-shirt', name: 'Dress Shirt', person: 'him', group: 'tops', __type: 'shirt', tiers: ['cocktail'] },
+    { id: 'cocktail-shirt', name: 'Dress Shirt', person: 'him', group: 'tops', __type: 'shirt', tiers: ['athletic'] },
   ];
 
   let got = await run(wardrobe, 'current-polo', 'him', 'casual', ['current-polo']);

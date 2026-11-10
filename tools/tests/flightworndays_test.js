@@ -76,12 +76,32 @@ const ordinary = tripsyWardrobeWearDaysFromLines(guide, 'him', ordinaryLine, 'Bl
 assert(ordinary.basis === 'tier', 'an ordinary line still uses the tier rule -> ' + ordinary.basis);
 assert(ordinary.days.length === 3 && !ordinary.days.some(d => d.dayKey === '2026-08-14'), 'and spans every casual day EXCEPT the departing flight, which the flight-worn garments wear (2026-11-10) -> ' + ordinary.days.length);
 // Garments sharing a line take the tier's days in turn ("multiple sets of dirty clothes when
-// there should have been one set at most for the flight," 2026-11-10).
-const turnA = tripsyWardrobeWearDaysFromLines(guide, 'him', ordinaryLine, 'Blue Polo', { share: () => ({ total: 2, mine: [0] }) });
-const turnB = tripsyWardrobeWearDaysFromLines(guide, 'him', ordinaryLine, 'Green Polo', { share: () => ({ total: 2, mine: [1] }) });
-assert(turnA.days.length === 2 && turnB.days.length === 1 && !turnA.days.some(d => turnB.days.some(x => x.dayKey === d.dayKey)),
-  'two tops on one line split the casual days between them, never both on one day -> ' + turnA.days.length + '/' + turnB.days.length);
-assert(/const share = e => \{[\s\S]*?slots\.push\(x\.id\)[\s\S]*?\{ share \}\);/.test(html), 'a real garment is given its turns among the copies picked for the same line');
+// there should have been one set at most for the flight," 2026-11-10), and a dressier spare
+// covers a day the line cannot ("Allow a dressier item to substitute for a less dressy item").
+const turnsFn = new Function('TRIPSY_ATTIRE_CATEGORY_ORDER', 'TRIPSY_WARDROBE_GENERAL_TIER', 'TRIPSY_WARDROBE_GYM_TIER',
+  'tripsyWardrobeFlightDepartureEvent', 'tripsyWardrobeLineIsFlightWorn', 'tripsyWearsBeforeWash', 'tripsyOutfitGarmentRoles',
+  extractFn('tripsyGarmentWearableAtTier') + '\n' + extractFn('tripsyWardrobeTierTurns') + '\nreturn { tripsyWardrobeTierTurns, tripsyGarmentWearableAtTier };')(
+  ['athletic', 'casual', 'smart_casual', 'semi_formal', 'cocktail', 'formal', 'black_tie'], 'general', 'gym',
+  () => null, l => /wearing on the flight/.test(l), () => 1, () => ['tops']);
+const tg = { days: ['01', '02', '03', '04'].map(d => ({ dayKey: '2030-06-' + d, events: [{ id: 'e' + d, category: d === '04' ? 'smart_casual' : 'casual' }] })) };
+const tById = new Map([['a', { id: 'a', name: 'Polo A' }], ['b', { id: 'b', name: 'Polo B' }], ['c', { id: 'c', name: 'Shirt C' }], ['d', { id: 'd', name: 'Shirt D' }]]);
+const tSel = [{ id: 'a', category: 'casual', line: 'tops', qty: 1 }, { id: 'b', category: 'casual', line: 'tops', qty: 1 },
+  { id: 'c', category: 'smart_casual', line: 'shirts', qty: 1 }, { id: 'd', category: 'smart_casual', line: 'shirts', qty: 1 }];
+const tt = turnsFn.tripsyWardrobeTierTurns(tg, 'him', tSel, tById);
+const daysFor = k => (tt.get(k) || []).map(t => t.dayKey.slice(-2) + ':' + t.category).join(',');
+assert(daysFor('a::casual::tops') === '01:casual' && daysFor('b::casual::tops') === '02:casual', 'two casual tops take the first two casual days, one each');
+assert(daysFor('c::smart_casual::shirts') === '04:smart_casual' && daysFor('d::smart_casual::shirts') === '03:casual',
+  'THE ASK: the third casual day goes to the spare smart casual shirt, not to a re-worn casual top -> ' + daysFor('c::smart_casual::shirts') + ' / ' + daysFor('d::smart_casual::shirts'));
+const tt2 = turnsFn.tripsyWardrobeTierTurns(tg, 'him', tSel.slice(0, 3), tById);
+assert((tt2.get('a::casual::tops') || []).length === 2, 'with nothing dressier spare, the line re-wears its own piece');
+const W = turnsFn.tripsyGarmentWearableAtTier;
+assert(W({ tiers: ['smart_casual'] }, 'casual') && W({ tiers: ['casual'] }, 'casual') && !W({ tiers: ['casual'] }, 'smart_casual') && !W({ tiers: ['formal'] }, 'athletic') && !W({ tiers: [] }, 'casual'),
+  'a garment is wearable at its own dress code or a less dressy one, never a dressier one, and nothing dressier stands in for athletic');
+const viaTurns = tripsyWardrobeWearDaysFromLines(guide, 'him', ordinaryLine, 'Blue Polo', { turns: () => [{ dayKey: ordinary.days[0].dayKey, category: 'casual' }] });
+assert(viaTurns.days.length === 1 && viaTurns.days[0].dayKey === ordinary.days[0].dayKey, 'a garment given its turns is worn on exactly those days');
+assert(/const allTurns = tripsyWardrobeTierTurns\(guide, person, resolved, byId\);/.test(html), 'a real garment is given its turns among everything picked');
+for (const fn of ['tripsyOutfitSwapCandidates', 'tripsyOutfitAddCandidates', 'tripsyAttireBlockShortfall'])
+  assert(/tripsyGarmentWearableAtTier\(g, (liveTier|tier)\)/.test(extractFn(fn)), fn + ' accepts a dressier garment');
 
 // No departing flight at all -> the flight-worn line resolves to zero wear days
 // rather than throwing or silently falling back to the tier-wide behavior.

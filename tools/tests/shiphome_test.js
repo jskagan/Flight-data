@@ -18,6 +18,11 @@ function extractFn(name) {
     else if (html[j] === '}') { depth--; if (!depth) return html.slice(start, j + 1); }
   }
 }
+
+// tripsyGarmentWearableAtTier (2026-11-10: a dressier garment may stand in) is a dependency
+// of the functions extracted below; as globals, every eval / new Function scaffold sees it.
+global.TRIPSY_ATTIRE_CATEGORY_ORDER = ['athletic', 'casual', 'smart_casual', 'semi_formal', 'cocktail', 'formal', 'black_tie'];
+global.tripsyGarmentWearableAtTier = eval('(' + extractFn('tripsyGarmentWearableAtTier') + ')');
 const D = n => '2030-05-' + String(n).padStart(2, '0');
 
 // ---- shared scaffold: a tiny wardrobe, a selection, wear days, ship-home records ----
@@ -165,7 +170,7 @@ eval(['tripsyShipHomeQtyBefore', 'tripsyShipHomeSplit', 'tripsyShipHomeCandidate
   wardrobe = [
     { id: 'p1', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'], bucket: 'pants' },
     { id: 'p2', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'], bucket: 'pants' },
-    { id: 'p3', name: 'Chinos', person: 'him', group: 'pants', tiers: ['formal'], bucket: 'pants' },
+    { id: 'p3', name: 'Chinos', person: 'him', group: 'pants', tiers: ['athletic'], bucket: 'pants' },
     { id: 's1', name: 'Blue shirt', person: 'him', group: 'tops', tiers: ['casual'], bucket: 'tops' },
     { id: 'p4', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'], bucket: 'pants' },
     { id: 'p5', name: 'Chinos', person: 'him', group: 'pants', tiers: ['casual'], bucket: 'pants' },

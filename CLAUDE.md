@@ -2703,6 +2703,23 @@ step 4; git history has it if ever needed.
   among the copies picked for the same tier+line (selection order, one slot per copy), and the
   tier's days are handed out in turn, one garment a day. Generic "No Picture" lines pass no
   share and keep every day. `flightworndays_test.js`.
+  **A leg that LEAVES New York is omitted too** ("Nov 11 should not count as a packed-clothes
+  day," same day — the 9 PM Newark→London flight): `tripsyAttireNycOmittedIds` adds any
+  transportation whose departure is a `tripsyNycAreaEndpoint` (NYC address, JFK, LGA or EWR).
+  A leg INTO New York is still dressed from the bag. This supersedes "a flight to or from New
+  York is still dressed for" above for the departing side. `nycomit_test.js`.
+- **A dressier garment may stand in for a less dressy one** ("Allow a dressier item to
+  substitute for a less dressy item," 2026-11-10). `tripsyGarmentWearableAtTier(g, tier)`
+  (pure): tagged for the tier OR any dressier one in `TRIPSY_ATTIRE_CATEGORY_ORDER`; never
+  for Athletic, and an untagged garment still fits nothing. Used by Swap and Add candidates,
+  `tripsyAttireBlockShortfall` and Ship Home's swap reasons; the Packing List's need lines
+  still match a line's own tag. With NO outfits composed, `tripsyWardrobeTierTurns(guide,
+  person, resolved, byId)` (pure) replaces the per-line `share`: each line's copies take
+  their dress code's days in turn up to `tripsyWearsBeforeWash`, a day left over goes to a
+  spare copy on a dressier line with the same body role that is free that day, and only then
+  does the line re-wear its own piece. It knows nothing of washes (a washed line still hands
+  later days to spares). `tripsyWardrobeWearDays` passes each garment its turns as
+  `opts.turns`. Several scaffolds get the helper as a `global`. `flightworndays_test.js`.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"
   2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day

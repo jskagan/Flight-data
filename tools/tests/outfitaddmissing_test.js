@@ -13,6 +13,11 @@ function extractFn(name) {
   for (; i < html.length; i++) { if (html[i] === '{') depth++; else if (html[i] === '}' && --depth === 0) break; }
   return html.slice(start, i + 1);
 }
+
+// tripsyGarmentWearableAtTier (2026-11-10: a dressier garment may stand in) is a dependency
+// of the functions extracted below; as globals, every eval / new Function scaffold sees it.
+global.TRIPSY_ATTIRE_CATEGORY_ORDER = ['athletic', 'casual', 'smart_casual', 'semi_formal', 'cocktail', 'formal', 'black_tie'];
+global.tripsyGarmentWearableAtTier = eval('(' + extractFn('tripsyGarmentWearableAtTier') + ')');
 function extractConst(name) {
   const start = html.indexOf(`\nconst ${name} = `) + 1;
   let depth = 0;
@@ -57,7 +62,7 @@ assert(JSON.stringify(tripsyOutfitMissingRoles([G('e', 'Silk Tie'), G('d', 'Loaf
 // ---- the garments that could complete it ----
 (async () => {
   wardrobe = [
-    G('shirt1', 'Blue Oxford Shirt'), G('shirt2', 'White Dress Shirt', { tiers: ['formal'] }), G('tee', 'Grey Tee', { tiers: ['casual'] }),
+    G('shirt1', 'Blue Oxford Shirt'), G('shirt2', 'White Dress Shirt', { tiers: ['athletic'] }), G('tee', 'Grey Tee', { tiers: ['casual'] }),
     G('jeans', 'Blue Jeans'), G('loafers', 'Brown Loafers'), G('sneak', 'White Sneakers', { tiers: ['casual'] }),
     G('hers', 'Her Sandals', { person: 'her' }), G('socks', 'Casual Socks', { group: 'essentials' }), G('unpacked', 'Black Oxfords'),
   ];
