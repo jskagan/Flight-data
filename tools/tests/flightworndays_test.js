@@ -108,3 +108,5 @@ for (const fn of ['tripsyOutfitSwapCandidates', 'tripsyOutfitAddCandidates', 'tr
 const noFlightGuide = { days: [{ dayKey: '2026-08-14', events: [{ id: 'ev1', name: 'Casual lunch', category: 'casual', displayCategory: 'casual' }] }], packingList: { him: [] } };
 const noFlight = tripsyWardrobeWearDaysFromLines(noFlightGuide, 'him', line, 'Navy Henley');
 assert(noFlight.days.length === 0, 'no departing flight in the guide -> zero wear days for the flight-worn line, not a crash');
+
+assert(/use one listed for a DRESSIER dress code instead — e\.g\. a smart casual top for a casual block/.test(html) && /Never the reverse/.test(html), 'the outfit composer may use a dressier garment only when the block\'s own are unavailable (2026-11-10)');

@@ -2720,6 +2720,10 @@ step 4; git history has it if ever needed.
   does the line re-wear its own piece. It knows nothing of washes (a washed line still hands
   later days to spares). `tripsyWardrobeWearDays` passes each garment its turns as
   `opts.turns`. Several scaffolds get the helper as a `global`. `flightworndays_test.js`.
+  **The outfit composer follows the same rule, as a fallback only** ("You can use a smart
+  casual top for a casual one if all casual ones are unavailable," same day): its prompt
+  prefers garments listed for the block's own dress code and takes a dressier one only when
+  every such garment of that type is unavailable; never the reverse, never for Athletic.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"
   2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day
