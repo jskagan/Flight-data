@@ -46,6 +46,7 @@ ${extractFn('tripsyLaundryBagBaseCounts')}
 ${extractFn('tripsyLaundryReturnCredits')}
 ${extractFn('tripsyLaundryLastReturnDay')}
 ${extractFn('tripsyLaundryOutOn')}
+${extractFn('tripsyLaundryWearIsDone')}
 ${extractFn('tripsyLaundryItemsForDay')}
 
 const G = (id, name, person, driveFileId) => ({ id, name, person, driveFileId });

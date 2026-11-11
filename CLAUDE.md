@@ -2724,6 +2724,19 @@ step 4; git history has it if ever needed.
   casual top for a casual one if all casual ones are unavailable," same day): its prompt
   prefers garments listed for the block's own dress code and takes a dressier one only when
   every such garment of that type is unavailable; never the reverse, never for Athletic.
+- **The laundry list counts a wearing only once it has HAPPENED, and its summary line is
+  computed** ("why are these clothes marked as dirty when I have not even worn them yet …
+  Shouldn't clothes only be dirty after the wearing period or the day has ended?" and "Why am
+  I getting the message that if I wash these clothes, I should have enough for the entire
+  trip? Is that true?", 2026-11-11). `tripsyLaundryWearIsDone(day, viewDayKey, now)` (pure):
+  earlier day yes, later day no; on the viewed day, any day but the device's today counts as
+  before, and TODAY counts only once the wearing's last event is over (end time, else start
+  time; an untimed wearing only when the day ends). `tripsyLaundryItemsForDay` uses it for
+  `worn` and counts a not-yet-done wearing as a future one. It also returns
+  `out.shortAfterWash` (garments with more wearings left than `qty × limit`), and
+  `tripsyLaundrySummaryText` replaces the fixed "wash these today and you should have enough"
+  line, which was shown whatever the numbers said. The run-out walks are unchanged.
+  `laundryworn_test.js`.
 - **Days with no scheduled events still get clothed — Casual by default, shown everywhere as "No
   events planned"** ("on days with no scheduled events you still need to account for clothing,"
   2026-09-15). `tripsyAttireBuildDays` fills every gap between the trip's first and last EVENT day

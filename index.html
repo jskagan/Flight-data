@@ -12725,6 +12725,42 @@ function tripsyShipHomeGoneIds(tripKey, person, dayKey) {
   }
   return gone;
 }
+// The laundry screen's summary line. It used to promise "wash these today and you should
+// have enough clean clothes for the rest of the trip" whatever the numbers said. Pure.
+function tripsyLaundrySummaryText(shortAfterWash) {
+  const s = shortAfterWash || [];
+  if (!s.length) return 'Wash these today and you should have enough clean clothes for the rest of the trip.';
+  const names = s.length > 3 ? s.slice(0, 3).join(', ') + ` and ${s.length - 3} more` : s.join(', ');
+  return `These are what is dirty today. One wash today is not enough for the rest of the trip: there are more wearings left of ${names} than you have packed, so plan another wash later.`;
+}
+// Whether a wearing has HAPPENED as of the day being viewed ("why are these clothes marked
+// as dirty when I have not even worn them yet? Shouldn't clothes only be dirty after the
+// wearing period or the day has ended?", 2026-11-11). An earlier day's wearing has; a later
+// day's has not. On the viewed day itself: any day but the device's today counts as before
+// (the screen stands for laundry done that day); TODAY counts only once the wearing's last
+// event is over -- its end time, else its start time -- and an untimed wearing only once the
+// day has ended. `day` is a wear-day entry {dayKey, events:[{startTime, endTime}]}. Pure.
+function tripsyLaundryWearIsDone(day, viewDayKey, now) {
+  if (!day || !day.dayKey) return false;
+  if (day.dayKey !== viewDayKey) return day.dayKey < viewDayKey;
+  const d = now || new Date();
+  const todayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  if (viewDayKey !== todayKey) return true;
+  const mins = t => {
+    const m = String(t || '').match(/^\s*(\d{1,2}):(\d{2})\s*([AP]M)?\s*$/i);
+    if (!m) return null;
+    let h = +m[1] % (m[3] ? 12 : 24);
+    if (m[3] && /pm/i.test(m[3])) h += 12;
+    return h * 60 + +m[2];
+  };
+  let last = null;
+  for (const ev of (day.events || [])) {
+    const t = mins(ev && ev.endTime) ?? mins(ev && ev.startTime);
+    if (t === null) return false; // an untimed event: not over until the day is
+    if (last === null || t > last) last = t;
+  }
+  return last !== null && d.getHours() * 60 + d.getMinutes() >= last;
+}
 // ---- "Do Laundry Today" ---------------------------------------------------------
 // What is DIRTY on a given day and still NEEDED afterwards. Washing something you will
 // never wear again does nothing for the odds of finishing the trip without a second
@@ -12779,6 +12815,10 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
   // Copies already shipped home (a box dated before this day) are not here to wash.
   const shipRecords = Store.listTripsyShipHome(tripKey);
   const out = [];
+  // Garments the rest of the trip needs MORE wearings of than every copy can give even if
+  // all of them are washed today -- one wash today is not enough for these. Rides on the
+  // returned array (out.shortAfterWash) so the screen's summary line can be truthful.
+  const shortAfterWash = [];
   for (const [id, qtyPacked] of qtyById) {
     const g = byId.get(id);
     if (!g || !isPerson(g)) continue;
@@ -12787,14 +12827,15 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
     if (qty <= 0) continue;
     const { days } = await tripsyWardrobeWearDays(tripKey, id, person);
     const since = lastWashFor('g:' + id);
-    const worn = Math.max(0, (days || []).filter(d => d.dayKey && d.dayKey <= dayKey && (!since || d.dayKey > since)).length
+    const worn = Math.max(0, (days || []).filter(d => tripsyLaundryWearIsDone(d, dayKey) && (!since || d.dayKey > since)).length
       - creditFor('g:' + id, since));
     // Only genuinely DIRTY copies -- one that has not had its full run of wearings yet is
     // still wearable, and putting it in the bag would be washing a clean garment.
     const limit = tripsyWearsBeforeWash(g.name, null, g.group);
     const dirty = tripsyDirtyCopies(worn, limit, qty);
+    const futureWears = (days || []).filter(d => d.dayKey && d.dayKey >= dayKey && !tripsyLaundryWearIsDone(d, dayKey)).length;
+    if (isFinite(limit) && limit > 0 && futureWears > qty * limit) shortAfterWash.push(g.name || 'Garment');
     if (!dirty) continue;
-    const futureWears = (days || []).filter(d => d.dayKey && d.dayKey > dayKey).length;
     pushSplit(out, { key: 'g:' + id, name: g.name || 'Garment', driveFileId: g.driveFileId || '',
       typeKey: tripsyGarmentTypeKey(g.name || ''), group: g.group || '' },
       { dirty, qty, limit, worn, futureWears });
@@ -12806,20 +12847,22 @@ async function tripsyLaundryItemsForDay(tripKey, dayKey, person) {
     const lines = [{ category: x.category, line: x.name }];
     const { days } = tripsyWardrobeWearDaysFromLines(guide, person, lines, x.name || '');
     const sinceX = lastWashFor('x:' + (x.name || ''));
-    const worn = Math.max(0, (days || []).filter(d => d.dayKey && d.dayKey <= dayKey && (!sinceX || d.dayKey > sinceX)).length
+    const worn = Math.max(0, (days || []).filter(d => tripsyLaundryWearIsDone(d, dayKey) && (!sinceX || d.dayKey > sinceX)).length
       - creditFor('x:' + (x.name || ''), sinceX));
     const limitX = tripsyWearsBeforeWash(x.name, x.typeKey, '');
     const qtyX = Math.max(1, x.qty || 1) - tripsyShipHomeQtyBefore(shipRecords, person, 'x:' + (x.name || ''), dayKey) - tripsyLaundryOutOn(laundryRecords, person, 'x:' + (x.name || ''), dayKey);
     if (qtyX <= 0) continue;
     const dirtyX = tripsyDirtyCopies(worn, limitX, qtyX);
+    const futureWearsX = (days || []).filter(d => d.dayKey && d.dayKey >= dayKey && !tripsyLaundryWearIsDone(d, dayKey)).length;
+    if (isFinite(limitX) && limitX > 0 && futureWearsX > qtyX * limitX) shortAfterWash.push(x.name || 'Item');
     if (!dirtyX) continue;
-    const futureWearsX = (days || []).filter(d => d.dayKey && d.dayKey > dayKey).length;
     pushSplit(out, { key: 'x:' + (x.name || ''), name: x.name || 'Item', driveFileId: '',
       typeKey: x.typeKey || tripsyGarmentTypeKey(x.name || ''), group: '' },
       { dirty: dirtyX, qty: qtyX, limit: limitX, worn, futureWears: futureWearsX });
   }
   // Most-dirty first: the pile that actually decides whether you make it.
   out.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  out.shortAfterWash = [...new Set(shortAfterWash)];
   return out;
 }
 // One shared per-day step for the wear-limit walk both tripsyLaundryRunOutByDay and
@@ -13324,7 +13367,7 @@ async function showTripsyLaundryDay(tripKey, dayKey, person, opts = {}) {
         </div>
       </div>`;
     body.innerHTML = `
-      <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">Wash these today and you should have enough clean clothes for the rest of the trip. Tap a garment to put it in the bag.</div>
+      <div data-laundry-summary style="font-size:13px; color:var(--muted); margin-bottom:12px;">${esc(tripsyLaundrySummaryText(items.shortAfterWash))} Tap a garment to put it in the bag.</div>
       <div class="tripsy-laundry-bag">
         <div class="tripsy-laundry-bag-head">
           <span>🧺 Laundry Bag${bagTotal ? ` <span style="color:var(--muted); font-weight:400;">· ${bagTotal} item${bagTotal === 1 ? '' : 's'}</span>` : ''}</span>
