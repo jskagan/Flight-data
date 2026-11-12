@@ -12993,6 +12993,141 @@ function tripsyUnwashedLaundryBagsByDay(records, person) {
   }
   return out;
 }
+// ---- "Out of Clothes" ("add an 'Out of Clothes' button to the clothing screens that will
+// show what days I will run out of what categories of items," 2026-11-11). A forecast with
+// NO further laundry: washes and Not Dirty credits already recorded count, nothing later is
+// assumed. Same per-day arithmetic as the run-out bar (tripsyLaundryWearDebtStep), but it
+// lists EVERY short day, not only the first, and groups garments by category.
+// The category a garment is reported under: socks / underwear / undershirts on their own
+// (the "essentials" group lumps them), else the packing group's label.
+function tripsyOutOfClothesCategory(name, group) {
+  const t = tripsyGarmentTypeKey(name || '');
+  if (t === 'socks' || t === 'dress-socks') return 'Socks';
+  if (t === 'underwear') return 'Underwear';
+  if (t === 'undershirt') return 'Undershirts';
+  const grp = TRIPSY_ATTIRE_PACKING_GROUP_LABEL[group] ? group : tripsyAttirePackingGroupOf({ name: name || '' });
+  return TRIPSY_ATTIRE_PACKING_GROUP_LABEL[grp] || 'Other';
+}
+// Every day one garment is scheduled with no clean copy left. Pure. `qtyOn`, `washedOn`
+// and `creditedOn` are dayKey -> number; a short day adds no wear debt (it was already
+// all dirty), so later scheduled days stay short until a recorded wash comes back.
+function tripsyOutOfClothesShortDays(dayKeys, wornDays, limit, qtyOn, washedOn, creditedOn) {
+  const worn = new Set(wornDays || []);
+  const out = [];
+  let wearDebt = 0;
+  for (const dayKey of (dayKeys || [])) {
+    const qty = qtyOn(dayKey);
+    if (qty <= 0) { if (worn.has(dayKey)) out.push(dayKey); continue; }
+    if (!(limit > 0) || !isFinite(limit)) continue; // never laundered: can never run out
+    const step = tripsyLaundryWearDebtStep(wearDebt, {
+      washedQty: washedOn ? washedOn(dayKey) : 0, credited: creditedOn ? creditedOn(dayKey) : 0,
+      wornToday: worn.has(dayKey), qty, limit,
+    });
+    wearDebt = step.wearDebt;
+    if (step.short) out.push(dayKey);
+  }
+  return out;
+}
+// rows [{name, category, shortDays}] -> one entry per category that runs short on or after
+// `fromDayKey`, earliest first: {category, firstDay, shortBy, days:[{dayKey, names}]}. Pure.
+function tripsyOutOfClothesSummary(rows, fromDayKey) {
+  const cats = new Map();
+  for (const r of (rows || [])) {
+    for (const dayKey of (r.shortDays || [])) {
+      if (fromDayKey && dayKey < fromDayKey) continue;
+      if (!cats.has(r.category)) cats.set(r.category, new Map());
+      const byDay = cats.get(r.category);
+      if (!byDay.has(dayKey)) byDay.set(dayKey, []);
+      byDay.get(dayKey).push(r.name);
+    }
+  }
+  return [...cats].map(([category, byDay]) => {
+    const days = [...byDay].sort((a, b) => a[0] < b[0] ? -1 : 1).map(([dayKey, names]) => ({ dayKey, names }));
+    return { category, firstDay: days[0].dayKey, shortBy: days.reduce((n, d) => n + d.names.length, 0), days };
+  }).sort((a, b) => a.firstDay < b.firstDay ? -1 : a.firstDay > b.firstDay ? 1 : a.category.localeCompare(b.category));
+}
+async function tripsyOutOfClothesRows(tripKey, person) {
+  const [garments, selectedRaw, genericRaw, guide] = await Promise.all([
+    Store.listWardrobe(), Store.getTripWardrobe(tripKey), Store.getTripGenericGarments(tripKey), Store.getTripsyAttireGuide(tripKey),
+  ]);
+  const dayKeys = ((guide && guide.days) || []).map(d => d.dayKey).filter(Boolean);
+  const washes = Store.listTripsyLaundry(tripKey).filter(r => r.washedAt && (r.person || 'him') === person && r.dayKey);
+  const notDirty = Store.listLaundryNotDirty(tripKey).filter(r => (r.person || 'him') === person && r.dayKey);
+  const returnCredits = tripsyLaundryReturnCredits(washes, person);
+  const shipRecords = Store.listTripsyShipHome(tripKey);
+  const rows = [];
+  const add = (key, name, group, typeKey, qtyPacked, days) => {
+    const limit = tripsyWearsBeforeWash(name, typeKey, group);
+    const shortDays = tripsyOutOfClothesShortDays(dayKeys, (days || []).map(d => d.dayKey).filter(Boolean), limit,
+      dayKey => qtyPacked - tripsyShipHomeQtyBefore(shipRecords, person, key, dayKey),
+      dayKey => tripsyLaundryCreditOn(returnCredits, key, dayKey),
+      dayKey => notDirty.filter(r => r.dayKey === dayKey && (r.key === key || r.key === key + '::nn')).reduce((n, r) => n + (r.count || 0), 0));
+    rows.push({ name, category: tripsyOutOfClothesCategory(name, group), shortDays });
+  };
+  const byId = new Map((garments || []).map(g => [g.id, g]));
+  for (const [id, qty] of tripsyWardrobePhysicalQtyById(tripsyNormalizeTripSelection(selectedRaw))) {
+    const g = byId.get(id);
+    if (!g || (g.person || 'him') !== person) continue;
+    const { days } = await tripsyWardrobeWearDays(tripKey, id, person);
+    add('g:' + id, g.name || 'Garment', g.group || '', null, qty, days);
+  }
+  for (const x of (genericRaw || [])) {
+    if ((x.person || 'him') !== person) continue;
+    const { days } = tripsyWardrobeWearDaysFromLines(guide, person, [{ category: x.category, line: x.name }], x.name || '');
+    add('x:' + (x.name || ''), x.name || 'Item', '', x.typeKey, Math.max(1, x.qty || 1), days);
+  }
+  return rows;
+}
+// The list's markup, pure for the tests. A category whose short garment is always the one
+// thing (Underwear) lists just its days; one with several garments names them per day.
+function tripsyOutOfClothesHtml(summary) {
+  if (!summary.length) return `<div data-ooc-none style="padding:14px 0;">You have enough clean clothes for the rest of the trip.</div>`;
+  return summary.map(c => {
+    const oneName = new Set(c.days.flatMap(d => d.names)).size === 1;
+    const dayLine = d => `<div style="font-size:13px; padding:2px 0;">${esc(tripsyDayHeaderLabel(d.dayKey))}${oneName ? (d.names.length > 1 ? ` · ${d.names.length} short` : '') : ` — ${esc(d.names.join(', '))}`}</div>`;
+    return `<div data-ooc-category="${esc(c.category)}" style="border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:10px;">
+      <div style="font-weight:700;">${esc(c.category)} <span style="font-weight:400; color:var(--muted);">— out from ${esc(tripsyDayHeaderLabel(c.firstDay))} · short by ${c.shortBy} wearing${c.shortBy === 1 ? '' : 's'}</span></div>
+      <div style="margin-top:6px;">${c.days.map(dayLine).join('')}</div>
+    </div>`;
+  }).join('');
+}
+async function showTripsyOutOfClothes(tripKey, person) {
+  let ov = document.getElementById('tripsy-outofclothes-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'tripsy-outofclothes-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
+  ov.style.zIndex = '2147483130'; // above the laundry screen, which has a button for it
+  let who = person || tripsyDressGuidePerson || 'him';
+  const close = () => { ov.style.display = 'none'; ov.onclick = null; };
+  ov.onclick = e => {
+    if (e.target === ov || e.target.closest('[data-ooc-close]')) return close();
+    const p = e.target.closest('[data-ooc-person]');
+    if (p && p.dataset.oocPerson !== who) { who = p.dataset.oocPerson; render(); }
+  };
+  const render = async () => {
+    const shown = who;
+    const personBtn = (id, label) => `<button class="btn${id === shown ? ' primary' : ''}" data-ooc-person="${id}" style="padding:4px 12px;">${label}</button>`;
+    ov.innerHTML = `<div class="tw-modal-paper" style="max-width:560px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px;">
+        <h2 style="margin:0; font-size:18px;">Out of Clothes</h2>
+        <button class="tripsy-close-x" data-ooc-close aria-label="Close" title="Close">&#10005;</button>
+      </div>
+      <div style="display:flex; gap:8px; margin-bottom:8px;">${personBtn('him', 'His')}${personBtn('her', 'Hers')}</div>
+      <div style="font-size:13px; color:var(--muted); margin-bottom:12px;">The days each kind of clothing runs out if no more laundry is done. Washes already recorded are counted.</div>
+      <div data-ooc-body><div style="padding:14px 0; color:var(--muted);">Working it out…</div></div>
+    </div>`;
+    ov.style.display = 'flex';
+    let html;
+    try {
+      html = tripsyOutOfClothesHtml(tripsyOutOfClothesSummary(await tripsyOutOfClothesRows(tripKey, shown), tripsyTodayDayKey()));
+    } catch (e) {
+      console.error('Out of Clothes failed:', e);
+      html = `<div style="padding:14px 0; color:var(--amber);">Could not work this out: ${esc(String((e && e.message) || e).slice(0, 200))}</div>`;
+    }
+    const body = ov.querySelector('[data-ooc-body]');
+    if (body && shown === who && ov.style.display !== 'none') body.innerHTML = html;
+  };
+  await render();
+}
+
 // The run-out bar's sentence, pure for the tests: the garment is on the day's wear
 // schedule but unavailable because it is dirty, plus the last day it was worn.
 function tripsyRunOutNoteText(name, lastWornDayKey) {
@@ -13367,7 +13502,7 @@ async function showTripsyLaundryDay(tripKey, dayKey, person, opts = {}) {
         </div>
       </div>`;
     body.innerHTML = `
-      <div data-laundry-summary style="font-size:13px; color:var(--muted); margin-bottom:12px;">${esc(tripsyLaundrySummaryText(items.shortAfterWash))} Tap a garment to put it in the bag.</div>
+      <div data-laundry-summary style="font-size:13px; color:var(--muted); margin-bottom:12px;">${esc(tripsyLaundrySummaryText(items.shortAfterWash))} Tap a garment to put it in the bag. <button class="btn" data-laundry-out-of-clothes style="padding:2px 10px; font-size:12px; margin-left:6px;">Out of Clothes</button></div>
       <div class="tripsy-laundry-bag">
         <div class="tripsy-laundry-bag-head">
           <span>🧺 Laundry Bag${bagTotal ? ` <span style="color:var(--muted); font-weight:400;">· ${bagTotal} item${bagTotal === 1 ? '' : 's'}</span>` : ''}</span>
@@ -13396,6 +13531,7 @@ async function showTripsyLaundryDay(tripKey, dayKey, person, opts = {}) {
 
   ov.onclick = async e => {
     if (e.target === ov || e.target.closest('[data-laundry-close]')) { ov.style.display = 'none'; ov.onclick = null; return; }
+    if (e.target.closest('[data-laundry-out-of-clothes]')) { showTripsyOutOfClothes(tripKey, person); return; }
     if (e.target.closest('[data-laundry-wash]')) {
       // Washing makes exactly what is in the bag clean again: the record is stamped, and
       // tripsyLaundryItemsForDay stops counting those garments' wears from this day back.
@@ -35453,8 +35589,8 @@ function tripsyTodayStripHtml(trip, todayKey, hasEvents) {
     parts.push(btn(`data-tripsy-attire-nav="laundry" data-key="${k}" data-day="${esc(todayKey)}"`, '🧺 Laundry'));
     for (const o of outstanding) parts.push(btn(`data-tripsy-attire-nav="laundryback" data-key="${k}" data-day="${esc(todayKey)}" data-wash="${esc(o.washDayKey)}"`, `🧺 Laundry back · ${o.total} out`));
   }
-  if (guide) parts.push(btn(`data-tripsy-attire-nav="dressguide" data-key="${k}"`, '📖 Dress guide'));
-  parts.push(btn('data-tripsy-today-travelview', '🧳 Travel View'));
+  // No Dress guide or Travel View buttons here ("Remove dress guide and travel view from the
+  // today box," 2026-11-12): both are a tap away on the Clothes menu and the nav.
   return `<div class="tripsy-today-strip" data-tripsy-today-strip="${k}" style="position:relative; z-index:2; display:flex; flex-wrap:wrap; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--home-green); border-radius:8px; padding:8px 12px; margin:0 0 10px;">
     <span style="font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:0.06em; color:var(--home-green);">TODAY${hasEvents ? '' : ` · ${esc(tripsyDayHeaderLabel(todayKey))} · NO EVENTS`}</span>
     ${parts.join('')}
@@ -39101,6 +39237,7 @@ function getOrCreateTripsyAttireOverlay() {
         <h2 class="tripsy-attire-cardtitle" data-tripsy-attire-title></h2>
         <div class="tripsy-attire-toolbar-actions">
           <button class="tripsy-update-btn" id="tripsy-attire-definitions-btn">Definitions</button>
+          <button class="tripsy-update-btn" data-tripsy-out-of-clothes>Out of Clothes</button>
           ${isOwner ? '<button class="tripsy-update-btn" id="tripsy-attire-regenerate-btn">Regenerate</button>' : ''}
           <button class="tripsy-close-x" id="tripsy-attire-close-btn" aria-label="Close" title="Close">&#10005;</button>
         </div>
@@ -39117,6 +39254,7 @@ function getOrCreateTripsyAttireOverlay() {
     overlay.style.display = 'none';
   });
   overlay.querySelector('#tripsy-attire-definitions-btn').addEventListener('click', () => showTripsyAttireDefinitions());
+  overlay.querySelector('[data-tripsy-out-of-clothes]').addEventListener('click', () => { if (tripsyAttireOverlayTripKey) showTripsyOutOfClothes(tripsyAttireOverlayTripKey, tripsyDressGuidePerson); });
   // Regenerate ("add a 'Regenerate' button to the right of the Definitions button
   // on the clothing summary screen," 2026-09-15): the exact same safe entry the 👔
   // menu's Refresh uses, against whichever trip this overlay currently shows.
@@ -40506,6 +40644,7 @@ function getOrCreateTripsyDressGuideOverlay() {
           <button class="tripsy-update-btn" data-tripsy-dg-scale-up aria-label="Larger text">Zoom +</button>
         </span>
         <button class="tripsy-update-btn" id="tripsy-attire-dressguide-filter-btn">Filter</button>
+        <button class="tripsy-update-btn" data-tripsy-out-of-clothes>Out of Clothes</button>
         <span id="tripsy-attire-dressguide-person"></span>
         <button class="tripsy-update-btn" id="tripsy-attire-dressguide-regen-btn" style="display:none;">Regenerate</button>
         <button class="tripsy-close-x" id="tripsy-attire-dressguide-close-btn" aria-label="Close" title="Close">&#10005;</button>
@@ -40516,6 +40655,7 @@ function getOrCreateTripsyDressGuideOverlay() {
   document.body.appendChild(overlay);
   overlay.querySelector('#tripsy-attire-dressguide-close-btn').addEventListener('click', () => { overlay.style.display = 'none'; });
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.style.display = 'none'; });
+  overlay.querySelector('[data-tripsy-out-of-clothes]').addEventListener('click', () => { if (tripsyAttireOverlayTripKey) showTripsyOutOfClothes(tripsyAttireOverlayTripKey, tripsyDressGuidePerson); });
   const bumpScale = dir => {
     const v = tripsyDgScaleStep(tripsyDgScaleLoad(), dir);
     tripsyDgScaleSave(v);
@@ -45093,6 +45233,8 @@ async function renderTripsyEventsListImpl() {
       // me to add new clothes purchased on the trip," 2026-10-20): on-trip only, owner-only
       // (it writes the wardrobe, the packing list and the outfits). See tripsyBuyClothesFlow.
       isOwner && attireHasGuide && attireTripUnderway ? menuListButtonHtml(`data-tripsy-attire-nav="buy" data-key="${esc(trip.key)}" data-name="${esc(trip.name)}"`, '🛍️', 'Buy Clothes') : '',
+      // Out of Clothes (2026-11-11): read-only forecast, any viewer, once a guide exists; before Garment Location, which stays directly before Refresh.
+      attireHasGuide ? menuListButtonHtml(`data-tripsy-attire-nav="outofclothes" data-key="${esc(trip.key)}"`, '🚫', 'Out of Clothes') : '',
       // Garment Location ("a list of each packing cube used on that trip plus an option
       // for Laundry," 2026-10-17): read-only, any viewer, once a guide exists -- cube
       // contents come from the packing selection and the laundry judgement from the
@@ -45563,6 +45705,7 @@ async function renderTripsyEventsListImpl() {
         case 'pack': tripsyWardrobePackForTrip(key, name); break;
         case 'packlist': tripsyWardrobePackingList(key, name); break;
         case 'location': showTripsyGarmentLocation(key, name); break;
+        case 'outofclothes': showTripsyOutOfClothes(key, tripsyDressGuidePerson); break;
         case 'buy': tripsyBuyClothesFlow(key, name); break;
         // Laundry / Laundry back (2026-10-19): the Daily Dress Guide's own screens, for the
         // trip's today (data-day; empty = the trip hasn't started, nothing worn yet) and

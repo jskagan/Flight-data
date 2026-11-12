@@ -52,7 +52,7 @@ const data = { tripsyAttireGuides: [{ tripKey: 'T' }], tripsyTripOutfits: [{ tri
 let h = build({ data, outstanding: [{ washDayKey: '2030-05-01', total: 3 }] })(trip, '2030-05-03', true);
 assert((h.match(/data-tripsy-today-outfit/g) || []).length === 2 && /Outfit · Casual/.test(h) && /Outfit · Formal/.test(h), 'two outfits today: one button each, named by dress code');
 assert(/data-tripsy-attire-nav="laundry" data-key="T" data-day="2030-05-03"/.test(h) && /Laundry back · 3 out/.test(h), 'Laundry, and Laundry back while a wash is out, through the Clothes menu\'s own handler');
-assert(/data-tripsy-attire-nav="dressguide"/.test(h) && /data-tripsy-today-travelview/.test(h), 'the Dress guide and Travel View links');
+assert(!/data-tripsy-attire-nav="dressguide"/.test(h) && !/data-tripsy-today-travelview/.test(h) && !/Travel View/.test(h), 'no Dress guide or Travel View buttons (removed 2026-11-12)');
 h = build({ data: { ...data, tripsyTripOutfits: [{ tripKey: 'T', person: 'him', blocks: blocks.slice(0, 1) }] } })(trip, '2030-05-03', true);
 assert(/Today’s outfit/.test(h), 'one outfit today reads "Today\'s outfit"');
 h = build({ data: { ...data, tripsyTripOutfits: [{ tripKey: 'T', person: 'her', blocks: blocks.slice(0, 1) }] } })(trip, '2030-05-03', true);
@@ -60,7 +60,7 @@ assert(/data-person="her"/.test(h), 'with no outfit for the person shown, the ot
 h = build({ data, owner: false })(trip, '2030-05-03', true);
 assert(!/laundry/.test(h) && /data-tripsy-today-outfit/.test(h), 'a viewer gets the outfit and guide links but no Laundry');
 h = build({ data: { tripsyAttireGuides: [], tripsyTripOutfits: [] } })(trip, '2030-05-03', false);
-assert(/NO EVENTS/.test(h) && /Travel View/.test(h) && !/dressguide/.test(h), 'a free day with no guide still gets a strip, saying so');
+assert(/NO EVENTS/.test(h) && !/Travel View/.test(h) && !/dressguide/.test(h), 'a free day with no guide still gets a strip, saying so');
 assert(build({ data })(trip, null, true) === '', 'no today: no strip');
 assert(/tlTodayHasEvents && g\.dayKey === tlTodayKey \? tripsyTodayStripHtml\(trip, tlTodayKey, true\)/.test(html), 'it sits under today\'s day bar, inside the block the today jump lands on');
 assert(/dayGroups\[0\]\.dayKey <= tlTodayKey && tlTodayKey <= dayGroups\[dayGroups\.length - 1\]\.dayKey/.test(html), 'only while today is inside the trip\'s own days');

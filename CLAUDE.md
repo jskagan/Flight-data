@@ -1292,9 +1292,10 @@ step 4; git history has it if ever needed.
   before the next day's block on a free day ("TODAY · … · NO EVENTS"). Buttons: one per composed
   outfit block today (`data-tripsy-today-outfit`, the Daily Dress Guide's person, else the
   other; "Today's outfit", or "Outfit · <dress code>" when there are several), Laundry and
-  "Laundry back · N out" (owner, full guide) and Dress guide — these three carry the Clothes
-  menu's `data-tripsy-attire-nav` attributes, so that menu's handler serves them — and Travel
-  View. Verified in Chromium against a synthetic trip. `attentiontoday_test.js`.
+  "Laundry back · N out" (owner, full guide) — these carry the Clothes menu's
+  `data-tripsy-attire-nav` attributes, so that menu's handler serves them. The Dress guide and
+  Travel View buttons were removed ("Remove dress guide and travel view from the today box,"
+  2026-11-12). Verified in Chromium against a synthetic trip. `attentiontoday_test.js`.
 - **Three interface rules from a UI review** ("Do 4, 5 and 6," 2026-11-10; `uitidy_test.js`):
   **(a) Back vs Close.** A button that returns ONE LEVEL is the orange "‹ Back"
   (`.tripsy-back-btn`); one that closes the whole page is the red ✕ (`.tripsy-close-x`). The
@@ -2724,6 +2725,22 @@ step 4; git history has it if ever needed.
   casual top for a casual one if all casual ones are unavailable," same day): its prompt
   prefers garments listed for the block's own dress code and takes a dressier one only when
   every such garment of that type is unavailable; never the reverse, never for Athletic.
+- **"Out of Clothes" — the days each CATEGORY runs out with no more laundry** ("add an 'Out of
+  Clothes' button to the clothing screens that will show what days I will run out of what
+  categories of items," 2026-11-11). `showTripsyOutOfClothes(tripKey, person)` (overlay
+  `tripsy-outofclothes-overlay`, z 2147483130 — above the laundry screen; His/Hers toggle;
+  read-only, any viewer). Buttons: the Clothes menu (`data-tripsy-attire-nav="outofclothes"`),
+  the Daily Dress Guide and Clothing Summary toolbars (`data-tripsy-out-of-clothes`, trip from
+  `tripsyAttireOverlayTripKey`) and the Laundry screen (`data-laundry-out-of-clothes`).
+  `tripsyOutOfClothesRows` walks every packed garment and generic line with the run-out bar's
+  own step (`tripsyLaundryWearDebtStep`; physical copies, ship-home boxes, returned washes and
+  Not Dirty credits counted, nothing later assumed) through the pure
+  `tripsyOutOfClothesShortDays`, which lists EVERY short day, not just the first, and unlike
+  `tripsyLaundryRunOutByDay` needs no recorded wash. `tripsyOutOfClothesSummary(rows,
+  fromDayKey)` (pure) groups by `tripsyOutOfClothesCategory` (Socks / Underwear / Undershirts
+  on their own, else the packing group label) from the device's today on;
+  `tripsyOutOfClothesHtml` renders it. Checked in Chromium on Jon's live trip: Tops short 6
+  from Nov 17, Underwear 4 from Nov 21, Socks 1 on Nov 24. `outofclothes_test.js`.
 - **The laundry list counts a wearing only once it has HAPPENED, and its summary line is
   computed** ("why are these clothes marked as dirty when I have not even worn them yet …
   Shouldn't clothes only be dirty after the wearing period or the day has ended?" and "Why am
