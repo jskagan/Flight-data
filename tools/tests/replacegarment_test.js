@@ -126,7 +126,7 @@ function makeWorld({ failOutfits = false } = {}) {
   assert(/closest\('\[data-tw-replace\]'\)/.test(pack) && /tripsyWardrobePackForTrip\(tripKey, tripName, person, onClose, lnNow \? \{ tier: view\.tier, lineName: lnNow\.name \} : null\)/.test(pack),
     'after a replace the Packing List reopens on the same line from the saved stores');
   const picker = fnSource('tripsyReplaceGarmentPicker');
-  assert(/tripsyAttirePackingGroupOf\(g\) === group/.test(picker) && /g\.id !== oldGarment\.id/.test(picker), 'the picker offers same-kind garments only, old one excluded');
+  assert(/tripsyGarmentsShareKind\(g, oldGarment\)/.test(picker) && /g\.id !== oldGarment\.id/.test(picker), 'the picker offers same-kind garments only, old one excluded');
   assert(/zIndex = '2147483099'/.test(picker), 'the picker clears the outfit modal and its pickers (below the confirm dialog)');
   assert(/Not tagged for/.test(picker), 'a candidate not tagged for a used tier says so rather than being hidden');
   const run = fnSource('tripsyRunReplaceGarment');

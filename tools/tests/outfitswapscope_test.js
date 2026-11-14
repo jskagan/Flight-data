@@ -67,6 +67,8 @@ assert(tripsyOutfitBlockLiveTier(guideFixture, { eventIds: [], category: 'casual
   const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
   const tripsyGarmentTypeBucket = g => ({ key: g.__type || ('group:' + (g.group || 'accessories')) });
   const tripsyAttirePackingGroupOf = g => g.group || 'accessories';
+  const tripsyGarmentPackingGroups = g => [tripsyAttirePackingGroupOf(g)];
+  const tripsyGarmentsShareKind = (a, b) => tripsyAttirePackingGroupOf(a) === tripsyAttirePackingGroupOf(b);
   const tripsyNormalizeTripSelection = sel => sel;
   const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';
   let wardrobeFixture = [];

@@ -16,7 +16,7 @@ function extractFn(name) {
 const assert = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 const { fills } = new Function(
   [extractFn('tripsyGarmentTypeKey'), extractFn('tripsyWardrobeGarmentFillsLine')].join('\n')
-  + '\nfunction tripsyAttirePackingGroupOf(){ return "pants"; }\nfunction tripsyWardrobeLosesAccessoryLine(){ return false; }'
+  + '\nfunction tripsyAttirePackingGroupOf(){ return "pants"; }\nfunction tripsyGarmentPackingGroups(g){ return [tripsyAttirePackingGroupOf(g)]; }\nfunction tripsyGarmentsShareKind(a,b){ return tripsyAttirePackingGroupOf(a) === tripsyAttirePackingGroupOf(b); }\nfunction tripsyWardrobeLosesAccessoryLine(){ return false; }'
   + '\nreturn { fills: tripsyWardrobeGarmentFillsLine };')();
 
 const line = name => ({ name, group: 'pants', typeKey: '' });

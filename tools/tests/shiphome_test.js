@@ -53,6 +53,8 @@ const tripsyGarmentTypeKey = () => 'shirt';
 const tripsyWardrobeGarmentExcludedFromOutfits = () => false;
 const tripsyGarmentTypeBucket = g => ({ key: g.bucket || 'tops', label: 'Tops' });
 const tripsyAttirePackingGroupOf = g => g.group || 'tops';
+const tripsyGarmentPackingGroups = g => [tripsyAttirePackingGroupOf(g)];
+const tripsyGarmentsShareKind = (a, b) => tripsyAttirePackingGroupOf(a) === tripsyAttirePackingGroupOf(b);
 const TRIPSY_ATTIRE_ITEMIZED_CATEGORIES = ['black_tie', 'formal', 'cocktail', 'semi_formal'];
 const TRIPSY_WARDROBE_GYM_TIER = 'gym';
 eval(['tripsyShipHomeQtyBefore', 'tripsyShipHomeSplit', 'tripsyShipHomeCandidates', 'tripsyShipHomeGoneIds',

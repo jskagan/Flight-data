@@ -3613,6 +3613,16 @@ would overwrite the glyph with the word.
   same ordering traps and must agree with it** (it read "bathing suit" as `dress_wear` for the same
   reason). When changing either, re-type every name in the live data against the previous
   implementation and diff — that catches what reasoning about the regex does not.
+- **A sweater is BOTH a top and outerwear** ("make sure that all sweaters for the current trip
+  are listed both as outerwear and tops … for all future trips," 2026-11-14). The stored `group`
+  stays one value; `tripsyGarmentPackingGroups(g)` returns both `tops` and `outerwear` for a
+  garment whose NAME types as `sweater` (`tripsyGarmentTypeKey`, which now also reads a
+  quarter/half/"1/4" zip as a sweater), and `tripsyGarmentsShareKind(a, b)` compares two
+  garments by it. Used by `tripsyWardrobeGarmentFillsLine` and the assign fallback (a sweater is
+  offered on tops and outerwear lines), outfit Swap, Ship Home's swap options, Replace, Add
+  Garment's Type filter and the Wardrobe bulk-edit Type filter. `tripsyOutfitGarmentRoles` gives
+  a sweater the `tops` role, so it can stand alone as an outfit's top. Several test scaffolds
+  stub the two helpers. `sweaterboth_test.js`.
 - **`light-jacket` is split out of the general `jacket` bucket** for a packable travel jacket, as
   opposed to a heavy coat/raincoat/parka — matched by `tripsyGarmentTypeKey` BEFORE the general
   jacket rule ("light jacket", "travel(er) jacket" — Loro Piana's own product name for this kind of

@@ -15,7 +15,7 @@ function extractFn(name) {
 }
 const { fills, typeKey } = new Function(
   ['tripsyGarmentTypeKey', 'tripsyGarmentLineMatchType', 'tripsyWardrobeGarmentFillsLine'].map(extractFn).join('\n')
-  + '\nfunction tripsyAttirePackingGroupOf(){ return "outerwear"; }\nfunction tripsyWardrobeLosesAccessoryLine(){ return false; }'
+  + '\nfunction tripsyAttirePackingGroupOf(){ return "outerwear"; }\nfunction tripsyGarmentPackingGroups(g){ return [tripsyAttirePackingGroupOf(g)]; }\nfunction tripsyGarmentsShareKind(a,b){ return tripsyAttirePackingGroupOf(a) === tripsyAttirePackingGroupOf(b); }\nfunction tripsyWardrobeLosesAccessoryLine(){ return false; }'
   + '\nreturn { fills: tripsyWardrobeGarmentFillsLine, typeKey: tripsyGarmentTypeKey };')();
 const line = name => ({ name, group: 'outerwear', typeKey: typeKey(name) });
 const traveler = { name: 'Tan Traveler Jacket', group: 'outerwear' };
