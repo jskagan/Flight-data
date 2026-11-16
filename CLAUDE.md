@@ -3202,7 +3202,9 @@ would overwrite the glyph with the word.
   `Store.setTripWardrobe` with `cubes`, repaints the dialog and reloads By Bag's contents
   (`reloadContents`). The picker gets `{onlyCubeIds}` = `tripsyTripCubeIds` — only cubes
   already holding something on this trip, and no New cube ("Do not include cubes that are not on
-  the trip"). Picking "Wear on flight" here only sets the location; it does not move the
+  the trip"). The save is optimistic ("There's a delay after I press the
+  change location button," same day): dialog and By Bag repaint at once, the Drive write runs
+  behind, a failure restores the old entries and toasts. Picking "Wear on flight" here only sets the location; it does not move the
   garment onto the flight-worn line as Packing Status does. Verified in Chromium.
   `garmentlocation_test.js`.
 - **The 👔 menu is labelled "Clothes"** ("Change the name of the attire menu to Clothes,"

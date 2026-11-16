@@ -106,7 +106,8 @@ const generics = [{ category: 'general', typeKey: 'socks', name: 'Socks', qty: 3
     const info = fnSource('showTripsyGarmentCubeInfo');
     assert(/opts\.allowChange && isOwner && !tripsyGarmentSkipsCube\(g\.name\)/.test(info) && />Change location</.test(info), 'Change location: owner only, cubed garments only');
     assert(/showTripsyCubePicker\(g\.name, tripsyGarmentRelocateSlots\(entries, garmentId\), /.test(info), 'it opens the cube picker over every copy on the trip');
-    assert(/Store\.setTripWardrobe\(tripKey, next\.map\(e => \(\{ id: e\.id, category: e\.category, line: e\.line, qty: e\.qty, packed: [^}]*cubes:/.test(info), 'the save carries cubes');
+    assert(/const shape = list => list\.map\(e => \(\{ id: e\.id, category: e\.category, line: e\.line, qty: e\.qty, packed: [^}]*cubes:/.test(info) && /Store\.setTripWardrobe\(tripKey, shape\(next\)\)/.test(info), 'the save carries cubes');
+    assert(!/await Store\.setTripWardrobe/.test(info) && /saving\.then\(ok => \{\s*if \(ok\) return;\s*driveData\.tripsyTripWardrobe\[tripKey\] = shape\(entries\);/.test(info), 'optimistic: repaint at once, save behind, undo on failure');
     assert(/onlyCubeIds: onTrip/.test(info) && /cubes = tripsyCubesSorted\(\)\.filter\(c => !only \|\| only\.has\(c\.id\)\)/.test(fnSource('showTripsyCubePicker')), 'only cubes in use on the trip are offered, and no New cube');
     const ids = new Function('tripsyCubeById', fnSource('tripsyTripCubeIds') + 'return tripsyTripCubeIds;')(id => (id === 'c1' || id === 'c2') ? { id } : null);
     assert([...ids([{ cubes: ['c1', ''] }, { cubes: ['__none__'] }], [{ cubes: ['c2'] }])].sort().join() === 'c1,c2', 'trip cubes: real cubes from garments and generic lines');

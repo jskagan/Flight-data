@@ -14424,11 +14424,24 @@ async function showTripsyGarmentCubeInfo(tripKey, garmentId, opts = {}) {
     const picked = await showTripsyCubePicker(g.name, tripsyGarmentRelocateSlots(entries, garmentId), { onlyCubeIds: onTrip });
     if (picked == null) return; // cancelled
     const next = tripsyGarmentRelocateApply(entries, garmentId, picked);
-    const ok = await Store.setTripWardrobe(tripKey, next.map(e => ({ id: e.id, category: e.category, line: e.line, qty: e.qty, packed: Math.min(e.qty, e.packed), cubes: (e.cubes || []).filter(Boolean).slice(0, e.qty) })));
-    if (!ok) { toast('Could not save the new location — please try again.', 'error'); return; }
+    // Optimistic ("There's a delay after I press the change location button," 2026-11-16):
+    // setTripWardrobe updates memory before its first await, so the dialog and By Bag repaint
+    // at once and the whole-file Drive save runs behind them. A failed save puts the old
+    // entries back and says so.
+    const shape = list => list.map(e => ({ id: e.id, category: e.category, line: e.line, qty: e.qty, packed: Math.min(e.qty, e.packed), cubes: (e.cubes || []).filter(Boolean).slice(0, e.qty) }));
+    const repaint = () => {
+      if (typeof opts.onChanged === 'function') opts.onChanged();
+      if (ov.style.display !== 'none') showTripsyGarmentCubeInfo(tripKey, garmentId, opts);
+    };
+    const saving = Store.setTripWardrobe(tripKey, shape(next)); // shape() carries cubes
     toast(`Updated where ${g.name || 'the garment'} is.`);
-    if (typeof opts.onChanged === 'function') opts.onChanged();
-    showTripsyGarmentCubeInfo(tripKey, garmentId, opts);
+    repaint();
+    saving.then(ok => {
+      if (ok) return;
+      driveData.tripsyTripWardrobe[tripKey] = shape(entries);
+      toast('Could not save the new location — it was undone.', 'error');
+      repaint();
+    });
   };
   ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
   tripsyPaintCubePhotos(ov);
