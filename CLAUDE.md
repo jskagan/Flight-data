@@ -3192,8 +3192,19 @@ would overwrite the glyph with the word.
   groups) and Dress category (wardrobe tags, Gym and General included) — through the pure
   `tripsyGarmentSearchMatches`. A tap on a result opens `showTripsyGarmentCubeInfo(tripKey, id,
   {zIndex})` above the page; that dialog now ends in a sentence from the pure
-  `tripsyGarmentWhereText` ("Navy Chinos: in the Blue Medium cube."). Back from Location or Search
-  returns to the choice. Verified in Chromium. `garmentlocation_test.js`.
+  `tripsyGarmentWhereText` ("Navy Chinos: in the Blue Medium cube."). Back from By Bag or Search
+  returns to the choice. **That dialog has a "Change location" button when opened from Search**
+  ("also include a button that says change location … select any location available on the
+  current trip," same day): `opts.allowChange`, owner only, never for an uncubed type. It opens
+  `showTripsyCubePicker` over every copy of the garment on the trip
+  (`tripsyGarmentRelocateSlots` / `tripsyGarmentRelocateApply`, pure — copies can sit on several
+  Packing List lines; a copy on a flight-worn line is left out), saves through
+  `Store.setTripWardrobe` with `cubes`, repaints the dialog and reloads By Bag's contents
+  (`reloadContents`). The picker gets `{onlyCubeIds}` = `tripsyTripCubeIds` — only cubes
+  already holding something on this trip, and no New cube ("Do not include cubes that are not on
+  the trip"). Picking "Wear on flight" here only sets the location; it does not move the
+  garment onto the flight-worn line as Packing Status does. Verified in Chromium.
+  `garmentlocation_test.js`.
 - **The 👔 menu is labelled "Clothes"** ("Change the name of the attire menu to Clothes,"
   2026-10-19): the trip card's button label and tooltip, and the two messages that point at
   the menu (the Packing List's "Select Packing Status from the 👔 Clothes menu…" and the stale

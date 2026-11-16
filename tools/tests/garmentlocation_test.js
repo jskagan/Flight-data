@@ -99,7 +99,29 @@ const generics = [{ category: 'general', typeKey: 'socks', name: 'Socks', qty: 3
   assert(/let view = \{ mode: 'choose' \}/.test(page) && /opt\('list', '📦', 'By Bag'/.test(page) && /opt\('search', '🔍', 'Search'/.test(page), 'THE ASK: the page opens on By Bag / Search');
   assert(/view\.mode === 'list' \|\| view\.mode === 'search'\) \{ view = \{ mode: 'choose' \}; render\(\); return; \}/.test(page), 'Back from Location or Search returns to the choice');
   assert(/data-tw-location-search/.test(page) && /chipRow\('Type'/.test(page) && /chipRow\('Dress category'/.test(page), 'Search has a text box plus Type and Dress category filters');
-  assert(/showTripsyGarmentCubeInfo\(tripKey, garmentEl\.getAttribute\('data-tw-location-garment'\), \{ zIndex: 2147483145 \}\)/.test(page), 'tapping a result shows its cube, above this page');
+  assert(/showTripsyGarmentCubeInfo\(tripKey, garmentEl\.getAttribute\('data-tw-location-garment'\), \{ zIndex: 2147483145, /.test(page), 'tapping a result shows its cube, above this page');
+  // "also include a button that says change location" (2026-11-16)
+  assert(/allowChange: true, onChanged: reloadContents/.test(page), 'the search result dialog offers Change location and refreshes By Bag after');
+  {
+    const info = fnSource('showTripsyGarmentCubeInfo');
+    assert(/opts\.allowChange && isOwner && !tripsyGarmentSkipsCube\(g\.name\)/.test(info) && />Change location</.test(info), 'Change location: owner only, cubed garments only');
+    assert(/showTripsyCubePicker\(g\.name, tripsyGarmentRelocateSlots\(entries, garmentId\), /.test(info), 'it opens the cube picker over every copy on the trip');
+    assert(/Store\.setTripWardrobe\(tripKey, next\.map\(e => \(\{ id: e\.id, category: e\.category, line: e\.line, qty: e\.qty, packed: [^}]*cubes:/.test(info), 'the save carries cubes');
+    assert(/onlyCubeIds: onTrip/.test(info) && /cubes = tripsyCubesSorted\(\)\.filter\(c => !only \|\| only\.has\(c\.id\)\)/.test(fnSource('showTripsyCubePicker')), 'only cubes in use on the trip are offered, and no New cube');
+    const ids = new Function('tripsyCubeById', fnSource('tripsyTripCubeIds') + 'return tripsyTripCubeIds;')(id => (id === 'c1' || id === 'c2') ? { id } : null);
+    assert([...ids([{ cubes: ['c1', ''] }, { cubes: ['__none__'] }], [{ cubes: ['c2'] }])].sort().join() === 'c1,c2', 'trip cubes: real cubes from garments and generic lines');
+    const r = new Function('tripsyWardrobeLineIsFlightWorn', fnSource('tripsyGarmentRelocateSlots') + fnSource('tripsyGarmentRelocateApply') + 'return { s: tripsyGarmentRelocateSlots, a: tripsyGarmentRelocateApply };')(l => /flight/.test(l || ''));
+    const entries = [
+      { id: 'a', category: 'casual', line: 'Tops', qty: 2, packed: 1, cubes: ['c1'] },
+      { id: 'b', category: 'casual', line: 'Tops', qty: 1, packed: 1, cubes: ['c1'] },
+      { id: 'a', category: 'smart', line: 'Tops', qty: 1, packed: 0, cubes: [] },
+      { id: 'a', category: 'casual', line: 'Top — wearing on the flight', qty: 1, packed: 1, cubes: ['f'] },
+    ];
+    assert(JSON.stringify(r.s(entries, 'a')) === '["c1","","" ]'.replace(' ', ''), 'slots: every copy across lines, the flight-worn copy left out');
+    const next = r.a(entries, 'a', ['c2', '', 'c3']);
+    assert(JSON.stringify(next[0].cubes) === '["c2"]' && next[0].packed === 1 && JSON.stringify(next[2].cubes) === '["c3"]' && next[2].packed === 1, 'the picks go back to their own lines');
+    assert(next[1] === entries[1] && next[3] === entries[3], 'other garments and the flight-worn copy are untouched');
+  }
   assert(/ov\.oninput = /.test(page) && /paintSearchResults\(\)/.test(page), 'typing refills only the results (the box keeps focus)');
   {
     const m = new Function('tripsyGarmentPackingGroups', 'tripsyWardrobeGarmentTiers', fnSource('tripsyGarmentSearchMatches') + fnSource('tripsyGarmentWhereText') + 'return { m: tripsyGarmentSearchMatches, w: tripsyGarmentWhereText };')(

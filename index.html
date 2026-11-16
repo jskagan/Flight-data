@@ -11903,7 +11903,7 @@ async function tripsyCubeFormUploadPhoto(saved, blob) {
 // copies are selected for this line); each slot holds a cube id, '' for "not packed".
 // Resolves to a NEW array, or null if cancelled. Per-copy rather than one-cube-per-
 // garment because several of the same garment can legitimately be split across cubes.
-function showTripsyCubePicker(garmentName, copies) {
+function showTripsyCubePicker(garmentName, copies, opts = {}) {
   return new Promise(resolve => {
     let ov = document.getElementById('tw-cube-picker-overlay');
     if (!ov) { ov = document.createElement('div'); ov.id = 'tw-cube-picker-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
@@ -11912,8 +11912,11 @@ function showTripsyCubePicker(garmentName, copies) {
     // Which copy the next cube tap applies to. With one copy there is nothing to
     // choose, so it stays 0 and the grid acts as a plain "put it here".
     let activeCopy = 0;
+    // opts.onlyCubeIds (a Set): offer just those cubes and no "New cube" -- Garment Location's
+    // Change location lists only the cubes in use on the trip (2026-11-16).
+    const only = opts.onlyCubeIds || null;
     const render = () => {
-      const cubes = tripsyCubesSorted();
+      const cubes = tripsyCubesSorted().filter(c => !only || only.has(c.id));
       const packedCount = working.filter(Boolean).length;
       const copyRows = working.length > 1 ? `
         <div style="display:flex; flex-wrap:wrap; gap:6px; margin:0 0 12px;">
@@ -11954,12 +11957,12 @@ function showTripsyCubePicker(garmentName, copies) {
           <div style="display:flex; flex-wrap:wrap; gap:12px;">
             ${specialCards}
             ${cubeCards}
-            <button data-tw-new-cube style="background:none; border:none; padding:0; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:4px; width:82px;">
+            ${only ? '' : `<button data-tw-new-cube style="background:none; border:none; padding:0; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:4px; width:82px;">
               <div style="width:74px; height:74px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:26px; color:var(--muted);">+</div>
               <span style="font-size:11px; color:var(--muted);">New cube</span>
-            </button>
+            </button>`}
           </div>
-          ${cubes.length ? '' : `<div style="font-size:12px; color:var(--muted); margin-top:10px;">No cubes yet — add one to start assigning.</div>`}
+          ${cubes.length ? '' : `<div style="font-size:12px; color:var(--muted); margin-top:10px;">${only ? 'No cubes are in use on this trip yet.' : 'No cubes yet — add one to start assigning.'}</div>`}
           <div style="display:flex; gap:10px; justify-content:space-between; margin-top:18px;">
             <button class="btn" data-tw-cube-clear style="border-color:var(--red); color:var(--red);">${working.length > 1 ? 'Not packed' : 'Unpack'}</button>
             <span style="display:flex; gap:10px;">
@@ -14354,6 +14357,10 @@ async function showTripsyGarmentCubeInfo(tripKey, garmentId, opts = {}) {
   // Location's search, 2147483140) passes its own.
   ov.style.zIndex = String(opts.zIndex || 2147483085);
   let body;
+  // Garment Location's search passes allowChange; owner only, and only for a garment that
+  // goes in a cube and has a copy on the trip that is not the one worn on the flight.
+  const canChange = !!opts.allowChange && isOwner && !tripsyGarmentSkipsCube(g.name)
+    && tripsyGarmentRelocateSlots(tripsyNormalizeTripSelection(selectedRaw), garmentId).length > 0;
   if (tripsyGarmentSkipsCube(g.name)) {
     // Hangs, or packed loose/in a case -- never in a cube at all, so say WHY rather
     // than showing a "cube not set" that would read as an oversight instead of by design.
@@ -14402,9 +14409,27 @@ async function showTripsyGarmentCubeInfo(tripKey, garmentId, opts = {}) {
         <button class="tripsy-close-x" data-tw-garmentcube-close aria-label="Close" title="Close">&#10005;</button>
       </div>
       ${body}
+      ${canChange ? `<div style="margin-top:16px;"><button class="btn primary" data-tw-garmentcube-change>Change location</button></div>` : ''}
     </div>`;
   ov.style.display = 'flex';
   ov.querySelector('[data-tw-garmentcube-close]').onclick = () => { ov.style.display = 'none'; };
+  const changeBtn = ov.querySelector('[data-tw-garmentcube-change]');
+  if (changeBtn) changeBtn.onclick = async () => {
+    // Re-read the selection: it may have changed since this dialog was painted.
+    const entries = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey));
+    // Only the cubes holding something on THIS trip ("Do not include cubes that are not on
+    // the trip," 2026-11-16), from garments and generic lines alike.
+    const generics = (await Store.getTripGenericGarments(tripKey)) || [];
+    const onTrip = tripsyTripCubeIds(entries, generics);
+    const picked = await showTripsyCubePicker(g.name, tripsyGarmentRelocateSlots(entries, garmentId), { onlyCubeIds: onTrip });
+    if (picked == null) return; // cancelled
+    const next = tripsyGarmentRelocateApply(entries, garmentId, picked);
+    const ok = await Store.setTripWardrobe(tripKey, next.map(e => ({ id: e.id, category: e.category, line: e.line, qty: e.qty, packed: Math.min(e.qty, e.packed), cubes: (e.cubes || []).filter(Boolean).slice(0, e.qty) })));
+    if (!ok) { toast('Could not save the new location — please try again.', 'error'); return; }
+    toast(`Updated where ${g.name || 'the garment'} is.`);
+    if (typeof opts.onChanged === 'function') opts.onChanged();
+    showTripsyGarmentCubeInfo(tripKey, garmentId, opts);
+  };
   ov.onclick = e => { if (e.target === ov) ov.style.display = 'none'; };
   tripsyPaintCubePhotos(ov);
 }
@@ -16494,6 +16519,37 @@ function tripsyGarmentLocationLaundryItems(items) {
   }
   return [...m.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
+// "Change location" from Garment Location's search ("allow the user to select any location
+// available on the current trip for that garment," 2026-11-16). The cube picker works on one
+// flat list of copies, but a garment's copies can sit on several Packing List lines, so
+// these two pure helpers flatten and un-flatten. A copy on a flight-worn line is left out:
+// it is on your body, and the normalizer would put it straight back.
+// The ids of the real cubes in use on a trip: any cube holding a packed garment or generic.
+function tripsyTripCubeIds(entries, generics) {
+  const ids = new Set();
+  for (const e of [...(entries || []), ...(generics || [])]) {
+    for (const cid of (e.cubes || [])) if (cid && tripsyCubeById(cid)) ids.add(cid);
+  }
+  return ids;
+}
+function tripsyGarmentRelocateSlots(entries, garmentId) {
+  const slots = [];
+  for (const e of (entries || [])) {
+    if (e.id !== garmentId || tripsyWardrobeLineIsFlightWorn(e.line)) continue;
+    const cur = (e.cubes || []).filter(Boolean).slice(0, e.qty);
+    for (let i = 0; i < e.qty; i++) slots.push(cur[i] || '');
+  }
+  return slots;
+}
+function tripsyGarmentRelocateApply(entries, garmentId, picked) {
+  let at = 0;
+  return (entries || []).map(e => {
+    if (e.id !== garmentId || tripsyWardrobeLineIsFlightWorn(e.line)) return e;
+    const mine = (picked || []).slice(at, at + e.qty).filter(Boolean);
+    at += e.qty;
+    return { ...e, packed: mine.length, cubes: mine };
+  });
+}
 // One sentence saying where a packed garment is, for the cube dialog ("show the cube that
 // contains that garment and describe it," 2026-11-16). `places` is one entry per distinct
 // location: {label, isCube, count}. Pure.
@@ -16556,10 +16612,16 @@ async function showTripsyGarmentLocation(tripKey, tripName) {
   ]);
   if (ov.style.display === 'none') return; // closed while loading
   const garmentById = new Map((garments || []).map(g => [g.id, g]));
-  const selEntries = tripsyNormalizeTripSelection(selectedRaw);
+  let selEntries = tripsyNormalizeTripSelection(selectedRaw);
   const generics = (genericRaw || []).map(x => { const qty = Math.max(1, x.qty || 1); const packed = Math.max(0, Math.min(qty, x.packed || 0)); return { ...x, qty, packed, cubes: tripsyCubesForEntry(x, packed) }; });
-  const contents = tripsyCubeContentsMap(selEntries, generics, garmentById);
-  const rows = tripsyGarmentLocationRows(contents, tripsyCubesSorted());
+  let contents = tripsyCubeContentsMap(selEntries, generics, garmentById);
+  let rows = tripsyGarmentLocationRows(contents, tripsyCubesSorted());
+  // After "Change location" in the garment dialog: By Bag must show the new cube contents.
+  const reloadContents = async () => {
+    selEntries = tripsyNormalizeTripSelection(await Store.getTripWardrobe(tripKey));
+    contents = tripsyCubeContentsMap(selEntries, generics, garmentById);
+    rows = tripsyGarmentLocationRows(contents, tripsyCubesSorted());
+  };
   // Laundry is computed lazily, once -- it walks every garment's wear days.
   let laundry = null;
   const loadLaundry = async () => {
@@ -16681,7 +16743,7 @@ async function showTripsyGarmentLocation(tripKey, tripName) {
     const modeEl = e.target.closest('[data-tw-location-mode]');
     if (modeEl) { view = { mode: modeEl.getAttribute('data-tw-location-mode') }; render(); return; }
     const garmentEl = e.target.closest('[data-tw-location-garment]');
-    if (garmentEl) { showTripsyGarmentCubeInfo(tripKey, garmentEl.getAttribute('data-tw-location-garment'), { zIndex: 2147483145 }); return; }
+    if (garmentEl) { showTripsyGarmentCubeInfo(tripKey, garmentEl.getAttribute('data-tw-location-garment'), { zIndex: 2147483145, allowChange: true, onChanged: reloadContents }); return; }
     const toggle = (set, v) => { if (set.has(v)) set.delete(v); else set.add(v); };
     const personEl = e.target.closest('[data-tw-location-person]');
     const groupEl = e.target.closest('[data-tw-location-group]');
