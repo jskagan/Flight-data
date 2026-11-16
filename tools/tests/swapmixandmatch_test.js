@@ -47,11 +47,11 @@ assert(/const isMixAndMatch = liveTier && !TRIPSY_ATTIRE_ITEMIZED_CATEGORIES\.in
   'a mix-and-match tier is any live tier NOT in the itemized list');
 assert(/const currentGroup = current \? tripsyAttirePackingGroupOf\(current\) : null;/.test(candidatesSrc),
   'the current garment\'s packing GROUP is computed alongside its type bucket');
-assert(/isMixAndMatch\s*\n\s*\? \(!currentGroup \|\| tripsyGarmentsShareKind\(g, current\)\)\s*\n\s*: \(!bucketKey \|\| tripsyGarmentTypeBucket\(g\)\.key === bucketKey\)/.test(candidatesSrc),
+assert(/isMixAndMatch\s*\n\s*\? \(!currentGroup \|\| tripsyGarmentsShareKind\(g, current\)[\s\S]*?\)\)\s*\n\s*: \(!bucketKey \|\| tripsyGarmentTypeBucket\(g\)\.key === bucketKey\)/.test(candidatesSrc),
   'the candidate filter branches: group match for mix-and-match tiers, narrow type-bucket match otherwise');
 assert(/isMixAndMatch \? \(TRIPSY_ATTIRE_PACKING_GROUP_LABEL\[currentGroup\] \|\| currentGroup\) : tripsyGarmentTypeBucket\(current\)\.label/.test(pickerSrc),
   'the modal\'s typeLabel also reflects the group name on a mix-and-match tier, not a misleadingly narrow type label');
-assert(/const \{ candidates, current, isMixAndMatch, currentGroup \} =\s*\n\s*await tripsyOutfitSwapCandidates\(tripKey, block, currentGarmentId, person, liveTier\);/.test(pickerSrc),
+assert(/const \{ candidates, current, isMixAndMatch, currentGroup \} =\s*\n\s*await tripsyOutfitSwapCandidates\(tripKey, block, currentGarmentId, person, liveTier, \{ offerLayers: true \}\);/.test(pickerSrc),
   'the picker itself just calls the shared helper for its candidate list');
 
 // ---- executed: the real tripsyOutfitSwapCandidates function, against fixtures ----
@@ -60,6 +60,7 @@ assert(/const \{ candidates, current, isMixAndMatch, currentGroup \} =\s*\n\s*aw
   const tripsyGarmentTypeBucket = g => ({ key: g.__type || ('group:' + (g.group || 'accessories')), label: g.__type || g.group });
   const tripsyAttirePackingGroupOf = g => g.group || 'accessories';
   const tripsyGarmentPackingGroups = g => [tripsyAttirePackingGroupOf(g)];
+  const tripsyGarmentIsLayerOnly = () => false;
   const tripsyGarmentsShareKind = (a, b) => tripsyAttirePackingGroupOf(a) === tripsyAttirePackingGroupOf(b);
   const tripsyNormalizeTripSelection = sel => sel;
   const tripsyWardrobeGarmentExcludedFromOutfits = g => g.group === 'essentials';

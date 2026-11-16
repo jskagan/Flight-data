@@ -11492,8 +11492,16 @@ function tripsyGarmentLineMatchType(typeKey) {
 // two, so a sweater is offered on tops AND outerwear lines, in Swap/Replace/Add for
 // either kind, and under either Type filter. Typed by NAME (tripsyGarmentTypeKey),
 // so it holds for any garment added later with no data edit.
+function tripsyGarmentIsLayerOnly(g) {
+  const tk = g ? tripsyGarmentTypeKey(g.name || '') : '';
+  return tk === 'light-jacket' || tk === 'jacket';
+}
 function tripsyGarmentPackingGroups(g) {
   const primary = tripsyAttirePackingGroupOf(g);
+  // An overshirt, shacket, fleece or jacket is a LAYER whatever group it was filed
+  // under ("make overshirts layers," 2026-11-15 -- three overshirts stored as Tops were
+  // being swapped for polos, leaving outfits with two shirts): outerwear only.
+  if (tripsyGarmentIsLayerOnly(g)) return ['outerwear'];
   if (g && tripsyGarmentTypeKey(g.name || '') === 'sweater' && (primary === 'tops' || primary === 'outerwear')) {
     return primary === 'tops' ? ['tops', 'outerwear'] : ['outerwear', 'tops'];
   }
@@ -12376,6 +12384,9 @@ const TRIPSY_WEARS_BEFORE_WASH = {
   swim: 3, dress: 6, sweater: 6,
   tie: Infinity,
   suit: Infinity, tuxedo: Infinity, blazer: Infinity, jacket: Infinity,
+  // A layer (overshirt, fleece, packable jacket) is re-worn, never a one-wear top --
+  // even when the Wardrobe files it under Tops.
+  'light-jacket': Infinity,
   shoes: Infinity, belt: Infinity, cufflinks: Infinity, sunglasses: Infinity,
 };
 // Falls back on the packing GROUP rather than a magic number, so an unrecognised garment
@@ -14767,7 +14778,7 @@ const TRIPSY_OUTFIT_SWAP_REMOVE = '__REMOVE__';
 // Swap picker below AND the automatic after-a-wash adjustment finder
 // (tripsyLaundryFindAdjustments), so the two can never disagree about what counts as a
 // valid substitute.
-async function tripsyOutfitSwapCandidates(tripKey, block, currentGarmentId, person, liveTier) {
+async function tripsyOutfitSwapCandidates(tripKey, block, currentGarmentId, person, liveTier, opts = {}) {
   const [garments, selectedRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
   const byId = new Map(garments.map(g => [g.id, g]));
   const current = byId.get(currentGarmentId);
@@ -14806,7 +14817,11 @@ async function tripsyOutfitSwapCandidates(tripKey, block, currentGarmentId, pers
     .filter(g => g && (g.person || 'him') === person && !tripsyWardrobeGarmentExcludedFromOutfits(g) && g.id !== currentGarmentId
       && !wornElsewhere.has(g.id) && !wornSameDay.has(g.id) && !shippedGone.has(g.id)
       && (isMixAndMatch
-            ? (!currentGroup || tripsyGarmentsShareKind(g, current))
+            ? (!currentGroup || tripsyGarmentsShareKind(g, current)
+                // The MANUAL picker also offers layers for a top, so a shirt standing in a
+                // layer's place can be swapped back to the overshirt. Never the automatic
+                // callers: a dirty polo must not be auto-replaced by a jacket.
+                || (opts.offerLayers && tripsyGarmentIsLayerOnly(g) && tripsyGarmentPackingGroups(current).includes('tops')))
             : (!bucketKey || tripsyGarmentTypeBucket(g).key === bucketKey))
       // Scoped to the block's LIVE dress code: the whole point of re-opening Swap
       // after changing an event's dress code is to see substitutes for the NEW tier,
@@ -14818,7 +14833,7 @@ async function tripsyOutfitSwapCandidates(tripKey, block, currentGarmentId, pers
 }
 async function tripsyOutfitSwapPicker(tripKey, block, currentGarmentId, person = 'him', liveTier = null) {
   const { candidates, current, isMixAndMatch, currentGroup } =
-    await tripsyOutfitSwapCandidates(tripKey, block, currentGarmentId, person, liveTier);
+    await tripsyOutfitSwapCandidates(tripKey, block, currentGarmentId, person, liveTier, { offerLayers: true });
   const typeLabel = current
     ? (isMixAndMatch ? (TRIPSY_ATTIRE_PACKING_GROUP_LABEL[currentGroup] || currentGroup) : tripsyGarmentTypeBucket(current).label)
     : 'garment';

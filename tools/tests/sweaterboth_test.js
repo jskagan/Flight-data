@@ -11,8 +11,8 @@ function fn(name) {
 }
 function konst(name) { const m = src.match(new RegExp('const ' + name + ' = [^;]*;')); if (!m) throw new Error('missing ' + name); return m[0]; }
 const code = [konst('TRIPSY_ATTIRE_PACKING_GROUPS'), konst('TRIPSY_OUTFIT_ROLES'), fn('tripsyGarmentTypeKey'), fn('tripsyAttirePackingGroupOf'),
-  fn('tripsyGarmentPackingGroups'), fn('tripsyGarmentsShareKind'), fn('tripsyOutfitGarmentRoles')].join('\n');
-const api = new Function(code + '\nreturn { tripsyGarmentTypeKey, tripsyGarmentPackingGroups, tripsyGarmentsShareKind, tripsyOutfitGarmentRoles };')();
+  fn('tripsyGarmentIsLayerOnly'), fn('tripsyGarmentPackingGroups'), konst('TRIPSY_WEARS_BEFORE_WASH'), konst('TRIPSY_WEARS_BEFORE_WASH_BY_GROUP'), fn('tripsyWearsBeforeWash'), fn('tripsyGarmentsShareKind'), fn('tripsyOutfitGarmentRoles')].join('\n');
+const api = new Function(code + '\nreturn { tripsyWearsBeforeWash, tripsyGarmentTypeKey, tripsyGarmentPackingGroups, tripsyGarmentsShareKind, tripsyOutfitGarmentRoles };')();
 const sw = { name: 'Rust Cashmere Sweater', group: 'outerwear' };
 const swTop = { name: 'Navy Cardigan', group: 'tops' };
 const qz = { name: 'Black Pleats Quarter Zip', group: 'tops' };
@@ -35,5 +35,15 @@ ok(api.tripsyOutfitGarmentRoles(coat).length === 0, 'a coat fills no role');
 ok(/!tripsyGarmentPackingGroups\(g\)\.includes\(ln\.group\)/.test(src), 'need-line fill uses both kinds');
 ok(/tripsyGarmentsShareKind\(g, current\)/.test(src) && /tripsyGarmentsShareKind\(g, oldGarment\)/.test(src), 'Swap, Ship Home swap and Replace use both kinds');
 ok(/tripsyGarmentPackingGroups\(g\)\.includes\(type\)/.test(src), 'Add Garment type filter uses both kinds');
+// Overshirts are layers (2026-11-15), even when filed under Tops.
+const over = { name: 'Blue Plaid Overshirt', group: 'tops' };
+ok(JSON.stringify(api.tripsyGarmentPackingGroups(over)) === '["outerwear"]', 'an overshirt filed as a top is a layer only');
+ok(!api.tripsyGarmentsShareKind(over, polo), 'an overshirt is never swapped for a polo');
+ok(api.tripsyGarmentsShareKind(over, sw) && api.tripsyGarmentsShareKind(over, coat), 'an overshirt swaps with a sweater or a jacket');
+ok(api.tripsyOutfitGarmentRoles(over).length === 0, 'an overshirt is not the outfit\'s top');
+ok(api.tripsyWearsBeforeWash(over.name, null, 'tops') === Infinity, 'an overshirt is re-worn, not a one-wear top');
+ok(api.tripsyWearsBeforeWash('Blue Polo', null, 'tops') === 1, 'a polo is still one wear');
+ok(/tripsyOutfitSwapCandidates\(tripKey, block, currentGarmentId, person, liveTier, \{ offerLayers: true \}\)/.test(src), 'the manual Swap picker offers layers');
+ok((src.match(/offerLayers: true/g) || []).length === 1, 'only the manual picker offers layers');
 console.log(`sweaterboth_test: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

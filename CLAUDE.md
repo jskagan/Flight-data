@@ -3623,6 +3623,14 @@ would overwrite the glyph with the word.
   Garment's Type filter and the Wardrobe bulk-edit Type filter. `tripsyOutfitGarmentRoles` gives
   a sweater the `tops` role, so it can stand alone as an outfit's top. Several test scaffolds
   stub the two helpers. `sweaterboth_test.js`.
+  **An overshirt (or any `light-jacket`/`jacket` type) is a LAYER only** ("make overshirts
+  layers," 2026-11-15 — three overshirts filed as Tops counted as one-wear tops, so the
+  dirty-garment auto-swap replaced them with polos and outfits showed two shirts):
+  `tripsyGarmentIsLayerOnly(g)` makes `tripsyGarmentPackingGroups` return `['outerwear']`
+  whatever group is stored, and `TRIPSY_WEARS_BEFORE_WASH['light-jacket']` is `Infinity`. The
+  MANUAL Swap picker alone passes `{offerLayers: true}` to `tripsyOutfitSwapCandidates`, so a
+  shirt standing in a layer's place can be swapped back to an overshirt; the automatic
+  callers never offer a layer for a top.
 - **`light-jacket` is split out of the general `jacket` bucket** for a packable travel jacket, as
   opposed to a heavy coat/raincoat/parka — matched by `tripsyGarmentTypeKey` BEFORE the general
   jacket rule ("light jacket", "travel(er) jacket" — Loro Piana's own product name for this kind of
