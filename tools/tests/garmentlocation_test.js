@@ -94,7 +94,30 @@ const generics = [{ category: 'general', typeKey: 'socks', name: 'Socks', qty: 3
   assert(/tripsyLaundryItemsForDay\(tripKey, dayKey, p\)/.test(page) && /for \(const p of \['him', 'her'\]\)/.test(page),
     'Laundry uses the Daily Dress Guide\'s own dirty-garment judgement, for both people');
   assert(/tripsyTravelViewTodayKey\(trip, /.test(page), 'today is the TRIP\'s local today');
-  assert(/view\.mode !== 'list'\) \{ view = \{ mode: 'list' \}; render\(\); return; \}/.test(page), 'Close is contextual: a drill-down goes back to the list');
+  assert(/view\.mode === 'cube' \|\| view\.mode === 'laundry'\) \{ view = \{ mode: 'list' \}; render\(\); return; \}/.test(page), 'Close is contextual: a drill-down goes back to the list');
+  // "When a user selects garment location, bring up an option. Say location or search" (2026-11-16).
+  assert(/let view = \{ mode: 'choose' \}/.test(page) && /opt\('list', '📦', 'By Bag'/.test(page) && /opt\('search', '🔍', 'Search'/.test(page), 'THE ASK: the page opens on By Bag / Search');
+  assert(/view\.mode === 'list' \|\| view\.mode === 'search'\) \{ view = \{ mode: 'choose' \}; render\(\); return; \}/.test(page), 'Back from Location or Search returns to the choice');
+  assert(/data-tw-location-search/.test(page) && /chipRow\('Type'/.test(page) && /chipRow\('Dress category'/.test(page), 'Search has a text box plus Type and Dress category filters');
+  assert(/showTripsyGarmentCubeInfo\(tripKey, garmentEl\.getAttribute\('data-tw-location-garment'\), \{ zIndex: 2147483145 \}\)/.test(page), 'tapping a result shows its cube, above this page');
+  assert(/ov\.oninput = /.test(page) && /paintSearchResults\(\)/.test(page), 'typing refills only the results (the box keeps focus)');
+  {
+    const m = new Function('tripsyGarmentPackingGroups', 'tripsyWardrobeGarmentTiers', fnSource('tripsyGarmentSearchMatches') + fnSource('tripsyGarmentWhereText') + 'return { m: tripsyGarmentSearchMatches, w: tripsyGarmentWhereText };')(
+      g => (/sweater/i.test(g.name) ? ['tops', 'outerwear'] : [g.group]), g => ((g.tiers || []).length ? g.tiers : ['general']));
+    const polo = { name: 'Blue Polo', color: 'navy', group: 'tops', tiers: ['casual', 'gym'], person: 'him' };
+    const sweater = { name: 'Gray Sweater', group: 'tops', tiers: ['smart_casual'], person: 'him' };
+    const socks = { name: 'Socks', group: 'essentials', tiers: [], person: 'her' };
+    assert(m.m(polo, {}) && m.m(socks, {}), 'no terms and no filters match everything');
+    assert(m.m(polo, { text: 'polo BLUE' }) && !m.m(polo, { text: 'blue shirt' }), 'every typed word must appear in the name');
+    assert(m.m(polo, { text: 'navy' }), 'the color is searched too');
+    assert(m.m(polo, { groups: new Set(['tops']) }) && !m.m(polo, { groups: new Set(['pants']) }), 'Type filter');
+    assert(m.m(sweater, { groups: new Set(['outerwear']) }), 'a sweater is found under outerwear as well as tops');
+    assert(m.m(polo, { tiers: new Set(['gym']) }) && !m.m(sweater, { tiers: new Set(['gym']) }), 'Dress category filter (Gym)');
+    assert(m.m(socks, { tiers: new Set(['general']) }), 'an untagged garment reads as General');
+    assert(!m.m(socks, { person: 'him' }) && m.m(socks, { person: 'her' }), 'Whose filter');
+    assert(m.w('Blue Polo', [{ label: 'Blue Medium', isCube: true, count: 1 }]) === 'Blue Polo: in the Blue Medium cube.', 'the dialog describes the cube');
+    assert(m.w('Socks', [{ label: 'Blue Medium', isCube: true, count: 2 }, { label: 'No cube', isCube: false, count: 1 }]) === 'Socks: 2 in the Blue Medium cube; 1 no cube.', 'several places are counted');
+  }
   assert(/tripsyBackOrCloseHtml\('data-tw-location-close', !!back\)/.test(page), 'the list closes with the red ✕; a drill-down shows ‹ Back');
   assert(/data-tw-photo=/.test(page) && /tripsyWardrobeLoadPhotos\(ov\)/.test(page), 'garments are shown as photo cards');
   const menuAt = html.indexOf(`data-tripsy-attire-nav="location"`);

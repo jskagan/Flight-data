@@ -31,7 +31,7 @@ assert(/ov\.querySelectorAll\('\[data-tw-outfit-photo\]'\)\.forEach\(el => \{\s*
 
 // ---- the dialog function itself ----
 const fn = extractFn('showTripsyGarmentCubeInfo');
-assert(/ov\.style\.zIndex = '2147483085';/.test(fn), 'clears the outfit modal (2147483080) it opens from');
+assert(/ov\.style\.zIndex = String\(opts\.zIndex \|\| 2147483085\);/.test(fn), 'clears the outfit modal (2147483080) it opens from');
 assert(/if \(tripsyGarmentSkipsCube\(g\.name\)\)/.test(fn),
   'an uncubed type (tie, hangs, ...) explains WHY rather than showing a false "not set"');
 assert(/isn't marked packed for this trip yet/.test(fn), 'an unpacked garment gets an honest message, not a blank dialog');

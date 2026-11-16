@@ -14344,13 +14344,15 @@ async function showTripsyOutfitModal(tripKey, eventId, person = 'him', opts = {}
 // entry for this ONE garment id in the trip -- allocation is per LINE, so a single
 // owned copy can be split across several lines, each with its own cube assignment.
 // Read-only, so every viewer gets it, not just the owner.
-async function showTripsyGarmentCubeInfo(tripKey, garmentId) {
+async function showTripsyGarmentCubeInfo(tripKey, garmentId, opts = {}) {
   const [garments, selectedRaw] = await Promise.all([Store.listWardrobe(), Store.getTripWardrobe(tripKey)]);
   const g = garments.find(x => x.id === garmentId);
   if (!g) return;
   let ov = document.getElementById('tw-garmentcube-overlay');
   if (!ov) { ov = document.createElement('div'); ov.id = 'tw-garmentcube-overlay'; ov.className = 'tw-modal'; document.body.appendChild(ov); }
-  ov.style.zIndex = '2147483085'; // above the outfit modal (2147483080) it opens from
+  // Above the outfit modal (2147483080) it opens from; a caller sitting higher (Garment
+  // Location's search, 2147483140) passes its own.
+  ov.style.zIndex = String(opts.zIndex || 2147483085);
   let body;
   if (tripsyGarmentSkipsCube(g.name)) {
     // Hangs, or packed loose/in a case -- never in a cube at all, so say WHY rather
@@ -14389,7 +14391,8 @@ async function showTripsyGarmentCubeInfo(tripKey, garmentId) {
           <div style="font-size:12.5px; font-weight:600; color:${(cube || special) ? 'var(--text)' : 'var(--amber)'}; text-align:center; line-height:1.3;">${esc(label)}</div>
           ${cubeIds.length > 1 ? `<div style="font-size:11.5px; color:var(--muted);">${n} item${n === 1 ? '' : 's'}</div>` : ''}
         </div>`;
-      }).join('')}</div>`;
+      }).join('')}</div>
+      <div data-tw-garmentcube-where style="margin-top:12px; color:var(--muted); font-size:13.5px;">${esc(tripsyGarmentWhereText(g.name, order.map(cid => ({ label: tripsyCubeSlotLabel(cid) || '', isCube: !!tripsyCubeById(cid), count: counts.get(cid) }))))}</div>`;
     }
   }
   ov.innerHTML = `
@@ -16491,6 +16494,34 @@ function tripsyGarmentLocationLaundryItems(items) {
   }
   return [...m.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
+// One sentence saying where a packed garment is, for the cube dialog ("show the cube that
+// contains that garment and describe it," 2026-11-16). `places` is one entry per distinct
+// location: {label, isCube, count}. Pure.
+function tripsyGarmentWhereText(name, places) {
+  const total = (places || []).reduce((n, p) => n + (p.count || 0), 0);
+  const parts = (places || []).map(p => {
+    const where = p.isCube ? `in the ${p.label} cube` : (p.label ? p.label.charAt(0).toLowerCase() + p.label.slice(1) : 'packed, but its cube is not set');
+    return total > 1 ? `${p.count} ${where}` : where;
+  });
+  if (!parts.length) return '';
+  return `${name || 'This garment'}: ${parts.join('; ')}.`;
+}
+// Garment Location -> Search ("bring up a menu that allows the user to enter search terms
+// for the garment manually, and also brings up a list of filters or checkboxes," 2026-11-16).
+// Pure: every typed word must appear in the garment's name or color; a ticked Type must be
+// one of its packing groups (a sweater is both a top and outerwear); a ticked dress
+// category must be one of its tags (untagged reads as General). Nothing ticked = no filter.
+function tripsyGarmentSearchMatches(g, f) {
+  if (!g) return false;
+  f = f || {};
+  if (f.person && (g.person || 'him') !== f.person) return false;
+  const hay = `${g.name || ''} ${g.color || ''}`.toLowerCase();
+  const words = String(f.text || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.every(w => hay.includes(w))) return false;
+  if (f.groups && f.groups.size && !tripsyGarmentPackingGroups(g).some(x => f.groups.has(x))) return false;
+  if (f.tiers && f.tiers.size && !tripsyWardrobeGarmentTiers(g).some(x => f.tiers.has(x))) return false;
+  return true;
+}
 // 👔 menu -> Garment Location ("pull up a list of each packing cube used on that trip
 // plus an option for Laundry. If the user selects a cube, show every garment in that
 // packing cube; if he selects Laundry, show all garments marked as needing cleaning,"
@@ -16513,8 +16544,11 @@ async function showTripsyGarmentLocation(tripKey, tripName) {
     </div>`;
   ov.innerHTML = shell(header(esc(title)) + `<div style="padding:16px 0; color:var(--muted);">Loading…</div>`);
   ov.style.display = 'flex';
-  let view = { mode: 'list' };
-  const close = () => { ov.style.display = 'none'; ov.onclick = null; };
+  // Opens on a choice ("bring up an option. Say location or search," 2026-11-16): Location is
+  // the cube list this page has always shown; Search finds one garment and says where it is.
+  let view = { mode: 'choose' };
+  const search = { text: '', person: '', groups: new Set(), tiers: new Set() };
+  const close = () => { ov.style.display = 'none'; ov.onclick = null; ov.oninput = null; };
   ov.onclick = e => { if (e.target.closest('[data-tw-location-close]') || e.target === ov) close(); };
 
   const [garments, selectedRaw, genericRaw, guide] = await Promise.all([
@@ -16552,7 +16586,51 @@ async function showTripsyGarmentLocation(tripKey, tripName) {
   const tile = row => row.cube
     ? tripsyCubeTileHtml(row.cube, { size: 56 })
     : `<div style="width:56px; height:56px; border-radius:10px; border:1px dashed var(--line); display:flex; align-items:center; justify-content:center; font-size:24px; color:var(--muted); flex-shrink:0;">${row.id === TRIPSY_LOCATION_LAUNDRY ? '🧺' : (row.id === '' ? '?' : tripsyCubeSlotGlyph(row.id))}</div>`;
+  // The garments Search looks through: everything selected for THIS trip, one card each.
+  const tripGarments = [...new Set(selEntries.map(e => e.id))].map(id => garmentById.get(id)).filter(Boolean)
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base', numeric: true }));
+  const searchPersons = [...new Set(tripGarments.map(g => g.person || 'him'))];
+  const searchGroups = TRIPSY_ATTIRE_PACKING_GROUPS.filter(k => tripGarments.some(g => tripsyGarmentPackingGroups(g).includes(k)));
+  const searchTiers = tripsyWardrobeTierOptions().filter(t => tripGarments.some(g => tripsyWardrobeGarmentTiers(g).includes(t)));
+  const chip = (attr, val, label, on) => `<button type="button" ${attr}="${esc(val)}" aria-pressed="${on ? 'true' : 'false'}" style="font-size:12.5px; padding:5px 10px; border-radius:999px; cursor:pointer; border:1px solid ${on ? 'var(--amber)' : 'var(--line)'}; background:${on ? 'var(--amber)' : 'var(--panel-2)'}; color:${on ? '#111' : 'var(--text)'}; font-weight:${on ? 700 : 500};">${on ? '✓ ' : ''}${esc(label)}</button>`;
+  const chipRow = (title, chips) => chips ? `<div style="margin:8px 0;"><div style="font-size:11.5px; color:var(--muted); margin-bottom:4px;">${title}</div><div style="display:flex; flex-wrap:wrap; gap:6px;">${chips}</div></div>` : '';
+  const searchResultsHtml = () => {
+    const hits = tripGarments.filter(g => tripsyGarmentSearchMatches(g, search));
+    if (!hits.length) return `<div class="empty-state" style="margin-top:12px;">No garment on this trip matches.</div>`;
+    return `<div style="font-size:12px; color:var(--muted); margin:8px 0 6px;">${hits.length} garment${hits.length === 1 ? '' : 's'} — tap one to see where it is</div><div class="tw-grid">${hits.map(g => `
+      <div class="tw-card" data-tw-location-garment="${esc(g.id)}" style="cursor:pointer;">
+        <div class="tw-photo${g.driveFileId ? '' : ' tw-photo-glyph'}"${g.driveFileId ? ` data-tw-photo="${esc(g.driveFileId)}"` : ''}>${g.driveFileId ? '' : tripsyGarmentGlyph(tripsyGarmentTypeKey(g.name || ''), g.group, g.name)}</div>
+        <div class="tw-info"><div class="tw-name">${esc(g.name || 'Garment')}</div></div>
+      </div>`).join('')}</div>`;
+  };
+  const paintSearchResults = () => {
+    const box = ov.querySelector('[data-tw-location-results]');
+    if (!box) return;
+    box.innerHTML = searchResultsHtml();
+    tripsyWardrobeLoadPhotos(box);
+  };
   const render = async () => {
+    if (view.mode === 'choose') {
+      const opt = (mode, glyph, label, sub) => `
+        <button type="button" data-tw-location-mode="${mode}" style="display:flex; align-items:center; gap:12px; width:100%; text-align:left; background:var(--panel-2); border:1px solid var(--line); border-radius:10px; padding:12px; margin:8px 0; cursor:pointer; color:var(--text);">
+          <span style="font-size:26px; width:40px; text-align:center;">${glyph}</span>
+          <span style="flex:1; min-width:0;"><span style="display:block; font-weight:700; font-size:15px;">${label}</span><span style="display:block; font-size:12.5px; color:var(--muted);">${sub}</span></span>
+        </button>`;
+      ov.innerHTML = shell(header(esc(title))
+        + opt('list', '📦', 'By Bag', 'Each packing cube and what is in it, plus laundry')
+        + opt('search', '🔍', 'Search', 'Find a garment and see where it is'));
+      return;
+    }
+    if (view.mode === 'search') {
+      ov.innerHTML = shell(header('🔍 Search garments', 'Type a name, or tick filters', true)
+        + `<input type="search" data-tw-location-search value="${esc(search.text)}" placeholder="Search by name or color" autocomplete="off" style="width:100%; box-sizing:border-box; padding:9px 10px; border-radius:8px; border:1px solid var(--line); background:var(--panel-2); color:var(--text); font-size:15px;">`
+        + (searchPersons.length > 1 ? chipRow('Whose', [['', 'Both'], ['him', 'His'], ['her', 'Hers']].map(([v, l]) => chip('data-tw-location-person', v, l, search.person === v)).join('')) : '')
+        + chipRow('Type', searchGroups.map(k => chip('data-tw-location-group', k, TRIPSY_ATTIRE_PACKING_GROUP_LABEL[k] || k, search.groups.has(k))).join(''))
+        + chipRow('Dress category', searchTiers.map(t => chip('data-tw-location-tier', t, tripsyWardrobeTagLabel(t), search.tiers.has(t))).join(''))
+        + `<div data-tw-location-results></div>`);
+      paintSearchResults();
+      return;
+    }
     if (view.mode === 'cube') {
       const row = rows.find(r => r.id === view.id);
       const items = [...(contents.get(view.id) || new Map()).values()];
@@ -16589,15 +16667,30 @@ async function showTripsyGarmentLocation(tripKey, tripName) {
         <span style="font-size:12px; color:var(--muted); white-space:nowrap;">${row.count == null ? 'needs cleaning' : `${row.count} item${row.count === 1 ? '' : 's'}`}</span>
       </button>`;
     const cubeRows = rows.filter(r => r.id !== TRIPSY_LOCATION_LAUNDRY);
-    ov.innerHTML = shell(header(esc(title), 'Where each packed garment is')
+    ov.innerHTML = shell(header(esc(title), 'Where each packed garment is', true)
       + (cubeRows.length ? cubeRows.map(rowHtml).join('') : `<div class="empty-state" style="margin:12px 0;">Nothing has been packed into a cube yet — mark garments packed on Packing Status to place them.</div>`)
       + rowHtml(rows.find(r => r.id === TRIPSY_LOCATION_LAUNDRY)));
     tripsyPaintCubePhotos(ov);
   };
   ov.onclick = e => {
     if (e.target.closest('[data-tw-location-close]') || e.target === ov) {
-      if (view.mode !== 'list') { view = { mode: 'list' }; render(); return; }
+      if (view.mode === 'cube' || view.mode === 'laundry') { view = { mode: 'list' }; render(); return; }
+      if (view.mode === 'list' || view.mode === 'search') { view = { mode: 'choose' }; render(); return; }
       close(); return;
+    }
+    const modeEl = e.target.closest('[data-tw-location-mode]');
+    if (modeEl) { view = { mode: modeEl.getAttribute('data-tw-location-mode') }; render(); return; }
+    const garmentEl = e.target.closest('[data-tw-location-garment]');
+    if (garmentEl) { showTripsyGarmentCubeInfo(tripKey, garmentEl.getAttribute('data-tw-location-garment'), { zIndex: 2147483145 }); return; }
+    const toggle = (set, v) => { if (set.has(v)) set.delete(v); else set.add(v); };
+    const personEl = e.target.closest('[data-tw-location-person]');
+    const groupEl = e.target.closest('[data-tw-location-group]');
+    const tierEl = e.target.closest('[data-tw-location-tier]');
+    if (personEl || groupEl || tierEl) {
+      if (personEl) search.person = personEl.getAttribute('data-tw-location-person') || '';
+      if (groupEl) toggle(search.groups, groupEl.getAttribute('data-tw-location-group'));
+      if (tierEl) toggle(search.tiers, tierEl.getAttribute('data-tw-location-tier'));
+      render(); return;
     }
     const openEl = e.target.closest('[data-tw-location-open]');
     if (openEl) {
@@ -16605,6 +16698,12 @@ async function showTripsyGarmentLocation(tripKey, tripName) {
       view = id === TRIPSY_LOCATION_LAUNDRY ? { mode: 'laundry' } : { mode: 'cube', id };
       render();
     }
+  };
+  // Typing refills only the results, so the box keeps its focus and the keyboard stays up.
+  ov.oninput = e => {
+    if (!e.target.matches || !e.target.matches('[data-tw-location-search]')) return;
+    search.text = e.target.value || '';
+    paintSearchResults();
   };
   render();
 }

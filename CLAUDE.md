@@ -3182,6 +3182,18 @@ would overwrite the glyph with the word.
   before it starts — nothing has been worn) with each garment's "needed again"/`::nn` halves
   merged (`tripsyGarmentLocationLaundryItems`) — here it is simply in the laundry. Computed
   lazily on the Laundry tap, since it walks every garment's wear days. `garmentlocation_test.js`.
+- **Garment Location opens on Location / Search** ("When a user selects garment location, bring
+  up an option. Say location or search … enter search terms for the garment manually, and …
+  filters or checkboxes … when the user selects on a particular garment, show the cube that
+  contains that garment and describe it," 2026-11-16). `showTripsyGarmentLocation` starts in
+  `view.mode 'choose'`; **By Bag** (first labelled Location; "instead of saying location, say buy bag," same day, read as "By Bag") is the cube list described above, **Search** lists every
+  garment selected for the trip, narrowed by a text box (typing refills only the results, so the
+  box keeps focus) and chip filters — Whose (when both people have garments), Type (packing
+  groups) and Dress category (wardrobe tags, Gym and General included) — through the pure
+  `tripsyGarmentSearchMatches`. A tap on a result opens `showTripsyGarmentCubeInfo(tripKey, id,
+  {zIndex})` above the page; that dialog now ends in a sentence from the pure
+  `tripsyGarmentWhereText` ("Navy Chinos: in the Blue Medium cube."). Back from Location or Search
+  returns to the choice. Verified in Chromium. `garmentlocation_test.js`.
 - **The 👔 menu is labelled "Clothes"** ("Change the name of the attire menu to Clothes,"
   2026-10-19): the trip card's button label and tooltip, and the two messages that point at
   the menu (the Packing List's "Select Packing Status from the 👔 Clothes menu…" and the stale
