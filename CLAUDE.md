@@ -1577,6 +1577,44 @@ step 4; git history has it if ever needed.
   `departureAt`+endpoints, everything else on `name`+`startsAt`, and an entry with nothing
   identifying never dedupes. A relay carrying transportation must not be uploaded before this
   fix is live. `tripeditsrelay_test.js`.
+- **The auth Worker applies `tripsy-trip-edits.json` on a timer, so a relayed edit no longer waits
+  for the app to be opened** ("I want to ... give voice commands in a chat session and those will
+  get automatically integrated into travel tracker," 2026-11-23). `tools/auth-worker/worker.js` has
+  a `scheduled` handler (Cron Trigger `* * * * *`) running `editsDrain`: find the relay, apply it,
+  save `trips-data.json`, delete the relay. **The app is no longer the file's single writer.** What
+  keeps that safe: **(1) one logic, mirrored** — the Worker deploys as one pasted file and cannot
+  import, so `tools/auth-worker/mirror.js` copies `applyTripsyChangeToTrips`, `tripsyRawToDisplay`
+  and their dependencies byte-for-byte between the `MIRROR` markers (`MIRROR_NAMES` is the list;
+  `TRIPSY_EDIT_FIELDS` is reduced to its keys). **After changing any mirrored function, run
+  `node tools/auth-worker/mirror.js` and redeploy the Worker** — `workertripedits_test.js` fails
+  until you do. **(2) the same revision guard** — the Worker re-reads `headRevisionId` before
+  saving and reloads + re-applies on a mismatch, as `persistTripsData` does. **(3) a conflict
+  reload never re-applies a relayed change that is already there**: `applyTripsyTripEditsRelay`
+  passes each change a non-enumerable `stillNeeded()` (its own replay test, read against the
+  CURRENT trips), and `queueTripsyChange`'s conflict branch stops when it answers false. Without
+  it, the app and the Worker draining the same relay seconds apart made the app add the event a
+  second time on its retry. Hand-made edits carry no `stillNeeded` and behave as before.
+  The Worker never touches `flight-log-data.json`, so after every save it writes
+  **`tripsy-applied-edits.json`** (`{changes:[{type, eventKey, tripKey, targetTripKey}]}`);
+  `drainTripsyAppliedEdits` (in `syncTripsyRelays`, after `drainTripsyTripEdits`) reloads the trips
+  when the head revision moved (never under an in-flight write) and runs the same derived-cache
+  cleanup `queueTripsyChange` does (Update pages, `tripsyStripDeletedEventFromCaches`,
+  `tripsyReHomeMovedEvent`), one save. The Worker also keeps **`tripsy-trip-edits-log.json`** (last
+  30 runs; each entry `applied`/`skipped`/`failed` with a reason, and a created event's new
+  `eventKey`) — a chat reads it to confirm. Two deliberate differences from the app's drain: an
+  entry that fails to APPLY is logged and dropped (it would fail identically every minute; only a
+  Drive failure keeps the relay), and an unreadable relay is renamed
+  `tripsy-trip-edits.invalid-<time>.json`. **The timer acts ONLY while a trip is in progress**
+  ("Let's only have the worker check when I am on a trip. When there is no trip in progress, it
+  is fine to only update when the app is opened," same day): `editsTripInProgress` reads
+  `edits:tripWindows` from KV — `editsTripWindows(trips, today)`, each visible unfinished trip's
+  event span widened a day either side (UTC clock vs. local event days), rebuilt from
+  `trips-data.json` when the key's 6h TTL lapses and after every save — and `editsDrain(…,
+  {onlyOnTrip:true})` returns at once off a trip (one KV read, no Drive call); the app's own
+  drain then applies the relay on next open. The manual `/feed/<t>/apply-edits` run ignores the
+  gate. An idle tick on a trip is one KV read, one Drive search and NO KV write (the free plan's
+  1,000 KV writes a day belong to sign-in) — keep it that way. Setup, the relay
+  format and the log format are in `tools/auth-worker/README.md`. `workertripedits_test.js`.
 - **International flights get researched ENTRY REQUIREMENTS — ON DEMAND, from a trip-header button —
   and flights that need something get a "🛂 Entry Requirements" button** ("When there is a flight into
   a different country … research any entry or visa requirements … put a button on the flight event,"

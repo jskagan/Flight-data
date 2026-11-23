@@ -178,3 +178,110 @@ Build it in the Shortcuts app on the iPhone. `BASE` below means
 6. Shortcut details (ⓘ): turn on **Show on Apple Watch**.
 
 On the watch, run it from the Shortcuts app or add it as a complication.
+
+## Trip edits drain (voice commands in a chat → the tracker, no app open)
+
+A Claude chat can only **create** files in Drive, so it leaves itinerary changes as a
+small relay file, `tripsy-trip-edits.json`, in the Travel Tracker folder. The app has
+always applied that file the next time it was opened. This Worker now does the same job
+on a timer **while a trip is in progress**, so on a trip a change lands within about a
+minute whether or not the app is open.
+
+**Off a trip the timer does nothing**, and the app applies the relay the next time it is
+opened, as it always has. "On a trip" means today falls between the day before a trip's
+first event and the day after its last (the extra day each side covers the Worker's UTC
+clock against local event days). The Worker keeps that short list of date windows in KV
+(`edits:tripWindows`), rebuilds it from `trips-data.json` every six hours and after each
+save, so a trip added or re-dated in the app is noticed within six hours.
+
+On a trip, every minute it searches Drive for the relay. If there is none it stops there
+(one KV read, one Drive call, no KV write). If there is one it applies each entry to
+`trips-data.json` with **the app's own code**, saves, and deletes the relay. The app still
+drains the file too, so nothing breaks if the timer is off.
+
+### Turning it on (iPad is fine)
+
+1. Cloudflare dashboard → **Workers & Pages** → `travel-tracker-auth` → **Edit code**.
+   Replace `worker.js` with this folder's file and press **Deploy**.
+2. **Settings → Trigger Events → Add → Cron Triggers**, schedule `* * * * *` (every
+   minute). `wrangler deploy` sets this from `wrangler.toml` instead.
+3. `OWNER_EMAIL` must be set (it already is if the watch feed works). The drain uses the
+   same stored sign-in as the feed, so it works for as long as the owner is signed in to
+   the app on at least one device.
+4. Check: open `https://travel-tracker-auth.jskagan.workers.dev/feed/<FEED_TOKEN>/apply-edits`.
+   It runs the drain immediately, **whether or not a trip is in progress**, and answers
+   `No trip edits waiting.` or a line per edit. It can only apply a relay that is already
+   in the owner's Drive folder.
+
+Deploy the new `index.html` first, or at the same time. The app change is what stops a
+duplicate when the app and the Worker pick up the same relay within the same few seconds.
+
+### The relay a chat writes
+
+Always a **new** file named exactly `tripsy-trip-edits.json` (plain JSON, never converted
+to a Google Doc) in the same folder as `trips-data.json`:
+
+```json
+{"edits": [
+  {"type": "create_event", "tripKey": "<trip key>", "tripsyResource": "activity",
+   "fields": {"name": "Dinner", "category": "restaurant", "startsAt": "2030-05-03T19:30:00",
+              "endsAt": "2030-05-03T21:00:00", "address": "…", "timezone": "Europe/London"}},
+  {"type": "create_event", "tripKey": "<trip key>", "tripsyResource": "transportation",
+   "fields": {"category": "train", "departureDescription": "Paddington", "departureAt": "2030-05-04T09:00:00",
+              "arrivalDescription": "Oxford", "arrivalAt": "2030-05-04T09:55:00"}},
+  {"type": "edit_event", "eventKey": "activity:1795379177485798", "changes": {"endsAt": "2030-05-03T21:30:00"}},
+  {"type": "delete_event", "eventKey": "activity:1795379177485798"},
+  {"type": "move_event", "eventKey": "hosting:123", "targetTripKey": "<other trip key>"}
+]}
+```
+
+- `tripsyResource` is `activity`, `hosting` or `transportation`. Field names are the
+  app's own (`TRIPSY_EDIT_FIELDS` in `index.html`).
+- An `eventKey` is the event's `tripsyRaw.resource` + `:` + `tripsyRaw.id`.
+- Times are local wall-clock with no offset.
+- Also accepted: `edit_trip`, `create_trip`, `delete_trip`.
+
+### What the Worker writes back
+
+| File | What it is |
+|---|---|
+| `tripsy-trip-edits-log.json` | The last 30 runs, newest first. Each edit is `applied`, `skipped` or `failed`, with a reason. A created event's entry carries its new `eventKey`. **A chat reads this to confirm a change landed.** |
+| `tripsy-applied-edits.json` | A note for the app, written after every save. On its next sync the app takes the newer trips and cleans its own caches (Dress Guide, outfits, Update pages), which live in `flight-log-data.json` and which the Worker never touches. |
+| `tripsy-trip-edits.invalid-<time>.json` | A relay that could not be read (bad JSON, no `edits` list, or converted to a Google Doc), renamed so it is not retried forever. |
+
+### Rules it follows
+
+- **Nothing is created twice.** An `edit_event` re-merges the same fields; a
+  `create_event` is skipped when the trip already holds an event with the same name and
+  start (or, for transportation, the same departure time and endpoints); an entry naming
+  an event or trip that is gone is skipped.
+- **Two writers, one file.** Just before saving, the Worker re-reads the file's head
+  revision, the same guard the app uses. If another device saved in between, it reloads
+  and re-applies, with the checks above run again. The check and the save are two
+  separate Drive calls, so a save from another device landing in the second between
+  them can still be overwritten. The app has always had the same gap between devices.
+- **A Drive failure keeps the relay** for the next minute. An entry that fails to apply
+  (unknown resource, a change to an event's `id`) is logged and dropped: the same input
+  would fail the same way every minute.
+
+### Keeping the Worker's copy of the app's logic in step
+
+`worker.js` deploys as one pasted file, so it cannot import from `index.html`. The block
+between the `MIRROR` markers is copied from `index.html` by a script:
+
+```sh
+node tools/auth-worker/mirror.js          # rewrite the block
+node tools/auth-worker/mirror.js --check  # exit 1 if it is out of date
+```
+
+`tools/tests/workertripedits_test.js` fails whenever the two differ. After changing any
+mirrored function in `index.html` (`applyTripsyChangeToTrips`, `tripsyRawToDisplay`, the
+field list, …), run the script **and redeploy the Worker**.
+
+### Not yet measured
+
+A run that applies edits parses and re-writes the whole of `trips-data.json`. On
+Cloudflare's free plan a Worker gets 10 ms of CPU per run. The watch feed already parses
+the same file on that plan, but the drain also serializes it. If the Worker's logs show
+`Exceeded CPU`, the fix is the paid plan's higher limit.
+

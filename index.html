@@ -3783,6 +3783,12 @@ const Store = {
           // persistTripsData already reloaded the newer copy (discarding our
           // change) -- re-apply onto the fresh data and retry (bounded).
           if (e && e.conflict) {
+            // A RELAYED change may already be in the copy just reloaded: the auth
+            // Worker's scheduled drain applies the same tripsy-trip-edits.json, and
+            // when it saved first, re-applying here would add the event a second
+            // time (or fail a delete of an event already gone). The relay drain
+            // passes stillNeeded for exactly this; hand-made edits carry none.
+            if (typeof change.stillNeeded === 'function' && !change.stillNeeded()) break;
             if (attempt < 2) { applyTripsyChangeToTrips(change); continue; }
             // Retries exhausted: trips are the fresh reloaded copy; do NOT
             // roll back -- that would clobber the reload.
@@ -6189,24 +6195,33 @@ function tripsyTripEditCreateIdentity(resource, raw) {
 async function applyTripsyTripEditsRelay(relay) {
   const edits = Array.isArray(relay && relay.edits) ? relay.edits : [];
   let applied = 0, skipped = 0, failed = 0;
+  // True when the entry has nothing left to do against the trips as they are
+  // NOW -- read fresh on every call, because queueTripsyChange asks again
+  // (stillNeeded) after a write conflict reloads a newer copy.
+  const nothingToDo = change => {
+    const trips = tripsyDecryptedTrips || [];
+    if (change.type === 'edit_event' || change.type === 'delete_event' || change.type === 'move_event') {
+      return !trips.some(t => (t.events || []).some(ev => tripsyEventKey(ev.tripsyRaw) === change.eventKey));
+    }
+    if (change.type === 'create_event') {
+      const trip = trips.find(t => t.key === change.tripKey);
+      if (!trip) return true;
+      const id = tripsyTripEditCreateIdentity(change.tripsyResource, change.fields || {});
+      // a replay after a partial failure, or the auth Worker's drain got there first
+      return !!id && (trip.events || []).some(ev => ev.tripsyRaw
+        && tripsyTripEditCreateIdentity(ev.tripsyRaw.resource, ev.tripsyRaw) === id);
+    }
+    if (change.type === 'create_trip') return trips.some(t => t.key === change.tripKey);
+    return false;
+  };
   for (const change of edits) {
     try {
-      const trips = tripsyDecryptedTrips || [];
       if (!change || !TRIPSY_TRIP_EDIT_KNOWN_TYPES.includes(change.type)) { skipped++; continue; }
-      if (change.type === 'edit_event' || change.type === 'delete_event' || change.type === 'move_event') {
-        const exists = trips.some(t => (t.events || []).some(ev => tripsyEventKey(ev.tripsyRaw) === change.eventKey));
-        if (!exists) { skipped++; continue; }
-      } else if (change.type === 'create_event') {
-        const trip = trips.find(t => t.key === change.tripKey);
-        if (!trip) { skipped++; continue; }
-        const id = tripsyTripEditCreateIdentity(change.tripsyResource, change.fields || {});
-        const dup = !!id && (trip.events || []).some(ev => ev.tripsyRaw
-          && tripsyTripEditCreateIdentity(ev.tripsyRaw.resource, ev.tripsyRaw) === id);
-        if (dup) { skipped++; continue; } // a replay after a partial failure
-      } else if (change.type === 'create_trip') {
-        if (trips.some(t => t.key === change.tripKey)) { skipped++; continue; }
-      }
-      await Store.queueTripsyChange(change);
+      if (nothingToDo(change)) { skipped++; continue; }
+      // Non-enumerable, so the guard never rides along into anything that copies
+      // or stores the change object.
+      const guarded = Object.defineProperty({ ...change }, 'stillNeeded', { value: () => !nothingToDo(change), enumerable: false });
+      await Store.queueTripsyChange(guarded);
       applied++;
     } catch (e) {
       failed++;
@@ -6222,6 +6237,47 @@ async function applyTripsyTripEditsRelay(relay) {
 async function drainTripsyTripEdits() {
   if (!isOwner || !tripsyDecryptedTrips) return;
   await drainTripsyRelayFiles(TRIPSY_TRIP_EDITS_FILENAME, applyTripsyTripEditsRelay);
+}
+// Owner-only. The auth Worker's scheduled drain (tools/auth-worker/worker.js) applies
+// tripsy-trip-edits.json to trips-data.json WITHOUT the app open ("give voice commands
+// in a chat session and those will get automatically integrated," 2026-11-23). It never
+// touches flight-log-data.json, so it leaves this note of what it applied
+// (`{changes:[{type, eventKey, tripKey, targetTripKey}]}`, written after every save) and
+// the app finishes the job here: (1) a page that was already open takes the newer trips
+// (never under a write of its own -- that write's conflict path reloads anyway), and
+// (2) each change gets the SAME derived-cache cleanup queueTripsyChange runs after a
+// hand-made edit: a stale Update page dropped, a deleted event stripped from the Dress
+// Guide and outfits, a moved event's caches and attachments re-homed. One save.
+const TRIPSY_APPLIED_EDITS_FILENAME = 'tripsy-applied-edits.json';
+async function applyTripsyAppliedEditsRelay(relay) {
+  if (tripsDataFileId && !tripsyInFlightWrites.length) {
+    const rev = await fetchDriveHeadRevision(tripsDataFileId);
+    if (rev && tripsDataRevision && rev !== tripsDataRevision) {
+      tripsyDecryptedTrips = await fetchTripsDataFromDrive();
+    }
+  }
+  const changes = Array.isArray(relay && relay.changes) ? relay.changes : [];
+  let touched = false;
+  for (const c of changes) {
+    if (!c || !c.type) continue;
+    const before = driveData.tripsyUpdatePages;
+    if (before && before.length) {
+      if (c.type === 'delete_trip') {
+        driveData.tripsyUpdatePages = before.filter(p => p.tripKey !== c.tripKey);
+      } else if (c.eventKey && (c.type === 'edit_event' || c.type === 'delete_event' || c.type === 'move_event')) {
+        driveData.tripsyUpdatePages = before.filter(p => !(p.eventKeys || []).includes(c.eventKey));
+      }
+      if (driveData.tripsyUpdatePages.length !== before.length) touched = true;
+    }
+    if (c.type === 'delete_event' && c.eventKey && c.tripKey
+      && tripsyStripDeletedEventFromCaches(c.tripKey, String(c.eventKey).replace(':', '-'))) touched = true;
+    if (c.type === 'move_event' && c.eventKey && c.tripKey && c.targetTripKey && tripsyReHomeMovedEvent(c)) touched = true;
+  }
+  if (touched) await persistDriveData({ silentConflict: true });
+}
+async function drainTripsyAppliedEdits() {
+  if (!isOwner || !tripsyDecryptedTrips) return;
+  await drainTripsyRelayFiles(TRIPSY_APPLIED_EDITS_FILENAME, applyTripsyAppliedEditsRelay);
 }
 
 
@@ -6303,6 +6359,9 @@ async function syncTripsyRelays() {
     // also needs the loaded trips, since every entry goes through the live
     // queueTripsyChange path.
     try { await drainTripsyTripEdits(); } catch (e) { console.error('trip-edits drain failed:', e); }
+    // What the auth Worker's scheduled drain applied while the app was closed (or
+    // open on another page): newer trips + the derived-cache cleanup it cannot do.
+    try { await drainTripsyAppliedEdits(); } catch (e) { console.error('applied-edits drain failed:', e); }
     // A fly-over record a Claude session relayed to put back (see drainTripsyFlyoverRestore).
     try { await drainTripsyFlyoverRestore(); } catch (e) { console.error('fly-over restore drain failed:', e); }
     // Hand-entered entry requirements a Claude session relayed. (Research
