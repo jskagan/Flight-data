@@ -44,6 +44,7 @@ const identIdx = dupSrc.indexOf("for (const key of ['name', 'company', 'transpor
 assert(identIdx > 0 && dupSrc.indexOf('const newConf') < identIdx, 'the confirmation guard runs before the existing identity-field loop, which is otherwise untouched');
 
 eval(extractFn('tripsyParseIdentValue'));
+eval(extractFn('tripsyProposalIsCancellation')); // the duplicate check now skips cancellations first
 eval(dupSrc.replace(/^function /, 'var tripsyProposalEventIsDuplicate = function '));
 const pev = (resource, fields) => ({ tripsyResource: resource, fields, resolution: 'pending' });
 // Mo's leg, exactly as it sits in her trip: same flight, same times, HER confirmation.

@@ -45,6 +45,7 @@ assert(review.indexOf('tripsyAutoIgnoreDuplicateProposals()') > -1
 
 // ---- executed: the identity predicate ----
 eval(extractFn('tripsyParseIdentValue'));
+eval(extractFn('tripsyProposalIsCancellation')); // the duplicate check now skips cancellations first
 eval(extractFn('tripsyProposalEventIsDuplicate').replace(/^function /, 'var tripsyProposalEventIsDuplicate = function '));
 const trips = [{
   key: 't1', events: [

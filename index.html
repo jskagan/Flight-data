@@ -4490,11 +4490,19 @@ const Store = {
   // even for a small file, per live timing) makes three sequential writes
   // for one button press a genuinely bad delay, not just a theoretical one.
   async rejectTripsyParseProposalEvent(proposalId, eventId) {
+    return this.finishTripsyParseProposalEvent(proposalId, eventId, { resolution: 'rejected' });
+  },
+  // Resolves one proposal event with `patch` (a non-pending resolution) and, when
+  // that was the proposal's last pending event, does the same finish bookkeeping
+  // Reject always did -- in ONE write. A cancellation the owner applied resolves
+  // as 'cancelled' (with the deleted keys), deliberately not 'accepted', which
+  // conflict checks would read as a real event.
+  async finishTripsyParseProposalEvent(proposalId, eventId, patch) {
     try {
       const proposal = (driveData.tripsyParseProposals || []).find(p => p.id === proposalId);
       const event = proposal && proposal.events.find(e => e.id === eventId);
       if (!event) return false;
-      Object.assign(event, { resolution: 'rejected', resolvedAt: new Date().toISOString() });
+      Object.assign(event, patch, { resolvedAt: new Date().toISOString() });
 
       if (proposal.events.every(e => e.resolution !== 'pending')) {
         const a = (driveData.tripsyAttachments || []).find(x => x.id === proposal.attachmentId);
@@ -4505,7 +4513,7 @@ const Store = {
       await persistDriveData();
       return true;
     } catch (e) {
-      console.error('Store.rejectTripsyParseProposalEvent failed:', e);
+      console.error('Store.finishTripsyParseProposalEvent failed:', e);
       return false;
     }
   },
@@ -25567,10 +25575,11 @@ function tripsyLocalParseSchema() {
         type: 'array',
         items: {
           type: 'object', additionalProperties: false,
-          required: ['resource', 'event_summary', 'fields'],
+          required: ['resource', 'event_summary', 'cancellation', 'fields'],
           properties: {
             resource: { type: 'string', enum: ['activity', 'hosting', 'transportation'] },
             event_summary: { type: 'string' },
+            cancellation: { type: 'boolean' },
             fields: {
               type: 'object', additionalProperties: false, required: fieldKeys,
               properties: Object.fromEntries(fieldKeys.map(k => [k, { type: 'string' }])),
@@ -25595,6 +25604,8 @@ fields rules:
 - An activity/hosting event wants name + address + startsAt (+ endsAt when stated) + confirmation; transportation wants departure/arrival descriptions and times + company + transportNumber.
 - notes: only genuinely useful extras (a check-in time rule, a meeting-point detail) — never boilerplate.
 
+cancellation: true ONLY when the source says this booking, or this one leg of it, was CANCELLED (not merely changed). Then fill confirmation plus whatever identifies what was cancelled (the start time, flight number, name), and leave the rest ''. A changed booking is NOT a cancellation: extract the new details as an ordinary event with cancellation false.
+
 event_summary: a short human label, e.g. "Tour at The Real Mary King's Close".`;
 }
 // Model output -> the exact proposal-event shape the review page reads
@@ -25618,6 +25629,7 @@ function tripsyLocalParseToProposalEvents(events) {
       tripsyResource: resource,
       eventSummary: String(ev.event_summary || fields.name || 'Event').trim(),
       fields,
+      ...(ev.cancellation === true ? { action: 'cancel' } : {}),
     });
   }
   return out;
@@ -28520,7 +28532,61 @@ function tripsyParseMatchTrips(dayKey, trips, fields) {
 function tripsyParseIdentValue(v) {
   return String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, ' ');
 }
+// A parsed event can be a CANCELLATION rather than a booking ("Build the
+// cancellation proposal," 2026-11-24): `action: 'cancel'` on a proposal event
+// means the source says this booking (or one leg of it) was cancelled. Its
+// `fields` only IDENTIFY what was cancelled -- confirmation, plus whatever names
+// the leg (start, flight number, name) -- and an optional `targetEventKey`
+// ("<resource>:<id>") pins it outright. It never becomes a new event: the review
+// page lists the tracked events it matches and deletes the ones the owner ticks.
+function tripsyProposalIsCancellation(pev) {
+  return !!pev && pev.action === 'cancel';
+}
+// The tracked events a cancellation proposal refers to, as {trip, ev, raw,
+// eventKey}. A targetEventKey that still exists wins outright. Otherwise the
+// CONFIRMATION picks the booking (same resource), and the start / flight number /
+// name narrow it to the leg -- each narrowing applied only when it leaves
+// something, since one confirmation often covers several legs or a hotel stored
+// twice. With no confirmation, it takes an exact start to the minute AND a
+// matching flight number or name; anything less matches nothing (a cancellation
+// must never land on an unrelated event).
+function tripsyCancellationTargets(pev, trips) {
+  const f = (pev && pev.fields) || {};
+  const resource = pev && pev.tripsyResource;
+  const all = [];
+  for (const trip of (trips || [])) {
+    for (const ev of ((trip && trip.events) || [])) {
+      const raw = ev && ev.tripsyRaw;
+      if (raw) all.push({ trip, ev, raw, eventKey: tripsyEventKey(raw) });
+    }
+  }
+  if (pev && pev.targetEventKey) {
+    const hit = all.filter(x => x.eventKey === pev.targetEventKey);
+    if (hit.length) return hit;
+  }
+  const sameRes = all.filter(x => !resource || x.raw.resource === resource);
+  const startOf = raw => String(raw.startsAt || raw.departureAt || '');
+  const start = String(f.startsAt || f.departureAt || '').slice(0, 16);
+  const idKeys = ['transportNumber', 'name'].filter(k => tripsyParseIdentValue(f[k]));
+  const idMatches = (x, k) => tripsyParseIdentValue(x.raw[k]) === tripsyParseIdentValue(f[k]);
+  const conf = tripsyParseIdentValue(f.confirmation);
+  if (!conf) {
+    if (!start || !idKeys.length) return [];
+    return sameRes.filter(x => startOf(x.raw).slice(0, 16) === start && idKeys.some(k => idMatches(x, k)));
+  }
+  let pool = sameRes.filter(x => tripsyParseIdentValue(x.raw.confirmation) === conf);
+  const narrow = test => { const n = pool.filter(test); if (n.length) pool = n; };
+  if (start) {
+    narrow(x => startOf(x.raw).slice(0, 10) === start.slice(0, 10));
+    if (start.length > 10) narrow(x => startOf(x.raw).slice(0, 16) === start);
+  }
+  for (const k of idKeys) narrow(x => idMatches(x, k));
+  return pool;
+}
+
 function tripsyProposalEventIsDuplicate(pev, trips) {
+  // A cancellation names an existing event on purpose -- that is not a duplicate.
+  if (tripsyProposalIsCancellation(pev)) return false;
   const f = (pev && pev.fields) || {};
   const resource = pev && pev.tripsyResource;
   const newStart = String(f.startsAt || f.departureAt || '').slice(0, 16);
@@ -44825,7 +44891,11 @@ async function renderTripsyEventsListImpl() {
     parseProposals.forEach(p => {
       p.events.filter(e => e.resolution === 'pending').forEach(ev => {
         const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
-        tripsyParseMatchTrips(dayKey, trips).forEach(t => {
+        // A cancellation badges the trip(s) holding the event it cancels.
+        const badged = tripsyProposalIsCancellation(ev)
+          ? [...new Set(tripsyCancellationTargets(ev, trips).map(x => x.trip))]
+          : tripsyParseMatchTrips(dayKey, trips);
+        badged.forEach(t => {
           pendingParseTripCounts.set(t.key, (pendingParseTripCounts.get(t.key) || 0) + 1);
         });
       });
@@ -47212,7 +47282,8 @@ function tripsyEmailsAwaitingParseCount() {
 function tripsyParseConflictTripKeys(proposals, trips, pendingChanges) {
   const set = new Set();
   (proposals || []).forEach(p => {
-    p.events.filter(e => e.resolution === 'pending').forEach(ev => {
+    // A cancellation adds no event, so it can never overlap one.
+    p.events.filter(e => e.resolution === 'pending' && !tripsyProposalIsCancellation(e)).forEach(ev => {
       const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
       tripsyParseMatchTrips(dayKey, trips || []).forEach(t => {
         if (tripsyParseFindConflicts(ev, t, pendingChanges).length) set.add(t.key);
@@ -47236,7 +47307,7 @@ function tripsyParseConflictTripKeys(proposals, trips, pendingChanges) {
 function tripsyParseConflictEventCount(proposals, trips, pendingChanges) {
   let count = 0;
   (proposals || []).forEach(p => {
-    p.events.filter(e => e.resolution === 'pending').forEach(ev => {
+    p.events.filter(e => e.resolution === 'pending' && !tripsyProposalIsCancellation(e)).forEach(ev => {
       const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
       const destTrip = tripsyParseMatchTrips(dayKey, trips || [], ev.fields)[0] || null;
       const conflicts = destTrip ? tripsyParseFindConflicts(ev, destTrip, pendingChanges) : [];
@@ -48051,6 +48122,41 @@ function wireTripsyConflictUi(ctx) {
 // A trailing cluster prompt covers events that matched no existing trip
 // AND fall close enough together in time to plausibly be their own trip
 // (see tripsyParseFindCluster).
+// One cancellation on the Review Parsed Docs page: what the source says was
+// cancelled, then every tracked event it matches (tripsyCancellationTargets) as a
+// checkbox -- ticked when there is exactly one -- with "Delete" for the ticked
+// ones and "Ignore". Nothing matching (already removed, or never tracked) leaves
+// only Dismiss.
+function tripsyParseCancellationRowHtml(proposal, ev, trips) {
+  const targets = tripsyCancellationTargets(ev, trips);
+  const when = x => {
+    const s = x.raw.startsAt || x.raw.departureAt;
+    const d = tripsyDayKey(s);
+    const t = s && String(s).length > 10 ? formatTripTime(s) : '';
+    return [d ? tripsyDayHeaderLabel(d) : '', t].filter(Boolean).join(' ');
+  };
+  const targetsHtml = targets.length ? `
+    <div style="margin-top:10px; font-size:12px; color:var(--muted);">Matches on your trips — tick what to delete:</div>
+    ${targets.map(x => `
+      <label style="display:flex; gap:8px; align-items:flex-start; margin-top:6px; font-size:13px; color:var(--text); cursor:pointer;">
+        <input type="checkbox" data-parse-cancel-target value="${esc(x.eventKey)}" ${targets.length === 1 ? 'checked' : ''} style="margin-top:2px;">
+        <span>${esc(x.ev.summary || x.raw.name || 'Event')}<span style="color:var(--muted);"> · ${esc(when(x))} · ${esc(x.trip.name || '')}</span></span>
+      </label>`).join('')}
+    <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="btn primary" data-parse-cancel-apply style="font-size:12px; padding:5px 12px; background:var(--red, #c0392b); border-color:var(--red, #c0392b);">Delete checked event${targets.length === 1 ? '' : 's'}</button>
+      <button class="btn" data-parse-reject style="font-size:12px; padding:5px 12px;">Ignore</button>
+    </div>`
+    : `
+    <div style="margin-top:10px; font-size:12px; color:var(--muted);">No matching event on your trips — it may already be removed.</div>
+    <div style="margin-top:10px;"><button class="btn" data-parse-reject style="font-size:12px; padding:5px 12px;">Dismiss</button></div>`;
+  return `
+    <div data-parse-event-row data-parse-cancel-row data-event-id="${esc(ev.id)}" data-proposal-id="${esc(proposal.id)}" style="border-top:2px solid var(--muted); padding:18px 0;">
+      <div style="font-size:14px; font-weight:600; color:var(--red, #c0392b);">🚫 Cancelled: ${esc(ev.eventSummary || 'Booking')} <span style="color:var(--muted); font-weight:400; font-size:12px;">(${esc(tripsySlugToLabel(ev.tripsyResource))})</span></div>
+      ${tripsyParseEventFieldsHtml(ev.tripsyResource, ev.fields || {})}
+      ${targetsHtml}
+    </div>`;
+}
+
 function tripsyParseReviewCardHtml(proposal, pendingChanges) {
   const pendingEvents = proposal.events.filter(e => e.resolution === 'pending');
   const byDay = new Map();
@@ -48062,6 +48168,7 @@ function tripsyParseReviewCardHtml(proposal, pendingChanges) {
   const sortedDayKeys = [...byDay.keys()].sort();
 
   const eventRowHtml = ev => {
+    if (tripsyProposalIsCancellation(ev)) return tripsyParseCancellationRowHtml(proposal, ev, tripsyDecryptedTrips);
     const dayKey = tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt);
     const matches = tripsyParseMatchTrips(dayKey, tripsyDecryptedTrips, ev.fields);
     const selectOptions = tripsyParseTripOptionsHtml(dayKey, tripsyDecryptedTrips, ev.fields);
@@ -48153,6 +48260,7 @@ async function renderTripsyParseReview() {
   for (const p of proposals) {
     for (const ev of p.events) {
       if (ev.resolution !== 'pending') continue;
+      if (tripsyProposalIsCancellation(ev)) continue; // removes an event, never needs a trip
       if (tripsyParseMatchTrips(tripsyDayKey(ev.fields.startsAt || ev.fields.departureAt), trips).length) continue;
       unmatched.push({ proposal: p, event: ev });
     }
@@ -48245,6 +48353,46 @@ async function renderTripsyParseReview() {
       // the proposal" step into its one write -- afterImport (badge + full
       // re-render only) is the right post-action, same as a real Import.
       await Store.rejectTripsyParseProposalEvent(proposalId, eventId);
+      await afterImport();
+    });
+  });
+
+  // A cancellation: delete each ticked tracked event through the one change
+  // entry point (so the derived caches and failure handling are the usual ones),
+  // then resolve the proposal event as 'cancelled'. Blocking, since each delete
+  // is a real write and a partial failure must stay visible.
+  container.querySelectorAll("[data-parse-cancel-apply]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const row = btn.closest("[data-parse-event-row]");
+      const proposalId = row.dataset.proposalId, eventId = row.dataset.eventId;
+      const proposal = proposals.find(p => p.id === proposalId);
+      const event = proposal && proposal.events.find(e => e.id === eventId);
+      const keys = [...row.querySelectorAll("[data-parse-cancel-target]:checked")].map(i => i.value);
+      if (!event || !keys.length) { toast("Tick the event to delete, or press Ignore.", "error"); return; }
+      const targets = tripsyCancellationTargets(event, trips).filter(x => keys.includes(x.eventKey));
+      btn.disabled = true;
+      const deleted = [];
+      for (const x of targets) {
+        try {
+          const ok = await Store.queueTripsyChange({
+            id: crypto.randomUUID(), type: 'delete_event', createdAt: new Date().toISOString(),
+            tripKey: x.trip.key, tripName: x.trip.name, eventKey: x.eventKey,
+            eventSummary: x.ev.summary || x.raw.name || 'Event',
+            tripsyResource: x.raw.resource, tripsyId: Number(x.raw.id),
+          });
+          if (ok) deleted.push(x.eventKey);
+        } catch (e) {
+          console.error('cancellation delete failed:', e, x.eventKey);
+        }
+      }
+      if (deleted.length < targets.length) {
+        btn.disabled = false;
+        toast(`Deleted ${deleted.length} of ${targets.length} — the rest didn't save. Try again.`, "error");
+        await afterImport();
+        return;
+      }
+      await Store.finishTripsyParseProposalEvent(proposalId, eventId, { resolution: 'cancelled', deletedEventKeys: deleted });
+      toast(deleted.length === 1 ? "Cancelled event deleted." : `Deleted ${deleted.length} cancelled events.`);
       await afterImport();
     });
   });

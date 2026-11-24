@@ -556,6 +556,26 @@ step 4; git history has it if ever needed.
   flashes a badge), `runTripsyLocalParse` after staging (subtracting from the toast count so
   hidden duplicates aren't announced), and the top of `renderTripsyParseReview` as the last line
   of defense before anything renders.
+- **A parsed event can be a CANCELLATION** ("Build the cancellation proposal," 2026-11-24 —
+  without it a cancellation email parsed to "empty" and was never seen). A proposal event with
+  `action: 'cancel'` names a tracked booking or leg; its `fields` only identify it (confirmation,
+  plus start / `transportNumber` / `name`), and an optional `targetEventKey` ("resource:id")
+  pins it. `tripsyCancellationTargets(pev, trips)` (pure): a live `targetEventKey` wins; else the
+  confirmation picks the booking (same resource) and start day, start minute, flight number and
+  name each NARROW it only when something is left (one confirmation often spans several legs, or
+  a hotel stored twice); with no confirmation it needs an exact start AND a matching flight
+  number or name, else nothing. The review page renders such a row through
+  `tripsyParseCancellationRowHtml` — "🚫 Cancelled: …", each match a checkbox (pre-ticked when
+  there is exactly one), **Delete checked event(s)** and **Ignore**, or just **Dismiss** when
+  nothing matches. Delete runs one `delete_event` per ticked event through
+  `Store.queueTripsyChange`, then resolves the proposal event `resolution: 'cancelled'` (with
+  `deletedEventKeys`) via `Store.finishTripsyParseProposalEvent` — the shared finish
+  bookkeeping Reject now also uses; never `'accepted'`, which conflict checks would read as a
+  real event. A partial failure leaves the proposal pending. Cancellations are kept out of the
+  duplicate sweep, both conflict counters and the new-trip clusters, and badge the trip that
+  HOLDS the cancelled event. The in-app parser's schema has a `cancellation` boolean that maps
+  to `action: 'cancel'`; the cloud routine's prompt must be told the same shape (it is edited
+  by the owner at claude.ai/code/routines). `cancelproposal_test.js`.
 - **A fully-parsed doc's parse label clears ITSELF — there is no acknowledge click** ("Once an
   uploaded document that is flagged for parsing has been parsed, remove that label from the
   document in the document menu," 2026-09-28). Both menu row builders
