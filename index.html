@@ -6181,6 +6181,49 @@ async function drainTripsyFlyoverRestore() {
   });
 }
 const TRIPSY_TRIP_EDIT_KNOWN_TYPES = ['edit_event', 'delete_event', 'create_event', 'edit_trip', 'create_trip', 'delete_trip', 'move_event'];
+// A relay-created trip uses the SAME key namespace a hand-made one does
+// (tripsyParseImportProposalEvent / the review page's cluster accept mint
+// `tripsy-pending-<8 hex>`); the writer supplies the key so later
+// create_event ops in the same file can target it. Anything outside that
+// namespace is refused, so a relay can never collide with a Tripsy-era key.
+const TRIPSY_TRIP_EDIT_KEY_RE = /^tripsy-pending-[a-z0-9]{4,32}$/;
+const TRIPSY_TRIP_EDIT_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+// The trip fields a relay may set, on create_trip and edit_trip alike.
+const TRIPSY_TRIP_EDIT_TRIP_FIELDS = ['name', 'start', 'end', 'location'];
+// Turns a relayed create_trip / edit_trip into the plain change object
+// Store.queueTripsyChange takes -- the exact shape a hand-made trip's change
+// has ({id, type, createdAt, tripKey, name, start, end}, plus location) -- or
+// returns null when it is unusable. Accepts the documented `fields` form and
+// the older flat form (name/start/end on the op itself; `changes` for an
+// edit). Dates must be YYYY-MM-DD; an end before the start is swapped, a
+// missing end becomes the start (tripsyNewTripDialog's rules). A create needs
+// a key in the pending namespace, a name and a start; an edit needs at least
+// one valid field. Every other field is dropped. Pure.
+function tripsyTripEditNormalizeTripChange(change) {
+  if (!change || (change.type !== 'create_trip' && change.type !== 'edit_trip')) return null;
+  const tripKey = typeof change.tripKey === 'string' ? change.tripKey.trim() : '';
+  if (!tripKey) return null;
+  const src = (change.fields && typeof change.fields === 'object') ? change.fields
+    : (change.changes && typeof change.changes === 'object') ? change.changes : change;
+  const out = {};
+  for (const k of TRIPSY_TRIP_EDIT_TRIP_FIELDS) {
+    if (!(k in src) || src[k] == null) continue;
+    const v = String(src[k]).trim();
+    if ((k === 'start' || k === 'end') && !TRIPSY_TRIP_EDIT_DAY_RE.test(v)) continue;
+    if (k === 'name' && !v) continue;
+    out[k] = v || null;
+  }
+  const base = { id: crypto.randomUUID(), type: change.type, createdAt: new Date().toISOString(), tripKey };
+  if (change.type === 'create_trip') {
+    if (!TRIPSY_TRIP_EDIT_KEY_RE.test(tripKey) || !out.name || !out.start) return null;
+    let start = out.start, end = out.end || out.start;
+    if (end < start) [start, end] = [end, start];
+    return { ...base, name: out.name, start, end, location: out.location || null };
+  }
+  if (out.start && out.end && out.end < out.start) [out.start, out.end] = [out.end, out.start];
+  if (!Object.keys(out).length) return null;
+  return { ...base, changes: out };
+}
 // A create_event's replay-dedupe identity. Transportation carries no
 // name/startsAt at all (its fields are departure/arrival), so the old
 // name+startsAt test read '' === '' against EVERY existing flight and
@@ -6211,10 +6254,21 @@ async function applyTripsyTripEditsRelay(relay) {
         const dup = !!id && (trip.events || []).some(ev => ev.tripsyRaw
           && tripsyTripEditCreateIdentity(ev.tripsyRaw.resource, ev.tripsyRaw) === id);
         if (dup) { skipped++; continue; } // a replay after a partial failure
-      } else if (change.type === 'create_trip') {
-        if (trips.some(t => t.key === change.tripKey)) { skipped++; continue; }
       }
-      await Store.queueTripsyChange(change);
+      let toApply = change;
+      if (change.type === 'create_trip' || change.type === 'edit_trip') {
+        toApply = tripsyTripEditNormalizeTripChange(change);
+        if (!toApply) { skipped++; continue; }
+        const exists = trips.some(t => t.key === toApply.tripKey);
+        // create: the key already exists (a replay, or a clash) -> never a
+        // duplicate trip; edit: the trip is gone -> nothing to change.
+        if (change.type === 'create_trip' ? exists : !exists) { skipped++; continue; }
+      }
+      // Ops apply strictly in file order, each awaited, so a create_trip lands
+      // before the create_event ops after it that use its key (the trips list
+      // is re-read at the top of every pass).
+      const ok = await Store.queueTripsyChange(toApply);
+      if (!ok) throw new Error('save failed'); // queueTripsyChange reports failure by returning false
       applied++;
     } catch (e) {
       failed++;
@@ -25335,7 +25389,7 @@ function applyTripsyChangeToTrips(change) {
   } else if (change.type === 'delete_trip') {
     next = trips.filter(t => t.key !== change.tripKey);
   } else if (change.type === 'create_trip') {
-    next = sortTrips([...trips, { key: change.tripKey, name: change.name || null, start: change.start || null, end: change.end || null, location: null, events: [] }]);
+    next = sortTrips([...trips, { key: change.tripKey, name: change.name || null, start: change.start || null, end: change.end || null, location: change.location || null, events: [] }]);
   } else if (change.type === 'move_event') {
     // Re-homes an event under another EXISTING trip. The very same event object
     // (same id, same tripsyRaw) is carried across -- NOT deleted and re-created --

@@ -1597,6 +1597,28 @@ step 4; git history has it if ever needed.
   `departureAt`+endpoints, everything else on `name`+`startsAt`, and an entry with nothing
   identifying never dedupes. A relay carrying transportation must not be uploaded before this
   fix is live. `tripeditsrelay_test.js`.
+  **Relay spec** (`{"edits":[…]}`, applied strictly in FILE ORDER, each op awaited, so an op may
+  use a trip an earlier op in the same file created):
+  - `{"type":"create_trip","tripKey":"tripsy-pending-<id>","fields":{"name","start":"YYYY-MM-DD","end":"YYYY-MM-DD","location"}}`
+    (2026-11-24). The WRITER mints the key, in the same namespace a hand-made trip uses
+    (`tripsy-pending-` + 4–32 lowercase letters/digits, `TRIPSY_TRIP_EDIT_KEY_RE`; the app's own
+    trips use 8 hex), so later `create_event` ops can target it. Needs a name and a start; a
+    missing end becomes the start, a reversed range is swapped, a bad date is dropped. Skipped
+    when the key already exists (no duplicates, replay-safe). `tripsyTripEditNormalizeTripChange`
+    turns it into exactly the change a hand-made trip queues (`{id, type, createdAt, tripKey,
+    name, start, end, location}`), so the stored trip is identical; the older flat form
+    (name/start/end on the op) still works.
+  - `{"type":"edit_trip","tripKey":…,"fields":{…any of name/start/end/location…}}` — rename or
+    re-date; other keys are dropped; skipped when the trip is gone or nothing valid remains
+    (the older `changes` form still works).
+  - `{"type":"delete_trip","tripKey":…}` — removes a trip and its events.
+  - `{"type":"create_event","tripKey":…,"tripsyResource":"activity|hosting|transportation","fields":{…}}`,
+    `{"type":"edit_event","eventKey":"<resource>:<id>","changes":{…}}`,
+    `{"type":"delete_event","eventKey":…}`, `{"type":"move_event","eventKey":…,"targetTripKey":…}`.
+  A save that FAILS (`queueTripsyChange` returns false) now counts as a failure, keeping the
+  file for the next open; it used to count as applied and the file was deleted. Only the app
+  applies this relay: the auth Worker (`tools/auth-worker/`) has no timer and only READS
+  `trips-data.json` (for the watch feed).
 - **International flights get researched ENTRY REQUIREMENTS — ON DEMAND, from a trip-header button —
   and flights that need something get a "🛂 Entry Requirements" button** ("When there is a flight into
   a different country … research any entry or visa requirements … put a button on the flight event,"

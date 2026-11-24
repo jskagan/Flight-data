@@ -51,6 +51,10 @@ assert(/if \(!isOwner \|\| !tripsyDecryptedTrips\) return;/.test(extractFn('drai
     'THE REPAINT FIX: both re-render snapshots include tripsDataUpdatedAt, so drained trip edits repaint an open My Trips page');
 }
 
+// The trip-op constants the normalizer needs (the grown-dependency lesson).
+const TRIP_CONSTS = ['TRIPSY_TRIP_EDIT_KEY_RE', 'TRIPSY_TRIP_EDIT_DAY_RE', 'TRIPSY_TRIP_EDIT_TRIP_FIELDS']
+  .map(n => { const m = html.match(new RegExp('const ' + n + ' = [^\\n]*')); return m ? m[0].replace(/^const /, 'var ') : ''; }).join('\n');
+
 // ---- executed: the apply itself ----
 (async () => {
   const src = extractFn('applyTripsyTripEditsRelay');
@@ -66,8 +70,17 @@ assert(/if \(!isOwner \|\| !tripsyDecryptedTrips\) return;/.test(extractFn('drai
     var TRIPSY_TRIP_EDIT_KNOWN_TYPES = ['edit_event', 'delete_event', 'create_event', 'edit_trip', 'create_trip', 'delete_trip', 'move_event'];
     var Store = { queueTripsyChange: async change => {
       if (failOn && change.eventSummary === failOn) throw new Error('write failed');
+      if (failOn === 'RETURN_FALSE' && change.eventSummary === 'Soft fail') return false;
       calls.queued.push(change);
+      // Mirror applyTripsyChangeToTrips for trips so later ops in the same
+      // file see a trip an earlier op created.
+      if (change.type === 'create_trip') trips.push({ key: change.tripKey, name: change.name, start: change.start, end: change.end, location: change.location, events: [] });
+      if (change.type === 'edit_trip') { const t = trips.find(x => x.key === change.tripKey); Object.assign(t, change.changes); }
+      if (change.type === 'create_event') { const t = trips.find(x => x.key === change.tripKey); t.events.push({ tripsyRaw: { resource: change.tripsyResource, id: 900 + t.events.length, ...change.fields } }); }
+      return true;
     } };
+    ${TRIP_CONSTS}
+    ${extractFn('tripsyTripEditNormalizeTripChange')}
     ${extractFn('tripsyTripEditCreateIdentity')}
     ${src.replace(/^async function /, 'var applyTripsyTripEditsRelay = async function ')}
     return applyTripsyTripEditsRelay;
@@ -97,6 +110,7 @@ assert(/if \(!isOwner \|\| !tripsyDecryptedTrips\) return;/.test(extractFn('drai
   // A write failure throws (so the shared drain KEEPS the relay file), but the
   // rest still applied first.
   calls.queued.length = 0; calls.toasts.length = 0;
+  trips[0].events = trips[0].events.filter(e => e.tripsyRaw.id === 11); // the stub recorded the first run's create
   let threw = false;
   try { await mk('JJ Lin - Padang Stage')(relay); } catch (e) { threw = true; }
   assert(threw && calls.queued.length === 1 && calls.queued[0].fields.name === 'CORTIS - Padang Stage',
@@ -120,4 +134,46 @@ assert(/if \(!isOwner \|\| !tripsyDecryptedTrips\) return;/.test(extractFn('drai
   const ident = new Function(extractFn('tripsyTripEditCreateIdentity') + '; return tripsyTripEditCreateIdentity;')();
   assert(ident('transportation', {}) === '' && ident('activity', {}) === '',
     'an entry with nothing identifying never dedupes against anything');
+
+  // ---- create_trip / edit_trip in the `fields` shape (2026-11-24) ----
+  calls.queued.length = 0; calls.toasts.length = 0;
+  const before = trips.length;
+  await mk()({ edits: [
+    { type: 'create_trip', tripKey: 'tripsy-pending-a1b2c3d4', fields: { name: 'Test Trip', start: '2030-05-08', end: '2030-05-01', location: 'Lisbon, Portugal' } },
+    { type: 'create_event', tripKey: 'tripsy-pending-a1b2c3d4', tripsyResource: 'activity', eventSummary: 'Dinner',
+      fields: { name: 'Dinner', startsAt: '2030-05-02T19:00:00' } },
+    { type: 'edit_trip', tripKey: 'tripsy-pending-a1b2c3d4', fields: { name: 'Renamed Trip', end: '2030-05-09', bogus: 'x' } },
+    { type: 'create_trip', tripKey: 'tripsy-pending-a1b2c3d4', fields: { name: 'Dup', start: '2030-01-01' } },
+    { type: 'create_trip', tripKey: 'my-own-key', fields: { name: 'Bad key', start: '2030-01-01' } },
+    { type: 'create_trip', tripKey: 'tripsy-pending-nodate1', fields: { name: 'No date' } },
+    { type: 'edit_trip', tripKey: 'tripsy-pending-gone0000', fields: { name: 'Ghost' } },
+  ] });
+  const ct = calls.queued[0];
+  assert(calls.queued.length === 3 && ct.type === 'create_trip' && ct.tripKey === 'tripsy-pending-a1b2c3d4'
+    && ct.name === 'Test Trip' && ct.start === '2030-05-01' && ct.end === '2030-05-08' && ct.location === 'Lisbon, Portugal'
+    && typeof ct.id === 'string' && typeof ct.createdAt === 'string' && !('fields' in ct),
+    'create_trip (fields shape) becomes the hand-made change shape {id, type, createdAt, tripKey, name, start, end, location}, reversed dates swapped');
+  assert(calls.queued[1].type === 'create_event' && calls.queued[1].tripKey === 'tripsy-pending-a1b2c3d4',
+    'ops apply in FILE ORDER: the create_event after it lands on the trip the create_trip just made');
+  assert(calls.queued[2].type === 'edit_trip' && JSON.stringify(calls.queued[2].changes) === JSON.stringify({ name: 'Renamed Trip', end: '2030-05-09' }),
+    'edit_trip (fields shape) becomes {changes} limited to name/start/end/location');
+  assert(trips.length === before + 1,
+    'skipped: a second create_trip on an existing key (no duplicate), a key outside tripsy-pending-, a create with no start, an edit of a missing trip');
+
+  const norm = new Function(TRIP_CONSTS + '\n' + extractFn('tripsyTripEditNormalizeTripChange') + '; return tripsyTripEditNormalizeTripChange;')();
+  const flat = norm({ type: 'create_trip', tripKey: 'tripsy-pending-0fcaf9dd', name: 'Flat', start: '2030-01-01', end: '2030-01-03' });
+  assert(flat && flat.name === 'Flat' && flat.end === '2030-01-03' && flat.location === null,
+    'the older flat create_trip form still works');
+  assert(norm({ type: 'create_trip', tripKey: 'tripsy-pending-x1y2', fields: { name: 'One day', start: '2030-02-02' } }).end === '2030-02-02',
+    'a missing end becomes the start');
+  assert(norm({ type: 'edit_trip', tripKey: 'tripsy-1', changes: { start: 'soon' } }) === null,
+    'an edit with no valid field is skipped (bad date dropped)');
+
+  // queueTripsyChange reports failure by RETURNING false; that must count as
+  // a failure (file kept), not as applied.
+  calls.queued.length = 0; calls.toasts.length = 0;
+  let threw2 = false;
+  try { await mk('RETURN_FALSE')({ edits: [{ type: 'create_event', tripKey: 'tripsy-1', tripsyResource: 'activity', eventSummary: 'Soft fail', fields: { name: 'Soft', startsAt: '2031-01-01T10:00:00' } }] }); }
+  catch (e) { threw2 = true; }
+  assert(threw2 && calls.toasts.length === 0, 'THE FIX: a save that returns false keeps the relay file instead of being counted as applied');
 })();
